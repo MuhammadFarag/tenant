@@ -11,5 +11,5 @@ fn main() -> ExitCode {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     let code = tenant::run(&args, &accounts, &mut stdout, &mut stderr);
-    ExitCode::from(code as u8)
+    ExitCode::from(code)
 }
