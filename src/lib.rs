@@ -3,6 +3,9 @@ use std::io::Write;
 
 use clap::{Parser, Subcommand};
 
+pub mod accounts;
+pub mod allocation;
+
 #[derive(Parser)]
 #[command(name = "tenant")]
 struct Cli {
@@ -22,7 +25,12 @@ enum Command {
     },
 }
 
-pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+pub fn run(
+    args: &[String],
+    accounts: &dyn accounts::Reader,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
     let argv = std::iter::once(OsString::from("tenant")).chain(args.iter().map(OsString::from));
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
@@ -38,10 +46,11 @@ pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i
             if dry_run {
                 let _ = writeln!(stdout, "Would create tenant '{name}'.");
                 if cli.verbose {
+                    let uid = allocation::UidAllocator::new(accounts).lowest_free_uid();
                     let _ = writeln!(
                         stdout,
                         "Would run:\n  sudo sysadminctl -addUser {name} \
-                         -fullName \"Tenant: {name}\" -shell /bin/zsh -UID 600 -GID 600",
+                         -fullName \"Tenant: {name}\" -shell /bin/zsh -UID {uid} -GID {uid}",
                     );
                 }
             }
