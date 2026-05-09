@@ -1,10 +1,35 @@
 use tenant::accounts::StubReader;
+use tenant::executor::{ExecError, Executor, StubExecutor};
+
+/// Default executor for tests that should not reach the exec stage —
+/// validation failures, conflicts, and dry-run paths. Panics on use, so
+/// any accidental exec from a path that's meant to be no-op surfaces
+/// loudly instead of being silently absorbed.
+struct NeverExecutor;
+impl Executor for NeverExecutor {
+    fn run(&self, argv: &[String]) -> Result<(), ExecError> {
+        panic!("executor unexpectedly invoked with argv: {argv:?}");
+    }
+}
 
 fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
+    let exec = NeverExecutor;
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let code = tenant::run(&args, &stub, &mut stdout, &mut stderr);
+    let code = tenant::run(&args, &stub, &exec, &mut stdout, &mut stderr);
+    (
+        code,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
+
+fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u8, String, String) {
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let code = tenant::run(&args, &stub, exec, &mut stdout, &mut stderr);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -204,6 +229,60 @@ fn create_succeeds_when_unrelated_user_exists() {
     assert_eq!(stdout, "Would create tenant 'dev'.\n");
 }
 
+#[test]
+fn create_real_mode_invokes_executor_with_expected_argv() {
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Creating tenant 'dev'.\n");
+    assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
+    let calls = exec.calls();
+    assert_eq!(calls.len(), 1, "expected exactly one exec call");
+    let want_argv: Vec<String> = [
+        "sudo",
+        "sysadminctl",
+        "-addUser",
+        "dev",
+        "-fullName",
+        "Tenant: dev",
+        "-shell",
+        "/bin/zsh",
+        "-UID",
+        "600",
+        "-GID",
+        "600",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    assert_eq!(calls[0], want_argv);
+}
+
+#[test]
+fn create_real_mode_verbose_shows_mechanism_before_exec() {
+    let exec = StubExecutor::new();
+    let (code, stdout, _stderr) =
+        run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
+    assert_eq!(code, 0);
+    let want = "Creating tenant 'dev'.\n\
+                Running:\n  \
+                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn create_real_mode_propagates_exec_failure() {
+    let exec = StubExecutor::failing(78);
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert_eq!(stdout, "Creating tenant 'dev'.\n");
+    assert_eq!(
+        stderr,
+        "tenant: failed to create 'dev': process exited with code 78\n"
+    );
+    assert_eq!(exec.calls().len(), 1);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_reader_detects_root_conflict() {
@@ -211,13 +290,14 @@ fn macos_reader_detects_root_conflict() {
     // dscl, run `tenant create root --dry-run`, expect a conflict.
     // `root` is universally present on macOS, so this is host-stable.
     let reader = tenant::accounts::MacosReader::new().expect("dscl should be available on macOS");
+    let exec = NeverExecutor;
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let args: Vec<String> = ["create", "root", "--dry-run"]
         .iter()
         .map(|s| (*s).to_string())
         .collect();
-    let code = tenant::run(&args, &reader, &mut stdout, &mut stderr);
+    let code = tenant::run(&args, &reader, &exec, &mut stdout, &mut stderr);
     let stderr_str = String::from_utf8_lossy(&stderr);
     assert_eq!(code, 64, "stderr={stderr_str:?}");
     assert!(

@@ -2,6 +2,10 @@ use std::collections::HashSet;
 use std::io;
 use std::process::Command;
 
+use crate::executor::{ExecError, Executor};
+use crate::messages;
+use crate::reporter::Reporter;
+
 pub trait Reader {
     fn used_uids(&self) -> Vec<u32>;
     fn has_user(&self, name: &str) -> bool;
@@ -117,6 +121,61 @@ fn run_dscl(args: &[&str]) -> io::Result<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Side-effecting half of the accounts API. Verbs ask in domain terms
+/// (`would_create_tenant`, `create_tenant`); the impl owns argv construction
+/// and self-emits intent + (verbose) mechanism via the Reporter handed in.
+/// Failure surfaces back as `ExecError` for the verb to render and exit on.
+pub(crate) trait Writer {
+    fn would_create_tenant(&self, name: &str, uid: u32, reporter: &mut Reporter);
+    fn create_tenant(&self, name: &str, uid: u32, reporter: &mut Reporter)
+    -> Result<(), ExecError>;
+}
+
+pub(crate) struct MacosWriter<'a> {
+    exec: &'a dyn Executor,
+}
+
+impl<'a> MacosWriter<'a> {
+    pub(crate) fn new(exec: &'a dyn Executor) -> Self {
+        Self { exec }
+    }
+}
+
+impl<'a> Writer for MacosWriter<'a> {
+    fn would_create_tenant(&self, name: &str, uid: u32, reporter: &mut Reporter) {
+        let argv = build_create_argv(name, uid);
+        reporter.write(messages::would_create_tenant(name, &argv));
+    }
+
+    fn create_tenant(
+        &self,
+        name: &str,
+        uid: u32,
+        reporter: &mut Reporter,
+    ) -> Result<(), ExecError> {
+        let argv = build_create_argv(name, uid);
+        reporter.write(messages::creating_tenant(name, &argv));
+        self.exec.run(&argv)
+    }
+}
+
+fn build_create_argv(name: &str, uid: u32) -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "sysadminctl".into(),
+        "-addUser".into(),
+        name.into(),
+        "-fullName".into(),
+        format!("Tenant: {name}"),
+        "-shell".into(),
+        "/bin/zsh".into(),
+        "-UID".into(),
+        uid.to_string(),
+        "-GID".into(),
+        uid.to_string(),
+    ]
 }
 
 pub fn validate_name(name: &str) -> Result<(), NameError> {

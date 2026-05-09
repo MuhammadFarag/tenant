@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 pub mod accounts;
 pub mod allocation;
 mod commands;
+pub mod executor;
 mod messages;
 mod reporter;
 
@@ -33,6 +34,7 @@ pub(crate) enum Command {
 pub fn run(
     args: &[String],
     accounts: &dyn accounts::Reader,
+    executor: &dyn executor::Executor,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
@@ -40,8 +42,9 @@ pub fn run(
         Ok(cli) => cli,
         Err(code) => return code,
     };
+    let writer = accounts::MacosWriter::new(executor);
     let mut reporter = Reporter::new(stdout, stderr, cli.verbose);
-    commands::dispatch(cli, accounts, &mut reporter)
+    commands::dispatch(cli, accounts, &writer, &mut reporter)
 }
 
 fn parse(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<Cli, u8> {
