@@ -40,7 +40,7 @@ pub fn run(
         Ok(cli) => cli,
         Err(code) => return code,
     };
-    let mut reporter = Reporter::new(stdout, cli.verbose);
+    let mut reporter = Reporter::new(stdout, stderr, cli.verbose);
     commands::dispatch(cli, accounts, &mut reporter)
 }
 
