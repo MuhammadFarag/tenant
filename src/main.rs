@@ -1,12 +1,16 @@
 use std::io;
 use std::process::ExitCode;
 
-use tenant::accounts::StubReader;
+use tenant::accounts::MacosReader;
 
 fn main() -> ExitCode {
-    // Placeholder accounts source — empty stub. A real macOS reader (dscl-backed)
-    // will replace this when host-side wiring lands.
-    let accounts = StubReader::default();
+    let accounts = match MacosReader::new() {
+        Ok(reader) => reader,
+        Err(e) => {
+            eprintln!("tenant: failed to query account state: {e}");
+            return ExitCode::from(74); // EX_IOERR
+        }
+    };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();

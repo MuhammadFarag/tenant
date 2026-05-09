@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+use std::io;
+use std::process::Command;
+
 pub trait Reader {
     fn used_uids(&self) -> Vec<u32>;
     fn has_user(&self, name: &str) -> bool;
@@ -49,6 +53,70 @@ pub fn check_conflict(reader: &dyn Reader, name: &str) -> Result<(), ConflictErr
         (false, true) => Err(ConflictError::GroupExists),
         (true, true) => Err(ConflictError::Both),
     }
+}
+
+/// Real `Reader` backed by `dscl`. Queries the local Open Directory node
+/// once at construction and serves all subsequent lookups from memory.
+pub struct MacosReader {
+    users: HashSet<String>,
+    groups: HashSet<String>,
+    uids: Vec<u32>,
+}
+
+impl MacosReader {
+    pub fn new() -> io::Result<Self> {
+        let users = run_dscl(&[".", "-list", "/Users"])?
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let groups = run_dscl(&[".", "-list", "/Groups"])?
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let uids = run_dscl(&[".", "-list", "/Users", "UniqueID"])?
+            .lines()
+            .filter_map(parse_uid_line)
+            .collect();
+        Ok(MacosReader {
+            users,
+            groups,
+            uids,
+        })
+    }
+}
+
+impl Reader for MacosReader {
+    fn used_uids(&self) -> Vec<u32> {
+        self.uids.clone()
+    }
+
+    fn has_user(&self, name: &str) -> bool {
+        self.users.contains(name)
+    }
+
+    fn has_group(&self, name: &str) -> bool {
+        self.groups.contains(name)
+    }
+}
+
+fn parse_uid_line(line: &str) -> Option<u32> {
+    let last = line.split_whitespace().last()?;
+    let uid = last.parse::<i32>().ok()?;
+    if uid < 0 { None } else { Some(uid as u32) }
+}
+
+fn run_dscl(args: &[&str]) -> io::Result<String> {
+    let output = Command::new("dscl").args(args).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "dscl {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 pub fn validate_name(name: &str) -> Result<(), NameError> {

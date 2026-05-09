@@ -203,3 +203,25 @@ fn create_succeeds_when_unrelated_user_exists() {
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     assert_eq!(stdout, "Would create tenant 'dev'.\n");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_reader_detects_root_conflict() {
+    // End-to-end smoke test: build a real MacosReader against the host's
+    // dscl, run `tenant create root --dry-run`, expect a conflict.
+    // `root` is universally present on macOS, so this is host-stable.
+    let reader = tenant::accounts::MacosReader::new().expect("dscl should be available on macOS");
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let args: Vec<String> = ["create", "root", "--dry-run"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let code = tenant::run(&args, &reader, &mut stdout, &mut stderr);
+    let stderr_str = String::from_utf8_lossy(&stderr);
+    assert_eq!(code, 64, "stderr={stderr_str:?}");
+    assert!(
+        stderr_str.contains("'root' already exists"),
+        "stderr should mention root conflict, got: {stderr_str:?}",
+    );
+}
