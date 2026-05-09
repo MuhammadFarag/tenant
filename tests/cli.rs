@@ -155,3 +155,51 @@ fn create_rejects_overlong_name() {
         format!("tenant: name '{name}' is too long (32 characters; maximum is 31)\n"),
     );
 }
+
+#[test]
+fn create_rejects_when_user_exists() {
+    let stub = StubReader {
+        users: vec!["dev".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(stderr, "tenant: user 'dev' already exists\n");
+}
+
+#[test]
+fn create_rejects_when_group_exists() {
+    let stub = StubReader {
+        groups: vec!["dev".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(stderr, "tenant: group 'dev' already exists\n");
+}
+
+#[test]
+fn create_rejects_when_user_and_group_exist() {
+    let stub = StubReader {
+        users: vec!["dev".to_string()],
+        groups: vec!["dev".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(stderr, "tenant: user and group 'dev' already exist\n");
+}
+
+#[test]
+fn create_succeeds_when_unrelated_user_exists() {
+    let stub = StubReader {
+        users: vec!["ops".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    assert_eq!(stdout, "Would create tenant 'dev'.\n");
+}

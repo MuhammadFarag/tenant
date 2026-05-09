@@ -9,6 +9,10 @@ pub(crate) fn dispatch(cli: Cli, accounts: &dyn accounts::Reader, reporter: &mut
                 reporter.write_err(messages::invalid_name(&name, &e));
                 return EX_USAGE;
             }
+            if let Err(e) = accounts::check_conflict(accounts, &name) {
+                reporter.write_err(messages::name_conflict(&name, &e));
+                return EX_USAGE;
+            }
             if !dry_run {
                 return 0;
             }

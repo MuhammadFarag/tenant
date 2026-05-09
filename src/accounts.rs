@@ -35,6 +35,22 @@ pub enum NameError {
     TooLong { len: usize, max: usize },
 }
 
+#[derive(Debug)]
+pub enum ConflictError {
+    UserExists,
+    GroupExists,
+    Both,
+}
+
+pub fn check_conflict(reader: &dyn Reader, name: &str) -> Result<(), ConflictError> {
+    match (reader.has_user(name), reader.has_group(name)) {
+        (false, false) => Ok(()),
+        (true, false) => Err(ConflictError::UserExists),
+        (false, true) => Err(ConflictError::GroupExists),
+        (true, true) => Err(ConflictError::Both),
+    }
+}
+
 pub fn validate_name(name: &str) -> Result<(), NameError> {
     let len = name.len();
     if len == 0 {

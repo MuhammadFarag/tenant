@@ -1,4 +1,4 @@
-use crate::accounts::NameError;
+use crate::accounts::{ConflictError, NameError};
 
 pub(crate) struct Message {
     pub summary: Option<String>,
@@ -27,6 +27,18 @@ pub(crate) fn invalid_name(name: &str, error: &NameError) -> Message {
         NameError::TooLong { len, max } => {
             format!("tenant: name '{name}' is too long ({len} characters; maximum is {max})")
         }
+    };
+    Message {
+        summary: Some(summary),
+        detail: None,
+    }
+}
+
+pub(crate) fn name_conflict(name: &str, error: &ConflictError) -> Message {
+    let summary = match error {
+        ConflictError::UserExists => format!("tenant: user '{name}' already exists"),
+        ConflictError::GroupExists => format!("tenant: group '{name}' already exists"),
+        ConflictError::Both => format!("tenant: user and group '{name}' already exist"),
     };
     Message {
         summary: Some(summary),
