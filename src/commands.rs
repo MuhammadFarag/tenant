@@ -1,21 +1,13 @@
-use std::io::Write;
+use crate::{Cli, Command, accounts, allocation, messages, reporter::Reporter};
 
-use crate::{Cli, Command, accounts, allocation};
-
-pub(crate) fn dispatch(cli: Cli, accounts: &dyn accounts::Reader, stdout: &mut dyn Write) -> u8 {
+pub(crate) fn dispatch(cli: Cli, accounts: &dyn accounts::Reader, reporter: &mut Reporter) -> u8 {
     match cli.command {
         Command::Create { name, dry_run } => {
-            if dry_run {
-                let _ = writeln!(stdout, "Would create tenant '{name}'.");
-                if cli.verbose {
-                    let uid = allocation::UidAllocator::new(accounts).lowest_free_uid();
-                    let _ = writeln!(
-                        stdout,
-                        "Would run:\n  sudo sysadminctl -addUser {name} \
-                         -fullName \"Tenant: {name}\" -shell /bin/zsh -UID {uid} -GID {uid}",
-                    );
-                }
+            if !dry_run {
+                return 0;
             }
+            let uid = allocation::UidAllocator::new(accounts).lowest_free_uid();
+            reporter.write(messages::would_create_tenant(&name, uid));
             0
         }
     }

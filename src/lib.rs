@@ -6,6 +6,10 @@ use clap::{Parser, Subcommand};
 pub mod accounts;
 pub mod allocation;
 mod commands;
+mod messages;
+mod reporter;
+
+use reporter::Reporter;
 
 #[derive(Parser)]
 #[command(name = "tenant")]
@@ -36,7 +40,8 @@ pub fn run(
         Ok(cli) => cli,
         Err(code) => return code,
     };
-    commands::dispatch(cli, accounts, stdout)
+    let mut reporter = Reporter::new(stdout, cli.verbose);
+    commands::dispatch(cli, accounts, &mut reporter)
 }
 
 fn parse(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<Cli, u8> {
