@@ -152,8 +152,16 @@ impl<'a> Writer for MacosWriter<'a> {
         reporter: &mut Reporter,
     ) -> Result<(), ExecError> {
         let argv = build_create_argv(name, uid);
-        reporter.emit(messages::create_tenant_action(name, &argv));
-        self.executor.run(&argv)
+        // Three bracketed Reporter calls; each is silent except in its
+        // applicable mode/verbosity. Net effect: dry-run shows "Would …"
+        // (and mechanism in verbose); real-standard shows only the
+        // post-exec "Created …"; real-verbose shows pre-exec intent +
+        // mechanism + post-exec confirmation with UID.
+        reporter.emit_dry_only(messages::would_create_tenant(name, &argv));
+        reporter.emit_real_only(messages::creating_tenant(name, &argv));
+        self.executor.run(&argv)?;
+        reporter.emit_real_only(messages::created_tenant(name, uid));
+        Ok(())
     }
 }
 

@@ -235,11 +235,13 @@ fn create_succeeds_when_unrelated_user_exists() {
 }
 
 #[test]
-fn create_real_mode_invokes_executor_with_expected_argv() {
+fn create_real_mode_standard_emits_only_post_exec_confirmation() {
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Creating tenant 'dev'.\n");
+    // Standard real mode is silent before exec; one confirmation line after.
+    // No UID — that's reserved for verbose mode.
+    assert_eq!(stdout, "Created tenant 'dev'.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     let calls = exec.calls();
     assert_eq!(calls.len(), 1, "expected exactly one exec call");
@@ -264,13 +266,14 @@ fn create_real_mode_invokes_executor_with_expected_argv() {
 }
 
 #[test]
-fn create_real_mode_verbose_shows_mechanism_before_exec() {
+fn create_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec_uid() {
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
         run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 0);
     let want = "Creating tenant 'dev'.\n  \
-                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n";
+                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
+                Created tenant 'dev' (UID 600).\n";
     assert_eq!(stdout, want);
 }
 
@@ -296,12 +299,27 @@ fn create_real_mode_propagates_exec_failure() {
     let exec = StubExecutor::failing(78);
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    assert_eq!(stdout, "Creating tenant 'dev'.\n");
+    // Standard mode: no pre-exec output; failure goes to stderr only.
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
         stderr,
         "tenant: failed to create 'dev': process exited with code 78\n"
     );
     assert_eq!(exec.calls().len(), 1);
+}
+
+#[test]
+fn create_real_mode_failure_surfaces_executor_stderr() {
+    let exec =
+        StubExecutor::failing_with(78, "sysadminctl: -addUser failed: user already exists\n");
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to create 'dev': process exited with code 78: \
+         sysadminctl: -addUser failed: user already exists\n"
+    );
 }
 
 #[cfg(target_os = "macos")]
