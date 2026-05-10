@@ -18,5 +18,18 @@ clippy:
 test:
     cargo test
 
+# Run the binary, forwarding args (e.g. `just run create dev --dry-run -v`)
+run *ARGS:
+    @cargo run --quiet -- {{ARGS}}
+
+# Build a release binary (target/release/tenant)
+build:
+    cargo build --release
+    @echo "Built: target/release/tenant"
+
+# Install to ~/.cargo/bin/tenant (must be on PATH for `tenant` to resolve)
+install:
+    cargo install --path .
+
 # Pre-merge gate: everything that should pass before push
 check: check-fmt clippy test

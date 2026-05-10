@@ -104,7 +104,9 @@ user-facing contract; cosmetic message tweaks need test edits.
 just check        # fmt + clippy -D warnings + test (pre-merge gate)
 just fmt          # in-place format
 just test         # cargo test
-cargo run --quiet -- create somename --dry-run -v
+just run create somename --dry-run -v   # invoke the binary; args after `run` forward
+just build        # release binary at target/release/tenant
+just install      # cargo install --path . (puts `tenant` on PATH via ~/.cargo/bin)
 ```
 
 Pre-commit hooks run `cargo fmt --check` (via `just check-fmt`) and
