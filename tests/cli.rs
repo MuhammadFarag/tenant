@@ -51,6 +51,13 @@ fn create_dry_run_default_shows_intent() {
 }
 
 #[test]
+fn dry_run_accepted_as_global_flag_before_subcommand() {
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["--dry-run", "create", "dev"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    assert_eq!(stdout, "Would create tenant 'dev'.\n");
+}
+
+#[test]
 fn create_accepts_max_length_name() {
     let name = "a".repeat(31);
     let (code, stdout, stderr) = run_with(StubReader::default(), &["create", &name, "--dry-run"]);
@@ -70,8 +77,7 @@ fn verbose_shows_floor_uid_when_no_uids_in_use() {
     let (code, stdout, _stderr) =
         run_with(StubReader::default(), &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    let want = "Would create tenant 'dev'.\n\
-                Would run:\n  \
+    let want = "Would create tenant 'dev'.\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n";
     assert_eq!(stdout, want);
 }
@@ -84,8 +90,7 @@ fn verbose_shows_lowest_free_uid_with_gap() {
     };
     let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    let want = "Would create tenant 'dev'.\n\
-                Would run:\n  \
+    let want = "Would create tenant 'dev'.\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 602 -GID 602\n";
     assert_eq!(stdout, want);
 }
@@ -264,10 +269,26 @@ fn create_real_mode_verbose_shows_mechanism_before_exec() {
     let (code, stdout, _stderr) =
         run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 0);
-    let want = "Creating tenant 'dev'.\n\
-                Running:\n  \
+    let want = "Creating tenant 'dev'.\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n";
     assert_eq!(stdout, want);
+}
+
+#[test]
+fn dry_run_bypasses_injected_executor() {
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(
+        StubReader::default(),
+        &exec,
+        &["create", "dev", "--dry-run"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Would create tenant 'dev'.\n");
+    assert!(
+        exec.calls().is_empty(),
+        "executor should not be invoked in dry-run mode; got calls: {:?}",
+        exec.calls()
+    );
 }
 
 #[test]

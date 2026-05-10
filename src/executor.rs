@@ -50,6 +50,17 @@ impl Executor for SystemExecutor {
     }
 }
 
+/// Production no-op executor. Returns Ok without spawning anything; the
+/// composition root swaps this in when `--dry-run` is set so that domain
+/// writers don't need to know about the mode.
+pub struct DryRunExecutor;
+
+impl Executor for DryRunExecutor {
+    fn run(&self, _argv: &[String]) -> Result<(), ExecError> {
+        Ok(())
+    }
+}
+
 /// Test double that records every invocation and returns a configured
 /// outcome. Use `StubExecutor::new()` for a success-by-default stub or
 /// `StubExecutor::failing(code)` to simulate a non-zero exit.

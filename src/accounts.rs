@@ -123,12 +123,13 @@ fn run_dscl(args: &[&str]) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Side-effecting half of the accounts API. Verbs ask in domain terms
-/// (`would_create_tenant`, `create_tenant`); the impl owns argv construction
-/// and self-emits intent + (verbose) mechanism via the Reporter handed in.
-/// Failure surfaces back as `ExecError` for the verb to render and exit on.
+/// Side-effecting half of the accounts API. Verbs ask in domain terms;
+/// the impl owns argv construction and self-emits intent + (verbose)
+/// mechanism via the Reporter handed in. Mode (real vs dry-run) is not
+/// the Writer's concern — it always renders one Message (which carries
+/// both summaries; Reporter picks) and always invokes the executor (which
+/// may be a no-op in dry-run mode).
 pub(crate) trait Writer {
-    fn would_create_tenant(&self, name: &str, uid: u32, reporter: &mut Reporter);
     fn create_tenant(&self, name: &str, uid: u32, reporter: &mut Reporter)
     -> Result<(), ExecError>;
 }
@@ -144,11 +145,6 @@ impl<'a> MacosWriter<'a> {
 }
 
 impl<'a> Writer for MacosWriter<'a> {
-    fn would_create_tenant(&self, name: &str, uid: u32, reporter: &mut Reporter) {
-        let argv = build_create_argv(name, uid);
-        reporter.write(messages::would_create_tenant(name, &argv));
-    }
-
     fn create_tenant(
         &self,
         name: &str,
@@ -156,7 +152,7 @@ impl<'a> Writer for MacosWriter<'a> {
         reporter: &mut Reporter,
     ) -> Result<(), ExecError> {
         let argv = build_create_argv(name, uid);
-        reporter.write(messages::creating_tenant(name, &argv));
+        reporter.write(messages::create_tenant_action(name, &argv));
         self.exec.run(&argv)
     }
 }

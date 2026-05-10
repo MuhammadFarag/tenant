@@ -18,17 +18,16 @@ pub(crate) struct Cli {
     #[arg(short, long, global = true)]
     pub(crate) verbose: bool,
 
+    #[arg(long, global = true)]
+    pub(crate) dry_run: bool,
+
     #[command(subcommand)]
     pub(crate) command: Command,
 }
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    Create {
-        name: String,
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Create { name: String },
 }
 
 pub fn run(
@@ -42,8 +41,14 @@ pub fn run(
         Ok(cli) => cli,
         Err(code) => return code,
     };
-    let writer = accounts::MacosWriter::new(executor);
-    let mut reporter = Reporter::new(stdout, stderr, cli.verbose);
+    let dry_run_executor = executor::DryRunExecutor;
+    let active_executor: &dyn executor::Executor = if cli.dry_run {
+        &dry_run_executor
+    } else {
+        executor
+    };
+    let writer = accounts::MacosWriter::new(active_executor);
+    let mut reporter = Reporter::new(stdout, stderr, cli.verbose, cli.dry_run);
     commands::dispatch(cli, accounts, &writer, &mut reporter)
 }
 

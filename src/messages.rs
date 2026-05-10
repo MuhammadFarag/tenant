@@ -2,27 +2,33 @@ use crate::accounts::{ConflictError, NameError};
 use crate::executor::ExecError;
 
 pub(crate) struct Message {
+    /// Default rendering, used in real mode and as fallback in dry-run mode
+    /// when `dry_run_summary` is None. Most messages (errors, conflicts) are
+    /// mode-agnostic and only populate this field.
     pub summary: Option<String>,
+    /// Override rendering for dry-run mode. Only action messages with a
+    /// meaningful "would" framing populate this; others leave it None and
+    /// fall back to `summary`.
+    pub dry_run_summary: Option<String>,
     pub detail: Option<String>,
 }
 
-pub(crate) fn would_create_tenant(name: &str, argv: &[String]) -> Message {
-    Message {
-        summary: Some(format!("Would create tenant '{name}'.")),
-        detail: Some(format!("Would run:\n  {}", shell_join(argv))),
-    }
-}
-
-pub(crate) fn creating_tenant(name: &str, argv: &[String]) -> Message {
+/// Unified factory for the create-tenant action message. Carries both the
+/// real-mode summary ("Creating …") and the dry-run summary ("Would create
+/// …") in one Message; Reporter picks based on its mode. Detail (the
+/// indented mechanism line) is the same in both modes.
+pub(crate) fn create_tenant_action(name: &str, argv: &[String]) -> Message {
     Message {
         summary: Some(format!("Creating tenant '{name}'.")),
-        detail: Some(format!("Running:\n  {}", shell_join(argv))),
+        dry_run_summary: Some(format!("Would create tenant '{name}'.")),
+        detail: Some(format!("  {}", shell_join(argv))),
     }
 }
 
 pub(crate) fn create_failed(name: &str, error: &ExecError) -> Message {
     Message {
         summary: Some(format!("tenant: failed to create '{name}': {error}")),
+        dry_run_summary: None,
         detail: None,
     }
 }
@@ -42,6 +48,7 @@ pub(crate) fn invalid_name(name: &str, error: &NameError) -> Message {
     };
     Message {
         summary: Some(summary),
+        dry_run_summary: None,
         detail: None,
     }
 }
@@ -54,6 +61,7 @@ pub(crate) fn name_conflict(name: &str, error: &ConflictError) -> Message {
     };
     Message {
         summary: Some(summary),
+        dry_run_summary: None,
         detail: None,
     }
 }
