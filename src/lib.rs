@@ -22,11 +22,11 @@ pub(crate) struct Cli {
     pub(crate) dry_run: bool,
 
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) verb: Verb,
 }
 
 #[derive(Subcommand)]
-pub(crate) enum Command {
+pub(crate) enum Verb {
     Create { name: String },
 }
 

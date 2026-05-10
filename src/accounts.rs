@@ -135,12 +135,12 @@ pub(crate) trait Writer {
 }
 
 pub(crate) struct MacosWriter<'a> {
-    exec: &'a dyn Executor,
+    executor: &'a dyn Executor,
 }
 
 impl<'a> MacosWriter<'a> {
-    pub(crate) fn new(exec: &'a dyn Executor) -> Self {
-        Self { exec }
+    pub(crate) fn new(executor: &'a dyn Executor) -> Self {
+        Self { executor }
     }
 }
 
@@ -152,8 +152,8 @@ impl<'a> Writer for MacosWriter<'a> {
         reporter: &mut Reporter,
     ) -> Result<(), ExecError> {
         let argv = build_create_argv(name, uid);
-        reporter.write(messages::create_tenant_action(name, &argv));
-        self.exec.run(&argv)
+        reporter.emit(messages::create_tenant_action(name, &argv));
+        self.executor.run(&argv)
     }
 }
 

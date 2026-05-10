@@ -59,12 +59,16 @@ tests/cli.rs      — every test goes here; helper fn run_with(stub, args) -> (u
 Things that are easy to violate and would matter:
 
 - **Intent / mechanism split** — every user-facing emission has a "summary"
-  (always shown) and an optional "detail" (verbose only). Verbs build
-  messages via factories in `messages.rs`, named after the domain action
-  (e.g. `would_create_tenant`).
+  (always shown) and an optional "detail" (verbose only). Action messages
+  also carry a `dry_run_summary` (Reporter picks it in dry-run mode; falls
+  back to `summary` when None, which is how error / conflict messages stay
+  mode-agnostic). Factories live in `messages.rs`, named after the domain
+  action (e.g. `create_tenant_action`).
 - **No I/O in command logic** — verbs receive `&mut Reporter`, emit via
-  `reporter.write(...)` / `write_err(...)`, return `u8`. They never touch
-  raw writers or check `cli.verbose`.
+  `reporter.emit(...)` / `emit_err(...)`, return `u8`. They never touch
+  raw writers or check `cli.verbose`. Writers (`accounts::Writer`) also
+  emit via Reporter — they're explicitly an I/O layer (they shell out)
+  and own intent + mechanism rendering for their own actions.
 - **Lexical → state-based check order** — `validate_name` runs before
   `check_conflict` in dispatch. Cheaper failure first.
 - **Composition-root DI** — `tenant::run` takes `&dyn accounts::Reader` plus

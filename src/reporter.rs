@@ -24,15 +24,15 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    pub fn write(&mut self, msg: Message) {
-        Self::emit(self.stdout, &msg, self.verbose, self.dry_run);
+    pub fn emit(&mut self, msg: Message) {
+        Self::emit_to(self.stdout, &msg, self.verbose, self.dry_run);
     }
 
-    pub fn write_err(&mut self, msg: Message) {
-        Self::emit(self.stderr, &msg, self.verbose, self.dry_run);
+    pub fn emit_err(&mut self, msg: Message) {
+        Self::emit_to(self.stderr, &msg, self.verbose, self.dry_run);
     }
 
-    fn emit(target: &mut dyn Write, msg: &Message, verbose: bool, dry_run: bool) {
+    fn emit_to(target: &mut dyn Write, msg: &Message, verbose: bool, dry_run: bool) {
         // In dry-run mode, prefer dry_run_summary; fall back to summary when the
         // message has no mode-specific override (errors, conflicts).
         let summary = if dry_run {
