@@ -84,6 +84,20 @@ Future / lower priority:
   `sysadminctl -deleteUser` default (move the home directory to
   `/Users/Deleted Users/`). Add `--secure-erase` (shred) and `--keep-home`
   (retain) when a real use case shows up.
+- **Destroy home-directory disclosure.** Today destroy emits no
+  information about what happens to `/Users/<name>` — sysadminctl's
+  default moves it to `/Users/Deleted Users/<name>` (recoverable via
+  `mv` until that directory is emptied or the host is rebuilt), but the
+  operator has no way to know that without reading `man sysadminctl`.
+  Surface this at the dispatch layer: in dry-run / verbose, a pre-exec
+  line stating where the home directory will go and whether the move is
+  reversible; in real mode, a post-exec line pointing at the relocated
+  path. Naturally pairs with the disposition flag entry above — once
+  `--secure-erase` (irreversible) and `--keep-home` (no move) exist, the
+  disclosure line varies by chosen disposition. Until then, the
+  disclosure alone is worth adding because the recoverable-vs-not bit
+  is the load-bearing piece of information for an operator about to
+  destroy an account.
 - **`ExecError::NonZero` stderr sanitization.** Today we echo captured
   sysadminctl stderr verbatim into our own stderr (via
   `ExecError::Display`). A hostile dscl / OD response could in principle
