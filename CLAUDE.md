@@ -196,6 +196,38 @@ Future / lower priority:
   Lives at the dispatch layer, gated on `stdout.is_terminal()` so it
   doesn't pollute scripted use. Should be silent in dry-run (no
   privileged call to explain).
+- **Richer non-verbose default output.** Today standard real mode is
+  one line per verb (`Created tenant 'X'.` / `Destroyed tenant 'X'.`).
+  That's terse to the point of withholding load-bearing facts: an
+  operator who just typed `tenant create devtest` doesn't see the
+  assigned UID/GID, the home directory path, or the suffixed group
+  name — they have to re-run with `-v` (already too late; the account
+  is created) or grep dscl. Proposed default: still one summary line,
+  but enriched — e.g., `Created tenant 'devtest' (UID 600, GID 600,
+  group 'devtest-tenant-share', home /Users/devtest).`. The verbose
+  mode would still add the mechanism preview + `$` echoes on top. The
+  Message factory already supports this (the verbose-confirmation
+  variant exists); the change is promoting some of that information
+  into `summary`. Open questions: how much info before the line gets
+  unwieldy; whether destroy should mirror the shape (less obviously
+  useful since the account is gone — maybe just the home-dir
+  disposition once that ships, per the disclosure entry above).
+- **Pre-execution confirmation prompt.** Today `tenant create` and
+  `tenant destroy` execute immediately — no "are you sure?" between
+  invocation and side effect. Destroy in particular is a destructive
+  verb; the operator should see the planned mechanism and accept it
+  before sysadminctl runs. Proposed shape: show the verbose-style
+  plan (the same one `--dry-run -v` emits today) then read a y/N
+  confirmation from stdin. `--yes` (already in the seven-verb spec
+  as the universal bypass) skips the prompt for scripted use; the
+  prompt itself is gated on `stdin.is_terminal()` so non-interactive
+  callers don't deadlock. Pairs naturally with the sudo-prompt
+  explainer above — the confirmation prompt fires first, then sudo's
+  password prompt, then exec. Implementation note: the prompt lives at
+  the dispatch layer (after eligibility classification, before the
+  writer call), reads from a `BufRead` handed in by the composition
+  root (mirror of the `&mut dyn Write` Reporter pattern, so tests
+  inject scripted input).
 
 ## File map
 
