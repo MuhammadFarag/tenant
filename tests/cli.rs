@@ -12,6 +12,9 @@ impl Executor for NeverExecutor {
     fn run(&self, argv: &[String]) -> Result<(), ExecError> {
         panic!("executor unexpectedly invoked with argv: {argv:?}");
     }
+    fn exec_into(&self, argv: &[String]) -> Result<i32, ExecError> {
+        panic!("executor unexpectedly invoked (exec_into) with argv: {argv:?}");
+    }
 }
 
 fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
@@ -1278,6 +1281,244 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
          dseditgroup: not authorized\n"
     );
     assert_eq!(exec.calls().len(), 1);
+}
+
+#[test]
+fn shell_dry_run_default_shows_intent() {
+    // Smallest red→green for the new verb. `stub_with_tenant("dev")` gives
+    // us a tenant-range user (UID 600) so eligibility classifies as
+    // shellable; dry-run + NeverExecutor guarantees we don't actually
+    // shell out.
+    let (code, stdout, stderr) = run_with(stub_with_tenant("dev"), &["shell", "dev", "--dry-run"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    assert_eq!(stdout, "Would shell into 'dev'.\n");
+}
+
+#[test]
+fn shell_dry_run_verbose_shows_mechanism() {
+    // Dry-run verbose adds the planned argv as a `  `-indented detail
+    // line. Single-argv plan because shell only issues `sudo -iu <name>`;
+    // no fan-out like create's 3 lines.
+    let (code, stdout, _stderr) = run_with(
+        stub_with_tenant("dev"),
+        &["shell", "dev", "--dry-run", "-v"],
+    );
+    assert_eq!(code, 0);
+    let want = "Would shell into 'dev'.\n  sudo -iu dev\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
+    // Standard real mode: one pre-exec intent line, then exec_into. Unlike
+    // create/destroy, no post-exec confirmation — the operator IS the
+    // shell after exec_into returns. Single exec call recorded.
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Shelling into 'dev'.\n");
+    assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
+    let calls = exec.calls();
+    assert_eq!(calls.len(), 1, "expected one exec_into call");
+    assert_eq!(calls[0], argv(&["sudo", "-iu", "dev"]));
+}
+
+#[test]
+fn shell_real_mode_verbose_shows_plan_and_echo() {
+    // Real+verbose: intent + plan + `$` echo. No post-exec line.
+    let exec = StubExecutor::new();
+    let (code, stdout, _stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"]);
+    assert_eq!(code, 0);
+    let want = "Shelling into 'dev'.\n  \
+                sudo -iu dev\n\
+                $ sudo -iu dev\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn shell_refuses_when_tenant_absent() {
+    // Empty StubReader — no user, no group. Shell must refuse: there's
+    // no account to log into. Exit 64 (EX_USAGE; the operator gave us a
+    // name we can't resolve). Never reaches the executor (NeverExecutor
+    // would panic), so stdout stays empty and the refusal lands on stderr.
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["shell", "ghost"]);
+    assert_eq!(code, 64, "stderr={stderr:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: cannot shell into 'ghost': does not exist\n"
+    );
+}
+
+#[test]
+fn shell_refuses_when_only_orphan_group_present() {
+    // Per Q3 design lock: OrphanGroup collapses to NotPresent for shell
+    // purposes — the operator wants a shell, and the lingering group
+    // doesn't provide one. Same refusal text and exit code as the bare
+    // NotPresent case. A regression that special-cased OrphanGroup
+    // (e.g. mentioning the group, or routing to a different message)
+    // would trip this test.
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["shell", "dev"]);
+    assert_eq!(code, 64, "stderr={stderr:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(stderr, "tenant: cannot shell into 'dev': does not exist\n");
+}
+
+#[test]
+fn shell_refuses_below_floor() {
+    // Tenant-floor guard mirrors destroy: an account exists with a
+    // positive UID below TENANT_UID_FLOOR (600) → refuse. `legacyusr`
+    // sidesteps the reserved-name blocklist (cycle 3) so this test
+    // exercises the state-based refusal path specifically.
+    let stub = StubReader {
+        users: vec!["legacyusr".to_string()],
+        uid_by_name: [("legacyusr".to_string(), 0)].into_iter().collect(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["shell", "legacyusr"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to shell into 'legacyusr': UID 0 is below tenant floor 600\n"
+    );
+}
+
+#[test]
+fn shell_refuses_system_account() {
+    // System-account refusal (`has_user` true, `uid_for` None — service
+    // accounts whose negative UIDs were filtered by `parse_id_line`).
+    // Same shape as destroy's `system_account_refusal`.
+    let stub = StubReader {
+        users: vec!["phantom".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["shell", "phantom"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to shell into 'phantom': system account (no tenant-range UID)\n"
+    );
+}
+
+#[test]
+fn shell_refuses_below_floor_verbose() {
+    // -v on a refusal path emits nothing on stdout — no "Shelling into"
+    // line, no mechanism preview. Mirrors `destroy_refuses_below_floor_verbose`;
+    // guards against "we built the argv before the eligibility match"
+    // regressions.
+    let stub = StubReader {
+        users: vec!["edge".to_string()],
+        uid_by_name: [("edge".to_string(), 599)].into_iter().collect(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["shell", "edge", "-v"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to shell into 'edge': UID 599 is below tenant floor 600\n"
+    );
+}
+
+#[test]
+fn shell_rejects_empty_name() {
+    // Lexical validation runs before eligibility; an empty name trips
+    // `NameError::Empty` and never consults the Reader. Same shape and
+    // wording as create/destroy.
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["shell", ""]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(stderr, "tenant: name cannot be empty\n");
+}
+
+#[test]
+fn shell_rejects_invalid_start() {
+    // Pins the leading-letter rule for shell. One representative case
+    // (a digit) — the full parametric matrix lives on
+    // `create_rejects_non_letter_start` / `destroy_rejects_non_letter_start`.
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["shell", "1dev"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: name '1dev' must start with a lowercase letter (got '1')\n"
+    );
+}
+
+#[test]
+fn shell_rejects_reserved_names() {
+    // Reserved-name blocklist applies to shell too. Lexical rail trips
+    // before any state-based check — important because `root` (UID 0) on
+    // a real host would also fail the below-floor guard, but the
+    // operator-relevant reason is the reserved name, not the floor.
+    for name in [
+        "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
+    ] {
+        let (code, stdout, stderr) = run_with(StubReader::default(), &["shell", name]);
+        assert_eq!(code, 64, "want EX_USAGE for {name:?}");
+        assert!(
+            stdout.is_empty(),
+            "stdout should be empty for {name:?}: {stdout:?}"
+        );
+        let want = format!("tenant: name '{name}' is reserved (matches a system or role name)\n");
+        assert_eq!(stderr, want, "stderr mismatch for {name:?}");
+    }
+}
+
+#[test]
+fn shell_dry_run_refuses_missing_tenant() {
+    // Dry-run doesn't bypass eligibility — the operator asking "what
+    // would happen if I shelled into 'ghost'?" deserves the same answer
+    // they'd get in real mode. Refusal lands on stderr; stdout stays
+    // empty; no executor invocation.
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["shell", "ghost", "--dry-run"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: cannot shell into 'ghost': does not exist\n"
+    );
+}
+
+#[test]
+fn shell_propagates_child_exit_code() {
+    // Q1=(b) design lock: tenant forwards the child shell's exit code as
+    // its own. Stub the executor's exec_into to return 5; tenant exits 5.
+    // The "Shelling into" intent line still emits — pre-exec emission
+    // happens before exec_into is consulted.
+    let exec = StubExecutor::new().with_exec_into_code(5);
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 5, "stderr={stderr:?}");
+    assert_eq!(stdout, "Shelling into 'dev'.\n");
+    assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
+    assert_eq!(exec.calls().len(), 1);
+}
+
+#[test]
+fn shell_dry_run_bypasses_injected_executor() {
+    // Dry-run swap-in of DryRunExecutor means the StubExecutor wired by
+    // the test never sees a call. Mirrors `dry_run_bypasses_injected_executor`
+    // and `destroy_dry_run_bypasses_injected_executor` for create/destroy.
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--dry-run"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Would shell into 'dev'.\n");
+    assert!(
+        exec.calls().is_empty(),
+        "executor should not be invoked in dry-run; got: {:?}",
+        exec.calls()
+    );
 }
 
 #[cfg(target_os = "macos")]

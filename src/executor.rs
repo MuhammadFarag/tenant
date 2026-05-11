@@ -37,6 +37,16 @@ impl fmt::Display for ExecError {
 
 pub trait Executor {
     fn run(&self, argv: &[String]) -> Result<(), ExecError>;
+
+    /// Hand off to an interactive child that inherits stdin/stdout/stderr —
+    /// the substitution point for the `shell` verb. Distinct from `run`
+    /// because `run` captures output (to suppress tool chatter on success),
+    /// which would swallow a shell session's stdout. Returns the child's
+    /// exit code on clean exit; `ExecError` is reserved for spawn failures
+    /// (e.g. `sudo` not on PATH). Signal-terminated children come back as
+    /// `Ok(1)` since `ExitStatus::code()` is `None` for signal exits and
+    /// distinguishing them isn't worth the surface area in v1.
+    fn exec_into(&self, argv: &[String]) -> Result<i32, ExecError>;
 }
 
 pub struct SystemExecutor;
@@ -62,6 +72,21 @@ impl Executor for SystemExecutor {
         }
         Ok(())
     }
+
+    fn exec_into(&self, argv: &[String]) -> Result<i32, ExecError> {
+        let (program, rest) = argv
+            .split_first()
+            .ok_or_else(|| ExecError::Spawn(io::Error::other("argv is empty")))?;
+        // .status() inherits stdin/stdout/stderr by default, which is what
+        // an interactive shell session needs — sudo can prompt for the
+        // host password, and the launched login shell reads from the
+        // controlling terminal.
+        let status = Command::new(program)
+            .args(rest)
+            .status()
+            .map_err(ExecError::Spawn)?;
+        Ok(status.code().unwrap_or(1))
+    }
 }
 
 /// Production no-op executor. Returns Ok without spawning anything; the
@@ -72,6 +97,10 @@ pub struct DryRunExecutor;
 impl Executor for DryRunExecutor {
     fn run(&self, _argv: &[String]) -> Result<(), ExecError> {
         Ok(())
+    }
+
+    fn exec_into(&self, _argv: &[String]) -> Result<i32, ExecError> {
+        Ok(0)
     }
 }
 
@@ -92,6 +121,7 @@ pub struct StubExecutor {
     fail_code: Cell<Option<i32>>,
     fail_stderr: RefCell<String>,
     overrides: RefCell<Vec<(Vec<String>, i32, String)>>,
+    exec_into_code: Cell<i32>,
 }
 
 impl StubExecutor {
@@ -109,7 +139,19 @@ impl StubExecutor {
             fail_code: Cell::new(Some(code)),
             fail_stderr: RefCell::new(stderr.to_string()),
             overrides: RefCell::new(Vec::new()),
+            exec_into_code: Cell::new(0),
         }
+    }
+
+    /// Configure the exit code returned by `exec_into`. Used by the shell-
+    /// verb tests to pin exit-code propagation: tenant must forward the
+    /// child shell's exit code as its own. `fail_code` / overrides don't
+    /// apply to `exec_into` — those are reserved for `run`'s NonZero error
+    /// semantics, which would be wrong for exec_into where non-zero is a
+    /// success signal carrying the child's exit code.
+    pub fn with_exec_into_code(self, code: i32) -> Self {
+        self.exec_into_code.set(code);
+        self
     }
 
     /// Register a per-argv-prefix override. When a `run` call's argv starts
@@ -155,5 +197,13 @@ impl Executor for StubExecutor {
                 stderr: self.fail_stderr.borrow().clone(),
             }),
         }
+    }
+
+    fn exec_into(&self, argv: &[String]) -> Result<i32, ExecError> {
+        // Same `calls` stream as `run` so test assertions on call count and
+        // argv shape work uniformly across both substitution points. Exit
+        // code defaults to 0; tests pin propagation via `with_exec_into_code`.
+        self.calls.borrow_mut().push(argv.to_vec());
+        Ok(self.exec_into_code.get())
     }
 }

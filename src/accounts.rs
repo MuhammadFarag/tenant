@@ -323,6 +323,17 @@ pub(crate) trait Writer {
     /// `destroyed_orphan_group` trio, mirroring the discipline of the
     /// full destroy path.
     fn destroy_orphan_group(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError>;
+
+    /// Interactive shell entry into the tenant. Hands `["sudo", "-iu",
+    /// <name>]` to the executor's `exec_into` substitution point (inherits
+    /// stdin/stdout/stderr so sudo can prompt and the login shell can drive
+    /// the controlling terminal). Returns the child's exit code on clean
+    /// shell exit; bubbles `ExecError` only for spawn failures (sudo not
+    /// found, etc.). Pre-exec emits the would/shelling pair through the
+    /// Reporter; no post-exec confirmation — the operator IS the shell,
+    /// so a "Shelled into …" line after they exit would be at best
+    /// redundant and at worst land in a different terminal context.
+    fn shell_into_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<i32, ExecError>;
 }
 
 /// Granular error type for the create writer. Phase 3 splits the create
@@ -493,6 +504,22 @@ impl<'a> Writer for MacosWriter<'a> {
         Ok(())
     }
 
+    fn shell_into_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<i32, ExecError> {
+        // Single-argv exec_into path. v1 uses `sudo -iu <name>` and lets
+        // sudo prompt for the host password on a cold timestamp; the next
+        // cycle will add a sudoers entry so this becomes `sudo -n -iu`
+        // and never prompts. Same Reporter discipline as the other writer
+        // methods: dry-only/real-only pre-exec messages, real-only `$`
+        // echo, no post-exec line (the operator IS the shell now).
+        let argv = build_shell_argv(name);
+
+        reporter.emit_dry_only(messages::would_shell_into_tenant(name, &argv));
+        reporter.emit_real_only(messages::shelling_into_tenant(name, &argv));
+
+        reporter.emit_real_only(messages::running_argv(&argv));
+        self.executor.exec_into(&argv)
+    }
+
     fn destroy_orphan_group(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError> {
         // Single-argv convergence path. Same Reporter discipline as the
         // full destroy: dry-only / real-only pre-exec messages, real-only
@@ -510,6 +537,15 @@ impl<'a> Writer for MacosWriter<'a> {
         reporter.emit_real_only(messages::destroyed_orphan_group(name));
         Ok(())
     }
+}
+
+/// Phase-shell command shape: `sudo -iu <name>`. `-i` makes sudo run a
+/// login shell (full env reset, sources the tenant's shell rc files); `-u`
+/// selects the target user. Minimal on purpose — `-n` (non-interactive,
+/// "fail if a prompt is needed") is deferred to the sudoers-entry cycle
+/// when we can guarantee the timestamp-cache state.
+fn build_shell_argv(name: &str) -> Vec<String> {
+    vec!["sudo".into(), "-iu".into(), name.into()]
 }
 
 fn build_create_argv(name: &str, uid: u32, gid: u32) -> Vec<String> {

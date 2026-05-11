@@ -50,6 +50,40 @@ pub(crate) fn dispatch(
                 }
             }
         }
+        Verb::Shell { name } => {
+            if let Err(e) = accounts::validate_name(&name) {
+                reporter.emit_err(messages::invalid_name(&name, &e));
+                return EX_USAGE;
+            }
+            // Reuses `destroy_eligibility`'s 5-way classifier (per the
+            // Option-A design lock). Shell collapses NotPresent and
+            // OrphanGroup into the same `shell_absent` refusal — Q3 ruled
+            // that operators wanting a shell don't care about the lingering
+            // group; the destroy verb is the right tool to converge that.
+            match accounts::destroy_eligibility(accounts, &name) {
+                accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+                    reporter.emit_err(messages::shell_absent(&name));
+                    EX_USAGE
+                }
+                accounts::Eligibility::NotATenant { uid } => {
+                    reporter.emit_err(messages::shell_not_a_tenant(&name, uid, TENANT_UID_FLOOR));
+                    EX_USAGE
+                }
+                accounts::Eligibility::SystemAccount => {
+                    reporter.emit_err(messages::shell_system_account_refusal(&name));
+                    EX_USAGE
+                }
+                accounts::Eligibility::Destroyable => {
+                    match writer.shell_into_tenant(&name, reporter) {
+                        Ok(code) => code.clamp(0, 255) as u8,
+                        Err(e) => {
+                            reporter.emit_err(messages::shell_failed(&name, &e));
+                            EX_IOERR
+                        }
+                    }
+                }
+            }
+        }
         Verb::Destroy { name } => {
             if let Err(e) = accounts::validate_name(&name) {
                 reporter.emit_err(messages::invalid_name(&name, &e));

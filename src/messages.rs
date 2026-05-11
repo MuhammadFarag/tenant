@@ -239,6 +239,96 @@ pub(crate) fn destroyed_orphan_group(name: &str) -> Message {
     }
 }
 
+/// Pre-exec dry-run message for the shell verb: "Would shell into 'X'."
+/// Verbose adds the single-argv mechanism preview. Single-argv plan
+/// (unlike create/destroy) — there's no fan-out, just `sudo -iu <name>`.
+/// Emitted via `emit_dry_only`.
+pub(crate) fn would_shell_into_tenant(name: &str, argv: &[String]) -> Message {
+    Message {
+        summary: Some(format!("Would shell into '{name}'.")),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: Some(format!("  {}", shell_join(argv))),
+    }
+}
+
+/// Pre-exec real-mode twin: "Shelling into 'X'." Unlike create/destroy
+/// where the summary lives in `summary_verbose` (silent standard mode,
+/// post-exec confirmation does the talking), shell has no post-exec
+/// confirmation — the operator IS the shell after this fires. So the
+/// "Shelling into" line is the only acknowledgement the operator gets,
+/// and it shows in both standard and verbose. Emitted via `emit_real_only`.
+pub(crate) fn shelling_into_tenant(name: &str, argv: &[String]) -> Message {
+    Message {
+        summary: Some(format!("Shelling into '{name}'.")),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: Some(format!("  {}", shell_join(argv))),
+    }
+}
+
+/// Error-path message for the shell verb when `exec_into` returns
+/// `ExecError` (spawn failure — sudo not found, fork failed). Distinct
+/// from `create_failed` / `destroy_failed` so log-greps can disambiguate
+/// the verb. Non-zero shell exits are NOT errors here; they're propagated
+/// as tenant's own exit code by the dispatcher.
+pub(crate) fn shell_failed(name: &str, error: &ExecError) -> Message {
+    Message {
+        summary: Some(format!("tenant: failed to shell into '{name}': {error}")),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
+/// Refusal message for `shell <name>` where the tenant doesn't exist
+/// (NotPresent or OrphanGroup eligibility — per Q3, OrphanGroup collapses
+/// to the same refusal because the group alone can't host a shell session).
+/// Maps to EX_USAGE at the dispatch layer. Frames the action as "cannot
+/// shell into" rather than "refusing to" because the issue is "the target
+/// doesn't exist," not a guard-rail refusing an unsafe operation.
+pub(crate) fn shell_absent(name: &str) -> Message {
+    Message {
+        summary: Some(format!(
+            "tenant: cannot shell into '{name}': does not exist"
+        )),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
+/// Refusal message for `shell <name>` where the account exists with a
+/// positive UID below the tenant floor. Twin of `not_a_tenant` for
+/// destroy — same floor, different verb framing ("refusing to shell into"
+/// vs "refusing to destroy"). Names the floor explicitly so the operator
+/// can disambiguate without reading the source.
+pub(crate) fn shell_not_a_tenant(name: &str, uid: u32, floor: u32) -> Message {
+    Message {
+        summary: Some(format!(
+            "tenant: refusing to shell into '{name}': UID {uid} is below tenant floor {floor}"
+        )),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
+/// Refusal message for `shell <name>` where the account exists in the
+/// user listing but has no positive UID — twin of `system_account_refusal`
+/// for destroy. Same `(true, None)` Reader pattern; same refusal rationale
+/// (the account very much exists; we just won't shell into it).
+pub(crate) fn shell_system_account_refusal(name: &str) -> Message {
+    Message {
+        summary: Some(format!(
+            "tenant: refusing to shell into '{name}': system account (no tenant-range UID)"
+        )),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
 /// Convergent-noop message for the destroy verb: account already absent,
 /// so destroy is a successful no-op. Tense-neutral so the same line works
 /// in real and dry-run modes (no separate "Would …" twin).

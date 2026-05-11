@@ -32,6 +32,11 @@ src/commands.rs   — dispatch (the match on Verb) — no I/O, no cli.dry_run ch
                     reporter.emit (convergent-noop success). Create-side
                     matches CreateError::{Group, User, UserWithRollback};
                     destroy-side matches the 5-variant Eligibility.
+                    Shell-side reuses the same Eligibility classifier but
+                    collapses NotPresent + OrphanGroup into a single
+                    `shell_absent` refusal (the operator wants a shell; the
+                    lingering group alone can't host one) and clamps the
+                    child shell's i32 exit code into u8 for propagation.
 src/accounts.rs   — Reader + Writer traits; StubReader / MacosReader (dscl);
                     MacosWriter (argv build + Reporter emit + Executor delegation);
                     validate_name, check_conflict, destroy_eligibility.
@@ -46,14 +51,29 @@ src/accounts.rs   — Reader + Writer traits; StubReader / MacosReader (dscl);
                     cleanup), build_dseditgroup_delete_argv (Phase-3
                     unconditional group cleanup). `destroy_orphan_group`
                     issues just the dseditgroup-delete (convergence path).
+                    `shell_into_tenant` issues a single argv
+                    (`build_shell_argv` → `sudo -iu <name>`) through the
+                    Executor's `exec_into` substitution point (not `run`)
+                    and returns the child shell's i32 exit code.
                     `parse_id_line` is the shared parser for both UID and
                     GID dscl listings (negative-ID filter + lowest-wins fold).
 src/allocation.rs — UidAllocator + GidAllocator (both iterate from
                     TENANT_UID_FLOOR = 600; consult disjoint Reader maps,
                     independent values)
-src/executor.rs   — Executor trait; SystemExecutor / DryRunExecutor / StubExecutor;
-                    ExecError { Spawn, NonZero { code, stderr } }; StubExecutor
-                    has `with_response_to(prefix, code)` for per-call overrides
+src/executor.rs   — Executor trait with two substitution points: `run`
+                    (captures stdout/stderr — used by create/destroy so
+                    sysadminctl chatter is suppressed and stderr surfaces
+                    via ExecError::NonZero) and `exec_into` (inherits
+                    stdin/stdout/stderr, returns the child's i32 exit code
+                    — used by interactive verbs like shell where output
+                    capture would swallow the session). SystemExecutor /
+                    DryRunExecutor / StubExecutor; ExecError { Spawn,
+                    NonZero { code, stderr } } applies to `run` only —
+                    `exec_into` reserves ExecError for spawn failures, since
+                    a non-zero child exit is a propagation signal, not an
+                    error. StubExecutor has `with_response_to(prefix, code)`
+                    for per-call `run` overrides and `with_exec_into_code(n)`
+                    to pin the value returned by `exec_into`.
 src/messages.rs   — Message struct (summary / summary_verbose / dry_run_summary /
                     detail) + per-action factories. Create trio
                     (would_create_tenant / creating_tenant) takes group_argv,
@@ -72,6 +92,18 @@ src/messages.rs   — Message struct (summary / summary_verbose / dry_run_summar
                     `rollback_failed` (em-dash-suffixed recovery hint),
                     `destroy_failed`, plus destroy_absent, not_a_tenant,
                     system_account_refusal, invalid_name, name_conflict.
+                    Shell pair (would_shell_into_tenant /
+                    shelling_into_tenant) — pair not trio because there's
+                    no post-exec confirmation (the operator IS the shell
+                    after exec_into returns). The "Shelling into" intent
+                    line lives in `summary` (not `summary_verbose`) so it
+                    emits in standard mode too — without a post-exec line
+                    to do the talking, standard-mode silence would leave
+                    the operator looking at a bare sudo prompt with no
+                    project-side context. Shell refusals:
+                    shell_absent (collapsed NotPresent+OrphanGroup),
+                    shell_not_a_tenant, shell_system_account_refusal,
+                    shell_failed (spawn failure).
 src/reporter.rs   — Reporter holds (stdout, stderr, verbose, dry_run); methods
                     emit_err / emit (always-on-stdout) / emit_real_only /
                     emit_dry_only with mode-aware summary selection.
@@ -117,6 +149,24 @@ Things that are easy to violate and would matter:
   annotated `  # on rollback` to flag it as conditional in the plan
   (rolls back only on sysadminctl failure); the rollback also appears in
   the echo block when it actually fires (e.g. on partial-failure paths).
+  Interactive verbs like `shell` use a 2-message pair (no post-exec
+  past-participle) — the operator IS the shell after exec_into returns,
+  so a "Shelled into…" line after they exit would print to the host's
+  terminal in a different session context. The "Shelling into" intent
+  populates `summary` (not `summary_verbose`) so it shows in standard
+  mode too — there's no post-exec line to acknowledge the action
+  otherwise.
+- **Interactive verbs use `exec_into`, not `run`** — `Executor` has two
+  substitution points: `run` captures stdout/stderr so sysadminctl
+  chatter is suppressed on success (good for batch verbs) and surfaces
+  via `ExecError::NonZero` on failure; `exec_into` inherits the parent's
+  stdio so sudo can prompt and the launched login shell can drive the
+  controlling terminal. Wiring `shell` through `run` would silently
+  swallow the shell session's output. `exec_into` returns `Result<i32,
+  ExecError>` — the i32 is the child's exit code for propagation,
+  `ExecError` is reserved for spawn failures only. Tests pin both via
+  StubExecutor: `with_response_to(prefix, code)` for `run` overrides,
+  `with_exec_into_code(n)` for `exec_into`.
 - **Probe via Executor, not Reader live re-read** — when a verb needs to
   re-check OS state mid-execution (V1.8 destroy's dscl-read residue probe
   is the canonical case), the probe is a regular Executor call whose
@@ -205,11 +255,17 @@ Things that are easy to violate and would matter:
   an already-absent tenant AND the orphan-group convergence path); `64`
   (`EX_USAGE`, sysexits.h) for any user-input failure — validation,
   create-side conflict, destroy-side floor refusal (`NotATenant`),
-  destroy-side system-account refusal (`SystemAccount`); `74`
+  destroy-side system-account refusal (`SystemAccount`), shell-side
+  refusals (absent / orphan-group / not-a-tenant / system-account); `74`
   (`EX_IOERR`) reserved for dscl / dseditgroup / sysadminctl / process-
   execution failure (create-side dseditgroup-create, sysadminctl-addUser,
   and rollback-failure paths all map here; destroy-side any of the
-  four steps); `1` is clap's default for parse errors (we don't override).
+  four steps; shell-side `ExecError::Spawn` from `exec_into`). Shell is
+  the one verb that does NOT take an exit code from the set above on its
+  success path — when `exec_into` returns Ok, the child shell's exit code
+  is propagated as tenant's own exit (clamped 0..=255), so `tenant shell
+  dev` with `exit 5` inside the session yields `tenant`-exit `5`. `1` is
+  clap's default for parse errors (we don't override).
 - **Acronym casing** — Rust convention treats acronyms as words: `Uid`
   not `UID`, `Macos` not `MacOS`. Methods are `lowest_free_uid`, struct
   is `UidAllocator`, `MacosReader`.
