@@ -80,11 +80,18 @@ impl Executor for DryRunExecutor {
 /// `StubExecutor::failing(code)` for a non-zero exit with empty stderr,
 /// or `StubExecutor::failing_with(code, stderr)` to simulate a tool that
 /// printed something to stderr before exiting.
+///
+/// For multi-call paths where one specific argv should fail (e.g. the
+/// destroy verb's dscl-read probe returning eDSRecordNotFound while
+/// sysadminctl succeeds), chain `.with_response_to(prefix, code)` —
+/// any call whose argv starts with `prefix` returns `NonZero { code, .. }`
+/// instead of the global default. First registered match wins.
 #[derive(Default)]
 pub struct StubExecutor {
     calls: RefCell<Vec<Vec<String>>>,
     fail_code: Cell<Option<i32>>,
     fail_stderr: RefCell<String>,
+    overrides: RefCell<Vec<(Vec<String>, i32, String)>>,
 }
 
 impl StubExecutor {
@@ -101,7 +108,26 @@ impl StubExecutor {
             calls: RefCell::new(Vec::new()),
             fail_code: Cell::new(Some(code)),
             fail_stderr: RefCell::new(stderr.to_string()),
+            overrides: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Register a per-argv-prefix override. When a `run` call's argv starts
+    /// with `prefix`, the executor returns `NonZero { code, stderr: "" }`
+    /// instead of the global default. Multiple overrides may be registered;
+    /// the first match in registration order wins. Use `with_response_to_stderr`
+    /// when the test needs to assert against captured stderr.
+    pub fn with_response_to(self, prefix: &[&str], code: i32) -> Self {
+        self.with_response_to_stderr(prefix, code, "")
+    }
+
+    pub fn with_response_to_stderr(self, prefix: &[&str], code: i32, stderr: &str) -> Self {
+        self.overrides.borrow_mut().push((
+            prefix.iter().map(|s| (*s).to_string()).collect(),
+            code,
+            stderr.to_string(),
+        ));
+        self
     }
 
     pub fn calls(&self) -> Vec<Vec<String>> {
@@ -112,6 +138,16 @@ impl StubExecutor {
 impl Executor for StubExecutor {
     fn run(&self, argv: &[String]) -> Result<(), ExecError> {
         self.calls.borrow_mut().push(argv.to_vec());
+        // Per-argv overrides take precedence over the global fail_code so a
+        // test can say "everything succeeds except the dscl-read probe".
+        for (prefix, code, stderr) in self.overrides.borrow().iter() {
+            if argv.starts_with(prefix) {
+                return Err(ExecError::NonZero {
+                    code: *code,
+                    stderr: stderr.clone(),
+                });
+            }
+        }
         match self.fail_code.get() {
             None => Ok(()),
             Some(code) => Err(ExecError::NonZero {

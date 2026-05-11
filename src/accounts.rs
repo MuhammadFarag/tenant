@@ -260,13 +260,50 @@ impl<'a> Writer for MacosWriter<'a> {
     }
 
     fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError> {
-        let argv = build_destroy_argv(name);
-        // Same three-message bracket as create: dry-run shows "Would …",
-        // real-verbose shows pre-exec intent + mechanism, real-standard
-        // shows only the post-exec confirmation.
-        reporter.emit_dry_only(messages::would_destroy_tenant(name, &argv));
-        reporter.emit_real_only(messages::destroying_tenant(name, &argv));
-        self.executor.run(&argv)?;
+        // Three commands compose the destroy mechanism:
+        //   1. sysadminctl -deleteUser           — the canonical destroy
+        //   2. dscl . -read /Users/<name>        — residue probe (no sudo;
+        //      reads on the local node don't require it)
+        //   3. sudo dscl . -delete /Users/<name> — belt-and-braces cleanup,
+        //      conditional on the probe finding the DS record still
+        //      present. sysadminctl can leave a stale DS record in some
+        //      failure shapes (caught the hard way by the sandbox plugin
+        //      that originally inspired this CLI); the probe-and-cleanup
+        //      makes destroy convergent toward absence even in that case.
+        let sysadminctl_delete = build_destroy_sysadminctl_argv(name);
+        let dscl_probe = build_dscl_read_user_argv(name);
+        let dscl_cleanup = build_dscl_delete_user_argv(name);
+        let plan: [&[String]; 3] = [&sysadminctl_delete, &dscl_probe, &dscl_cleanup];
+
+        // Pre-exec: dry-run shows the full plan; real-verbose shows the
+        // intent + plan. Both render the dscl-cleanup unconditionally —
+        // pre-exec can't know what the probe will return at runtime, so
+        // the operator sees the algorithm.
+        reporter.emit_dry_only(messages::would_destroy_tenant(name, &plan));
+        reporter.emit_real_only(messages::destroying_tenant(name, &plan));
+
+        // Per-exec echo + run pairs. `running_argv` Messages have only
+        // `summary_verbose` populated, so they render only in real+verbose;
+        // `emit_real_only` filters them out in dry-run.
+        reporter.emit_real_only(messages::running_argv(&sysadminctl_delete));
+        self.executor.run(&sysadminctl_delete)?;
+
+        reporter.emit_real_only(messages::running_argv(&dscl_probe));
+        match self.executor.run(&dscl_probe) {
+            Ok(()) => {
+                // Probe succeeded → DS record still present → run cleanup.
+                reporter.emit_real_only(messages::running_argv(&dscl_cleanup));
+                self.executor.run(&dscl_cleanup)?;
+            }
+            Err(ExecError::NonZero { .. }) => {
+                // Probe returned non-zero (typically eDSRecordNotFound
+                // from dscl when the user is absent) → DS is clean → no
+                // cleanup needed. The cleanup `$` line stays absent so the
+                // operator can see what actually ran vs the plan above.
+            }
+            Err(other) => return Err(other),
+        }
+
         reporter.emit_real_only(messages::destroyed_tenant(name));
         Ok(())
     }
@@ -289,12 +326,40 @@ fn build_create_argv(name: &str, uid: u32) -> Vec<String> {
     ]
 }
 
-fn build_destroy_argv(name: &str) -> Vec<String> {
+fn build_destroy_sysadminctl_argv(name: &str) -> Vec<String> {
     vec![
         "sudo".into(),
         "sysadminctl".into(),
         "-deleteUser".into(),
         name.into(),
+    ]
+}
+
+/// Residue probe: `dscl . -read /Users/<name>` exits 0 when the DS record
+/// exists and non-zero (typically eDSRecordNotFound) when it doesn't. No
+/// sudo — reads on the local node don't require it. The `destroy_tenant`
+/// writer uses the exit code to decide whether the conditional cleanup
+/// runs.
+fn build_dscl_read_user_argv(name: &str) -> Vec<String> {
+    vec![
+        "dscl".into(),
+        ".".into(),
+        "-read".into(),
+        format!("/Users/{name}"),
+    ]
+}
+
+/// Belt-and-braces cleanup: `sudo dscl . -delete /Users/<name>` removes a
+/// stale DS record that sysadminctl `-deleteUser` may have left behind.
+/// Only runs when `build_dscl_read_user_argv`'s probe shows the record is
+/// still present. Needs sudo (writes to the local node).
+fn build_dscl_delete_user_argv(name: &str) -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "dscl".into(),
+        ".".into(),
+        "-delete".into(),
+        format!("/Users/{name}"),
     ]
 }
 

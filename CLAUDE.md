@@ -25,6 +25,21 @@ Done:
   no positive UID at all (system account like `nobody`, distinct message).
   Charset guard via `validate_name` reuse. No group cleanup yet — paired
   with explicit group lifecycle in the next vertical slice (see Open).
+- Destroy mechanism (V1.8): three-step `sysadminctl -deleteUser` →
+  `dscl . -read /Users/<name>` (residue probe, no sudo) → conditional
+  `sudo dscl . -delete /Users/<name>` (cleanup, only if probe shows the DS
+  record still present). Belt-and-braces against the case where
+  sysadminctl reports success but leaves a stale DS record that would
+  block re-init — the mitigation was learned the hard way by the sandbox
+  plugin (`/Users/Shared/sandbox/plugin-dev/claude-plugins/sandbox/`)
+  that originally inspired this CLI. Probe-as-Executor-call (not a
+  Reader live re-read) so the test seam stays at the Executor boundary.
+  Standard-mode stdout is unchanged ("Destroyed tenant 'X'."); verbose
+  shows the upfront pessimistic plan (3 indented argvs under
+  "Destroying tenant 'X'.") followed by per-exec `$ <argv>` echo lines
+  for what actually ran (the cleanup echo is absent when the probe
+  finds DS clean — that asymmetry is the operator-visible signal that
+  the cleanup was unnecessary).
 - `accounts::Reader` trait + `StubReader` (test) + `MacosReader` (dscl).
   Reader exposes `used_uids`, `has_user`, `has_group`, and `uid_for(name)`
   (added with destroy). `MacosReader` keeps `users` and `uid_by_name` as
@@ -45,7 +60,11 @@ Done:
 - `allocation::UidAllocator::lowest_free_uid` (iterate from `TENANT_UID_FLOOR = 600`)
 - `executor::Executor` trait + `SystemExecutor` (real, captures stderr) +
   `DryRunExecutor` (Ok-noop, swapped in at composition root when `--dry-run`) +
-  `StubExecutor` (records calls; `failing` / `failing_with` for failure-path tests)
+  `StubExecutor` (records calls; `failing` / `failing_with` for global
+  failure-path tests; `with_response_to` / `with_response_to_stderr` for
+  per-argv-prefix overrides — needed when one specific call in a multi-call
+  verb should fail while others succeed, e.g. destroy's dscl-read probe
+  returning eDSRecordNotFound while sysadminctl succeeds)
 - `Reporter` + `Message`: Reporter holds `(stdout, stderr, verbose, dry_run)`;
   Message holds `(summary, summary_verbose, dry_run_summary, detail)`; methods
   are `emit_err` (always-on-stderr), `emit` (always-on-stdout, added with
@@ -57,18 +76,58 @@ Done:
   confirmation — `destroyed_tenant` skips the UID since the dead account's
   UID isn't new info to the operator. Sysadminctl noise suppressed on
   success, surfaced via `ExecError::NonZero { code, stderr }` on failure.
+- Multi-argv verbose UX (V1.8, destroy-only today): for verbs that issue
+  more than one shell-out, `would_destroy_tenant` and `destroying_tenant`
+  take `argvs: &[&[String]]` and render the full pessimistic plan as
+  multiple indented lines under one summary. During real-mode execution,
+  `running_argv` Messages emit `$ <argv>` echo lines per Executor call
+  (verbose-only via `summary_verbose`). Operator's view: one upfront plan
+  block + one execution-echo block; conditional commands appear in the
+  plan but only show in the echo if they actually ran.
 - E2E test suite in `tests/cli.rs` (reverse pyramid — no inline unit tests),
-  43 cases via `run_with` / `run_with_exec` helpers + the
-  `stub_with_tenant` / `stub_with_used_uids` setup helpers
+  46 cases via `run_with` / `run_with_exec` helpers + the
+  `stub_with_tenant` / `stub_with_used_uids` setup helpers + the `argv`
+  helper for multi-line argv assertions
 - macOS-gated smoke test exercises real dscl
 
-Open / likely next:
-- **Vertical slice: explicit group lifecycle.** `create` today relies on
-  sysadminctl's implicit "create matching group when `-GID` slot is free"
-  side-effect; `destroy` doesn't touch the group at all. Pair the two:
-  make `create` issue an explicit `dscl . -create /Groups/<name>` (or
-  similar), and have `destroy` issue the matching `-delete`. Once that
-  lands, the destroy path becomes truly symmetric with create.
+Open / likely next (phases of the explicit-group-lifecycle vertical slice):
+- **Phase 2: reserved-name blocklist.** `validate_name` is purely lexical
+  today, so it would happily accept `wheel`, `staff`, `admin`, etc. The
+  state-based prechecks (`check_conflict` for create, `destroy_eligibility`
+  for destroy) catch these by other means, but the lexical guard is the
+  cheapest first failure and should refuse them up front. Plan: copy the
+  sandbox plugin's blocklist `{root, admin, staff, wheel, daemon, nobody,
+  sudo}` (see `/Users/Shared/sandbox/plugin-dev/claude-plugins/sandbox/scripts/lib/naming.py`),
+  add a `NameError::Reserved` variant, exit `EX_USAGE`. The macOS `_*`
+  service-account namespace is already excluded by the leading-letter rule
+  so no special handling needed for `_sandbox` etc.
+- **Phase 3: explicit group lifecycle.** Decision frame from earlier
+  design pass: group-first ordering on create (group exists before
+  sysadminctl runs, so the home directory's group ownership lands on the
+  tenant group, not staff), `dseditgroup` (not bare `dscl . -create`) for
+  the create call, `<name>-tenant-share` as the group name. Destroy mirror:
+  sysadminctl-deleteUser → dscl-read probe + conditional dscl-delete
+  (already shipped in V1.8) → `dseditgroup -o delete` for the group.
+  Allocator needs to inspect both UID and GID space (new
+  `Reader::used_gids()` method, MacosReader parses
+  `dscl . -list /Groups PrimaryGroupID`). No explicit
+  dseditgroup-add-member step — the user's primary-group binding
+  provides implicit member access on macOS.
+
+  Sysadminctl-cascade discovery (empirically verified post-V1.8 on
+  Darwin 25.4): `sudo sysadminctl -deleteUser <name>` *does* cascade to
+  the implicit primary group it created during `-addUser` (the group it
+  knows about because the group name matched the user name). So today's
+  destroy path leaves no orphan-group residue on the host. **Phase 3
+  changes this picture**: once the primary group is renamed to
+  `<name>-tenant-share`, the cascade no longer applies (sysadminctl
+  looks for a group named after the user), so explicit
+  `dseditgroup -o delete <name>-tenant-share` on destroy becomes load-
+  bearing — without it Phase 3 *introduces* the orphan-group problem
+  that V1.8 doesn't currently have. Implication: no
+  `Eligibility::OrphanGroup` variant needed (no pre-existing residue to
+  converge over), and no manual host cleanup needed before Phase 3
+  lands.
 - **`status <name>`** — read-only verb; exercises the Reader without
   needing the Writer or Executor. Will likely surface `--strict` (exit
   code on drift) and `--json` (format) as orthogonal axes.
@@ -126,15 +185,20 @@ src/commands.rs   — dispatch (the match on Verb) — no I/O, no cli.dry_run ch
                     reporter.emit (convergent-noop success)
 src/accounts.rs   — Reader + Writer traits; StubReader / MacosReader (dscl);
                     MacosWriter (argv build + Reporter emit + Executor delegation);
-                    validate_name, check_conflict, destroy_eligibility
+                    validate_name, check_conflict, destroy_eligibility.
+                    `destroy_tenant` issues 3 argvs: build_destroy_sysadminctl_argv,
+                    build_dscl_read_user_argv (probe), build_dscl_delete_user_argv
+                    (conditional cleanup)
 src/allocation.rs — UidAllocator + TENANT_UID_FLOOR
 src/executor.rs   — Executor trait; SystemExecutor / DryRunExecutor / StubExecutor;
-                    ExecError { Spawn, NonZero { code, stderr } }
+                    ExecError { Spawn, NonZero { code, stderr } }; StubExecutor
+                    has `with_response_to(prefix, code)` for per-call overrides
 src/messages.rs   — Message struct (summary / summary_verbose / dry_run_summary /
-                    detail) + per-action factories (would_create_tenant /
-                    creating_tenant / created_tenant for create; matching trio
-                    for destroy plus destroy_absent, not_a_tenant, and
-                    system_account_refusal)
+                    detail) + per-action factories. Create trio takes a single
+                    argv; destroy trio (would_destroy_tenant / destroying_tenant)
+                    takes `argvs: &[&[String]]` and renders multi-line plans via
+                    `render_plan`. `running_argv` is the per-exec echo factory.
+                    Plus destroy_absent, not_a_tenant, system_account_refusal
 src/reporter.rs   — Reporter holds (stdout, stderr, verbose, dry_run); methods
                     emit_err / emit (always-on-stdout) / emit_real_only /
                     emit_dry_only with mode-aware summary selection
@@ -160,7 +224,23 @@ Things that are easy to violate and would matter:
   dry-only pre-exec, `<action>ing` (gerund) for real-verbose-only pre-exec
   intent + mechanism, `<action>ed` (past participle) for real-only post-exec
   confirmation. Each is emitted via the matching Reporter method
-  (`emit_dry_only` / `emit_real_only`).
+  (`emit_dry_only` / `emit_real_only`). For verbs that issue more than one
+  shell-out (V1.8 destroy is the first), the `would_<action>` /
+  `<action>ing` factories take `argvs: &[&[String]]` and render the full
+  pessimistic plan as multi-line detail; `running_argv` Messages then emit
+  `$ <argv>` echo lines per Executor call inside the Writer. Conditional
+  argvs appear in the upfront plan but only echo if they actually run —
+  the plan-vs-echo asymmetry is the operator-visible signal that a
+  conditional step was skipped.
+- **Probe via Executor, not Reader live re-read** — when a verb needs to
+  re-check OS state mid-execution (V1.8 destroy's dscl-read residue probe
+  is the canonical case), the probe is a regular Executor call whose
+  exit code drives a branch in the Writer. The Reader trait stays
+  snapshot-then-act: it's the in-memory view the dispatcher decided
+  against. The Executor is the test seam; per-call overrides in
+  StubExecutor (`with_response_to`) let tests pin both probe outcomes.
+  Don't add a "live re-read" method to Reader — it would confuse the
+  snapshot doctrine.
 - **No I/O in command logic** — verbs receive `&mut Reporter`, emit via
   `reporter.emit_err(...)` (failure paths) or `reporter.emit(...)`
   (mode-neutral success messages like destroy's convergent-noop), return
@@ -271,8 +351,22 @@ Convention notes:
 
 ## Cross-references
 
-- Go reference project: `/Users/plugin-dev/src/tenant/`. Same domain,
-  different idioms; useful for understanding intent but don't transliterate.
-- The Go project's `.features/spec/` directory contains the design
-  consensus the seven-verb spec came from (gitignored there; not duplicated
-  here).
+- **Sandbox plugin (the original inspiration):**
+  `/Users/Shared/sandbox/plugin-dev/claude-plugins/sandbox/`. A Python-CLI
+  + skill that host-isolates Claude Code agents on macOS via per-agent
+  user accounts, primary groups (named `<agent>-share`), PF anchors,
+  login keychains, sudoers, and shared-root ACLs. The Rust `tenant` CLI
+  is a clean-room rewrite of just **Phase 1** of the plugin's pipeline —
+  the user-account primitive — intentionally agent-/Claude-Code-agnostic.
+  Load-bearing files when designing tenant features: `scripts/lib/phases/phase01_user.py`
+  (user + group creation; canonical answer to "what argv shape works"),
+  `scripts/lib/phases/phase_destroy.py` (the dscl-residue mitigation
+  V1.8 ports here), `scripts/lib/naming.py` (reserved-name set),
+  `scripts/lib/allocation.py` (UID allocator shape).
+- **Go prototype (deprecated):** `/Users/plugin-dev/src/tenant/`. An
+  intermediate iteration from before the Rust port; not being continued.
+  Don't cross-reference for design decisions — the sandbox plugin is the
+  source of truth for prior art, and the Rust port is the live codebase.
+  The Go project's `.features/spec/` directory contains the seven-verb
+  spec text (gitignored there; not duplicated here) — only useful as a
+  historical record of the spec's wording.

@@ -25,6 +25,14 @@ fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
     )
 }
 
+/// Build a `Vec<String>` argv from `&[&str]` — the shape `StubExecutor`
+/// records calls in. Used in assertions where reading three or four parallel
+/// argv literals is easier than the inline `.iter().map(...).collect()`
+/// chain.
+fn argv(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|s| (*s).to_string()).collect()
+}
+
 fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u8, String, String) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
@@ -353,40 +361,140 @@ fn destroy_dry_run_default_shows_intent() {
 
 #[test]
 fn destroy_dry_run_verbose_shows_mechanism() {
+    // Dry-run verbose lists the full pessimistic plan: sysadminctl -deleteUser
+    // (the canonical destroy), dscl -read (the post-exec residue probe), and
+    // sudo dscl -delete (the conditional belt-and-braces cleanup if the probe
+    // finds the DS record still present). The dscl-delete is shown
+    // unconditionally because the dry-run can't know what the probe would
+    // have found at runtime — the operator sees the algorithm.
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["destroy", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
     let want = "Would destroy tenant 'dev'.\n  \
-                sudo sysadminctl -deleteUser dev\n";
+                sudo sysadminctl -deleteUser dev\n  \
+                dscl . -read /Users/dev\n  \
+                sudo dscl . -delete /Users/dev\n";
     assert_eq!(stdout, want);
 }
 
 #[test]
 fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
+    // StubExecutor::new() returns Ok by default → the dscl-read probe sees
+    // the DS record as still present → the conditional dscl-delete runs.
+    // Three exec calls in standard mode; stdout is still the single
+    // confirmation line (mechanism is suppressed without -v).
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     let calls = exec.calls();
-    assert_eq!(calls.len(), 1, "expected exactly one exec call");
-    let want_argv: Vec<String> = ["sudo", "sysadminctl", "-deleteUser", "dev"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    assert_eq!(calls[0], want_argv);
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected sysadminctl + dscl-read + dscl-delete"
+    );
+    assert_eq!(
+        calls[0],
+        argv(&["sudo", "sysadminctl", "-deleteUser", "dev"])
+    );
+    assert_eq!(calls[1], argv(&["dscl", ".", "-read", "/Users/dev"]));
+    assert_eq!(
+        calls[2],
+        argv(&["sudo", "dscl", ".", "-delete", "/Users/dev"])
+    );
 }
 
 #[test]
 fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
+    // Real-mode verbose has two sections: (a) the "Destroying" pre-exec
+    // intent + the full pessimistic plan (same shape as dry-run verbose),
+    // then (b) per-exec echo lines prefixed with "$ " as each command
+    // actually runs. Default StubExecutor → probe says residue → all three
+    // commands echo. The trailing post-exec confirmation closes the block.
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
     let want = "Destroying tenant 'dev'.\n  \
-                sudo sysadminctl -deleteUser dev\n\
+                sudo sysadminctl -deleteUser dev\n  \
+                dscl . -read /Users/dev\n  \
+                sudo dscl . -delete /Users/dev\n\
+                $ sudo sysadminctl -deleteUser dev\n\
+                $ dscl . -read /Users/dev\n\
+                $ sudo dscl . -delete /Users/dev\n\
+                Destroyed tenant 'dev'.\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
+    // The dscl-read probe returns NonZero when the DS record is absent
+    // (typically eDSRecordNotFound, code 56). The destroy writer must
+    // treat probe-NonZero as "no cleanup needed" and stop after the
+    // probe — only two exec calls, no third sudo-dscl-delete. The
+    // stdout (standard mode) is the same single confirmation as the
+    // residue path; the operator can't tell from non-verbose output
+    // whether the cleanup ran. Verbose output's `$ sudo dscl . -delete`
+    // line is the operator's signal — covered separately below.
+    let exec = StubExecutor::new().with_response_to(&["dscl", ".", "-read", "/Users/dev"], 56);
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
+    let calls = exec.calls();
+    assert_eq!(calls.len(), 2, "expected sysadminctl + dscl-read only");
+    assert_eq!(
+        calls[0],
+        argv(&["sudo", "sysadminctl", "-deleteUser", "dev"])
+    );
+    assert_eq!(calls[1], argv(&["dscl", ".", "-read", "/Users/dev"]));
+}
+
+#[test]
+fn destroy_real_mode_dscl_cleanup_failure_surfaces_as_destroy_failure() {
+    // The cleanup is best-effort but not optional: if sysadminctl claims
+    // success and the probe says residue is still there, we MUST be able
+    // to remove it — otherwise the operator's `tenant destroy` reports
+    // success while the host still carries a stale DS record. Treat a
+    // dscl-delete NonZero as a destroy failure (EX_IOERR), with the
+    // captured stderr surfaced via ExecError::Display.
+    let exec = StubExecutor::new().with_response_to_stderr(
+        &["sudo", "dscl", ".", "-delete", "/Users/dev"],
+        78,
+        "dscl: cannot remove /Users/dev: not authorized\n",
+    );
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to destroy 'dev': process exited with code 78: \
+         dscl: cannot remove /Users/dev: not authorized\n"
+    );
+    // Sysadminctl + dscl-read + dscl-delete all attempted — the failure
+    // is on the third call, not before.
+    assert_eq!(exec.calls().len(), 3);
+}
+
+#[test]
+fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
+    // Verbose-mode counterpart: the upfront plan still lists all three
+    // commands (the operator sees the algorithm), but the per-exec `$`
+    // echo block stops after the probe — the dscl-delete echo is absent
+    // because the cleanup didn't run. The asymmetry between plan and
+    // echo is the load-bearing observable that tells the operator the
+    // probe cleared the DS state.
+    let exec = StubExecutor::new().with_response_to(&["dscl", ".", "-read", "/Users/dev"], 56);
+    let (code, stdout, _stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
+    assert_eq!(code, 0);
+    let want = "Destroying tenant 'dev'.\n  \
+                sudo sysadminctl -deleteUser dev\n  \
+                dscl . -read /Users/dev\n  \
+                sudo dscl . -delete /Users/dev\n\
+                $ sudo sysadminctl -deleteUser dev\n\
+                $ dscl . -read /Users/dev\n\
                 Destroyed tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }
@@ -494,7 +602,13 @@ fn destroy_accepts_at_floor() {
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "edge"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'edge'.\n");
-    assert_eq!(exec.calls().len(), 1, "expected exactly one exec call");
+    // Three calls: sysadminctl-deleteUser + dscl-read probe + (probe defaults
+    // to Ok with a vanilla StubExecutor) sudo-dscl-delete cleanup.
+    assert_eq!(
+        exec.calls().len(),
+        3,
+        "sysadminctl + dscl-read + dscl-delete"
+    );
 }
 
 #[test]

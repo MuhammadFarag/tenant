@@ -65,25 +65,47 @@ pub(crate) fn create_failed(name: &str, error: &ExecError) -> Message {
 }
 
 /// Pre-exec dry-run twin of `would_create_tenant`. "Would destroy tenant
-/// 'X'." with the planned argv as detail. Emitted via `emit_dry_only`.
-pub(crate) fn would_destroy_tenant(name: &str, argv: &[String]) -> Message {
+/// 'X'." with the full pessimistic plan as detail (one indented argv per
+/// line). Multi-argv because destroy issues sysadminctl `-deleteUser` plus
+/// a dscl `-read` residue probe plus a conditional `dscl -delete` cleanup.
+/// The dscl-delete is shown unconditionally — dry-run can't know what the
+/// probe would have found, so the operator sees the algorithm. Emitted via
+/// `emit_dry_only`.
+pub(crate) fn would_destroy_tenant(name: &str, argvs: &[&[String]]) -> Message {
     Message {
         summary: Some(format!("Would destroy tenant '{name}'.")),
         summary_verbose: None,
         dry_run_summary: None,
-        detail: Some(format!("  {}", shell_join(argv))),
+        detail: Some(render_plan(argvs)),
     }
 }
 
-/// Pre-exec real-mode twin of `creating_tenant`. Verbose-only (the summary
+/// Pre-exec real-mode twin of `creating_tenant`. Same multi-argv plan
+/// rendering as `would_destroy_tenant`, but verbose-only (the summary
 /// lives in `summary_verbose`) so standard real mode stays silent until the
-/// post-exec confirmation. Emitted via `emit_real_only`.
-pub(crate) fn destroying_tenant(name: &str, argv: &[String]) -> Message {
+/// post-exec confirmation. Pairs with `running_argv` emissions that follow
+/// during execution. Emitted via `emit_real_only`.
+pub(crate) fn destroying_tenant(name: &str, argvs: &[&[String]]) -> Message {
     Message {
         summary: None,
         summary_verbose: Some(format!("Destroying tenant '{name}'.")),
         dry_run_summary: None,
-        detail: Some(format!("  {}", shell_join(argv))),
+        detail: Some(render_plan(argvs)),
+    }
+}
+
+/// Per-exec echo line emitted just before each Executor.run call during a
+/// real-verbose run: `$ <argv>`. Follows the upfront plan block so the
+/// operator sees the planned commands first, then which ones actually ran
+/// (the dscl-delete cleanup is conditional, so its `$` line is absent when
+/// the probe finds DS clean). Verbose-only (lives in `summary_verbose`);
+/// emitted via `emit_real_only` so dry-run stays silent.
+pub(crate) fn running_argv(argv: &[String]) -> Message {
+    Message {
+        summary: None,
+        summary_verbose: Some(format!("$ {}", shell_join(argv))),
+        dry_run_summary: None,
+        detail: None,
     }
 }
 
@@ -212,4 +234,16 @@ fn shell_join(argv: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Render a multi-argv plan as a single newline-separated string with
+/// `  ` (two-space) indentation per line. The Reporter writes the
+/// composite as one `detail` block; the indentation distinguishes plan
+/// lines from the `$ ` execution-echo lines emitted by `running_argv`.
+fn render_plan(argvs: &[&[String]]) -> String {
+    argvs
+        .iter()
+        .map(|a| format!("  {}", shell_join(a)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
