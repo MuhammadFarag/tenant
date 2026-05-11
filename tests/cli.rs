@@ -83,12 +83,25 @@ fn create_accepts_single_letter_name() {
 }
 
 #[test]
-fn verbose_shows_floor_uid_when_no_uids_in_use() {
+fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
+    // Phase 3 changes the plan from one argv to three: dseditgroup-create
+    // (group-first so the user's home directory lands on the tenant-share
+    // group, not staff), sysadminctl-addUser (pointing -GID at the just-
+    // created group), and an unconditional `# on rollback` line that
+    // documents what happens if sysadminctl fails after the group was
+    // created. The rollback line is in the plan but not in the `$` echo
+    // block — that asymmetry is the operator-visible signal of whether
+    // the rollback fired (mirrors the destroy-side dscl-cleanup
+    // convention shipped in V1.8). UID and GID allocators are decoupled
+    // post-Phase-3 but both happen to bottom-out at TENANT_UID_FLOOR=600
+    // when both spaces are empty.
     let (code, stdout, _stderr) =
         run_with(StubReader::default(), &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
     let want = "Would create tenant 'dev'.\n  \
-                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n";
+                sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n";
     assert_eq!(stdout, want);
 }
 
@@ -106,51 +119,112 @@ fn stub_with_used_uids(uids: &[u32]) -> StubReader {
 }
 
 #[test]
-fn verbose_shows_lowest_free_uid_with_gap() {
+fn verbose_shows_lowest_free_uid_with_gap_and_gid_at_floor() {
+    // First decoupled-allocation evidence: UID space has a gap so the
+    // allocator returns 602, but the GID space is empty (stub_with_used_uids
+    // only populates uid_by_name, leaving gid_by_name empty) so the GID
+    // allocator returns 600. Phase 3 explicitly does NOT force UID == GID
+    // — the two allocators consult their own spaces and may diverge.
     let (code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[600, 601, 603]),
         &["create", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
     let want = "Would create tenant 'dev'.\n  \
-                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 602 -GID 602\n";
+                sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 602 -GID 600\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n";
     assert_eq!(stdout, want);
 }
 
 #[test]
-fn verbose_skips_taken_floor() {
+fn verbose_uid_skips_taken_floor_gid_stays_at_floor() {
+    // UID 600 taken, GID space empty → UID 601, GID 600. Pins the new
+    // decoupled-allocator semantics on the boundary: a single taken UID
+    // doesn't drag the GID allocator with it.
     let (_code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[600]),
         &["create", "dev", "--dry-run", "-v"],
     );
     assert!(
-        stdout.contains("-UID 601 -GID 601"),
-        "expected UID 601 in stdout, got: {stdout:?}",
+        stdout.contains("-UID 601 -GID 600"),
+        "expected '-UID 601 -GID 600' in stdout, got: {stdout:?}",
     );
 }
 
 #[test]
 fn verbose_uid_independent_of_input_order() {
+    // UIDs 600, 601, 603 taken (any input order) → UID 602; GID space empty → GID 600.
     let (_code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[603, 600, 601]),
         &["create", "dev", "--dry-run", "-v"],
     );
     assert!(
-        stdout.contains("-UID 602 -GID 602"),
-        "expected UID 602 in stdout, got: {stdout:?}",
+        stdout.contains("-UID 602 -GID 600"),
+        "expected '-UID 602 -GID 600' in stdout, got: {stdout:?}",
     );
 }
 
 #[test]
 fn verbose_skips_uids_below_floor() {
+    // UIDs below the floor (500, 599) don't constrain the allocator; both
+    // allocators bottom-out at the floor.
     let (_code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[500, 599]),
         &["create", "dev", "--dry-run", "-v"],
     );
     assert!(
         stdout.contains("-UID 600 -GID 600"),
-        "expected UID 600 in stdout, got: {stdout:?}",
+        "expected '-UID 600 -GID 600' in stdout, got: {stdout:?}",
     );
+}
+
+#[test]
+fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
+    // Mirror twin of `verbose_uid_skips_taken_floor_gid_stays_at_floor`:
+    // empty UID space + GID 600 taken (an unrelated group at the floor) →
+    // UID 600, GID 601. The dseditgroup `-i` value tracks the GID
+    // allocator, not the UID allocator — the literal argument is the
+    // load-bearing thing tenant passes to dseditgroup, so a regression
+    // that wires `-i` to `uid` would slip past UID-only tests but trips
+    // here.
+    let stub = StubReader {
+        groups: vec!["other".to_string()],
+        gid_by_name: [("other".to_string(), 600)].into_iter().collect(),
+        ..Default::default()
+    };
+    let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
+    assert_eq!(code, 0);
+    let want = "Would create tenant 'dev'.\n  \
+                sudo dseditgroup -o create -n . -i 601 dev-tenant-share\n  \
+                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 601\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn verbose_uid_and_gid_allocators_cross_over() {
+    // Crossover stub: UID space has the floor (600) taken; GID space has
+    // 601 taken. UID allocator climbs to 601 (lowest free above the
+    // floor); GID allocator stays at 600 (still free in its space). The
+    // resulting argv carries `-UID 601 -GID 600` — a *crossover* between
+    // the two spaces that's impossible if the two allocators are fused.
+    // The strongest single-test defense against a regression that
+    // wires `-i` and `-GID` to `lowest_free_uid` instead of
+    // `lowest_free_gid`.
+    let stub = StubReader {
+        users: vec!["legacy".to_string()],
+        uid_by_name: [("legacy".to_string(), 600)].into_iter().collect(),
+        groups: vec!["phantom".to_string()],
+        gid_by_name: [("phantom".to_string(), 601)].into_iter().collect(),
+    };
+    let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
+    assert_eq!(code, 0);
+    let want = "Would create tenant 'dev'.\n  \
+                sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 601 -GID 600\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n";
+    assert_eq!(stdout, want);
 }
 
 #[test]
@@ -256,28 +330,56 @@ fn create_rejects_when_user_exists() {
 }
 
 #[test]
-fn create_rejects_when_group_exists() {
+fn create_rejects_when_tenant_share_group_exists() {
+    // Phase 3 names the primary group `<name>-tenant-share` (not bare
+    // `<name>`). The conflict check now refuses when that suffixed name is
+    // already taken, regardless of what the bare-name group looks like.
     let stub = StubReader {
-        groups: vec!["dev".to_string()],
+        groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
-    assert_eq!(stderr, "tenant: group 'dev' already exists\n");
+    assert_eq!(stderr, "tenant: group 'dev-tenant-share' already exists\n");
 }
 
 #[test]
-fn create_rejects_when_user_and_group_exist() {
+fn create_rejects_when_user_and_tenant_share_group_exist() {
+    // The `Both` arm — user named `dev` AND the suffixed group `dev-tenant-share`
+    // both present. The message names both with the literal group name so
+    // the operator can find them with `dscl` directly.
     let stub = StubReader {
         users: vec!["dev".to_string()],
-        groups: vec!["dev".to_string()],
+        groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
-    assert_eq!(stderr, "tenant: user and group 'dev' already exist\n");
+    assert_eq!(
+        stderr,
+        "tenant: user 'dev' and group 'dev-tenant-share' already exist\n"
+    );
+}
+
+#[test]
+fn create_accepts_when_bare_name_group_exists_but_not_suffix() {
+    // Phase 3 only reserves `<name>-tenant-share` as conflict territory.
+    // A pre-existing bare-name group is no longer something tenant creates
+    // (sysadminctl is invoked with -GID pointing at the explicit
+    // tenant-share group's GID, not asking sysadminctl to mint a new group
+    // named after the user) so a bare `dev` group on the host is harmless.
+    // Pins the new contract's specificity — a future regression that
+    // swaps `has_group("<name>-tenant-share")` for `has_group(name)` (or
+    // checks both) would trip this test.
+    let stub = StubReader {
+        groups: vec!["dev".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    assert_eq!(stdout, "Would create tenant 'dev'.\n");
 }
 
 #[test]
@@ -293,44 +395,73 @@ fn create_succeeds_when_unrelated_user_exists() {
 
 #[test]
 fn create_real_mode_standard_emits_only_post_exec_confirmation() {
+    // Standard real mode is silent before exec; one confirmation line
+    // after. No UID/GID — that's reserved for verbose mode. Phase 3
+    // changed the exec count from 1 to 2 (dseditgroup-create first, then
+    // sysadminctl-addUser): the group must exist before sysadminctl so
+    // the new user's home directory chowns to `dev-tenant-share`, not
+    // `staff`. The two-argv order is load-bearing for that reason; this
+    // test pins it.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Standard real mode is silent before exec; one confirmation line after.
-    // No UID — that's reserved for verbose mode.
     assert_eq!(stdout, "Created tenant 'dev'.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     let calls = exec.calls();
-    assert_eq!(calls.len(), 1, "expected exactly one exec call");
-    let want_argv: Vec<String> = [
-        "sudo",
-        "sysadminctl",
-        "-addUser",
-        "dev",
-        "-fullName",
-        "Tenant: dev",
-        "-shell",
-        "/bin/zsh",
-        "-UID",
-        "600",
-        "-GID",
-        "600",
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect();
-    assert_eq!(calls[0], want_argv);
+    assert_eq!(calls.len(), 2, "expected dseditgroup + sysadminctl");
+    assert_eq!(
+        calls[0],
+        argv(&[
+            "sudo",
+            "dseditgroup",
+            "-o",
+            "create",
+            "-n",
+            ".",
+            "-i",
+            "600",
+            "dev-tenant-share",
+        ]),
+    );
+    assert_eq!(
+        calls[1],
+        argv(&[
+            "sudo",
+            "sysadminctl",
+            "-addUser",
+            "dev",
+            "-fullName",
+            "Tenant: dev",
+            "-shell",
+            "/bin/zsh",
+            "-UID",
+            "600",
+            "-GID",
+            "600",
+        ]),
+    );
 }
 
 #[test]
-fn create_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec_uid() {
+fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
+    // Real+verbose now shows the full 3-line plan upfront (including the
+    // `# on rollback` line that documents what fires if sysadminctl
+    // fails), then `$ ` echoes for each command that actually ran.
+    // Success-path echo is 2 lines, not 3 — the rollback only echoes if
+    // sysadminctl failed (covered in cycle 3). The post-exec
+    // confirmation now inlines both UID and GID since Phase 3 allocates
+    // them independently; either could be non-floor in real-world use.
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
         run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 0);
     let want = "Creating tenant 'dev'.\n  \
-                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
-                Created tenant 'dev' (UID 600).\n";
+                sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n\
+                $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
+                $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
+                Created tenant 'dev' (UID 600, GID 600).\n";
     assert_eq!(stdout, want);
 }
 
@@ -352,30 +483,177 @@ fn dry_run_bypasses_injected_executor() {
 }
 
 #[test]
-fn create_real_mode_propagates_exec_failure() {
+fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
+    // Phase 3 issues two exec calls: dseditgroup-create first, sysadminctl
+    // second. `StubExecutor::failing(78)` fails ALL calls, so the first
+    // call (dseditgroup-create) trips. The expected behavior is: stop
+    // immediately (no sysadminctl, no rollback — there's nothing to roll
+    // back because dseditgroup-create itself failed), exit EX_IOERR, and
+    // emit the new `create_group_failed` shape that names the group
+    // explicitly so the operator knows the user wasn't touched.
     let exec = StubExecutor::failing(78);
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Standard mode: no pre-exec output; failure goes to stderr only.
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
         stderr,
-        "tenant: failed to create 'dev': process exited with code 78\n"
+        "tenant: failed to create group 'dev-tenant-share' for 'dev': process exited with code 78\n"
     );
-    assert_eq!(exec.calls().len(), 1);
+    assert_eq!(exec.calls().len(), 1, "should abort after dseditgroup");
 }
 
 #[test]
-fn create_real_mode_failure_surfaces_executor_stderr() {
-    let exec =
-        StubExecutor::failing_with(78, "sysadminctl: -addUser failed: user already exists\n");
+fn create_sysadminctl_failure_rolls_back_dseditgroup() {
+    // The partial-failure case Phase 3 was designed for: dseditgroup-create
+    // succeeded, but sysadminctl-addUser failed. Without rollback the host
+    // would carry an orphan `<name>-tenant-share` group with no
+    // corresponding user. The writer must invoke
+    // `sudo dseditgroup -o delete -n . <name>-tenant-share` to converge
+    // back to the pre-create state, then surface the *original*
+    // sysadminctl failure as the error (the rollback succeeded so it's
+    // not separately reportable). Three exec calls in total.
+    let exec = StubExecutor::new().with_response_to_stderr(
+        &["sudo", "sysadminctl", "-addUser", "dev"],
+        78,
+        "sysadminctl: -addUser failed: existing record\n",
+    );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
-    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
         stderr,
         "tenant: failed to create 'dev': process exited with code 78: \
-         sysadminctl: -addUser failed: user already exists\n"
+         sysadminctl: -addUser failed: existing record\n"
+    );
+    let calls = exec.calls();
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected dseditgroup-create + sysadminctl + dseditgroup-delete (rollback)"
+    );
+    assert_eq!(
+        calls[0],
+        argv(&[
+            "sudo",
+            "dseditgroup",
+            "-o",
+            "create",
+            "-n",
+            ".",
+            "-i",
+            "600",
+            "dev-tenant-share",
+        ]),
+    );
+    assert_eq!(
+        calls[1][0..4],
+        argv(&["sudo", "sysadminctl", "-addUser", "dev"])[..]
+    );
+    assert_eq!(
+        calls[2],
+        argv(&[
+            "sudo",
+            "dseditgroup",
+            "-o",
+            "delete",
+            "-n",
+            ".",
+            "dev-tenant-share",
+        ]),
+    );
+}
+
+#[test]
+fn create_real_mode_verbose_shows_rollback_echo() {
+    // Verbose counterpart: the pre-exec plan still shows 3 lines including
+    // the `# on rollback` annotation (same plan as the success case — the
+    // plan is the algorithm, not the trace). The `$` echo block grows to
+    // 3 lines because the rollback actually fires. No post-exec
+    // confirmation — the create failed. Stderr carries the original
+    // sysadminctl error; the rollback's success is signaled implicitly
+    // by the absence of a rollback-failed line.
+    let exec = StubExecutor::new().with_response_to_stderr(
+        &["sudo", "sysadminctl", "-addUser", "dev"],
+        78,
+        "sysadminctl: -addUser failed: existing record\n",
+    );
+    let (code, stdout, stderr) =
+        run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    let want_stdout = "Creating tenant 'dev'.\n  \
+                       sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+                       sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
+                       sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n\
+                       $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
+                       $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
+                       $ sudo dseditgroup -o delete -n . dev-tenant-share\n";
+    assert_eq!(stdout, want_stdout);
+    assert_eq!(
+        stderr,
+        "tenant: failed to create 'dev': process exited with code 78: \
+         sysadminctl: -addUser failed: existing record\n"
+    );
+}
+
+#[test]
+fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
+    // Worst-case partial failure: dseditgroup-create succeeded (so the
+    // group exists), sysadminctl-addUser failed (so no user), and the
+    // rollback dseditgroup-delete also failed (so the group is now an
+    // orphan with no corresponding user). The operator gets two stderr
+    // lines: the original failure (matches the single-failure shape so
+    // log-grep regexes don't break), plus a second line naming the
+    // rollback failure and pointing the operator at the recovery path.
+    // The trailing `— host now has an orphan group; next 'tenant destroy
+    // dev' will converge` is the load-bearing piece: the operator
+    // shouldn't have to read the source to find out how to clean up.
+    let exec = StubExecutor::new()
+        .with_response_to_stderr(
+            &["sudo", "sysadminctl", "-addUser", "dev"],
+            78,
+            "sysadminctl: -addUser failed: existing record\n",
+        )
+        .with_response_to_stderr(
+            &[
+                "sudo",
+                "dseditgroup",
+                "-o",
+                "delete",
+                "-n",
+                ".",
+                "dev-tenant-share",
+            ],
+            1,
+            "dseditgroup: not authorized\n",
+        );
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    let want_stderr = "tenant: failed to create 'dev': process exited with code 78: \
+                       sysadminctl: -addUser failed: existing record\n\
+                       tenant: rollback of group 'dev-tenant-share' also failed: process exited with code 1: \
+                       dseditgroup: not authorized \
+                       \u{2014} host now has an orphan group; next 'tenant destroy dev' will converge\n";
+    assert_eq!(stderr, want_stderr);
+    assert_eq!(exec.calls().len(), 3);
+}
+
+#[test]
+fn create_real_mode_dseditgroup_failure_surfaces_executor_stderr() {
+    // Companion to the above — when dseditgroup-create has captured stderr,
+    // it flows through ExecError::Display unchanged. Pins the error-shape
+    // contract end-to-end.
+    let exec = StubExecutor::failing_with(
+        78,
+        "dseditgroup: cannot create group dev-tenant-share: not authorized\n",
+    );
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to create group 'dev-tenant-share' for 'dev': process exited with code 78: \
+         dseditgroup: cannot create group dev-tenant-share: not authorized\n"
     );
 }
 
@@ -401,12 +679,14 @@ fn destroy_dry_run_default_shows_intent() {
 
 #[test]
 fn destroy_dry_run_verbose_shows_mechanism() {
-    // Dry-run verbose lists the full pessimistic plan: sysadminctl -deleteUser
-    // (the canonical destroy), dscl -read (the post-exec residue probe), and
-    // sudo dscl -delete (the conditional belt-and-braces cleanup if the probe
-    // finds the DS record still present). The dscl-delete is shown
-    // unconditionally because the dry-run can't know what the probe would
-    // have found at runtime — the operator sees the algorithm.
+    // Dry-run verbose lists the full pessimistic plan. Phase 3 grows it
+    // to 4 lines by appending `sudo dseditgroup -o delete -n .
+    // <name>-tenant-share` — unlike the V1.8 sysadminctl-cascade that
+    // caught implicit `<name>` groups, the renamed tenant-share group
+    // doesn't inherit that cleanup, so the explicit dseditgroup-delete
+    // is load-bearing. Shown unconditionally because the dry-run can't
+    // know what the dscl-probe will return at runtime; the operator
+    // sees the full algorithm.
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["destroy", "dev", "--dry-run", "-v"],
@@ -415,7 +695,8 @@ fn destroy_dry_run_verbose_shows_mechanism() {
     let want = "Would destroy tenant 'dev'.\n  \
                 sudo sysadminctl -deleteUser dev\n  \
                 dscl . -read /Users/dev\n  \
-                sudo dscl . -delete /Users/dev\n";
+                sudo dscl . -delete /Users/dev\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share\n";
     assert_eq!(stdout, want);
 }
 
@@ -423,8 +704,10 @@ fn destroy_dry_run_verbose_shows_mechanism() {
 fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
     // StubExecutor::new() returns Ok by default → the dscl-read probe sees
     // the DS record as still present → the conditional dscl-delete runs.
-    // Three exec calls in standard mode; stdout is still the single
-    // confirmation line (mechanism is suppressed without -v).
+    // Phase 3 adds an unconditional fourth call (dseditgroup-delete on
+    // the tenant-share group). Four exec calls in standard mode; stdout
+    // is still the single confirmation line (mechanism is suppressed
+    // without -v).
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -433,8 +716,8 @@ fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
     let calls = exec.calls();
     assert_eq!(
         calls.len(),
-        3,
-        "expected sysadminctl + dscl-read + dscl-delete"
+        4,
+        "expected sysadminctl + dscl-read + dscl-delete + dseditgroup-delete"
     );
     assert_eq!(
         calls[0],
@@ -445,15 +728,29 @@ fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
         calls[2],
         argv(&["sudo", "dscl", ".", "-delete", "/Users/dev"])
     );
+    assert_eq!(
+        calls[3],
+        argv(&[
+            "sudo",
+            "dseditgroup",
+            "-o",
+            "delete",
+            "-n",
+            ".",
+            "dev-tenant-share",
+        ]),
+    );
 }
 
 #[test]
 fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
     // Real-mode verbose has two sections: (a) the "Destroying" pre-exec
-    // intent + the full pessimistic plan (same shape as dry-run verbose),
-    // then (b) per-exec echo lines prefixed with "$ " as each command
-    // actually runs. Default StubExecutor → probe says residue → all three
-    // commands echo. The trailing post-exec confirmation closes the block.
+    // intent + the 4-line pessimistic plan (same shape as dry-run
+    // verbose), then (b) per-exec echo lines prefixed with "$ " as each
+    // command actually runs. Default StubExecutor → probe says residue
+    // → all four commands echo (dseditgroup-delete is the load-bearing
+    // 4th step Phase 3 adds). The trailing post-exec confirmation closes
+    // the block.
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
@@ -461,10 +758,12 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
     let want = "Destroying tenant 'dev'.\n  \
                 sudo sysadminctl -deleteUser dev\n  \
                 dscl . -read /Users/dev\n  \
-                sudo dscl . -delete /Users/dev\n\
+                sudo dscl . -delete /Users/dev\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share\n\
                 $ sudo sysadminctl -deleteUser dev\n\
                 $ dscl . -read /Users/dev\n\
                 $ sudo dscl . -delete /Users/dev\n\
+                $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
                 Destroyed tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }
@@ -473,23 +772,77 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
 fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
     // The dscl-read probe returns NonZero when the DS record is absent
     // (typically eDSRecordNotFound, code 56). The destroy writer must
-    // treat probe-NonZero as "no cleanup needed" and stop after the
-    // probe — only two exec calls, no third sudo-dscl-delete. The
-    // stdout (standard mode) is the same single confirmation as the
-    // residue path; the operator can't tell from non-verbose output
-    // whether the cleanup ran. Verbose output's `$ sudo dscl . -delete`
-    // line is the operator's signal — covered separately below.
+    // treat probe-NonZero as "no cleanup needed" and skip the
+    // sudo-dscl-delete — but the unconditional Phase-3 dseditgroup-delete
+    // still runs after, because the tenant-share group is independent
+    // of the user record. So this path has exactly three exec calls:
+    // sysadminctl + dscl-read + dseditgroup-delete (no dscl-delete).
+    // The plan-vs-echo asymmetry around dscl-delete remains the
+    // operator's signal that the dscl path was clean.
     let exec = StubExecutor::new().with_response_to(&["dscl", ".", "-read", "/Users/dev"], 56);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
     let calls = exec.calls();
-    assert_eq!(calls.len(), 2, "expected sysadminctl + dscl-read only");
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected sysadminctl + dscl-read + dseditgroup-delete (dscl-delete skipped)"
+    );
     assert_eq!(
         calls[0],
         argv(&["sudo", "sysadminctl", "-deleteUser", "dev"])
     );
     assert_eq!(calls[1], argv(&["dscl", ".", "-read", "/Users/dev"]));
+    assert_eq!(
+        calls[2],
+        argv(&[
+            "sudo",
+            "dseditgroup",
+            "-o",
+            "delete",
+            "-n",
+            ".",
+            "dev-tenant-share",
+        ]),
+    );
+}
+
+#[test]
+fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
+    // Phase 3's load-bearing 4th step: if dseditgroup-delete fails after
+    // sysadminctl-deleteUser succeeded and the dscl-cleanup ran (or was
+    // skipped as a noop), the host now carries an orphan tenant-share
+    // group. The writer must surface this as EX_IOERR so the operator
+    // knows to retry — and cycle 5's OrphanGroup eligibility arm
+    // converges on retry. The error message reuses the existing
+    // `destroy_failed` shape; the captured dseditgroup stderr inside
+    // ExecError carries enough detail (the dseditgroup tool prints its
+    // own argv-aware context) for the operator to diagnose.
+    let exec = StubExecutor::new().with_response_to_stderr(
+        &[
+            "sudo",
+            "dseditgroup",
+            "-o",
+            "delete",
+            "-n",
+            ".",
+            "dev-tenant-share",
+        ],
+        78,
+        "dseditgroup: cannot remove group dev-tenant-share: not authorized\n",
+    );
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to destroy 'dev': process exited with code 78: \
+         dseditgroup: cannot remove group dev-tenant-share: not authorized\n"
+    );
+    // All four steps attempted — the failure is on the dseditgroup-delete,
+    // not before.
+    assert_eq!(exec.calls().len(), 4);
 }
 
 #[test]
@@ -519,12 +872,12 @@ fn destroy_real_mode_dscl_cleanup_failure_surfaces_as_destroy_failure() {
 
 #[test]
 fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
-    // Verbose-mode counterpart: the upfront plan still lists all three
+    // Verbose-mode counterpart: the upfront plan still lists all four
     // commands (the operator sees the algorithm), but the per-exec `$`
-    // echo block stops after the probe — the dscl-delete echo is absent
-    // because the cleanup didn't run. The asymmetry between plan and
-    // echo is the load-bearing observable that tells the operator the
-    // probe cleared the DS state.
+    // echo block skips the dscl-delete because the probe cleared the DS
+    // state. The dseditgroup-delete echo still appears — that step is
+    // unconditional. The asymmetry between plan and echo around
+    // dscl-delete is the operator's signal that the dscl path was clean.
     let exec = StubExecutor::new().with_response_to(&["dscl", ".", "-read", "/Users/dev"], 56);
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
@@ -532,9 +885,11 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
     let want = "Destroying tenant 'dev'.\n  \
                 sudo sysadminctl -deleteUser dev\n  \
                 dscl . -read /Users/dev\n  \
-                sudo dscl . -delete /Users/dev\n\
+                sudo dscl . -delete /Users/dev\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share\n\
                 $ sudo sysadminctl -deleteUser dev\n\
                 $ dscl . -read /Users/dev\n\
+                $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
                 Destroyed tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }
@@ -645,12 +1000,13 @@ fn destroy_accepts_at_floor() {
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "edge"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'edge'.\n");
-    // Three calls: sysadminctl-deleteUser + dscl-read probe + (probe defaults
-    // to Ok with a vanilla StubExecutor) sudo-dscl-delete cleanup.
+    // Four calls: sysadminctl-deleteUser + dscl-read probe + (probe
+    // defaults to Ok with a vanilla StubExecutor) sudo-dscl-delete cleanup
+    // + Phase-3's unconditional dseditgroup-delete.
     assert_eq!(
         exec.calls().len(),
-        3,
-        "sysadminctl + dscl-read + dscl-delete"
+        4,
+        "sysadminctl + dscl-read + dscl-delete + dseditgroup-delete"
     );
 }
 
@@ -796,6 +1152,132 @@ fn destroy_dry_run_bypasses_injected_executor() {
         "executor should not be invoked in dry-run mode; got calls: {:?}",
         exec.calls()
     );
+}
+
+#[test]
+fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_present() {
+    // The cycle-5 convergence path: the user was destroyed earlier (or
+    // a previous destroy failed at the dseditgroup-delete step), leaving
+    // a `<name>-tenant-share` group with no corresponding user. The
+    // destroy verb classifies this as `OrphanGroup` and converges by
+    // running just the dseditgroup-delete. Exactly ONE exec call — no
+    // sysadminctl, no dscl — and exit 0. Standard-mode stdout names the
+    // tenant (not the group) so it stays parallel with the rest of the
+    // destroy UX from the operator's perspective.
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Destroyed orphan group for tenant 'dev'.\n");
+    assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
+    let calls = exec.calls();
+    assert_eq!(calls.len(), 1, "expected dseditgroup-delete only");
+    assert_eq!(
+        calls[0],
+        argv(&[
+            "sudo",
+            "dseditgroup",
+            "-o",
+            "delete",
+            "-n",
+            ".",
+            "dev-tenant-share",
+        ]),
+    );
+}
+
+#[test]
+fn destroy_dry_run_for_orphan_group() {
+    // Dry-run twin: same convergence framing, "Would" tense. No exec
+    // calls (dry-run bypasses the executor — NeverExecutor would panic).
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "dev", "--dry-run"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Would destroy orphan group for tenant 'dev'.\n");
+}
+
+#[test]
+fn destroy_dry_run_verbose_for_orphan_group() {
+    // Verbose dry-run names the group explicitly (the suffixed group is
+    // the literal resource being touched) AND shows the mechanism.
+    // Standard-mode framing is tenant-named; verbose adds the group
+    // name for grep-friendliness, matching the mechanism-exposure
+    // convention used elsewhere in the codebase.
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, _stderr) = run_with(stub, &["destroy", "dev", "--dry-run", "-v"]);
+    assert_eq!(code, 0);
+    let want = "Would destroy orphan group 'dev-tenant-share' for tenant 'dev'.\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn destroy_real_mode_verbose_for_orphan_group() {
+    // Real-mode verbose: same three-section shape as the regular destroy
+    // (pre-exec intent + plan, `$` echo for each command, post-exec
+    // confirmation), just with one argv in each block instead of four.
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubExecutor::new();
+    let (code, stdout, _stderr) = run_with_exec(stub, &exec, &["destroy", "dev", "-v"]);
+    assert_eq!(code, 0);
+    let want = "Destroying orphan group 'dev-tenant-share' for tenant 'dev'.\n  \
+                sudo dseditgroup -o delete -n . dev-tenant-share\n\
+                $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
+                Destroyed orphan group 'dev-tenant-share' for tenant 'dev'.\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn destroy_noop_when_neither_user_nor_tenant_share_group_present() {
+    // Specificity pin: a bare-name group (left over from pre-Phase-3
+    // creation, or unrelated host state) does NOT classify as
+    // OrphanGroup — only the suffixed `<name>-tenant-share` does. Empty
+    // users + bare `dev` group → `NotPresent` noop, exit 0, no exec.
+    // A regression that loosened the OrphanGroup check to bare-name
+    // matching (e.g. dropping the `tenant_share_group_name` call) would
+    // trip this test.
+    let stub = StubReader {
+        groups: vec!["dev".to_string()],
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "tenant 'dev' does not exist; nothing to do.\n");
+}
+
+#[test]
+fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
+    // Convergence-path failure mode: even on the simplified orphan-group
+    // path, dseditgroup-delete can still fail (auth, network OD,
+    // whatever). Surface as EX_IOERR via the same `destroy_failed` shape
+    // as the regular destroy — the operator's remediation is the same
+    // (retry; if the issue persists, manual dscl inspection).
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubExecutor::failing_with(78, "dseditgroup: not authorized\n");
+    let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to destroy 'dev': process exited with code 78: \
+         dseditgroup: not authorized\n"
+    );
+    assert_eq!(exec.calls().len(), 1);
 }
 
 #[cfg(target_os = "macos")]

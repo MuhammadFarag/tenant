@@ -54,16 +54,25 @@ impl<'a> Reporter<'a> {
     }
 
     fn emit_to(target: &mut dyn Write, msg: &Message, verbose: bool, dry_run: bool) {
-        // Summary selection precedence:
-        //   dry-run mode  → dry_run_summary, falling back to summary
-        //   real+verbose  → summary_verbose, falling back to summary
-        //   real+standard → summary
-        let summary = if dry_run {
-            msg.dry_run_summary.as_ref().or(msg.summary.as_ref())
-        } else if verbose {
-            msg.summary_verbose.as_ref().or(msg.summary.as_ref())
-        } else {
-            msg.summary.as_ref()
+        // Two-axis summary selection — mode (real vs dry-run) and
+        // verbosity. `summary_verbose` is the verbose override regardless
+        // of mode (the operator's `-v` intent applies whether or not
+        // they're in dry-run); `dry_run_summary` is the mode-specific
+        // override when no verbose override exists. `summary` is the
+        // default and the ultimate fallback. In dry-run+verbose, the
+        // verbose override wins over the dry-run override — phase 3's
+        // orphan-group factories rely on this so that
+        // `tenant destroy <name> --dry-run -v` names the suffixed group,
+        // parallel to the real+verbose framing.
+        let summary = match (dry_run, verbose) {
+            (true, true) => msg
+                .summary_verbose
+                .as_ref()
+                .or(msg.dry_run_summary.as_ref())
+                .or(msg.summary.as_ref()),
+            (true, false) => msg.dry_run_summary.as_ref().or(msg.summary.as_ref()),
+            (false, true) => msg.summary_verbose.as_ref().or(msg.summary.as_ref()),
+            (false, false) => msg.summary.as_ref(),
         };
         if let Some(s) = summary {
             let _ = writeln!(target, "{s}");

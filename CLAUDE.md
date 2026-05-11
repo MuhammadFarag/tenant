@@ -1,11 +1,13 @@
 # tenant — Rust port of the macOS tenant-account CLI
 
-A small CLI for provisioning macOS user accounts (and matching primary
-groups) in a project-reserved UID range (≥600). `tenant create <name>`
-inspects host account state, validates input, picks the next free UID,
-and either renders the planned `sudo sysadminctl …` invocation
-(`--dry-run`) or executes it (real mode). `tenant destroy <name>` is
-the symmetric teardown verb (sysadminctl `-deleteUser`).
+A small CLI for provisioning macOS user accounts and matching primary
+groups (named `<name>-tenant-share`) in a project-reserved UID/GID range
+(≥600). `tenant create <name>` inspects host account state, validates
+input, picks the next free UID and GID independently, and either renders
+the planned `sudo dseditgroup …` + `sudo sysadminctl …` invocations
+(`--dry-run`) or executes them (real mode). `tenant destroy <name>` is
+the symmetric teardown verb that runs sysadminctl `-deleteUser`, a dscl
+residue probe + conditional cleanup, and a final `dseditgroup -o delete`.
 
 This crate is a Rust port of an earlier Go prototype (lives at
 `/Users/plugin-dev/src/tenant/` for cross-reference). The Rust version
@@ -17,14 +19,16 @@ two languages' conventions diverge.
 
 Done:
 - Project init, justfile + pre-commit gates (`fmt --check` + `clippy -D warnings`)
-- `tenant create <name>` works in both dry-run and real mode (V1.5–V1.7)
+- `tenant create <name>` works in both dry-run and real mode (V1.5–V1.7;
+  Phase-3 expanded to two-argv group-first ordering — see Phase 3 entry)
 - `tenant destroy <name>` works in both modes; convergent-noop on missing
   user (exit 0), refuses with `EX_USAGE 64` when the named account exists
   with a UID outside the tenant range — either a positive UID below
   `TENANT_UID_FLOOR` (system / human account, message names the floor) or
   no positive UID at all (system account like `nobody`, distinct message).
-  Charset guard via `validate_name` reuse. No group cleanup yet — paired
-  with explicit group lifecycle in the next vertical slice (see Open).
+  Charset guard via `validate_name` reuse. Phase 3 added a 4th unconditional
+  `dseditgroup -o delete` step and the `OrphanGroup` eligibility variant
+  for convergent recovery from prior partial failures (see Phase 3 entry).
 - Reserved-name blocklist (V1.8.2): `validate_name` refuses
   `{root, admin, staff, wheel, daemon, nobody, sudo}` with
   `NameError::Reserved` → `EX_USAGE`. Set copied verbatim from the
@@ -48,12 +52,17 @@ Done:
   finds DS clean — that asymmetry is the operator-visible signal that
   the cleanup was unnecessary).
 - `accounts::Reader` trait + `StubReader` (test) + `MacosReader` (dscl).
-  Reader exposes `used_uids`, `has_user`, `has_group`, and `uid_for(name)`
-  (added with destroy). `MacosReader` keeps `users` and `uid_by_name` as
+  Reader exposes `used_uids`, `used_gids` (added Phase 3), `has_user`,
+  `has_group`, and `uid_for(name)` (added with destroy). `MacosReader`
+  keeps `users` and `uid_by_name` (and `groups` and `gid_by_name`) as
   separate fields so service accounts with negative UIDs (`nobody`) still
-  trip `has_user` even though they're filtered from the UID map.
-- `accounts::Writer` trait + `MacosWriter` (sysadminctl-backed via Executor);
-  `create_tenant` and `destroy_tenant` both follow the three-message bracket.
+  trip `has_user` even though they're filtered from the ID maps. The
+  GID-side parse uses `dscl . -list /Groups PrimaryGroupID` with the
+  shared `parse_id_line` helper.
+- `accounts::Writer` trait + `MacosWriter` (sysadminctl + dseditgroup,
+  via Executor); `create_tenant` takes `(name, uid, gid, reporter)` and
+  follows the bracketed Reporter discipline; `destroy_tenant` does too;
+  `destroy_orphan_group` is the convergence-path verb added in Phase 3.
 - `accounts::validate_name` (lexical: `[a-z][a-z0-9_-]{0,30}`, plus
   reserved-name blocklist `{root, admin, staff, wheel, daemon, nobody, sudo}`
   copied verbatim from the sandbox plugin's `naming.py`; `EX_USAGE` on fail).
@@ -61,14 +70,19 @@ Done:
   trips the more-specific `InvalidStart` feedback.
 - `accounts::check_conflict` (state-based via Reader, `EX_USAGE` on fail)
 - `accounts::destroy_eligibility` returns `Eligibility::{Destroyable,
-  NotPresent, NotATenant { uid }, SystemAccount}`. `has_user` is the
-  presence gate; `uid_for` carries the floor classification. The
+  NotPresent, OrphanGroup, NotATenant { uid }, SystemAccount}`. `has_user`
+  is the presence gate; `uid_for` carries the floor classification. The
   `SystemAccount` variant covers accounts present in the user listing
   with no positive UID (e.g. `nobody` at UID -2), filtered out of
-  `uid_by_name` by `parse_uid_line` — without this variant the bug
+  `uid_by_name` by `parse_id_line` — without this variant the bug
   surface is `tenant destroy nobody` emitting a misleading "does not
-  exist" noop instead of refusing.
-- `allocation::UidAllocator::lowest_free_uid` (iterate from `TENANT_UID_FLOOR = 600`)
+  exist" noop instead of refusing. The `OrphanGroup` variant (added in
+  Phase 3) handles the convergent-recovery case where the tenant user
+  is absent but `<name>-tenant-share` is still present.
+- `allocation::UidAllocator::lowest_free_uid` and
+  `allocation::GidAllocator::lowest_free_gid` (both iterate from
+  `TENANT_UID_FLOOR = 600`; independent — Phase 3 explicitly does NOT
+  force UID == GID)
 - `executor::Executor` trait + `SystemExecutor` (real, captures stderr) +
   `DryRunExecutor` (Ok-noop, swapped in at composition root when `--dry-run`) +
   `StubExecutor` (records calls; `failing` / `failing_with` for global
@@ -95,40 +109,47 @@ Done:
   (verbose-only via `summary_verbose`). Operator's view: one upfront plan
   block + one execution-echo block; conditional commands appear in the
   plan but only show in the echo if they actually ran.
+- Explicit group lifecycle (Phase 3): the primary group is named
+  `<name>-tenant-share` (centralized via `accounts::tenant_share_group_name`),
+  managed explicitly with `dseditgroup`. Create issues two argvs in
+  group-first order — `sudo dseditgroup -o create -n . -i <gid>
+  <name>-tenant-share` then `sudo sysadminctl -addUser <name> … -GID
+  <gid>` — so the user's home directory chowns to the tenant-share
+  group at creation time, not staff. Destroy appends an unconditional
+  4th step (`sudo dseditgroup -o delete -n . <name>-tenant-share`); the
+  pre-Phase-3 sysadminctl-cascade only caught implicit `<name>` groups
+  and doesn't apply to the renamed group. UID and GID allocators are
+  separate (`UidAllocator` reads `used_uids`, `GidAllocator` reads
+  `used_gids`); they may legitimately produce different numbers
+  (e.g. UID 601, GID 600). Conflict check refuses
+  `<name>-tenant-share`-group existence (not bare `<name>`); a
+  pre-existing bare-name group is now harmless. No
+  dseditgroup-add-member step — the user's primary-group binding gives
+  implicit member access on macOS.
+
+  Partial-failure rollback: if dseditgroup-create succeeds but
+  sysadminctl-addUser fails, the writer rolls back via
+  `dseditgroup -o delete`. The granular `CreateError::{Group, User,
+  UserWithRollback}` enum drives error rendering — the dispatcher
+  picks `create_group_failed` for the dseditgroup case and
+  `create_failed` for the sysadminctl case, with a second
+  `rollback_failed` emission for the worst case (both fail). That
+  second emission carries an em-dash-suffixed recovery hint pointing
+  the operator at `tenant destroy <name>` — which converges via the
+  Phase-3 `Eligibility::OrphanGroup` arm.
+
+  Sandbox-plugin prior art: this is a clean-room port of just the
+  phase-1 user+group machinery from
+  `claude-plugins/sandbox/scripts/lib/phases/phase01_user.py` (argv
+  shapes and tooling choices) and `phase_destroy.py` (cleanup ordering).
+  The group-name suffix and dseditgroup convention come from there.
 - E2E test suite in `tests/cli.rs` (reverse pyramid — no inline unit tests),
-  49 cases via `run_with` / `run_with_exec` helpers + the
+  62 cases via `run_with` / `run_with_exec` helpers + the
   `stub_with_tenant` / `stub_with_used_uids` setup helpers + the `argv`
   helper for multi-line argv assertions
 - macOS-gated smoke test exercises real dscl
 
-Open / likely next (phases of the explicit-group-lifecycle vertical slice):
-- **Phase 3: explicit group lifecycle.** Decision frame from earlier
-  design pass: group-first ordering on create (group exists before
-  sysadminctl runs, so the home directory's group ownership lands on the
-  tenant group, not staff), `dseditgroup` (not bare `dscl . -create`) for
-  the create call, `<name>-tenant-share` as the group name. Destroy mirror:
-  sysadminctl-deleteUser → dscl-read probe + conditional dscl-delete
-  (already shipped in V1.8) → `dseditgroup -o delete` for the group.
-  Allocator needs to inspect both UID and GID space (new
-  `Reader::used_gids()` method, MacosReader parses
-  `dscl . -list /Groups PrimaryGroupID`). No explicit
-  dseditgroup-add-member step — the user's primary-group binding
-  provides implicit member access on macOS.
-
-  Sysadminctl-cascade discovery (empirically verified post-V1.8 on
-  Darwin 25.4): `sudo sysadminctl -deleteUser <name>` *does* cascade to
-  the implicit primary group it created during `-addUser` (the group it
-  knows about because the group name matched the user name). So today's
-  destroy path leaves no orphan-group residue on the host. **Phase 3
-  changes this picture**: once the primary group is renamed to
-  `<name>-tenant-share`, the cascade no longer applies (sysadminctl
-  looks for a group named after the user), so explicit
-  `dseditgroup -o delete <name>-tenant-share` on destroy becomes load-
-  bearing — without it Phase 3 *introduces* the orphan-group problem
-  that V1.8 doesn't currently have. Implication: no
-  `Eligibility::OrphanGroup` variant needed (no pre-existing residue to
-  converge over), and no manual host cleanup needed before Phase 3
-  lands.
+Open / likely next:
 - **`status <name>`** — read-only verb; exercises the Reader without
   needing the Writer or Executor. Will likely surface `--strict` (exit
   code on drift) and `--json` (format) as orthogonal axes.
@@ -183,26 +204,56 @@ src/lib.rs        — public API: pub fn run; declares modules; Cli + Verb + par
                     composition-root mode swap (DryRunExecutor when cli.dry_run)
 src/commands.rs   — dispatch (the match on Verb) — no I/O, no cli.dry_run check;
                     emits via reporter.emit_err (failures, refusals) and
-                    reporter.emit (convergent-noop success)
+                    reporter.emit (convergent-noop success). Create-side
+                    matches CreateError::{Group, User, UserWithRollback};
+                    destroy-side matches the 5-variant Eligibility.
 src/accounts.rs   — Reader + Writer traits; StubReader / MacosReader (dscl);
                     MacosWriter (argv build + Reporter emit + Executor delegation);
                     validate_name, check_conflict, destroy_eligibility.
-                    `destroy_tenant` issues 3 argvs: build_destroy_sysadminctl_argv,
-                    build_dscl_read_user_argv (probe), build_dscl_delete_user_argv
-                    (conditional cleanup)
-src/allocation.rs — UidAllocator + TENANT_UID_FLOOR
+                    `tenant_share_group_name(name)` is the single source of
+                    truth for the `<name>-tenant-share` suffix. `create_tenant`
+                    issues 2 argvs (build_dseditgroup_create_argv,
+                    build_create_argv) plus the rollback argv on
+                    sysadminctl failure (build_dseditgroup_delete_argv);
+                    returns `CreateError`. `destroy_tenant` issues 4 argvs:
+                    build_destroy_sysadminctl_argv, build_dscl_read_user_argv
+                    (probe), build_dscl_delete_user_argv (conditional
+                    cleanup), build_dseditgroup_delete_argv (Phase-3
+                    unconditional group cleanup). `destroy_orphan_group`
+                    issues just the dseditgroup-delete (convergence path).
+                    `parse_id_line` is the shared parser for both UID and
+                    GID dscl listings (negative-ID filter + lowest-wins fold).
+src/allocation.rs — UidAllocator + GidAllocator (both iterate from
+                    TENANT_UID_FLOOR = 600; consult disjoint Reader maps,
+                    independent values)
 src/executor.rs   — Executor trait; SystemExecutor / DryRunExecutor / StubExecutor;
                     ExecError { Spawn, NonZero { code, stderr } }; StubExecutor
                     has `with_response_to(prefix, code)` for per-call overrides
 src/messages.rs   — Message struct (summary / summary_verbose / dry_run_summary /
-                    detail) + per-action factories. Create trio takes a single
-                    argv; destroy trio (would_destroy_tenant / destroying_tenant)
-                    takes `argvs: &[&[String]]` and renders multi-line plans via
-                    `render_plan`. `running_argv` is the per-exec echo factory.
-                    Plus destroy_absent, not_a_tenant, system_account_refusal
+                    detail) + per-action factories. Create trio
+                    (would_create_tenant / creating_tenant) takes group_argv,
+                    user_argv, rollback_argv and renders a 3-line plan via
+                    `render_create_plan` (3rd line annotated `# on rollback`);
+                    `created_tenant(name, uid, gid)` inlines both IDs in
+                    verbose. Destroy trio (would_destroy_tenant /
+                    destroying_tenant) takes `argvs: &[&[String]]` and
+                    renders multi-line plans via `render_plan`. Orphan-group
+                    trio (would_destroy_orphan_group / destroying_orphan_group /
+                    destroyed_orphan_group) takes a single argv;
+                    standard-mode framing names the tenant, verbose adds
+                    the literal group name. `running_argv` is the per-exec
+                    echo factory. `create_group_failed` (dseditgroup-create
+                    failure), `create_failed` (sysadminctl failure),
+                    `rollback_failed` (em-dash-suffixed recovery hint),
+                    `destroy_failed`, plus destroy_absent, not_a_tenant,
+                    system_account_refusal, invalid_name, name_conflict.
 src/reporter.rs   — Reporter holds (stdout, stderr, verbose, dry_run); methods
                     emit_err / emit (always-on-stdout) / emit_real_only /
-                    emit_dry_only with mode-aware summary selection
+                    emit_dry_only with mode-aware summary selection.
+                    `summary_verbose` applies in both real+verbose AND
+                    dry-run+verbose (verbose-intent honors the operator's
+                    `-v` regardless of mode); `dry_run_summary` is the
+                    dry-run-specific override when no verbose override exists.
 src/main.rs       — composition root: MacosReader::new() + SystemExecutor; tenant::run
 
 tests/cli.rs      — every test here; helpers run_with (default NeverExecutor —
@@ -218,21 +269,29 @@ Things that are easy to violate and would matter:
   (intent) and an optional "detail" (mechanism — the `sudo sysadminctl …`
   argv, verbose only). Reporter picks the right summary for the current
   mode/verbosity from up to four Message fields: `summary` (default),
-  `summary_verbose` (real+verbose override; e.g. inlining UID), and
-  `dry_run_summary` (dry-run override; "Would create…" vs "Creating…").
-  Action factories live in `messages.rs`. The V1.7 pattern for a
-  side-effecting verb is three bracketing messages: `would_<action>` for
-  dry-only pre-exec, `<action>ing` (gerund) for real-verbose-only pre-exec
-  intent + mechanism, `<action>ed` (past participle) for real-only post-exec
-  confirmation. Each is emitted via the matching Reporter method
-  (`emit_dry_only` / `emit_real_only`). For verbs that issue more than one
-  shell-out (V1.8 destroy is the first), the `would_<action>` /
-  `<action>ing` factories take `argvs: &[&[String]]` and render the full
-  pessimistic plan as multi-line detail; `running_argv` Messages then emit
-  `$ <argv>` echo lines per Executor call inside the Writer. Conditional
-  argvs appear in the upfront plan but only echo if they actually run —
-  the plan-vs-echo asymmetry is the operator-visible signal that a
-  conditional step was skipped.
+  `summary_verbose` (verbose override — applies in BOTH real+verbose AND
+  dry-run+verbose; e.g. inlining UID+GID or naming the suffixed group),
+  and `dry_run_summary` (dry-run-specific override when no verbose
+  override exists; "Would create…" vs "Creating…"). Verbose intent
+  wins over mode-specific framing — the operator's `-v` request applies
+  regardless of `--dry-run`. Action factories live in `messages.rs`.
+  The V1.7 pattern for a side-effecting verb is three bracketing
+  messages: `would_<action>` for dry-only pre-exec, `<action>ing`
+  (gerund) for real-verbose-only pre-exec intent + mechanism,
+  `<action>ed` (past participle) for real-only post-exec confirmation.
+  Each is emitted via the matching Reporter method (`emit_dry_only` /
+  `emit_real_only`). For verbs that issue more than one shell-out (V1.8
+  destroy was the first; Phase-3 create is the second), the
+  `would_<action>` / `<action>ing` factories take an argv tuple or
+  `argvs: &[&[String]]` and render the full pessimistic plan as
+  multi-line detail; `running_argv` Messages then emit `$ <argv>` echo
+  lines per Executor call inside the Writer. Conditional argvs appear in
+  the upfront plan but only echo if they actually run — the plan-vs-echo
+  asymmetry is the operator-visible signal that a conditional step was
+  skipped. Phase-3's create plan adds a special case: the 3rd line is
+  annotated `  # on rollback` to flag it as conditional in the plan
+  (rolls back only on sysadminctl failure); the rollback also appears in
+  the echo block when it actually fires (e.g. on partial-failure paths).
 - **Probe via Executor, not Reader live re-read** — when a verb needs to
   re-check OS state mid-execution (V1.8 destroy's dscl-read residue probe
   is the canonical case), the probe is a regular Executor call whose
@@ -256,7 +315,42 @@ Things that are easy to violate and would matter:
 - **Convergent semantics for teardown verbs** — `destroy <name>` against
   an absent tenant is a successful noop, not an error. The state-based
   precheck (`destroy_eligibility`) returns `NotPresent` and dispatch emits
-  the noop message + exit 0. The same applies to future teardown verbs.
+  the noop message + exit 0. When the user is absent but a stale
+  `<name>-tenant-share` group remains (e.g. a prior destroy that failed
+  at the dseditgroup-delete step), `destroy_eligibility` returns
+  `OrphanGroup` and dispatch calls `Writer::destroy_orphan_group` to
+  converge — the operator's mental model of destroy ("after this, the
+  host has no trace of <name>") is preserved across partial-failure
+  recovery. Same convergent contract applies to future teardown verbs.
+- **`<name>-tenant-share` is the canonical group name** —
+  `accounts::tenant_share_group_name(name)` is the single source of
+  truth for the suffix. `check_conflict`, `MacosWriter::create_tenant`,
+  `MacosWriter::destroy_tenant`, `MacosWriter::destroy_orphan_group`,
+  `destroy_eligibility::OrphanGroup`, and the user-facing
+  `name_conflict` / `create_group_failed` / `rollback_failed` /
+  orphan-group factories all derive the literal string from this
+  function. Tests pin the literal `dev-tenant-share` text to catch any
+  drift. Don't inline `format!("{name}-tenant-share")` at call sites —
+  the centralization lets a future suffix change happen with one edit.
+- **Decoupled UID/GID allocation** — `UidAllocator` reads `used_uids`,
+  `GidAllocator` reads `used_gids`; the two spaces are disjoint and may
+  legitimately diverge (e.g., UID 613, GID 600 on a host with prior
+  tenants). Don't fuse them. The dseditgroup `-i <gid>` argument
+  consumes the GID allocator's output; the sysadminctl `-UID <uid>
+  -GID <gid>` argument consumes both. The `verbose_uid_and_gid_allocators_cross_over`
+  test pins the divergence with a crossover stub — strongest defense
+  against a regression that wires `-i` to `lowest_free_uid`.
+- **Create partial-failure rollback** — `MacosWriter::create_tenant`
+  returns `CreateError::{Group(e), User(e), UserWithRollback{user,
+  rollback}}`. The dispatcher renders distinct messages per variant —
+  `create_group_failed` for `Group` (no user touched), `create_failed`
+  for `User` (rollback succeeded), and TWO emit_err calls for
+  `UserWithRollback` (the original failure first, then `rollback_failed`
+  with the em-dash-suffixed `— host now has an orphan group; next
+  'tenant destroy <name>' will converge`). The recovery story is
+  load-bearing UX: the operator doesn't need to read source to know
+  what to do next. `OrphanGroup` eligibility (cycle 5) is the
+  corresponding convergence path.
 - **Tenant-floor guard on destroy** — `destroy_eligibility` refuses with
   `EX_USAGE 64` when the named account exists with a UID below
   `TENANT_UID_FLOOR` (`NotATenant`) or with no positive UID at all
@@ -282,12 +376,15 @@ Things that are easy to violate and would matter:
   from the active Executor (DryRunExecutor swapped in when `cli.dry_run`),
   so the test seam stays at the Executor boundary while the Writer is an
   internal implementation detail.
-- **Exit codes** — `0` success (including destroy's convergent noop on an
-  already-absent tenant); `64` (`EX_USAGE`, sysexits.h) for any user-input
-  failure — validation, create-side conflict, destroy-side floor refusal
-  (`NotATenant`), destroy-side system-account refusal (`SystemAccount`);
-  `74` (`EX_IOERR`) reserved for dscl / process-execution failure; `1` is
-  clap's default for parse errors (we don't override).
+- **Exit codes** — `0` success (including destroy's convergent noop on
+  an already-absent tenant AND the orphan-group convergence path); `64`
+  (`EX_USAGE`, sysexits.h) for any user-input failure — validation,
+  create-side conflict, destroy-side floor refusal (`NotATenant`),
+  destroy-side system-account refusal (`SystemAccount`); `74`
+  (`EX_IOERR`) reserved for dscl / dseditgroup / sysadminctl / process-
+  execution failure (create-side dseditgroup-create, sysadminctl-addUser,
+  and rollback-failure paths all map here; destroy-side any of the
+  four steps); `1` is clap's default for parse errors (we don't override).
 - **Acronym casing** — Rust convention treats acronyms as words: `Uid`
   not `UID`, `Macos` not `MacOS`. Methods are `lowest_free_uid`, struct
   is `UidAllocator`, `MacosReader`.
@@ -341,14 +438,15 @@ From the project's design consensus:
 | `exec <name>` | convergent recovery + one command | open |
 | `mode <name>` | session-scoped PF posture (strict / permissive) | open |
 | `doctor` | host-level diagnostic + repair | open |
-| `destroy <name>` | teardown | ✓ (group cleanup deferred — see Roadmap) |
+| `destroy <name>` | teardown | ✓ |
 
 Convention notes:
 - `--strict` and `--json` are orthogonal axes on `status` (exit-code
   contract vs format).
 - `--yes` is the universal confirmation-bypass on prompt-bearing verbs.
 - `-v / --verbose` is the global mechanism-exposure flag (sudo invocations,
-  UIDs) — already implemented as `global = true` on the `Cli`.
+  UIDs, GIDs, suffixed group names) — already implemented as `global = true`
+  on the `Cli`. Verbose applies in dry-run too (Reporter precedence).
 
 ## Cross-references
 

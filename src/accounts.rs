@@ -9,6 +9,10 @@ use crate::reporter::Reporter;
 
 pub trait Reader {
     fn used_uids(&self) -> Vec<u32>;
+    /// Mirror of `used_uids` for the GID space. Phase 3 allocates UID and
+    /// GID independently — they may converge at the floor in fresh hosts
+    /// but diverge as tenants come and go. Feeds `GidAllocator`.
+    fn used_gids(&self) -> Vec<u32>;
     fn has_user(&self, name: &str) -> bool;
     fn has_group(&self, name: &str) -> bool;
     /// Returns the positive UID for `name`, or `None` if either (a) the
@@ -24,6 +28,7 @@ pub trait Reader {
 #[derive(Default)]
 pub struct StubReader {
     pub uid_by_name: HashMap<String, u32>,
+    pub gid_by_name: HashMap<String, u32>,
     pub users: Vec<String>,
     pub groups: Vec<String>,
 }
@@ -31,6 +36,10 @@ pub struct StubReader {
 impl Reader for StubReader {
     fn used_uids(&self) -> Vec<u32> {
         self.uid_by_name.values().copied().collect()
+    }
+
+    fn used_gids(&self) -> Vec<u32> {
+        self.gid_by_name.values().copied().collect()
     }
 
     fn has_user(&self, name: &str) -> bool {
@@ -90,11 +99,25 @@ pub enum ConflictError {
     Both,
 }
 
+/// Phase 3 names the primary group `<name>-tenant-share` (not bare
+/// `<name>`). Single source of truth for the suffix so `check_conflict`,
+/// the create/destroy writers, and the orphan-group convergence path all
+/// agree on the literal string. Choosing the convention here also keeps the
+/// suffix exactly one grep away from any caller — handy when the operator
+/// asks "where does '-tenant-share' come from?".
+pub fn tenant_share_group_name(name: &str) -> String {
+    format!("{name}-tenant-share")
+}
+
 /// Create-side precheck: refuse if the requested name already exists as a
-/// user, a group, or both. The `(false, false)` happy path means the name
-/// is free for sysadminctl to provision.
+/// user, or if `<name>-tenant-share` already exists as a group, or both.
+/// Pre-Phase-3 this checked the bare-name group; that arm was dropped
+/// because tenant no longer creates bare-name groups (the suffixed name is
+/// the only group identity Phase 3 owns) so a stray bare-name group on
+/// the host is no longer in conflict territory.
 pub fn check_conflict(reader: &dyn Reader, name: &str) -> Result<(), ConflictError> {
-    match (reader.has_user(name), reader.has_group(name)) {
+    let group = tenant_share_group_name(name);
+    match (reader.has_user(name), reader.has_group(&group)) {
         (false, false) => Ok(()),
         (true, false) => Err(ConflictError::UserExists),
         (false, true) => Err(ConflictError::GroupExists),
@@ -102,21 +125,31 @@ pub fn check_conflict(reader: &dyn Reader, name: &str) -> Result<(), ConflictErr
     }
 }
 
-/// Four-way classification of whether a name is destroyable.
+/// Five-way classification of whether a name is destroyable.
 /// `Destroyable` means the dispatcher should call `Writer::destroy_tenant`;
-/// `NotPresent` means destroy is a convergent noop (already absent);
+/// `NotPresent` means destroy is a convergent noop (user absent AND
+/// no `<name>-tenant-share` group residue);
+/// `OrphanGroup` means the user is absent but the suffixed group is still
+/// present (e.g. a prior destroy that failed at the dseditgroup-delete
+/// step) — the dispatcher converges via `Writer::destroy_orphan_group`;
 /// `NotATenant` means the account exists with a positive UID below the
 /// tenant floor (system or human account masquerading as a tenant);
 /// `SystemAccount` means the account exists in the user listing but has no
 /// positive UID (`nobody` and other negative-UID service accounts) — those
 /// are filtered out of `uid_by_name` upstream, so the floor predicate
-/// can't bind to a value. Both refusal variants exit with `EX_USAGE`; the
-/// split exists so the error message can be honest about the reason.
+/// can't bind to a value. The two refusal variants exit with `EX_USAGE`;
+/// the split exists so the error message can be honest about the reason.
 #[derive(Debug)]
 pub enum Eligibility {
     Destroyable,
     NotPresent,
-    NotATenant { uid: u32 },
+    /// User absent, `<name>-tenant-share` group present. The host carries
+    /// orphan group state from a prior partial failure; destroy
+    /// converges by removing the group with `dseditgroup -o delete`.
+    OrphanGroup,
+    NotATenant {
+        uid: u32,
+    },
     SystemAccount,
 }
 
@@ -125,8 +158,14 @@ pub enum Eligibility {
 /// `uid_by_name` — are not misclassified as `NotPresent`), then
 /// `uid_for` for the floor check. The `(true, None)` case is a system
 /// account with a non-positive UID, which we refuse via `SystemAccount`.
+/// When the user is absent, the suffixed group's presence determines
+/// whether destroy converges through the `OrphanGroup` path or is a true
+/// `NotPresent` noop.
 pub fn destroy_eligibility(reader: &dyn Reader, name: &str) -> Eligibility {
     if !reader.has_user(name) {
+        if reader.has_group(&tenant_share_group_name(name)) {
+            return Eligibility::OrphanGroup;
+        }
         return Eligibility::NotPresent;
     }
     match reader.uid_for(name) {
@@ -143,10 +182,13 @@ pub fn destroy_eligibility(reader: &dyn Reader, name: &str) -> Eligibility {
 /// (`nobody` is the canonical case) are present in the user listing but
 /// are filtered out of the UID map (negative-UID accounts can't masquerade
 /// as a tenant-range UID and shouldn't influence allocator state).
+/// `gid_by_name` mirrors the UID structure for the GID space, with the
+/// same negative-GID filtering rationale.
 pub struct MacosReader {
     users: HashSet<String>,
     groups: HashSet<String>,
     uid_by_name: HashMap<String, u32>,
+    gid_by_name: HashMap<String, u32>,
 }
 
 impl MacosReader {
@@ -171,17 +213,31 @@ impl MacosReader {
         // alias a tenant-range UID and slip past `destroy_eligibility`.
         let uid_by_name = run_dscl(&[".", "-list", "/Users", "UniqueID"])?
             .lines()
-            .filter_map(parse_uid_line)
+            .filter_map(parse_id_line)
             .fold(HashMap::<String, u32>::new(), |mut map, (name, uid)| {
                 map.entry(name)
                     .and_modify(|cur| *cur = (*cur).min(uid))
                     .or_insert(uid);
                 map
             });
+        // Same shape for the GID space. `PrimaryGroupID` is the dscl key
+        // on `/Groups`. Mirrors the UID parse: negative-GID filter (macOS
+        // service groups can have negative GIDs; allocator-irrelevant) and
+        // lowest-on-duplicate fold for the same defensive reason.
+        let gid_by_name = run_dscl(&[".", "-list", "/Groups", "PrimaryGroupID"])?
+            .lines()
+            .filter_map(parse_id_line)
+            .fold(HashMap::<String, u32>::new(), |mut map, (name, gid)| {
+                map.entry(name)
+                    .and_modify(|cur| *cur = (*cur).min(gid))
+                    .or_insert(gid);
+                map
+            });
         Ok(MacosReader {
             users,
             groups,
             uid_by_name,
+            gid_by_name,
         })
     }
 }
@@ -189,6 +245,10 @@ impl MacosReader {
 impl Reader for MacosReader {
     fn used_uids(&self) -> Vec<u32> {
         self.uid_by_name.values().copied().collect()
+    }
+
+    fn used_gids(&self) -> Vec<u32> {
+        self.gid_by_name.values().copied().collect()
     }
 
     fn has_user(&self, name: &str) -> bool {
@@ -204,23 +264,23 @@ impl Reader for MacosReader {
     }
 }
 
-fn parse_uid_line(line: &str) -> Option<(String, u32)> {
-    // dscl `-list /Users UniqueID` lines are "name<whitespace>uid".
-    // Negative UIDs (system accounts like `nobody`) are filtered out — they
-    // can't appear in the tenant range, so they're irrelevant to the
-    // allocator. Negative-UID users still appear in the `users` set (built
-    // from a separate dscl call), so `has_user` still finds them — that's
-    // what create's `check_conflict` consults to refuse aliasing, and what
-    // destroy's `destroy_eligibility` consults to classify them as
-    // `SystemAccount` (refused with `EX_USAGE`) rather than `NotPresent`
-    // (which would emit a misleading "does not exist" noop).
+fn parse_id_line(line: &str) -> Option<(String, u32)> {
+    // dscl `-list /Users UniqueID` and `-list /Groups PrimaryGroupID`
+    // both emit "name<whitespace>id" lines, so a single parser serves
+    // both. Negative IDs (system accounts/groups like `nobody`) are
+    // filtered out — they can't appear in the tenant range and shouldn't
+    // influence allocator state. Negative-ID entries still appear in the
+    // `users`/`groups` sets (built from separate dscl calls), so the
+    // `has_*` predicates still find them — that's what create's
+    // `check_conflict` consults to refuse aliasing, and what destroy's
+    // `destroy_eligibility` consults to classify as `SystemAccount`.
     let mut parts = line.split_whitespace();
     let name = parts.next()?;
-    let uid = parts.next()?.parse::<i32>().ok()?;
-    if uid < 0 {
+    let id = parts.next()?.parse::<i32>().ok()?;
+    if id < 0 {
         None
     } else {
-        Some((name.to_string(), uid as u32))
+        Some((name.to_string(), id as u32))
     }
 }
 
@@ -244,10 +304,53 @@ fn run_dscl(args: &[&str]) -> io::Result<String> {
 /// and always invokes the executor. The Reporter filters each Message
 /// down to the right mode/verbosity; the Executor is a no-op in dry-run.
 pub(crate) trait Writer {
-    fn create_tenant(&self, name: &str, uid: u32, reporter: &mut Reporter)
-    -> Result<(), ExecError>;
+    fn create_tenant(
+        &self,
+        name: &str,
+        uid: u32,
+        gid: u32,
+        reporter: &mut Reporter,
+    ) -> Result<(), CreateError>;
 
     fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError>;
+
+    /// Cycle-5 convergence path: the tenant user is already absent (so
+    /// none of the user-side teardown applies), but the suffixed
+    /// `<name>-tenant-share` group is still on the host. Issues exactly
+    /// one exec call — `sudo dseditgroup -o delete -n .
+    /// <name>-tenant-share` — bracketed by its own three-message
+    /// `would_destroy_orphan_group` / `destroying_orphan_group` /
+    /// `destroyed_orphan_group` trio, mirroring the discipline of the
+    /// full destroy path.
+    fn destroy_orphan_group(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError>;
+}
+
+/// Granular error type for the create writer. Phase 3 splits the create
+/// flow into two exec calls (dseditgroup-create + sysadminctl-addUser),
+/// each of which can fail. The dispatcher needs to know which one failed
+/// so it can render the right error message: `create_group_failed` if
+/// dseditgroup tripped (the user wasn't touched), `create_failed` if
+/// sysadminctl tripped (the writer ran a rollback). The third variant
+/// covers the worst case where the rollback itself failed — the host
+/// is left with an orphan group, which the operator needs to know about
+/// so they can re-run destroy to converge.
+#[derive(Debug)]
+pub(crate) enum CreateError {
+    /// dseditgroup-create failed before sysadminctl ran. No rollback —
+    /// the group was never created. The user is untouched.
+    Group(ExecError),
+    /// sysadminctl-addUser failed; the rollback dseditgroup-delete
+    /// succeeded. Host is back to its pre-create state.
+    User(ExecError),
+    /// sysadminctl-addUser failed AND the rollback dseditgroup-delete
+    /// also failed. The host now has an orphan `<name>-tenant-share`
+    /// group with no corresponding user. The dispatcher emits two stderr
+    /// lines, the second pointing the operator at `tenant destroy` for
+    /// convergence (cycle 5's OrphanGroup arm).
+    UserWithRollback {
+        user: ExecError,
+        rollback: ExecError,
+    },
 }
 
 pub(crate) struct MacosWriter<'a> {
@@ -265,41 +368,99 @@ impl<'a> Writer for MacosWriter<'a> {
         &self,
         name: &str,
         uid: u32,
+        gid: u32,
         reporter: &mut Reporter,
-    ) -> Result<(), ExecError> {
-        let argv = build_create_argv(name, uid);
-        // Three bracketed Reporter calls; each is silent except in its
-        // applicable mode/verbosity. Net effect: dry-run shows "Would …"
-        // (and mechanism in verbose); real-standard shows only the
-        // post-exec "Created …"; real-verbose shows pre-exec intent +
-        // mechanism + post-exec confirmation with UID.
-        reporter.emit_dry_only(messages::would_create_tenant(name, &argv));
-        reporter.emit_real_only(messages::creating_tenant(name, &argv));
-        self.executor.run(&argv)?;
-        reporter.emit_real_only(messages::created_tenant(name, uid));
-        Ok(())
+    ) -> Result<(), CreateError> {
+        // Two exec calls compose create — group-first, then user:
+        //   1. sudo dseditgroup -o create -n . -i <gid> <name>-tenant-share
+        //   2. sudo sysadminctl -addUser <name> ... -GID <gid>
+        // The group MUST exist before sysadminctl runs so the user's
+        // home directory ownership lands on the tenant-share group, not
+        // staff (sysadminctl chowns the home dir to the group named by
+        // -GID at creation time).
+        // The 3rd "rollback" line in the plan is the success-path
+        // counterpart: if sysadminctl fails, cycle 3's rollback path
+        // runs `sudo dseditgroup -o delete -n . <name>-tenant-share`.
+        // It's shown in the pre-exec plan regardless of outcome (the
+        // operator sees the algorithm) but only echoes in the `$` block
+        // when it actually fires.
+        let group_argv = build_dseditgroup_create_argv(name, gid);
+        let user_argv = build_create_argv(name, uid, gid);
+        let rollback_argv = build_dseditgroup_delete_argv(name);
+
+        reporter.emit_dry_only(messages::would_create_tenant(
+            name,
+            &group_argv,
+            &user_argv,
+            &rollback_argv,
+        ));
+        reporter.emit_real_only(messages::creating_tenant(
+            name,
+            &group_argv,
+            &user_argv,
+            &rollback_argv,
+        ));
+
+        reporter.emit_real_only(messages::running_argv(&group_argv));
+        self.executor.run(&group_argv).map_err(CreateError::Group)?;
+
+        reporter.emit_real_only(messages::running_argv(&user_argv));
+        match self.executor.run(&user_argv) {
+            Ok(()) => {
+                reporter.emit_real_only(messages::created_tenant(name, uid, gid));
+                Ok(())
+            }
+            Err(user_err) => {
+                // Sysadminctl-addUser failed after the group was created.
+                // Roll back by deleting the just-created group so the host
+                // returns to its pre-create state. The `$` echo for the
+                // rollback fires here regardless of whether the rollback
+                // itself succeeds — the operator should see what we tried.
+                reporter.emit_real_only(messages::running_argv(&rollback_argv));
+                match self.executor.run(&rollback_argv) {
+                    Ok(()) => Err(CreateError::User(user_err)),
+                    Err(rollback_err) => Err(CreateError::UserWithRollback {
+                        user: user_err,
+                        rollback: rollback_err,
+                    }),
+                }
+            }
+        }
     }
 
     fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError> {
-        // Three commands compose the destroy mechanism:
+        // Four commands compose the destroy mechanism:
         //   1. sysadminctl -deleteUser           — the canonical destroy
         //   2. dscl . -read /Users/<name>        — residue probe (no sudo;
         //      reads on the local node don't require it)
-        //   3. sudo dscl . -delete /Users/<name> — belt-and-braces cleanup,
-        //      conditional on the probe finding the DS record still
-        //      present. sysadminctl can leave a stale DS record in some
-        //      failure shapes (caught the hard way by the sandbox plugin
-        //      that originally inspired this CLI); the probe-and-cleanup
-        //      makes destroy convergent toward absence even in that case.
+        //   3. sudo dscl . -delete /Users/<name> — belt-and-braces user
+        //      cleanup, conditional on the probe finding the DS record
+        //      still present. sysadminctl can leave a stale DS record in
+        //      some failure shapes (caught the hard way by the sandbox
+        //      plugin that originally inspired this CLI); the
+        //      probe-and-cleanup makes destroy convergent toward absence.
+        //   4. sudo dseditgroup -o delete -n . <name>-tenant-share — the
+        //      Phase-3 group cleanup. The V1.8 sysadminctl-cascade only
+        //      caught implicit `<name>` groups; the renamed
+        //      `<name>-tenant-share` group doesn't inherit that cleanup,
+        //      so this step is load-bearing — without it the host would
+        //      carry an orphan group after every destroy.
         let sysadminctl_delete = build_destroy_sysadminctl_argv(name);
         let dscl_probe = build_dscl_read_user_argv(name);
         let dscl_cleanup = build_dscl_delete_user_argv(name);
-        let plan: [&[String]; 3] = [&sysadminctl_delete, &dscl_probe, &dscl_cleanup];
+        let group_delete = build_dseditgroup_delete_argv(name);
+        let plan: [&[String]; 4] = [
+            &sysadminctl_delete,
+            &dscl_probe,
+            &dscl_cleanup,
+            &group_delete,
+        ];
 
         // Pre-exec: dry-run shows the full plan; real-verbose shows the
         // intent + plan. Both render the dscl-cleanup unconditionally —
         // pre-exec can't know what the probe will return at runtime, so
-        // the operator sees the algorithm.
+        // the operator sees the algorithm. The dseditgroup-delete is
+        // also always shown; it's unconditional at runtime too.
         reporter.emit_dry_only(messages::would_destroy_tenant(name, &plan));
         reporter.emit_real_only(messages::destroying_tenant(name, &plan));
 
@@ -325,12 +486,33 @@ impl<'a> Writer for MacosWriter<'a> {
             Err(other) => return Err(other),
         }
 
+        reporter.emit_real_only(messages::running_argv(&group_delete));
+        self.executor.run(&group_delete)?;
+
         reporter.emit_real_only(messages::destroyed_tenant(name));
+        Ok(())
+    }
+
+    fn destroy_orphan_group(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError> {
+        // Single-argv convergence path. Same Reporter discipline as the
+        // full destroy: dry-only / real-only pre-exec messages, real-only
+        // `$` echo, real-only post-exec confirmation. The Reporter
+        // selects per-mode-and-verbosity from `summary` /
+        // `summary_verbose`; the message factories supply both.
+        let argv = build_dseditgroup_delete_argv(name);
+
+        reporter.emit_dry_only(messages::would_destroy_orphan_group(name, &argv));
+        reporter.emit_real_only(messages::destroying_orphan_group(name, &argv));
+
+        reporter.emit_real_only(messages::running_argv(&argv));
+        self.executor.run(&argv)?;
+
+        reporter.emit_real_only(messages::destroyed_orphan_group(name));
         Ok(())
     }
 }
 
-fn build_create_argv(name: &str, uid: u32) -> Vec<String> {
+fn build_create_argv(name: &str, uid: u32, gid: u32) -> Vec<String> {
     vec![
         "sudo".into(),
         "sysadminctl".into(),
@@ -343,7 +525,46 @@ fn build_create_argv(name: &str, uid: u32) -> Vec<String> {
         "-UID".into(),
         uid.to_string(),
         "-GID".into(),
-        uid.to_string(),
+        gid.to_string(),
+    ]
+}
+
+/// Phase 3's group-create command. Uses `dseditgroup` (not `dscl . -create`)
+/// because dseditgroup is the higher-level, OD-aware tool — it sets up the
+/// metadata fields sysadminctl expects to find when wiring the primary
+/// group. `-n .` targets the local node (matches sysadminctl's default
+/// node selection). `-i <gid>` is the load-bearing argument: sysadminctl
+/// will be invoked next with `-GID <gid>` pointing at this just-created
+/// group, so the GID number must match.
+fn build_dseditgroup_create_argv(name: &str, gid: u32) -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "dseditgroup".into(),
+        "-o".into(),
+        "create".into(),
+        "-n".into(),
+        ".".into(),
+        "-i".into(),
+        gid.to_string(),
+        tenant_share_group_name(name),
+    ]
+}
+
+/// Phase 3's group-delete command, used both as the rollback step in
+/// `create_tenant` (when sysadminctl-addUser fails after the group was
+/// created) and as the unconditional last step in `destroy_tenant` (the
+/// sysadminctl-cascade only catches groups named after the user, so a
+/// renamed primary group must be deleted explicitly to avoid orphan
+/// state).
+fn build_dseditgroup_delete_argv(name: &str) -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "dseditgroup".into(),
+        "-o".into(),
+        "delete".into(),
+        "-n".into(),
+        ".".into(),
+        tenant_share_group_name(name),
     ]
 }
 

@@ -1,4 +1,4 @@
-use crate::accounts::{ConflictError, NameError};
+use crate::accounts::{ConflictError, NameError, tenant_share_group_name};
 use crate::executor::ExecError;
 
 pub(crate) struct Message {
@@ -15,49 +15,105 @@ pub(crate) struct Message {
 }
 
 /// Pre-exec dry-run message: "Would create tenant 'X'." plus the planned
-/// argv as detail. Emitted via `emit_dry_only` — silent in real mode.
-pub(crate) fn would_create_tenant(name: &str, argv: &[String]) -> Message {
+/// 3-line plan as detail. Phase 3 issues two exec calls (group-first then
+/// sysadminctl) plus a third "on rollback" line that documents what fires
+/// if sysadminctl fails after the group was created. The rollback line is
+/// always in the plan — pre-exec can't know what runtime will do, so the
+/// operator sees the full algorithm. Emitted via `emit_dry_only`.
+pub(crate) fn would_create_tenant(
+    name: &str,
+    group_argv: &[String],
+    user_argv: &[String],
+    rollback_argv: &[String],
+) -> Message {
     Message {
         summary: Some(format!("Would create tenant '{name}'.")),
         summary_verbose: None,
         dry_run_summary: None,
-        detail: Some(format!("  {}", shell_join(argv))),
+        detail: Some(render_create_plan(group_argv, user_argv, rollback_argv)),
     }
 }
 
-/// Pre-exec real-mode message: "Creating tenant 'X'." plus the argv that's
-/// about to run. Emitted via `emit_real_only`; the summary lives in
-/// `summary_verbose` only, so standard real mode stays silent until the
-/// post-exec confirmation.
-pub(crate) fn creating_tenant(name: &str, argv: &[String]) -> Message {
+/// Pre-exec real-mode counterpart of `would_create_tenant`. Same 3-line
+/// plan; summary lives in `summary_verbose` so standard real mode stays
+/// silent until the post-exec confirmation. Pairs with `running_argv`
+/// emissions that follow during execution. The success-path `$` echo has
+/// only 2 lines (no rollback); cycle 3's rollback path adds the 3rd
+/// echo. Emitted via `emit_real_only`.
+pub(crate) fn creating_tenant(
+    name: &str,
+    group_argv: &[String],
+    user_argv: &[String],
+    rollback_argv: &[String],
+) -> Message {
     Message {
         summary: None,
         summary_verbose: Some(format!("Creating tenant '{name}'.")),
         dry_run_summary: None,
-        detail: Some(format!("  {}", shell_join(argv))),
+        detail: Some(render_create_plan(group_argv, user_argv, rollback_argv)),
     }
 }
 
-/// Post-exec real-mode confirmation. UID is shown only in verbose
-/// (inlined into the summary). Emitted via `emit_real_only` so it doesn't
-/// lie about successful creation in dry-run mode.
-pub(crate) fn created_tenant(name: &str, uid: u32) -> Message {
+/// Post-exec real-mode confirmation. UID and GID are both shown only in
+/// verbose (inlined into the summary). Phase 3 inlines both because the
+/// two allocators are now independent — neither value is implied by the
+/// other. Emitted via `emit_real_only` so it doesn't lie about successful
+/// creation in dry-run mode.
+pub(crate) fn created_tenant(name: &str, uid: u32, gid: u32) -> Message {
     Message {
         summary: Some(format!("Created tenant '{name}'.")),
-        summary_verbose: Some(format!("Created tenant '{name}' (UID {uid}).")),
+        summary_verbose: Some(format!("Created tenant '{name}' (UID {uid}, GID {gid}).")),
         dry_run_summary: None,
         detail: None,
     }
 }
 
-/// Error-path message for the create verb when sysadminctl returns
-/// non-zero. The captured stderr (carried inside `ExecError::NonZero`)
-/// flows through `ExecError::Display` and gets appended after the
-/// "process exited with code N" prefix when present. Emitted via
-/// `emit_err`.
+/// Error-path message for the create verb when sysadminctl-addUser
+/// returns non-zero. Cycle 3 wires this. The captured stderr (carried
+/// inside `ExecError::NonZero`) flows through `ExecError::Display` and
+/// gets appended after the "process exited with code N" prefix when
+/// present. Emitted via `emit_err`.
 pub(crate) fn create_failed(name: &str, error: &ExecError) -> Message {
     Message {
         summary: Some(format!("tenant: failed to create '{name}': {error}")),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
+/// Error-path message for the create verb when dseditgroup-create
+/// returns non-zero. Distinct from `create_failed` because the failure
+/// state is different — the user wasn't touched, so the operator's
+/// remediation is different (no orphan user to clean up, just retry the
+/// create). Names the suffixed group literally so the operator can
+/// inspect it directly via dscl.
+pub(crate) fn create_group_failed(name: &str, error: &ExecError) -> Message {
+    let group = tenant_share_group_name(name);
+    Message {
+        summary: Some(format!(
+            "tenant: failed to create group '{group}' for '{name}': {error}"
+        )),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
+/// Second-emission companion to `create_failed` for the case where the
+/// rollback dseditgroup-delete itself failed. Names the orphan group and
+/// the recovery path — the em-dash trailing clause is load-bearing UX:
+/// the operator shouldn't have to read the source to know that next
+/// `tenant destroy <name>` will converge via the OrphanGroup eligibility
+/// arm. Emitted via a second `emit_err` call right after `create_failed`,
+/// so the operator gets both lines in a predictable order.
+pub(crate) fn rollback_failed(name: &str, error: &ExecError) -> Message {
+    let group = tenant_share_group_name(name);
+    Message {
+        summary: Some(format!(
+            "tenant: rollback of group '{group}' also failed: {error} \
+             \u{2014} host now has an orphan group; next 'tenant destroy {name}' will converge"
+        )),
         summary_verbose: None,
         dry_run_summary: None,
         detail: None,
@@ -129,6 +185,55 @@ pub(crate) fn destroy_failed(name: &str, error: &ExecError) -> Message {
     Message {
         summary: Some(format!("tenant: failed to destroy '{name}': {error}")),
         summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
+/// Pre-exec dry-run message for the orphan-group convergence path.
+/// Standard mode names the tenant (parallel to the rest of the destroy UX
+/// — the operator typed `tenant destroy dev`); verbose adds the suffixed
+/// group name and the mechanism so the operator can see and grep for
+/// the literal resource. Emitted via `emit_dry_only`.
+pub(crate) fn would_destroy_orphan_group(name: &str, argv: &[String]) -> Message {
+    let group = tenant_share_group_name(name);
+    Message {
+        summary: Some(format!("Would destroy orphan group for tenant '{name}'.")),
+        summary_verbose: Some(format!(
+            "Would destroy orphan group '{group}' for tenant '{name}'."
+        )),
+        dry_run_summary: None,
+        detail: Some(format!("  {}", shell_join(argv))),
+    }
+}
+
+/// Pre-exec real-mode counterpart: "Destroying orphan group …". Summary
+/// lives in `summary_verbose` (silent in standard real mode); verbose
+/// adds the suffixed group name. Pairs with the `running_argv` emission
+/// that follows. Emitted via `emit_real_only`.
+pub(crate) fn destroying_orphan_group(name: &str, argv: &[String]) -> Message {
+    let group = tenant_share_group_name(name);
+    Message {
+        summary: None,
+        summary_verbose: Some(format!(
+            "Destroying orphan group '{group}' for tenant '{name}'."
+        )),
+        dry_run_summary: None,
+        detail: Some(format!("  {}", shell_join(argv))),
+    }
+}
+
+/// Post-exec real-mode confirmation: "Destroyed orphan group …". Mirror
+/// of `created_tenant`'s standard/verbose split — standard names the
+/// tenant; verbose names the literal group as well. Emitted via
+/// `emit_real_only`.
+pub(crate) fn destroyed_orphan_group(name: &str) -> Message {
+    let group = tenant_share_group_name(name);
+    Message {
+        summary: Some(format!("Destroyed orphan group for tenant '{name}'.")),
+        summary_verbose: Some(format!(
+            "Destroyed orphan group '{group}' for tenant '{name}'."
+        )),
         dry_run_summary: None,
         detail: None,
     }
@@ -206,13 +311,19 @@ pub(crate) fn invalid_name(name: &str, error: &NameError) -> Message {
 }
 
 /// Conflict-refusal message for the create verb: the requested name is
-/// already a user, a group, or both. Emitted via `emit_err`; produces
-/// `EX_USAGE 64` at the dispatch layer.
+/// already a user, the `<name>-tenant-share` group is already taken, or
+/// both. The group-side messages name the suffixed group literally so the
+/// operator can run `dscl . -read /Groups/<name>-tenant-share` directly
+/// without having to guess the convention. Emitted via `emit_err`;
+/// produces `EX_USAGE 64` at the dispatch layer.
 pub(crate) fn name_conflict(name: &str, error: &ConflictError) -> Message {
+    let group = tenant_share_group_name(name);
     let summary = match error {
         ConflictError::UserExists => format!("tenant: user '{name}' already exists"),
-        ConflictError::GroupExists => format!("tenant: group '{name}' already exists"),
-        ConflictError::Both => format!("tenant: user and group '{name}' already exist"),
+        ConflictError::GroupExists => format!("tenant: group '{group}' already exists"),
+        ConflictError::Both => {
+            format!("tenant: user '{name}' and group '{group}' already exist")
+        }
     };
     Message {
         summary: Some(summary),
@@ -249,4 +360,19 @@ fn render_plan(argvs: &[&[String]]) -> String {
         .map(|a| format!("  {}", shell_join(a)))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Specialized plan rendering for the create verb. Two normal plan lines
+/// (group-create, user-create) plus a third line annotated `# on rollback`
+/// that documents the conditional rollback step. The annotation isn't a
+/// shell-comment in any literal sense — display-only — but matches the
+/// `# on ...` shape sysadmin docs commonly use to flag conditional
+/// commands, so it reads naturally next to the unannotated lines.
+fn render_create_plan(group: &[String], user: &[String], rollback: &[String]) -> String {
+    format!(
+        "  {}\n  {}\n  {}  # on rollback",
+        shell_join(group),
+        shell_join(user),
+        shell_join(rollback),
+    )
 }
