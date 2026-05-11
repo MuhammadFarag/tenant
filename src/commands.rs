@@ -48,6 +48,10 @@ pub(crate) fn dispatch(
                     reporter.emit_err(messages::rollback_failed(&name, &rollback));
                     EX_IOERR
                 }
+                Err(accounts::CreateError::Profile(e)) => {
+                    reporter.emit_err(messages::create_profile_failed(&name, &e));
+                    EX_IOERR
+                }
             }
         }
         Verb::Shell { name } => {
@@ -97,11 +101,12 @@ pub(crate) fn dispatch(
                 accounts::Eligibility::OrphanGroup => {
                     // Convergence path: tenant user is already gone but the
                     // suffixed group survived a prior partial failure.
-                    // Reuse `destroy_failed` for any exec failure — same
-                    // surface contract as the full destroy path so the
-                    // operator's recovery is unchanged.
+                    // Routes through `surface_destroy_error` so a profile-
+                    // rm failure on this arm (cycle 1.8 wires it) gets the
+                    // same operator-friendly framing as the Destroyable
+                    // arm.
                     if let Err(e) = writer.destroy_orphan_group(&name, reporter) {
-                        reporter.emit_err(messages::destroy_failed(&name, &e));
+                        surface_destroy_error(reporter, &name, &e);
                         return EX_IOERR;
                     }
                     0
@@ -116,12 +121,29 @@ pub(crate) fn dispatch(
                 }
                 accounts::Eligibility::Destroyable => {
                     if let Err(e) = writer.destroy_tenant(&name, reporter) {
-                        reporter.emit_err(messages::destroy_failed(&name, &e));
+                        surface_destroy_error(reporter, &name, &e);
                         return EX_IOERR;
                     }
                     0
                 }
             }
+        }
+    }
+}
+
+/// Render a `DestroyError` via the appropriate message factory.
+/// Centralized so both destroy arms (`Destroyable` and `OrphanGroup`)
+/// route exec errors and profile errors to consistent operator-facing
+/// frames. `destroy_failed` keeps the existing `process exited with
+/// code N: <stderr>` shape for exec errors so log-grep regexes don't
+/// break; `destroy_profile_failed` names the profile path explicitly.
+fn surface_destroy_error(reporter: &mut Reporter, name: &str, error: &accounts::DestroyError) {
+    match error {
+        accounts::DestroyError::Exec(e) => {
+            reporter.emit_err(messages::destroy_failed(name, e));
+        }
+        accounts::DestroyError::Profile(e) => {
+            reporter.emit_err(messages::destroy_profile_failed(name, e));
         }
     }
 }

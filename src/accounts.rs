@@ -5,6 +5,7 @@ use std::process::Command;
 use crate::allocation::TENANT_UID_FLOOR;
 use crate::executor::{ExecError, Executor};
 use crate::messages;
+use crate::profile::{ProfileError, ProfileStore, default_profile_toml};
 use crate::reporter::Reporter;
 
 pub trait Reader {
@@ -312,7 +313,7 @@ pub(crate) trait Writer {
         reporter: &mut Reporter,
     ) -> Result<(), CreateError>;
 
-    fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError>;
+    fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), DestroyError>;
 
     /// Cycle-5 convergence path: the tenant user is already absent (so
     /// none of the user-side teardown applies), but the suffixed
@@ -321,8 +322,12 @@ pub(crate) trait Writer {
     /// <name>-tenant-share` — bracketed by its own three-message
     /// `would_destroy_orphan_group` / `destroying_orphan_group` /
     /// `destroyed_orphan_group` trio, mirroring the discipline of the
-    /// full destroy path.
-    fn destroy_orphan_group(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError>;
+    /// full destroy path. Sub-cycle 1.8 will extend this arm to also
+    /// remove a residual profile (the convergence contract is "host has
+    /// no trace of `<name>`"), which is why the return type is
+    /// `DestroyError` not `ExecError`.
+    fn destroy_orphan_group(&self, name: &str, reporter: &mut Reporter)
+    -> Result<(), DestroyError>;
 
     /// Interactive shell entry into the tenant. Hands `["sudo", "-iu",
     /// <name>]` to the executor's `exec_into` substitution point (inherits
@@ -362,15 +367,44 @@ pub(crate) enum CreateError {
         user: ExecError,
         rollback: ExecError,
     },
+    /// dseditgroup-create + sysadminctl-addUser both succeeded; the
+    /// profile-write failed (disk full, permission denied, etc.).
+    /// Locked policy: leave the user + group present. The operator's
+    /// recovery is `tenant destroy <name>` — the Destroyable arm cleans
+    /// up the user + group, and the profile-rm step is a noop when the
+    /// profile is absent. No rollback variants needed because
+    /// `std::fs::write` failures are rare and the convergence story is
+    /// already covered.
+    Profile(ProfileError),
+}
+
+/// Granular error type for the destroy writers (both `destroy_tenant`
+/// and `destroy_orphan_group`). Cycle 1 introduces this when destroy
+/// gains its 5th step (profile-rm) and the dispatcher needs to render a
+/// distinct error message for profile-rm failure (operator sees the
+/// path, not a generic `process exited with code N` frame). The
+/// `From<ExecError>` impl lets the writers keep `?` propagation on
+/// their existing executor.run calls.
+#[derive(Debug)]
+pub(crate) enum DestroyError {
+    Exec(ExecError),
+    Profile(ProfileError),
+}
+
+impl From<ExecError> for DestroyError {
+    fn from(e: ExecError) -> Self {
+        DestroyError::Exec(e)
+    }
 }
 
 pub(crate) struct MacosWriter<'a> {
     executor: &'a dyn Executor,
+    profiles: &'a dyn ProfileStore,
 }
 
 impl<'a> MacosWriter<'a> {
-    pub(crate) fn new(executor: &'a dyn Executor) -> Self {
-        Self { executor }
+    pub(crate) fn new(executor: &'a dyn Executor, profiles: &'a dyn ProfileStore) -> Self {
+        Self { executor, profiles }
     }
 }
 
@@ -418,6 +452,15 @@ impl<'a> Writer for MacosWriter<'a> {
         reporter.emit_real_only(messages::running_argv(&user_argv));
         match self.executor.run(&user_argv) {
             Ok(()) => {
+                // Profile-write is the 4th step. Echo line uses the
+                // pretend-shell `tee <path> < default.toml` framing
+                // (see `running_profile_write`). A profile-write failure
+                // doesn't roll back the user or group — operator
+                // recovers via `tenant destroy <name>` (Destroyable arm
+                // handles a missing-profile case as a noop on the rm
+                // step).
+                reporter.emit_real_only(messages::running_profile_write(name));
+                write_default_profile(self.profiles, name).map_err(CreateError::Profile)?;
                 reporter.emit_real_only(messages::created_tenant(name, uid, gid));
                 Ok(())
             }
@@ -439,7 +482,7 @@ impl<'a> Writer for MacosWriter<'a> {
         }
     }
 
-    fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError> {
+    fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), DestroyError> {
         // Four commands compose the destroy mechanism:
         //   1. sysadminctl -deleteUser           — the canonical destroy
         //   2. dscl . -read /Users/<name>        — residue probe (no sudo;
@@ -456,15 +499,23 @@ impl<'a> Writer for MacosWriter<'a> {
         //      `<name>-tenant-share` group doesn't inherit that cleanup,
         //      so this step is load-bearing — without it the host would
         //      carry an orphan group after every destroy.
+        //   5. rm -f ~/.config/tenant/profiles/<name>.toml — cycle 1's
+        //      profile cleanup. Synthetic argv (the actual call goes
+        //      through ProfileStore, not a real `rm`) so the plan
+        //      renderer can format it uniformly with the shell-out lines.
+        //      `rm -f` reflects the idempotent semantics: NotFound is
+        //      success, mirroring `XdgProfileStore::remove`.
         let sysadminctl_delete = build_destroy_sysadminctl_argv(name);
         let dscl_probe = build_dscl_read_user_argv(name);
         let dscl_cleanup = build_dscl_delete_user_argv(name);
         let group_delete = build_dseditgroup_delete_argv(name);
-        let plan: [&[String]; 4] = [
+        let profile_remove = build_profile_remove_synthetic_argv(name);
+        let plan: [&[String]; 5] = [
             &sysadminctl_delete,
             &dscl_probe,
             &dscl_cleanup,
             &group_delete,
+            &profile_remove,
         ];
 
         // Pre-exec: dry-run shows the full plan; real-verbose shows the
@@ -494,11 +545,20 @@ impl<'a> Writer for MacosWriter<'a> {
                 // cleanup needed. The cleanup `$` line stays absent so the
                 // operator can see what actually ran vs the plan above.
             }
-            Err(other) => return Err(other),
+            Err(other) => return Err(DestroyError::Exec(other)),
         }
 
         reporter.emit_real_only(messages::running_argv(&group_delete));
         self.executor.run(&group_delete)?;
+
+        // 5th step: profile-rm. Idempotent (NotFound is Ok in both
+        // `XdgProfileStore` and `StubProfileStore`). A profile-rm
+        // failure is surfaced via the new `DestroyError::Profile`
+        // variant; the dispatcher renders it with `destroy_profile_failed`
+        // so the operator sees the specific path that failed instead of
+        // a generic exec-error frame.
+        reporter.emit_real_only(messages::running_profile_remove(name));
+        self.profiles.remove(name).map_err(DestroyError::Profile)?;
 
         reporter.emit_real_only(messages::destroyed_tenant(name));
         Ok(())
@@ -520,23 +580,43 @@ impl<'a> Writer for MacosWriter<'a> {
         self.executor.exec_into(&argv)
     }
 
-    fn destroy_orphan_group(&self, name: &str, reporter: &mut Reporter) -> Result<(), ExecError> {
-        // Single-argv convergence path. Same Reporter discipline as the
-        // full destroy: dry-only / real-only pre-exec messages, real-only
-        // `$` echo, real-only post-exec confirmation. The Reporter
-        // selects per-mode-and-verbosity from `summary` /
-        // `summary_verbose`; the message factories supply both.
-        let argv = build_dseditgroup_delete_argv(name);
+    fn destroy_orphan_group(
+        &self,
+        name: &str,
+        reporter: &mut Reporter,
+    ) -> Result<(), DestroyError> {
+        // Two-step convergence path (cycle 1.8 added profile-rm). Same
+        // Reporter discipline as the full destroy: dry-only / real-only
+        // pre-exec messages, real-only `$` echo per step, real-only
+        // post-exec confirmation. The profile step is always attempted
+        // (idempotent rm) so the "host has no trace of <name> after
+        // destroy" contract holds even on the convergence path.
+        let group_delete = build_dseditgroup_delete_argv(name);
+        let profile_remove = build_profile_remove_synthetic_argv(name);
+        let plan: [&[String]; 2] = [&group_delete, &profile_remove];
 
-        reporter.emit_dry_only(messages::would_destroy_orphan_group(name, &argv));
-        reporter.emit_real_only(messages::destroying_orphan_group(name, &argv));
+        reporter.emit_dry_only(messages::would_destroy_orphan_group(name, &plan));
+        reporter.emit_real_only(messages::destroying_orphan_group(name, &plan));
 
-        reporter.emit_real_only(messages::running_argv(&argv));
-        self.executor.run(&argv)?;
+        reporter.emit_real_only(messages::running_argv(&group_delete));
+        self.executor.run(&group_delete)?;
+
+        reporter.emit_real_only(messages::running_profile_remove(name));
+        self.profiles.remove(name).map_err(DestroyError::Profile)?;
 
         reporter.emit_real_only(messages::destroyed_orphan_group(name));
         Ok(())
     }
+}
+
+/// Write the default profile for `name` into the store. Shared by
+/// `create_tenant` (the only caller in cycle 1). Centralizing it keeps
+/// the default-content source (`profile::default_profile_toml`) one
+/// grep away from any future caller and lets cycle 1.5's
+/// `CreateError::Profile` wiring change just the error-surfacing site,
+/// not the call site.
+fn write_default_profile(profiles: &dyn ProfileStore, name: &str) -> Result<(), ProfileError> {
+    profiles.write(name, &default_profile_toml())
 }
 
 /// Phase-shell command shape: `sudo -iu <name>`. `-i` makes sudo run a
@@ -625,6 +705,18 @@ fn build_dscl_read_user_argv(name: &str) -> Vec<String> {
         "-read".into(),
         format!("/Users/{name}"),
     ]
+}
+
+/// Synthetic argv for the destroy verb's plan rendering. The actual
+/// removal goes through `ProfileStore::remove` (which the dispatcher
+/// constructs from `XdgProfileStore` or `StubProfileStore`), not a
+/// `rm` subprocess. Sharing the `[&[String]]` plan-rendering pipeline
+/// with the real shell-out steps keeps the verbose-mode output uniform
+/// — operator sees a 5-line plan with the rm framing matching the
+/// `running_profile_remove` echo line shape.
+fn build_profile_remove_synthetic_argv(name: &str) -> Vec<String> {
+    use crate::profile::display_path_for;
+    vec!["rm".into(), "-f".into(), display_path_for(name)]
 }
 
 /// Belt-and-braces cleanup: `sudo dscl . -delete /Users/<name>` removes a

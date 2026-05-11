@@ -2,6 +2,7 @@
 use tenant::accounts::Reader;
 use tenant::accounts::StubReader;
 use tenant::executor::{ExecError, Executor, StubExecutor};
+use tenant::profile::StubProfileStore;
 
 /// Default executor for tests that should not reach the exec stage —
 /// validation failures, conflicts, and dry-run paths. Panics on use, so
@@ -19,10 +20,11 @@ impl Executor for NeverExecutor {
 
 fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
     let exec = NeverExecutor;
+    let profiles = StubProfileStore::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let code = tenant::run(&args, &stub, &exec, &mut stdout, &mut stderr);
+    let code = tenant::run(&args, &stub, &exec, &profiles, &mut stdout, &mut stderr);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -39,10 +41,24 @@ fn argv(parts: &[&str]) -> Vec<String> {
 }
 
 fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u8, String, String) {
+    let profiles = StubProfileStore::new();
+    run_with_exec_and_profiles(stub, exec, &profiles, args)
+}
+
+/// Variant for tests that need to inject a pre-loaded or failure-configured
+/// `StubProfileStore` AND/OR assert against its post-run state. The default
+/// `run_with_exec` constructs a fresh empty store internally; this helper
+/// hands the store back to the caller. Used by cycle-1 profile tests.
+fn run_with_exec_and_profiles(
+    stub: StubReader,
+    exec: &StubExecutor,
+    profiles: &StubProfileStore,
+    args: &[&str],
+) -> (u8, String, String) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let code = tenant::run(&args, &stub, exec, &mut stdout, &mut stderr);
+    let code = tenant::run(&args, &stub, exec, profiles, &mut stdout, &mut stderr);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -104,7 +120,8 @@ fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
     let want = "Would create tenant 'dev'.\n  \
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n";
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n";
     assert_eq!(stdout, want);
 }
 
@@ -136,7 +153,8 @@ fn verbose_shows_lowest_free_uid_with_gap_and_gid_at_floor() {
     let want = "Would create tenant 'dev'.\n  \
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 602 -GID 600\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n";
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n";
     assert_eq!(stdout, want);
 }
 
@@ -201,7 +219,8 @@ fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
     let want = "Would create tenant 'dev'.\n  \
                 sudo dseditgroup -o create -n . -i 601 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 601\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n";
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n";
     assert_eq!(stdout, want);
 }
 
@@ -226,7 +245,8 @@ fn verbose_uid_and_gid_allocators_cross_over() {
     let want = "Would create tenant 'dev'.\n  \
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 601 -GID 600\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n";
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n";
     assert_eq!(stdout, want);
 }
 
@@ -397,6 +417,74 @@ fn create_succeeds_when_unrelated_user_exists() {
 }
 
 #[test]
+fn create_writes_default_profile_to_store() {
+    // Cycle 1's smallest red→green for the profile feature: after a
+    // successful real-mode create, the ProfileStore must contain a
+    // profile keyed by the tenant name. Content-shape assertion lives
+    // in the dedicated TOML test below; this test only pins presence.
+    let exec = StubExecutor::new();
+    let profiles = StubProfileStore::new();
+    let (code, _stdout, stderr) =
+        run_with_exec_and_profiles(StubReader::default(), &exec, &profiles, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        profiles.has_profile("dev"),
+        "expected profile 'dev' to be present after create; snapshot={:?}",
+        profiles.snapshot()
+    );
+}
+
+#[test]
+fn create_writes_profile_with_correct_toml_shape() {
+    // Byte-exact pin on the default profile content. Schema-version
+    // floor at 1 (future migrations bump this); two empty allowlist
+    // sections matching the shape cycle 2's PF anchor will read from.
+    // No `[share]` section — that's Claude-Code-specific and out of
+    // scope for the generic Rust port.
+    let exec = StubExecutor::new();
+    let profiles = StubProfileStore::new();
+    let (code, _stdout, stderr) =
+        run_with_exec_and_profiles(StubReader::default(), &exec, &profiles, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let snapshot = profiles.snapshot();
+    let content = snapshot
+        .get("dev")
+        .expect("profile 'dev' should be present");
+    let want = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = []\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    assert_eq!(content, want, "profile content mismatch");
+}
+
+#[test]
+fn create_dry_run_does_not_write_profile() {
+    // Dry-run swap-in of `DryRunProfileStore` means the wired
+    // `StubProfileStore` never receives a write call. Mirrors the
+    // executor-side `dry_run_bypasses_injected_executor` test. Pins
+    // the composition-root dry-run plumbing on the new ProfileStore
+    // seam.
+    let exec = StubExecutor::new();
+    let profiles = StubProfileStore::new();
+    let (code, stdout, stderr) = run_with_exec_and_profiles(
+        StubReader::default(),
+        &exec,
+        &profiles,
+        &["create", "dev", "--dry-run"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Would create tenant 'dev'.\n");
+    assert!(
+        !profiles.has_profile("dev"),
+        "profile should not be written in dry-run; snapshot={:?}",
+        profiles.snapshot()
+    );
+}
+
+#[test]
 fn create_real_mode_standard_emits_only_post_exec_confirmation() {
     // Standard real mode is silent before exec; one confirmation line
     // after. No UID/GID — that's reserved for verbose mode. Phase 3
@@ -461,11 +549,49 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
     let want = "Creating tenant 'dev'.\n  \
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n\
+                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n\
                 $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
                 $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
+                $ tee ~/.config/tenant/profiles/dev.toml < default.toml\n\
                 Created tenant 'dev' (UID 600, GID 600).\n";
     assert_eq!(stdout, want);
+}
+
+#[test]
+fn create_profile_write_failure_surfaces_with_user_and_group_present() {
+    // Per the design lock: dseditgroup-create + sysadminctl-addUser have
+    // both succeeded by the time profile-write fires, so a profile-write
+    // failure does NOT roll back the user or group. Operator sees an
+    // EX_IOERR with a new `create_profile_failed` message that names the
+    // profile path (so they don't have to grep source). Their recovery
+    // is `tenant destroy <name>` — destroy's Destroyable arm cleans up
+    // the user+group, and the missing profile case is a successful noop
+    // for the profile-rm step.
+    let exec = StubExecutor::new();
+    let profiles = StubProfileStore::new().with_write_failure("disk full");
+    let (code, stdout, stderr) =
+        run_with_exec_and_profiles(StubReader::default(), &exec, &profiles, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to write profile '~/.config/tenant/profiles/dev.toml' \
+         for 'dev': disk full\n"
+    );
+    // Two exec calls (dseditgroup + sysadminctl) — no rollback, since
+    // the locked policy is "leave user+group present on profile failure".
+    assert_eq!(
+        exec.calls().len(),
+        2,
+        "expected dseditgroup + sysadminctl; no rollback"
+    );
+    // Profile is absent from the store (the write failed) — pins the
+    // fact that the failure is a real failure, not a silent success.
+    assert!(
+        !profiles.has_profile("dev"),
+        "profile should be absent after write failure"
+    );
 }
 
 #[test]
@@ -583,10 +709,17 @@ fn create_real_mode_verbose_shows_rollback_echo() {
     let (code, stdout, stderr) =
         run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    // Plan still has 4 lines (the algorithm — profile-write is the
+    // success-path 4th step), but the echo block omits the profile-write
+    // because sysadminctl failed before profile-write would have been
+    // attempted. The asymmetry between plan (line 4 present) and echo
+    // (no profile echo) is the operator's signal that profile-write
+    // never happened.
     let want_stdout = "Creating tenant 'dev'.\n  \
                        sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                        sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
-                       sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n\
+                       sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
+                       tee ~/.config/tenant/profiles/dev.toml < default.toml\n\
                        $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
                        $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
                        $ sudo dseditgroup -o delete -n . dev-tenant-share\n";
@@ -673,6 +806,52 @@ fn stub_with_tenant(name: &str) -> StubReader {
 }
 
 #[test]
+fn destroy_removes_profile_file_from_store() {
+    // Destroy adds a 5th step: profile-rm. After a successful destroy
+    // the profile must be gone from the store. The store is pre-loaded
+    // with a profile so the test pins "present before, absent after"
+    // — defending against a regression that wires destroy without the
+    // profile step.
+    let exec = StubExecutor::new();
+    let profiles = StubProfileStore::new().with_profile("dev", "schema_version = 1\n");
+    assert!(
+        profiles.has_profile("dev"),
+        "pre-condition: profile present"
+    );
+    let (code, stdout, stderr) = run_with_exec_and_profiles(
+        stub_with_tenant("dev"),
+        &exec,
+        &profiles,
+        &["destroy", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
+    assert!(
+        !profiles.has_profile("dev"),
+        "profile should be removed after destroy"
+    );
+}
+
+#[test]
+fn destroy_succeeds_when_profile_already_absent() {
+    // Idempotent rm: the operator may have manually removed the profile
+    // (or a prior destroy failed mid-flight). Destroy must converge to
+    // success regardless. Mirrors `XdgProfileStore::remove`'s
+    // NotFound-as-Ok semantics — the StubProfileStore enforces the same
+    // contract by silently dropping a missing-key remove.
+    let exec = StubExecutor::new();
+    let profiles = StubProfileStore::new(); // empty; no profile loaded
+    let (code, stdout, stderr) = run_with_exec_and_profiles(
+        stub_with_tenant("dev"),
+        &exec,
+        &profiles,
+        &["destroy", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
+}
+
+#[test]
 fn destroy_dry_run_default_shows_intent() {
     let (code, stdout, stderr) =
         run_with(stub_with_tenant("dev"), &["destroy", "dev", "--dry-run"]);
@@ -699,7 +878,8 @@ fn destroy_dry_run_verbose_shows_mechanism() {
                 sudo sysadminctl -deleteUser dev\n  \
                 dscl . -read /Users/dev\n  \
                 sudo dscl . -delete /Users/dev\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n";
+                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
+                rm -f ~/.config/tenant/profiles/dev.toml\n";
     assert_eq!(stdout, want);
 }
 
@@ -762,11 +942,13 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
                 sudo sysadminctl -deleteUser dev\n  \
                 dscl . -read /Users/dev\n  \
                 sudo dscl . -delete /Users/dev\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n\
+                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
+                rm -f ~/.config/tenant/profiles/dev.toml\n\
                 $ sudo sysadminctl -deleteUser dev\n\
                 $ dscl . -read /Users/dev\n\
                 $ sudo dscl . -delete /Users/dev\n\
                 $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
+                $ rm -f ~/.config/tenant/profiles/dev.toml\n\
                 Destroyed tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }
@@ -889,10 +1071,12 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
                 sudo sysadminctl -deleteUser dev\n  \
                 dscl . -read /Users/dev\n  \
                 sudo dscl . -delete /Users/dev\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n\
+                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
+                rm -f ~/.config/tenant/profiles/dev.toml\n\
                 $ sudo sysadminctl -deleteUser dev\n\
                 $ dscl . -read /Users/dev\n\
                 $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
+                $ rm -f ~/.config/tenant/profiles/dev.toml\n\
                 Destroyed tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }
@@ -1193,6 +1377,34 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
 }
 
 #[test]
+fn destroy_orphan_group_also_removes_profile_if_present() {
+    // Convergence contract: after `tenant destroy <name>`, the host
+    // should have no trace of `<name>` — including any leftover profile
+    // file. The OrphanGroup arm must remove the profile too, idempotent
+    // (the profile may or may not be present; either way is success).
+    // Pre-load the profile alongside the orphan group to pin the "both
+    // gone after" semantics.
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubExecutor::new();
+    let profiles = StubProfileStore::new().with_profile("dev", "schema_version = 1\n");
+    assert!(
+        profiles.has_profile("dev"),
+        "pre-condition: profile present"
+    );
+    let (code, stdout, stderr) =
+        run_with_exec_and_profiles(stub, &exec, &profiles, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Destroyed orphan group for tenant 'dev'.\n");
+    assert!(
+        !profiles.has_profile("dev"),
+        "profile should be removed by orphan-group convergence"
+    );
+}
+
+#[test]
 fn destroy_dry_run_for_orphan_group() {
     // Dry-run twin: same convergence framing, "Would" tense. No exec
     // calls (dry-run bypasses the executor — NeverExecutor would panic).
@@ -1219,7 +1431,8 @@ fn destroy_dry_run_verbose_for_orphan_group() {
     let (code, stdout, _stderr) = run_with(stub, &["destroy", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
     let want = "Would destroy orphan group 'dev-tenant-share' for tenant 'dev'.\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n";
+                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
+                rm -f ~/.config/tenant/profiles/dev.toml\n";
     assert_eq!(stdout, want);
 }
 
@@ -1236,8 +1449,10 @@ fn destroy_real_mode_verbose_for_orphan_group() {
     let (code, stdout, _stderr) = run_with_exec(stub, &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
     let want = "Destroying orphan group 'dev-tenant-share' for tenant 'dev'.\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n\
+                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
+                rm -f ~/.config/tenant/profiles/dev.toml\n\
                 $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
+                $ rm -f ~/.config/tenant/profiles/dev.toml\n\
                 Destroyed orphan group 'dev-tenant-share' for tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }

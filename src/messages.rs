@@ -1,5 +1,6 @@
 use crate::accounts::{ConflictError, NameError, tenant_share_group_name};
 use crate::executor::ExecError;
+use crate::profile::{ProfileError, display_path_for};
 
 pub(crate) struct Message {
     /// Default rendering, used in real+standard mode and as ultimate
@@ -30,7 +31,12 @@ pub(crate) fn would_create_tenant(
         summary: Some(format!("Would create tenant '{name}'.")),
         summary_verbose: None,
         dry_run_summary: None,
-        detail: Some(render_create_plan(group_argv, user_argv, rollback_argv)),
+        detail: Some(render_create_plan(
+            name,
+            group_argv,
+            user_argv,
+            rollback_argv,
+        )),
     }
 }
 
@@ -50,7 +56,12 @@ pub(crate) fn creating_tenant(
         summary: None,
         summary_verbose: Some(format!("Creating tenant '{name}'.")),
         dry_run_summary: None,
-        detail: Some(render_create_plan(group_argv, user_argv, rollback_argv)),
+        detail: Some(render_create_plan(
+            name,
+            group_argv,
+            user_argv,
+            rollback_argv,
+        )),
     }
 }
 
@@ -76,6 +87,24 @@ pub(crate) fn created_tenant(name: &str, uid: u32, gid: u32) -> Message {
 pub(crate) fn create_failed(name: &str, error: &ExecError) -> Message {
     Message {
         summary: Some(format!("tenant: failed to create '{name}': {error}")),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
+/// Error-path message for the create verb when the profile-write step
+/// fails after dseditgroup + sysadminctl have both succeeded. Names the
+/// display-form profile path (with literal `~`) so the operator can
+/// inspect / repair it directly without having to grep source. The
+/// failure leaves the user + group on the host (per locked policy);
+/// recovery is `tenant destroy <name>`. Emitted via `emit_err`.
+pub(crate) fn create_profile_failed(name: &str, error: &ProfileError) -> Message {
+    Message {
+        summary: Some(format!(
+            "tenant: failed to write profile '{}' for '{name}': {error}",
+            display_path_for(name)
+        )),
         summary_verbose: None,
         dry_run_summary: None,
         detail: None,
@@ -165,6 +194,36 @@ pub(crate) fn running_argv(argv: &[String]) -> Message {
     }
 }
 
+/// Per-step echo line for the profile-write step. Sibling to
+/// `running_argv` — same `$ ` prefix and verbose-only emission — but
+/// renders the pretend-shell `tee <path> < default.toml` form because
+/// the step is `std::fs::write`, not a real argv. Single source of
+/// truth for the line shape (used by both `create_tenant` execution
+/// echo and the matching plan rendering in `render_create_plan`).
+pub(crate) fn running_profile_write(name: &str) -> Message {
+    Message {
+        summary: None,
+        summary_verbose: Some(format!("$ tee {} < default.toml", display_path_for(name))),
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
+/// Per-step echo line for the profile-rm step. Counterpart of
+/// `running_profile_write` for the destroy side. `rm -f` reflects the
+/// idempotent semantics (NotFound is success at both the
+/// `XdgProfileStore` and `StubProfileStore` layers); `rm` (no `-f`)
+/// would be misleading because the operator isn't asked to confirm and
+/// missing-file isn't surfaced as an error.
+pub(crate) fn running_profile_remove(name: &str) -> Message {
+    Message {
+        summary: None,
+        summary_verbose: Some(format!("$ rm -f {}", display_path_for(name))),
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
 /// Post-exec real-mode confirmation. Unlike `created_tenant`, no UID is
 /// inlined in verbose: a destroyed account's old UID is not new information
 /// to the operator who just asked us to destroy it. Emitted via
@@ -190,12 +249,30 @@ pub(crate) fn destroy_failed(name: &str, error: &ExecError) -> Message {
     }
 }
 
+/// Error-path message for destroy when the profile-rm step fails.
+/// Surfaces the display-form profile path so the operator can inspect
+/// it directly. The user + group are already gone (the failure is on
+/// the 5th step), so the residual state is just the profile file —
+/// usually a permission issue the operator can clear with a manual
+/// `rm`. Emitted via `emit_err`.
+pub(crate) fn destroy_profile_failed(name: &str, error: &ProfileError) -> Message {
+    Message {
+        summary: Some(format!(
+            "tenant: failed to remove profile '{}' for '{name}': {error}",
+            display_path_for(name)
+        )),
+        summary_verbose: None,
+        dry_run_summary: None,
+        detail: None,
+    }
+}
+
 /// Pre-exec dry-run message for the orphan-group convergence path.
 /// Standard mode names the tenant (parallel to the rest of the destroy UX
 /// — the operator typed `tenant destroy dev`); verbose adds the suffixed
 /// group name and the mechanism so the operator can see and grep for
 /// the literal resource. Emitted via `emit_dry_only`.
-pub(crate) fn would_destroy_orphan_group(name: &str, argv: &[String]) -> Message {
+pub(crate) fn would_destroy_orphan_group(name: &str, argvs: &[&[String]]) -> Message {
     let group = tenant_share_group_name(name);
     Message {
         summary: Some(format!("Would destroy orphan group for tenant '{name}'.")),
@@ -203,15 +280,18 @@ pub(crate) fn would_destroy_orphan_group(name: &str, argv: &[String]) -> Message
             "Would destroy orphan group '{group}' for tenant '{name}'."
         )),
         dry_run_summary: None,
-        detail: Some(format!("  {}", shell_join(argv))),
+        detail: Some(render_plan(argvs)),
     }
 }
 
 /// Pre-exec real-mode counterpart: "Destroying orphan group …". Summary
 /// lives in `summary_verbose` (silent in standard real mode); verbose
-/// adds the suffixed group name. Pairs with the `running_argv` emission
-/// that follows. Emitted via `emit_real_only`.
-pub(crate) fn destroying_orphan_group(name: &str, argv: &[String]) -> Message {
+/// adds the suffixed group name. Pairs with the `running_argv` emissions
+/// that follow. Emitted via `emit_real_only`. Cycle 1.8 grew the plan
+/// from a single argv to a 2-step plan (dseditgroup-delete + profile-rm)
+/// so the orphan-group convergence path also restores the "no trace of
+/// `<name>` after destroy" contract.
+pub(crate) fn destroying_orphan_group(name: &str, argvs: &[&[String]]) -> Message {
     let group = tenant_share_group_name(name);
     Message {
         summary: None,
@@ -219,7 +299,7 @@ pub(crate) fn destroying_orphan_group(name: &str, argv: &[String]) -> Message {
             "Destroying orphan group '{group}' for tenant '{name}'."
         )),
         dry_run_summary: None,
-        detail: Some(format!("  {}", shell_join(argv))),
+        detail: Some(render_plan(argvs)),
     }
 }
 
@@ -452,17 +532,27 @@ fn render_plan(argvs: &[&[String]]) -> String {
         .join("\n")
 }
 
-/// Specialized plan rendering for the create verb. Two normal plan lines
-/// (group-create, user-create) plus a third line annotated `# on rollback`
-/// that documents the conditional rollback step. The annotation isn't a
-/// shell-comment in any literal sense — display-only — but matches the
-/// `# on ...` shape sysadmin docs commonly use to flag conditional
-/// commands, so it reads naturally next to the unannotated lines.
-fn render_create_plan(group: &[String], user: &[String], rollback: &[String]) -> String {
+/// Specialized plan rendering for the create verb. Three real-mode
+/// shell-out lines plus a fourth profile-write step rendered in a
+/// pretend-shell `tee <path> < default.toml` framing — there's no real
+/// `tee` invocation (it's a `std::fs::write`) but the form keeps the
+/// `$` echo block visually uniform and signals to the operator "a file
+/// landed here." `< default.toml` is fictional (the default content is
+/// in-binary) but conveys "the default template" without dragging the
+/// schema body into the plan. The `# on rollback` annotation on line 3
+/// keeps the conditional-step display convention the dscl-cleanup
+/// pioneered.
+fn render_create_plan(
+    name: &str,
+    group: &[String],
+    user: &[String],
+    rollback: &[String],
+) -> String {
     format!(
-        "  {}\n  {}\n  {}  # on rollback",
+        "  {}\n  {}\n  {}  # on rollback\n  tee {} < default.toml",
         shell_join(group),
         shell_join(user),
         shell_join(rollback),
+        display_path_for(name),
     )
 }
