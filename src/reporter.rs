@@ -25,12 +25,16 @@ impl<'a> Reporter<'a> {
     }
 
     /// Emit on stderr unconditionally. Reporter picks the right summary
-    /// for the current mode/verbosity. (No `emit` sibling on stdout for
-    /// now — current callers are mode-scoped via `emit_real_only` /
-    /// `emit_dry_only`; add an unconditional-stdout method when a future
-    /// verb needs one.)
+    /// for the current mode/verbosity.
     pub fn emit_err(&mut self, msg: Message) {
         Self::emit_to(self.stderr, &msg, self.verbose, self.dry_run);
+    }
+
+    /// Emit on stdout unconditionally — used for messages whose framing
+    /// is the same in real and dry-run modes (e.g. the convergent-noop
+    /// "tenant 'X' does not exist; nothing to do." line).
+    pub fn emit(&mut self, msg: Message) {
+        Self::emit_to(self.stdout, &msg, self.verbose, self.dry_run);
     }
 
     /// Emit only when in real mode (silent in dry-run). Use for messages

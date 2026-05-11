@@ -82,13 +82,25 @@ fn verbose_shows_floor_uid_when_no_uids_in_use() {
     assert_eq!(stdout, want);
 }
 
+/// Stub whose `used_uids()` reports the given UIDs as taken (by synthetic
+/// user names that no test asserts about). Used by allocator-driven tests.
+fn stub_with_used_uids(uids: &[u32]) -> StubReader {
+    StubReader {
+        uid_by_name: uids
+            .iter()
+            .enumerate()
+            .map(|(i, &u)| (format!("u{i}"), u))
+            .collect(),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn verbose_shows_lowest_free_uid_with_gap() {
-    let stub = StubReader {
-        uids: vec![600, 601, 603],
-        ..Default::default()
-    };
-    let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
+    let (code, stdout, _stderr) = run_with(
+        stub_with_used_uids(&[600, 601, 603]),
+        &["create", "dev", "--dry-run", "-v"],
+    );
     assert_eq!(code, 0);
     let want = "Would create tenant 'dev'.\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 602 -GID 602\n";
@@ -97,11 +109,10 @@ fn verbose_shows_lowest_free_uid_with_gap() {
 
 #[test]
 fn verbose_skips_taken_floor() {
-    let stub = StubReader {
-        uids: vec![600],
-        ..Default::default()
-    };
-    let (_code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
+    let (_code, stdout, _stderr) = run_with(
+        stub_with_used_uids(&[600]),
+        &["create", "dev", "--dry-run", "-v"],
+    );
     assert!(
         stdout.contains("-UID 601 -GID 601"),
         "expected UID 601 in stdout, got: {stdout:?}",
@@ -110,11 +121,10 @@ fn verbose_skips_taken_floor() {
 
 #[test]
 fn verbose_uid_independent_of_input_order() {
-    let stub = StubReader {
-        uids: vec![603, 600, 601],
-        ..Default::default()
-    };
-    let (_code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
+    let (_code, stdout, _stderr) = run_with(
+        stub_with_used_uids(&[603, 600, 601]),
+        &["create", "dev", "--dry-run", "-v"],
+    );
     assert!(
         stdout.contains("-UID 602 -GID 602"),
         "expected UID 602 in stdout, got: {stdout:?}",
@@ -123,11 +133,10 @@ fn verbose_uid_independent_of_input_order() {
 
 #[test]
 fn verbose_skips_uids_below_floor() {
-    let stub = StubReader {
-        uids: vec![500, 599],
-        ..Default::default()
-    };
-    let (_code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
+    let (_code, stdout, _stderr) = run_with(
+        stub_with_used_uids(&[500, 599]),
+        &["create", "dev", "--dry-run", "-v"],
+    );
     assert!(
         stdout.contains("-UID 600 -GID 600"),
         "expected UID 600 in stdout, got: {stdout:?}",
@@ -319,6 +328,289 @@ fn create_real_mode_failure_surfaces_executor_stderr() {
         stderr,
         "tenant: failed to create 'dev': process exited with code 78: \
          sysadminctl: -addUser failed: user already exists\n"
+    );
+}
+
+/// Stub representing a tenant that exists on the host with a tenant-range
+/// UID (for tests that drive the destroy verb's actual-destroy path rather
+/// than its noop / refusal paths). UID 600 is the canonical floor; any
+/// floor-or-above UID would do.
+fn stub_with_tenant(name: &str) -> StubReader {
+    StubReader {
+        users: vec![name.to_string()],
+        uid_by_name: [(name.to_string(), 600)].into_iter().collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn destroy_dry_run_default_shows_intent() {
+    let (code, stdout, stderr) =
+        run_with(stub_with_tenant("dev"), &["destroy", "dev", "--dry-run"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    assert_eq!(stdout, "Would destroy tenant 'dev'.\n");
+}
+
+#[test]
+fn destroy_dry_run_verbose_shows_mechanism() {
+    let (code, stdout, _stderr) = run_with(
+        stub_with_tenant("dev"),
+        &["destroy", "dev", "--dry-run", "-v"],
+    );
+    assert_eq!(code, 0);
+    let want = "Would destroy tenant 'dev'.\n  \
+                sudo sysadminctl -deleteUser dev\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
+    assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
+    let calls = exec.calls();
+    assert_eq!(calls.len(), 1, "expected exactly one exec call");
+    let want_argv: Vec<String> = ["sudo", "sysadminctl", "-deleteUser", "dev"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    assert_eq!(calls[0], want_argv);
+}
+
+#[test]
+fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
+    let exec = StubExecutor::new();
+    let (code, stdout, _stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
+    assert_eq!(code, 0);
+    let want = "Destroying tenant 'dev'.\n  \
+                sudo sysadminctl -deleteUser dev\n\
+                Destroyed tenant 'dev'.\n";
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn destroy_rejects_empty_name() {
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["destroy", "", "--dry-run"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(stderr, "tenant: name cannot be empty\n");
+}
+
+#[test]
+fn destroy_rejects_non_letter_start() {
+    for (name, offender) in [("1dev", '1'), ("_dev", '_'), ("Dev", 'D')] {
+        let (code, stdout, stderr) =
+            run_with(StubReader::default(), &["destroy", name, "--dry-run"]);
+        assert_eq!(code, 64, "want EX_USAGE for {name:?}");
+        assert!(
+            stdout.is_empty(),
+            "stdout should be empty for {name:?}: {stdout:?}"
+        );
+        let want = format!(
+            "tenant: name '{name}' must start with a lowercase letter (got '{offender}')\n"
+        );
+        assert_eq!(stderr, want, "stderr mismatch for {name:?}");
+    }
+}
+
+#[test]
+fn destroy_rejects_invalid_character() {
+    for (name, offender) in [("de v", ' '), ("de@v", '@'), ("dev.", '.')] {
+        let (code, stdout, stderr) =
+            run_with(StubReader::default(), &["destroy", name, "--dry-run"]);
+        assert_eq!(code, 64, "want EX_USAGE for {name:?}");
+        assert!(
+            stdout.is_empty(),
+            "stdout should be empty for {name:?}: {stdout:?}"
+        );
+        let want = format!("tenant: name '{name}' contains invalid character '{offender}'\n");
+        assert_eq!(stderr, want, "stderr mismatch for {name:?}");
+    }
+}
+
+#[test]
+fn destroy_noop_when_user_missing() {
+    // Empty StubReader — no users on the host. Destroy should be
+    // convergent-toward-absence: report the noop and exit 0 without
+    // touching the executor (NeverExecutor would panic if reached).
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "tenant 'dev' does not exist; nothing to do.\n");
+    assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
+}
+
+#[test]
+fn destroy_refuses_below_floor() {
+    // System account masquerading as a destroyable tenant: name passes
+    // validate_name (lowercase, no funny chars) but UID is below the
+    // tenant floor. Refuse with EX_USAGE; never reach the executor.
+    let stub = StubReader {
+        users: vec!["wheel".to_string()],
+        uid_by_name: [("wheel".to_string(), 0)].into_iter().collect(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "wheel"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to destroy 'wheel': UID 0 is below tenant floor 600\n"
+    );
+}
+
+#[test]
+fn destroy_refuses_just_below_floor() {
+    // Boundary: UID 599 refuses; UID 600 (the floor itself) accepts —
+    // see `destroy_accepts_at_floor` for the matching positive case.
+    let stub = StubReader {
+        users: vec!["edge".to_string()],
+        uid_by_name: [("edge".to_string(), 599)].into_iter().collect(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "edge"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to destroy 'edge': UID 599 is below tenant floor 600\n"
+    );
+}
+
+#[test]
+fn destroy_accepts_at_floor() {
+    // Boundary's positive twin: UID equal to TENANT_UID_FLOOR (600)
+    // proceeds to exec. Pins the inequality direction at the floor itself
+    // so a future helper edit that bumps `stub_with_tenant`'s UID can't
+    // silently erase the boundary contract.
+    let exec = StubExecutor::new();
+    let stub = StubReader {
+        users: vec!["edge".to_string()],
+        uid_by_name: [("edge".to_string(), 600)].into_iter().collect(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "edge"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Destroyed tenant 'edge'.\n");
+    assert_eq!(exec.calls().len(), 1, "expected exactly one exec call");
+}
+
+#[test]
+fn destroy_refuses_when_uid_unknown_but_user_present() {
+    // `nobody` on macOS has UID -2, which `parse_uid_line` filters out
+    // of `uid_by_name`. The user is still present in the user listing, so
+    // `has_user` is true but `uid_for` returns None — that's the
+    // `SystemAccount` variant. Refuse with `EX_USAGE`, NOT a noop, so the
+    // operator sees the real state ("system account") rather than the
+    // misleading "does not exist".
+    let stub = StubReader {
+        users: vec!["nobody".to_string()],
+        // uid_by_name deliberately empty: simulates the parse_uid_line
+        // negative-UID filter.
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "nobody"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to destroy 'nobody': system account (no tenant-range UID)\n"
+    );
+}
+
+#[test]
+fn destroy_refuses_below_floor_verbose() {
+    // -v on a refusal path must not emit any mechanism preview to stdout
+    // (no "Destroying …" line, no argv). The refusal is the only output,
+    // and it goes to stderr. Guards against a class of "we built the argv
+    // string before checking the guard" regressions.
+    let stub = StubReader {
+        users: vec!["edge".to_string()],
+        uid_by_name: [("edge".to_string(), 599)].into_iter().collect(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "edge", "-v"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to destroy 'edge': UID 599 is below tenant floor 600\n"
+    );
+}
+
+#[test]
+fn destroy_noop_when_user_missing_verbose() {
+    // -v on the convergent-noop path emits only the noop line — no
+    // mechanism preview, no argv — and on stdout (not stderr).
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["destroy", "ghost", "-v"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "tenant 'ghost' does not exist; nothing to do.\n");
+    assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
+}
+
+#[test]
+fn destroy_noop_emits_in_dry_run_too() {
+    // Same noop framing in dry-run mode — the message is tense-neutral
+    // because we'd "do nothing" either way.
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["destroy", "dev", "--dry-run"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "tenant 'dev' does not exist; nothing to do.\n");
+}
+
+#[test]
+fn destroy_rejects_overlong_name() {
+    let name = "a".repeat(32);
+    let (code, stdout, stderr) = run_with(StubReader::default(), &["destroy", &name, "--dry-run"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        format!("tenant: name '{name}' is too long (32 characters; maximum is 31)\n"),
+    );
+}
+
+#[test]
+fn destroy_real_mode_propagates_exec_failure() {
+    let exec = StubExecutor::failing(78);
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to destroy 'dev': process exited with code 78\n"
+    );
+    assert_eq!(exec.calls().len(), 1);
+}
+
+#[test]
+fn destroy_real_mode_failure_surfaces_executor_stderr() {
+    let exec = StubExecutor::failing_with(78, "sysadminctl: -deleteUser failed: not authorized\n");
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to destroy 'dev': process exited with code 78: \
+         sysadminctl: -deleteUser failed: not authorized\n"
+    );
+}
+
+#[test]
+fn destroy_dry_run_bypasses_injected_executor() {
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["destroy", "dev", "--dry-run"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Would destroy tenant 'dev'.\n");
+    assert!(
+        exec.calls().is_empty(),
+        "executor should not be invoked in dry-run mode; got calls: {:?}",
+        exec.calls()
     );
 }
 

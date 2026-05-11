@@ -28,6 +28,7 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Verb {
     Create { name: String },
+    Destroy { name: String },
 }
 
 pub fn run(

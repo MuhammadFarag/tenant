@@ -4,7 +4,8 @@ A small CLI for provisioning macOS user accounts (and matching primary
 groups) in a project-reserved UID range (≥600). `tenant create <name>`
 inspects host account state, validates input, picks the next free UID,
 and either renders the planned `sudo sysadminctl …` invocation
-(`--dry-run`) or executes it (real mode). The next verb is `destroy`.
+(`--dry-run`) or executes it (real mode). `tenant destroy <name>` is
+the symmetric teardown verb (sysadminctl `-deleteUser`).
 
 This crate is a Rust port of an earlier Go prototype (lives at
 `/Users/plugin-dev/src/tenant/` for cross-reference). The Rust version
@@ -17,41 +18,89 @@ two languages' conventions diverge.
 Done:
 - Project init, justfile + pre-commit gates (`fmt --check` + `clippy -D warnings`)
 - `tenant create <name>` works in both dry-run and real mode (V1.5–V1.7)
-- `accounts::Reader` trait + `StubReader` (test) + `MacosReader` (dscl)
-- `accounts::Writer` trait + `MacosWriter` (sysadminctl-backed via Executor)
+- `tenant destroy <name>` works in both modes; convergent-noop on missing
+  user (exit 0), refuses with `EX_USAGE 64` when the named account exists
+  with a UID outside the tenant range — either a positive UID below
+  `TENANT_UID_FLOOR` (system / human account, message names the floor) or
+  no positive UID at all (system account like `nobody`, distinct message).
+  Charset guard via `validate_name` reuse. No group cleanup yet — paired
+  with explicit group lifecycle in the next vertical slice (see Open).
+- `accounts::Reader` trait + `StubReader` (test) + `MacosReader` (dscl).
+  Reader exposes `used_uids`, `has_user`, `has_group`, and `uid_for(name)`
+  (added with destroy). `MacosReader` keeps `users` and `uid_by_name` as
+  separate fields so service accounts with negative UIDs (`nobody`) still
+  trip `has_user` even though they're filtered from the UID map.
+- `accounts::Writer` trait + `MacosWriter` (sysadminctl-backed via Executor);
+  `create_tenant` and `destroy_tenant` both follow the three-message bracket.
 - `accounts::validate_name` (lexical: `[a-z][a-z0-9_-]{0,30}`, `EX_USAGE` on fail)
 - `accounts::check_conflict` (state-based via Reader, `EX_USAGE` on fail)
+- `accounts::destroy_eligibility` returns `Eligibility::{Destroyable,
+  NotPresent, NotATenant { uid }, SystemAccount}`. `has_user` is the
+  presence gate; `uid_for` carries the floor classification. The
+  `SystemAccount` variant covers accounts present in the user listing
+  with no positive UID (e.g. `nobody` at UID -2), filtered out of
+  `uid_by_name` by `parse_uid_line` — without this variant the bug
+  surface is `tenant destroy nobody` emitting a misleading "does not
+  exist" noop instead of refusing.
 - `allocation::UidAllocator::lowest_free_uid` (iterate from `TENANT_UID_FLOOR = 600`)
 - `executor::Executor` trait + `SystemExecutor` (real, captures stderr) +
   `DryRunExecutor` (Ok-noop, swapped in at composition root when `--dry-run`) +
   `StubExecutor` (records calls; `failing` / `failing_with` for failure-path tests)
 - `Reporter` + `Message`: Reporter holds `(stdout, stderr, verbose, dry_run)`;
   Message holds `(summary, summary_verbose, dry_run_summary, detail)`; methods
-  are `emit_err` (always-on-stderr), `emit_real_only` (silent in dry), and
-  `emit_dry_only` (silent in real). Verbose / dry-run mode selection is
-  centralized in Reporter.
+  are `emit_err` (always-on-stderr), `emit` (always-on-stdout, added with
+  destroy's noop message), `emit_real_only` (silent in dry), and `emit_dry_only`
+  (silent in real). Verbose / dry-run mode selection is centralized in Reporter.
 - Post-exec UX (V1.7): standard real mode emits one confirmation line
-  ("Created tenant 'X'."); verbose adds pre-exec intent + mechanism preview
-  and inlines UID into the confirmation. Sysadminctl noise suppressed on
+  ("Created tenant 'X'." / "Destroyed tenant 'X'."); verbose adds pre-exec
+  intent + mechanism preview and (for create only) inlines UID into the
+  confirmation — `destroyed_tenant` skips the UID since the dead account's
+  UID isn't new info to the operator. Sysadminctl noise suppressed on
   success, surfaced via `ExecError::NonZero { code, stderr }` on failure.
 - E2E test suite in `tests/cli.rs` (reverse pyramid — no inline unit tests),
-  24 cases via `run_with` / `run_with_exec` helpers
+  43 cases via `run_with` / `run_with_exec` helpers + the
+  `stub_with_tenant` / `stub_with_used_uids` setup helpers
 - macOS-gated smoke test exercises real dscl
 
 Open / likely next:
-- **`destroy <name>`** — natural pair to `create`. Reuses the same seams
-  (Reader for pre-flight state checks, Writer for the action, Executor for
-  exec, Reporter for output). Open design questions: pre-flight guards
-  (require user exists? refuse non-tenant accounts via UID floor / name
-  charset?), home-directory handling (sysadminctl `-deleteUser` defaults vs
-  `-secure` shred vs `-keep`), primary-group residue (sysadminctl removes
-  the user account but may leave the group), idempotence on missing user,
-  confirmation flag (`--yes` per the seven-verb spec convention).
+- **Vertical slice: explicit group lifecycle.** `create` today relies on
+  sysadminctl's implicit "create matching group when `-GID` slot is free"
+  side-effect; `destroy` doesn't touch the group at all. Pair the two:
+  make `create` issue an explicit `dscl . -create /Groups/<name>` (or
+  similar), and have `destroy` issue the matching `-delete`. Once that
+  lands, the destroy path becomes truly symmetric with create.
 - **`status <name>`** — read-only verb; exercises the Reader without
   needing the Writer or Executor. Will likely surface `--strict` (exit
   code on drift) and `--json` (format) as orthogonal axes.
 - **`doctor`** — host-level diagnostic. Multi-line default output will
   likely force `Vec<String>` generalization on `Message` fields.
+
+Future / lower priority:
+- **Config-overridable destroy guards.** Today the UID-floor and charset
+  rails on `destroy` are hard-coded. Move thresholds to a config file when
+  configurability becomes a real need; introduce `--force` to bypass guards
+  explicitly at that point.
+- **Destroy home-directory disposition flag.** Currently always uses the
+  `sysadminctl -deleteUser` default (move the home directory to
+  `/Users/Deleted Users/`). Add `--secure-erase` (shred) and `--keep-home`
+  (retain) when a real use case shows up.
+- **`ExecError::NonZero` stderr sanitization.** Today we echo captured
+  sysadminctl stderr verbatim into our own stderr (via
+  `ExecError::Display`). A hostile dscl / OD response could in principle
+  embed ANSI escapes that mess with the operator's terminal. Low real
+  exposure today (sysadminctl is trusted), but worth a strip-control-chars
+  pass on `ExecError::stderr` if a future verb echoes more captured
+  output, or if we ever shell out to tools that touch untrusted input.
+- **Sudo-prompt explainer line.** Today sysadminctl triggers sudo's
+  `Password:` prompt with no project-side context, so on a cold-cache
+  invocation the operator sees a bare prompt and has to guess why. Emit
+  one line just before invoking the writer that names the privileged
+  action ("`tenant` needs sudo to provision/destroy a user via
+  sysadminctl — you may be prompted for your password"), likely with a
+  terminal color (yellow/cyan) to set it apart from regular output.
+  Lives at the dispatch layer, gated on `stdout.is_terminal()` so it
+  doesn't pollute scripted use. Should be silent in dry-run (no
+  privileged call to explain).
 
 ## File map
 
@@ -59,19 +108,22 @@ Open / likely next:
 src/lib.rs        — public API: pub fn run; declares modules; Cli + Verb + parse;
                     composition-root mode swap (DryRunExecutor when cli.dry_run)
 src/commands.rs   — dispatch (the match on Verb) — no I/O, no cli.dry_run check;
-                    emits errors via reporter.emit_err
+                    emits via reporter.emit_err (failures, refusals) and
+                    reporter.emit (convergent-noop success)
 src/accounts.rs   — Reader + Writer traits; StubReader / MacosReader (dscl);
                     MacosWriter (argv build + Reporter emit + Executor delegation);
-                    validate_name, check_conflict
+                    validate_name, check_conflict, destroy_eligibility
 src/allocation.rs — UidAllocator + TENANT_UID_FLOOR
 src/executor.rs   — Executor trait; SystemExecutor / DryRunExecutor / StubExecutor;
                     ExecError { Spawn, NonZero { code, stderr } }
 src/messages.rs   — Message struct (summary / summary_verbose / dry_run_summary /
-                    detail) + per-action factories (e.g. would_create_tenant /
-                    creating_tenant / created_tenant for the create verb)
+                    detail) + per-action factories (would_create_tenant /
+                    creating_tenant / created_tenant for create; matching trio
+                    for destroy plus destroy_absent, not_a_tenant, and
+                    system_account_refusal)
 src/reporter.rs   — Reporter holds (stdout, stderr, verbose, dry_run); methods
-                    emit_err / emit_real_only / emit_dry_only with mode-aware
-                    summary selection
+                    emit_err / emit (always-on-stdout) / emit_real_only /
+                    emit_dry_only with mode-aware summary selection
 src/main.rs       — composition root: MacosReader::new() + SystemExecutor; tenant::run
 
 tests/cli.rs      — every test here; helpers run_with (default NeverExecutor —
@@ -96,14 +148,38 @@ Things that are easy to violate and would matter:
   confirmation. Each is emitted via the matching Reporter method
   (`emit_dry_only` / `emit_real_only`).
 - **No I/O in command logic** — verbs receive `&mut Reporter`, emit via
-  `reporter.emit_err(...)` (failure paths), return `u8`. They never touch
-  raw writers, check `cli.verbose`, or check `cli.dry_run`. Writers
-  (`accounts::Writer`) also emit via Reporter — they're explicitly an
-  I/O layer (they shell out) and own intent + mechanism rendering for
-  their own actions, using `emit_real_only` / `emit_dry_only` to scope
-  output to the appropriate mode.
+  `reporter.emit_err(...)` (failure paths) or `reporter.emit(...)`
+  (mode-neutral success messages like destroy's convergent-noop), return
+  `u8`. They never touch raw writers, check `cli.verbose`, or check
+  `cli.dry_run`. Writers (`accounts::Writer`) also emit via Reporter —
+  they're explicitly an I/O layer (they shell out) and own intent +
+  mechanism rendering for their own actions, using `emit_real_only` /
+  `emit_dry_only` to scope output to the appropriate mode.
 - **Lexical → state-based check order** — `validate_name` runs before
-  `check_conflict` in dispatch. Cheaper failure first.
+  `check_conflict` (create) / `destroy_eligibility` (destroy) in dispatch.
+  Cheaper failure first.
+- **Convergent semantics for teardown verbs** — `destroy <name>` against
+  an absent tenant is a successful noop, not an error. The state-based
+  precheck (`destroy_eligibility`) returns `NotPresent` and dispatch emits
+  the noop message + exit 0. The same applies to future teardown verbs.
+- **Tenant-floor guard on destroy** — `destroy_eligibility` refuses with
+  `EX_USAGE 64` when the named account exists with a UID below
+  `TENANT_UID_FLOOR` (`NotATenant`) or with no positive UID at all
+  (`SystemAccount` — `nobody` and other negative-UID service accounts).
+  The charset rail (`validate_name`) is the upstream guard; the floor is
+  the downstream guard. Both are hard rails today; making them
+  config-overridable with `--force` is on the roadmap.
+- **Snapshot-then-act on the Reader** — `MacosReader::new()` queries dscl
+  once at composition-root construction; every subsequent lookup is served
+  from that in-memory snapshot. A second admin process mutating `/Users`
+  between snapshot and `sudo sysadminctl …` could in principle cause us
+  to destroy an account whose UID changed after we cleared it. Real-world
+  exploitation requires concurrent root, which means the attacker can
+  already destroy any account directly — so we accept the TOCTOU window
+  today rather than re-snapshotting before each writer call. If a future
+  use case widens the exposure (e.g. long-running daemon mode), the
+  mitigation is to pass `-UID <verified>` to sysadminctl to bind the
+  call to the UID the guard cleared.
 - **Composition-root DI** — `tenant::run` takes `&dyn accounts::Reader`
   and `&dyn executor::Executor`. `main.rs` builds the prod impls
   (`MacosReader`, `SystemExecutor`); tests build their own (`StubReader`,
@@ -111,10 +187,12 @@ Things that are easy to violate and would matter:
   from the active Executor (DryRunExecutor swapped in when `cli.dry_run`),
   so the test seam stays at the Executor boundary while the Writer is an
   internal implementation detail.
-- **Exit codes** — `0` success; `64` (`EX_USAGE`, sysexits.h) for any
-  user-input failure (validation, conflict); `74` (`EX_IOERR`) reserved for
-  dscl / process-execution failure; `1` is clap's default for parse errors
-  (we don't override).
+- **Exit codes** — `0` success (including destroy's convergent noop on an
+  already-absent tenant); `64` (`EX_USAGE`, sysexits.h) for any user-input
+  failure — validation, create-side conflict, destroy-side floor refusal
+  (`NotATenant`), destroy-side system-account refusal (`SystemAccount`);
+  `74` (`EX_IOERR`) reserved for dscl / process-execution failure; `1` is
+  clap's default for parse errors (we don't override).
 - **Acronym casing** — Rust convention treats acronyms as words: `Uid`
   not `UID`, `Macos` not `MacOS`. Methods are `lowest_free_uid`, struct
   is `UidAllocator`, `MacosReader`.
@@ -168,7 +246,7 @@ From the project's design consensus:
 | `exec <name>` | convergent recovery + one command | open |
 | `mode <name>` | session-scoped PF posture (strict / permissive) | open |
 | `doctor` | host-level diagnostic + repair | open |
-| `destroy <name>` | teardown | open |
+| `destroy <name>` | teardown | ✓ (group cleanup deferred — see Roadmap) |
 
 Convention notes:
 - `--strict` and `--json` are orthogonal axes on `status` (exit-code
