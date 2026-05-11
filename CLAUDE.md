@@ -15,219 +15,12 @@ does not mirror the Go shape literally; it follows Rust idioms (clap derive,
 composition-root DI, trait-object Reader, etc.) and has diverged where the
 two languages' conventions diverge.
 
-## Roadmap snapshot
+## Scope
 
-Done:
-- Project init, justfile + pre-commit gates (`fmt --check` + `clippy -D warnings`)
-- `tenant create <name>` works in both dry-run and real mode (V1.5–V1.7;
-  Phase-3 expanded to two-argv group-first ordering — see Phase 3 entry)
-- `tenant destroy <name>` works in both modes; convergent-noop on missing
-  user (exit 0), refuses with `EX_USAGE 64` when the named account exists
-  with a UID outside the tenant range — either a positive UID below
-  `TENANT_UID_FLOOR` (system / human account, message names the floor) or
-  no positive UID at all (system account like `nobody`, distinct message).
-  Charset guard via `validate_name` reuse. Phase 3 added a 4th unconditional
-  `dseditgroup -o delete` step and the `OrphanGroup` eligibility variant
-  for convergent recovery from prior partial failures (see Phase 3 entry).
-- Reserved-name blocklist (V1.8.2): `validate_name` refuses
-  `{root, admin, staff, wheel, daemon, nobody, sudo}` with
-  `NameError::Reserved` → `EX_USAGE`. Set copied verbatim from the
-  sandbox plugin's `scripts/lib/naming.py`. Exact-match semantics —
-  `rooty` / `wheelman` / `admins` pass the check. The lexical
-  leading-letter rule already excludes the `_*` service-account
-  namespace so no special handling for `_sandbox` etc.
-- Destroy mechanism (V1.8): three-step `sysadminctl -deleteUser` →
-  `dscl . -read /Users/<name>` (residue probe, no sudo) → conditional
-  `sudo dscl . -delete /Users/<name>` (cleanup, only if probe shows the DS
-  record still present). Belt-and-braces against the case where
-  sysadminctl reports success but leaves a stale DS record that would
-  block re-init — the mitigation was learned the hard way by the sandbox
-  plugin (`/Users/Shared/sandbox/plugin-dev/claude-plugins/sandbox/`)
-  that originally inspired this CLI. Probe-as-Executor-call (not a
-  Reader live re-read) so the test seam stays at the Executor boundary.
-  Standard-mode stdout is unchanged ("Destroyed tenant 'X'."); verbose
-  shows the upfront pessimistic plan (3 indented argvs under
-  "Destroying tenant 'X'.") followed by per-exec `$ <argv>` echo lines
-  for what actually ran (the cleanup echo is absent when the probe
-  finds DS clean — that asymmetry is the operator-visible signal that
-  the cleanup was unnecessary).
-- `accounts::Reader` trait + `StubReader` (test) + `MacosReader` (dscl).
-  Reader exposes `used_uids`, `used_gids` (added Phase 3), `has_user`,
-  `has_group`, and `uid_for(name)` (added with destroy). `MacosReader`
-  keeps `users` and `uid_by_name` (and `groups` and `gid_by_name`) as
-  separate fields so service accounts with negative UIDs (`nobody`) still
-  trip `has_user` even though they're filtered from the ID maps. The
-  GID-side parse uses `dscl . -list /Groups PrimaryGroupID` with the
-  shared `parse_id_line` helper.
-- `accounts::Writer` trait + `MacosWriter` (sysadminctl + dseditgroup,
-  via Executor); `create_tenant` takes `(name, uid, gid, reporter)` and
-  follows the bracketed Reporter discipline; `destroy_tenant` does too;
-  `destroy_orphan_group` is the convergence-path verb added in Phase 3.
-- `accounts::validate_name` (lexical: `[a-z][a-z0-9_-]{0,30}`, plus
-  reserved-name blocklist `{root, admin, staff, wheel, daemon, nobody, sudo}`
-  copied verbatim from the sandbox plugin's `naming.py`; `EX_USAGE` on fail).
-  Blocklist runs after the charset checks so `Wheel` (capital W) still
-  trips the more-specific `InvalidStart` feedback.
-- `accounts::check_conflict` (state-based via Reader, `EX_USAGE` on fail)
-- `accounts::destroy_eligibility` returns `Eligibility::{Destroyable,
-  NotPresent, OrphanGroup, NotATenant { uid }, SystemAccount}`. `has_user`
-  is the presence gate; `uid_for` carries the floor classification. The
-  `SystemAccount` variant covers accounts present in the user listing
-  with no positive UID (e.g. `nobody` at UID -2), filtered out of
-  `uid_by_name` by `parse_id_line` — without this variant the bug
-  surface is `tenant destroy nobody` emitting a misleading "does not
-  exist" noop instead of refusing. The `OrphanGroup` variant (added in
-  Phase 3) handles the convergent-recovery case where the tenant user
-  is absent but `<name>-tenant-share` is still present.
-- `allocation::UidAllocator::lowest_free_uid` and
-  `allocation::GidAllocator::lowest_free_gid` (both iterate from
-  `TENANT_UID_FLOOR = 600`; independent — Phase 3 explicitly does NOT
-  force UID == GID)
-- `executor::Executor` trait + `SystemExecutor` (real, captures stderr) +
-  `DryRunExecutor` (Ok-noop, swapped in at composition root when `--dry-run`) +
-  `StubExecutor` (records calls; `failing` / `failing_with` for global
-  failure-path tests; `with_response_to` / `with_response_to_stderr` for
-  per-argv-prefix overrides — needed when one specific call in a multi-call
-  verb should fail while others succeed, e.g. destroy's dscl-read probe
-  returning eDSRecordNotFound while sysadminctl succeeds)
-- `Reporter` + `Message`: Reporter holds `(stdout, stderr, verbose, dry_run)`;
-  Message holds `(summary, summary_verbose, dry_run_summary, detail)`; methods
-  are `emit_err` (always-on-stderr), `emit` (always-on-stdout, added with
-  destroy's noop message), `emit_real_only` (silent in dry), and `emit_dry_only`
-  (silent in real). Verbose / dry-run mode selection is centralized in Reporter.
-- Post-exec UX (V1.7): standard real mode emits one confirmation line
-  ("Created tenant 'X'." / "Destroyed tenant 'X'."); verbose adds pre-exec
-  intent + mechanism preview and (for create only) inlines UID into the
-  confirmation — `destroyed_tenant` skips the UID since the dead account's
-  UID isn't new info to the operator. Sysadminctl noise suppressed on
-  success, surfaced via `ExecError::NonZero { code, stderr }` on failure.
-- Multi-argv verbose UX (V1.8, destroy-only today): for verbs that issue
-  more than one shell-out, `would_destroy_tenant` and `destroying_tenant`
-  take `argvs: &[&[String]]` and render the full pessimistic plan as
-  multiple indented lines under one summary. During real-mode execution,
-  `running_argv` Messages emit `$ <argv>` echo lines per Executor call
-  (verbose-only via `summary_verbose`). Operator's view: one upfront plan
-  block + one execution-echo block; conditional commands appear in the
-  plan but only show in the echo if they actually ran.
-- Explicit group lifecycle (Phase 3): the primary group is named
-  `<name>-tenant-share` (centralized via `accounts::tenant_share_group_name`),
-  managed explicitly with `dseditgroup`. Create issues two argvs in
-  group-first order — `sudo dseditgroup -o create -n . -i <gid>
-  <name>-tenant-share` then `sudo sysadminctl -addUser <name> … -GID
-  <gid>` — so the user's home directory chowns to the tenant-share
-  group at creation time, not staff. Destroy appends an unconditional
-  4th step (`sudo dseditgroup -o delete -n . <name>-tenant-share`); the
-  pre-Phase-3 sysadminctl-cascade only caught implicit `<name>` groups
-  and doesn't apply to the renamed group. UID and GID allocators are
-  separate (`UidAllocator` reads `used_uids`, `GidAllocator` reads
-  `used_gids`); they may legitimately produce different numbers
-  (e.g. UID 601, GID 600). Conflict check refuses
-  `<name>-tenant-share`-group existence (not bare `<name>`); a
-  pre-existing bare-name group is now harmless. No
-  dseditgroup-add-member step — the user's primary-group binding gives
-  implicit member access on macOS.
-
-  Partial-failure rollback: if dseditgroup-create succeeds but
-  sysadminctl-addUser fails, the writer rolls back via
-  `dseditgroup -o delete`. The granular `CreateError::{Group, User,
-  UserWithRollback}` enum drives error rendering — the dispatcher
-  picks `create_group_failed` for the dseditgroup case and
-  `create_failed` for the sysadminctl case, with a second
-  `rollback_failed` emission for the worst case (both fail). That
-  second emission carries an em-dash-suffixed recovery hint pointing
-  the operator at `tenant destroy <name>` — which converges via the
-  Phase-3 `Eligibility::OrphanGroup` arm.
-
-  Sandbox-plugin prior art: this is a clean-room port of just the
-  phase-1 user+group machinery from
-  `claude-plugins/sandbox/scripts/lib/phases/phase01_user.py` (argv
-  shapes and tooling choices) and `phase_destroy.py` (cleanup ordering).
-  The group-name suffix and dseditgroup convention come from there.
-- E2E test suite in `tests/cli.rs` (reverse pyramid — no inline unit tests),
-  62 cases via `run_with` / `run_with_exec` helpers + the
-  `stub_with_tenant` / `stub_with_used_uids` setup helpers + the `argv`
-  helper for multi-line argv assertions
-- macOS-gated smoke test exercises real dscl
-
-Open / likely next:
-- **`status <name>`** — read-only verb; exercises the Reader without
-  needing the Writer or Executor. Will likely surface `--strict` (exit
-  code on drift) and `--json` (format) as orthogonal axes.
-- **`doctor`** — host-level diagnostic. Multi-line default output will
-  likely force `Vec<String>` generalization on `Message` fields.
-
-Future / lower priority:
-- **Config-overridable destroy guards.** Today the UID-floor and charset
-  rails on `destroy` are hard-coded. Move thresholds to a config file when
-  configurability becomes a real need; introduce `--force` to bypass guards
-  explicitly at that point.
-- **Destroy home-directory disposition flag.** Currently always uses the
-  `sysadminctl -deleteUser` default (move the home directory to
-  `/Users/Deleted Users/`). Add `--secure-erase` (shred) and `--keep-home`
-  (retain) when a real use case shows up.
-- **Destroy home-directory disclosure.** Today destroy emits no
-  information about what happens to `/Users/<name>` — sysadminctl's
-  default moves it to `/Users/Deleted Users/<name>` (recoverable via
-  `mv` until that directory is emptied or the host is rebuilt), but the
-  operator has no way to know that without reading `man sysadminctl`.
-  Surface this at the dispatch layer: in dry-run / verbose, a pre-exec
-  line stating where the home directory will go and whether the move is
-  reversible; in real mode, a post-exec line pointing at the relocated
-  path. Naturally pairs with the disposition flag entry above — once
-  `--secure-erase` (irreversible) and `--keep-home` (no move) exist, the
-  disclosure line varies by chosen disposition. Until then, the
-  disclosure alone is worth adding because the recoverable-vs-not bit
-  is the load-bearing piece of information for an operator about to
-  destroy an account.
-- **`ExecError::NonZero` stderr sanitization.** Today we echo captured
-  sysadminctl stderr verbatim into our own stderr (via
-  `ExecError::Display`). A hostile dscl / OD response could in principle
-  embed ANSI escapes that mess with the operator's terminal. Low real
-  exposure today (sysadminctl is trusted), but worth a strip-control-chars
-  pass on `ExecError::stderr` if a future verb echoes more captured
-  output, or if we ever shell out to tools that touch untrusted input.
-- **Sudo-prompt explainer line.** Today sysadminctl triggers sudo's
-  `Password:` prompt with no project-side context, so on a cold-cache
-  invocation the operator sees a bare prompt and has to guess why. Emit
-  one line just before invoking the writer that names the privileged
-  action ("`tenant` needs sudo to provision/destroy a user via
-  sysadminctl — you may be prompted for your password"), likely with a
-  terminal color (yellow/cyan) to set it apart from regular output.
-  Lives at the dispatch layer, gated on `stdout.is_terminal()` so it
-  doesn't pollute scripted use. Should be silent in dry-run (no
-  privileged call to explain).
-- **Richer non-verbose default output.** Today standard real mode is
-  one line per verb (`Created tenant 'X'.` / `Destroyed tenant 'X'.`).
-  That's terse to the point of withholding load-bearing facts: an
-  operator who just typed `tenant create devtest` doesn't see the
-  assigned UID/GID, the home directory path, or the suffixed group
-  name — they have to re-run with `-v` (already too late; the account
-  is created) or grep dscl. Proposed default: still one summary line,
-  but enriched — e.g., `Created tenant 'devtest' (UID 600, GID 600,
-  group 'devtest-tenant-share', home /Users/devtest).`. The verbose
-  mode would still add the mechanism preview + `$` echoes on top. The
-  Message factory already supports this (the verbose-confirmation
-  variant exists); the change is promoting some of that information
-  into `summary`. Open questions: how much info before the line gets
-  unwieldy; whether destroy should mirror the shape (less obviously
-  useful since the account is gone — maybe just the home-dir
-  disposition once that ships, per the disclosure entry above).
-- **Pre-execution confirmation prompt.** Today `tenant create` and
-  `tenant destroy` execute immediately — no "are you sure?" between
-  invocation and side effect. Destroy in particular is a destructive
-  verb; the operator should see the planned mechanism and accept it
-  before sysadminctl runs. Proposed shape: show the verbose-style
-  plan (the same one `--dry-run -v` emits today) then read a y/N
-  confirmation from stdin. `--yes` (already in the seven-verb spec
-  as the universal bypass) skips the prompt for scripted use; the
-  prompt itself is gated on `stdin.is_terminal()` so non-interactive
-  callers don't deadlock. Pairs naturally with the sudo-prompt
-  explainer above — the confirmation prompt fires first, then sudo's
-  password prompt, then exec. Implementation note: the prompt lives at
-  the dispatch layer (after eligibility classification, before the
-  writer call), reads from a `BufRead` handed in by the composition
-  root (mirror of the `&mut dyn Write` Reporter pattern, so tests
-  inject scripted input).
+This file carries the stable doctrine and the file map below — facts
+that describe what the code *currently does*, not what we plan to do
+next. For the chronology of shipped versions, `git log --oneline`
+walks the V<n> commits.
 
 ## File map
 
@@ -460,17 +253,18 @@ They're local-only (`language: system`), no PyPI / GitHub deps. Run
 
 ## The seven-verb spec (forward-looking design)
 
-From the project's design consensus:
+From the project's design consensus — verbs and their intended roles.
+Shipping status is in the git log, not here.
 
-| verb | role | status |
-|---|---|---|
-| `create <name>` | one-shot provisioning | ✓ |
-| `status <name>` | health summary; `--strict` for exit-code-on-drift | open |
-| `shell <name>` | convergent recovery + login shell | open |
-| `exec <name>` | convergent recovery + one command | open |
-| `mode <name>` | session-scoped PF posture (strict / permissive) | open |
-| `doctor` | host-level diagnostic + repair | open |
-| `destroy <name>` | teardown | ✓ |
+| verb | role |
+|---|---|
+| `create <name>` | one-shot provisioning |
+| `status <name>` | health summary; `--strict` for exit-code-on-drift |
+| `shell <name>` | convergent recovery + login shell |
+| `exec <name>` | convergent recovery + one command |
+| `mode <name>` | session-scoped PF posture (strict / permissive) |
+| `doctor` | host-level diagnostic + repair |
+| `destroy <name>` | teardown |
 
 Convention notes:
 - `--strict` and `--json` are orthogonal axes on `status` (exit-code
@@ -487,17 +281,17 @@ Convention notes:
   + skill that host-isolates Claude Code agents on macOS via per-agent
   user accounts, primary groups (named `<agent>-share`), PF anchors,
   login keychains, sudoers, and shared-root ACLs. The Rust `tenant` CLI
-  is a clean-room rewrite of just **Phase 1** of the plugin's pipeline —
-  the user-account primitive — intentionally agent-/Claude-Code-agnostic.
-  Load-bearing files when designing tenant features: `scripts/lib/phases/phase01_user.py`
-  (user + group creation; canonical answer to "what argv shape works"),
-  `scripts/lib/phases/phase_destroy.py` (the dscl-residue mitigation
-  V1.8 ports here), `scripts/lib/naming.py` (reserved-name set),
-  `scripts/lib/allocation.py` (UID allocator shape).
+  is a generic agent-/Claude-Code-agnostic primitive for the
+  user-account + primary-group layer; a future Claude-Code-specific
+  layer would consume `tenant` and add Claude-specific phases on top.
+  Load-bearing plugin files for prior-art lookups:
+  `scripts/lib/phases/phase01_user.py` (user + group; "what argv
+  shape works"), `scripts/lib/phases/phase_destroy.py` (dscl-residue
+  mitigation), `scripts/lib/naming.py` (reserved-name set),
+  `scripts/lib/allocation.py` (UID allocator shape),
+  `scripts/lib/phases/phase02_pf.py` + `scripts/lib/pf.py` (PF
+  anchor management — relevant for the next-phase build).
 - **Go prototype (deprecated):** `/Users/plugin-dev/src/tenant/`. An
   intermediate iteration from before the Rust port; not being continued.
   Don't cross-reference for design decisions — the sandbox plugin is the
   source of truth for prior art, and the Rust port is the live codebase.
-  The Go project's `.features/spec/` directory contains the seven-verb
-  spec text (gitignored there; not duplicated here) — only useful as a
-  historical record of the spec's wording.
