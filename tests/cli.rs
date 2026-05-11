@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use tenant::accounts::Reader;
 use tenant::accounts::StubReader;
 use tenant::executor::{ExecError, Executor, StubExecutor};
 
@@ -201,6 +203,44 @@ fn create_rejects_overlong_name() {
         stderr,
         format!("tenant: name '{name}' is too long (32 characters; maximum is 31)\n"),
     );
+}
+
+#[test]
+fn create_rejects_reserved_names() {
+    // Lexical blocklist on top of charset rules: even though these names
+    // all pass `[a-z][a-z0-9_-]*`, they're reserved as macOS system /
+    // role names and would either alias a real account (`root`, `nobody`)
+    // or carry semantics we don't want a tenant to inherit (`wheel`,
+    // `staff`, `sudo`). Copied verbatim from the sandbox plugin's
+    // `scripts/lib/naming.py` reserved set — see CLAUDE.md cross-reference.
+    for name in [
+        "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
+    ] {
+        let (code, stdout, stderr) =
+            run_with(StubReader::default(), &["create", name, "--dry-run"]);
+        assert_eq!(code, 64, "want EX_USAGE for {name:?}");
+        assert!(
+            stdout.is_empty(),
+            "stdout should be empty for {name:?}: {stdout:?}"
+        );
+        let want = format!("tenant: name '{name}' is reserved (matches a system or role name)\n");
+        assert_eq!(stderr, want, "stderr mismatch for {name:?}");
+    }
+}
+
+#[test]
+fn create_accepts_name_with_reserved_prefix() {
+    // Pins exact-match semantics on the blocklist: 'rooty' / 'wheelman'
+    // contain reserved names as substrings but are not themselves
+    // reserved. A future refactor that swaps `contains` for `starts_with`
+    // or vice-versa would silently break this — the test guards the
+    // intended behavior.
+    for name in ["rooty", "wheelman", "admins", "daemonic"] {
+        let (code, stdout, stderr) =
+            run_with(StubReader::default(), &["create", name, "--dry-run"]);
+        assert_eq!(code, 0, "want success for {name:?}; stderr={stderr:?}");
+        assert_eq!(stdout, format!("Would create tenant '{name}'.\n"));
+    }
 }
 
 #[test]
@@ -552,20 +592,23 @@ fn destroy_noop_when_user_missing() {
 
 #[test]
 fn destroy_refuses_below_floor() {
-    // System account masquerading as a destroyable tenant: name passes
-    // validate_name (lowercase, no funny chars) but UID is below the
-    // tenant floor. Refuse with EX_USAGE; never reach the executor.
+    // Name passes validate_name (lowercase, valid charset, NOT in
+    // RESERVED_NAMES) but UID is below the tenant floor — i.e. the
+    // state-based refusal, not the lexical one. The synthetic name
+    // `legacyusr` deliberately sidesteps the blocklist so the floor
+    // guard is the actual code path under test. Refuse with EX_USAGE;
+    // never reach the executor.
     let stub = StubReader {
-        users: vec!["wheel".to_string()],
-        uid_by_name: [("wheel".to_string(), 0)].into_iter().collect(),
+        users: vec!["legacyusr".to_string()],
+        uid_by_name: [("legacyusr".to_string(), 0)].into_iter().collect(),
         ..Default::default()
     };
-    let (code, stdout, stderr) = run_with(stub, &["destroy", "wheel"]);
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "legacyusr"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
         stderr,
-        "tenant: refusing to destroy 'wheel': UID 0 is below tenant floor 600\n"
+        "tenant: refusing to destroy 'legacyusr': UID 0 is below tenant floor 600\n"
     );
 }
 
@@ -613,24 +656,26 @@ fn destroy_accepts_at_floor() {
 
 #[test]
 fn destroy_refuses_when_uid_unknown_but_user_present() {
-    // `nobody` on macOS has UID -2, which `parse_uid_line` filters out
-    // of `uid_by_name`. The user is still present in the user listing, so
-    // `has_user` is true but `uid_for` returns None — that's the
-    // `SystemAccount` variant. Refuse with `EX_USAGE`, NOT a noop, so the
-    // operator sees the real state ("system account") rather than the
-    // misleading "does not exist".
+    // The canonical real-world case is `nobody` on macOS (UID -2 filtered
+    // by `parse_uid_line` out of `uid_by_name`), but `nobody` is now
+    // lexically reserved — the blocklist trips first. Synthetic
+    // `phantom` reproduces the same Reader state (present in `users`,
+    // absent from `uid_by_name`) without crossing the reserved-name
+    // rail, so the test still pins the `Eligibility::SystemAccount`
+    // arm. `has_user` is true, `uid_for` returns None → refuse with
+    // EX_USAGE, NOT a noop.
     let stub = StubReader {
-        users: vec!["nobody".to_string()],
+        users: vec!["phantom".to_string()],
         // uid_by_name deliberately empty: simulates the parse_uid_line
         // negative-UID filter.
         ..Default::default()
     };
-    let (code, stdout, stderr) = run_with(stub, &["destroy", "nobody"]);
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "phantom"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
         stderr,
-        "tenant: refusing to destroy 'nobody': system account (no tenant-range UID)\n"
+        "tenant: refusing to destroy 'phantom': system account (no tenant-range UID)\n"
     );
 }
 
@@ -671,6 +716,31 @@ fn destroy_noop_emits_in_dry_run_too() {
     let (code, stdout, stderr) = run_with(StubReader::default(), &["destroy", "dev", "--dry-run"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "tenant 'dev' does not exist; nothing to do.\n");
+}
+
+#[test]
+fn destroy_rejects_reserved_names() {
+    // Validate_name is shared between create and destroy via the
+    // dispatch layer's lexical-then-state-based check order. This test
+    // pins that the blocklist applies to destroy too — important because
+    // destroy_eligibility's `NotATenant` floor guard would catch most
+    // reserved names by UID, but the lexical refusal is the cheaper
+    // first failure (no Reader call needed) and surfaces the more
+    // operator-relevant reason ("you can't name a tenant 'wheel'" vs
+    // "UID 0 is below tenant floor 600").
+    for name in [
+        "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
+    ] {
+        let (code, stdout, stderr) =
+            run_with(StubReader::default(), &["destroy", name, "--dry-run"]);
+        assert_eq!(code, 64, "want EX_USAGE for {name:?}");
+        assert!(
+            stdout.is_empty(),
+            "stdout should be empty for {name:?}: {stdout:?}"
+        );
+        let want = format!("tenant: name '{name}' is reserved (matches a system or role name)\n");
+        assert_eq!(stderr, want, "stderr mismatch for {name:?}");
+    }
 }
 
 #[test]
@@ -730,23 +800,29 @@ fn destroy_dry_run_bypasses_injected_executor() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_reader_detects_root_conflict() {
-    // End-to-end smoke test: build a real MacosReader against the host's
-    // dscl, run `tenant create root --dry-run`, expect a conflict.
-    // `root` is universally present on macOS, so this is host-stable.
+fn macos_reader_observes_host_state() {
+    // Smoke test that the real `MacosReader` populates correctly from
+    // dscl. Was originally an end-to-end `tenant create root --dry-run`
+    // assertion, but Phase 2's reserved-name blocklist now refuses
+    // `root` at the lexical layer before dispatch reaches the Reader —
+    // which means the old test no longer exercises dscl integration.
+    // Direct Reader assertions instead: `root` (UID 0) and `wheel`
+    // (group) are universally present on macOS, so this is host-stable
+    // and proves the dscl → MacosReader translation works end-to-end
+    // for both the user listing and the group listing. The dispatch
+    // path is already extensively covered via StubReader.
     let reader = tenant::accounts::MacosReader::new().expect("dscl should be available on macOS");
-    let exec = NeverExecutor;
-    let mut stdout: Vec<u8> = Vec::new();
-    let mut stderr: Vec<u8> = Vec::new();
-    let args: Vec<String> = ["create", "root", "--dry-run"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    let code = tenant::run(&args, &reader, &exec, &mut stdout, &mut stderr);
-    let stderr_str = String::from_utf8_lossy(&stderr);
-    assert_eq!(code, 64, "stderr={stderr_str:?}");
     assert!(
-        stderr_str.contains("'root' already exists"),
-        "stderr should mention root conflict, got: {stderr_str:?}",
+        reader.has_user("root"),
+        "MacosReader should see 'root' user"
+    );
+    assert!(
+        reader.has_group("wheel"),
+        "MacosReader should see 'wheel' group"
+    );
+    assert_eq!(
+        reader.uid_for("root"),
+        Some(0),
+        "root's UID should be 0 in the in-memory map"
     );
 }

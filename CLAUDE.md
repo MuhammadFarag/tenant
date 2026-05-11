@@ -25,6 +25,13 @@ Done:
   no positive UID at all (system account like `nobody`, distinct message).
   Charset guard via `validate_name` reuse. No group cleanup yet — paired
   with explicit group lifecycle in the next vertical slice (see Open).
+- Reserved-name blocklist (V1.8.2): `validate_name` refuses
+  `{root, admin, staff, wheel, daemon, nobody, sudo}` with
+  `NameError::Reserved` → `EX_USAGE`. Set copied verbatim from the
+  sandbox plugin's `scripts/lib/naming.py`. Exact-match semantics —
+  `rooty` / `wheelman` / `admins` pass the check. The lexical
+  leading-letter rule already excludes the `_*` service-account
+  namespace so no special handling for `_sandbox` etc.
 - Destroy mechanism (V1.8): three-step `sysadminctl -deleteUser` →
   `dscl . -read /Users/<name>` (residue probe, no sudo) → conditional
   `sudo dscl . -delete /Users/<name>` (cleanup, only if probe shows the DS
@@ -47,7 +54,11 @@ Done:
   trip `has_user` even though they're filtered from the UID map.
 - `accounts::Writer` trait + `MacosWriter` (sysadminctl-backed via Executor);
   `create_tenant` and `destroy_tenant` both follow the three-message bracket.
-- `accounts::validate_name` (lexical: `[a-z][a-z0-9_-]{0,30}`, `EX_USAGE` on fail)
+- `accounts::validate_name` (lexical: `[a-z][a-z0-9_-]{0,30}`, plus
+  reserved-name blocklist `{root, admin, staff, wheel, daemon, nobody, sudo}`
+  copied verbatim from the sandbox plugin's `naming.py`; `EX_USAGE` on fail).
+  Blocklist runs after the charset checks so `Wheel` (capital W) still
+  trips the more-specific `InvalidStart` feedback.
 - `accounts::check_conflict` (state-based via Reader, `EX_USAGE` on fail)
 - `accounts::destroy_eligibility` returns `Eligibility::{Destroyable,
   NotPresent, NotATenant { uid }, SystemAccount}`. `has_user` is the
@@ -85,22 +96,12 @@ Done:
   block + one execution-echo block; conditional commands appear in the
   plan but only show in the echo if they actually ran.
 - E2E test suite in `tests/cli.rs` (reverse pyramid — no inline unit tests),
-  46 cases via `run_with` / `run_with_exec` helpers + the
+  49 cases via `run_with` / `run_with_exec` helpers + the
   `stub_with_tenant` / `stub_with_used_uids` setup helpers + the `argv`
   helper for multi-line argv assertions
 - macOS-gated smoke test exercises real dscl
 
 Open / likely next (phases of the explicit-group-lifecycle vertical slice):
-- **Phase 2: reserved-name blocklist.** `validate_name` is purely lexical
-  today, so it would happily accept `wheel`, `staff`, `admin`, etc. The
-  state-based prechecks (`check_conflict` for create, `destroy_eligibility`
-  for destroy) catch these by other means, but the lexical guard is the
-  cheapest first failure and should refuse them up front. Plan: copy the
-  sandbox plugin's blocklist `{root, admin, staff, wheel, daemon, nobody,
-  sudo}` (see `/Users/Shared/sandbox/plugin-dev/claude-plugins/sandbox/scripts/lib/naming.py`),
-  add a `NameError::Reserved` variant, exit `EX_USAGE`. The macOS `_*`
-  service-account namespace is already excluded by the leading-letter rule
-  so no special handling needed for `_sandbox` etc.
 - **Phase 3: explicit group lifecycle.** Decision frame from earlier
   design pass: group-first ordering on create (group exists before
   sysadminctl runs, so the home directory's group ownership lands on the

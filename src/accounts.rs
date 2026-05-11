@@ -48,6 +48,20 @@ impl Reader for StubReader {
 
 const MAX_NAME_LEN: usize = 31;
 
+/// macOS system / role names that pass the lexical charset rules
+/// (`[a-z][a-z0-9_-]*`) but would either alias a real account
+/// (`root`, `nobody`) or carry privileged semantics we don't want a
+/// tenant to inherit (`wheel`, `staff`, `sudo`). Refused by `validate_name`
+/// with `NameError::Reserved`, mapped to `EX_USAGE` at dispatch. The set
+/// is copied verbatim from the sandbox plugin's
+/// `scripts/lib/naming.py` — see CLAUDE.md cross-reference. The macOS
+/// `_*` service-account namespace is already excluded by the
+/// leading-letter rule (`InvalidStart`) so no special handling needed
+/// for `_sandbox` etc.
+const RESERVED_NAMES: &[&str] = &[
+    "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
+];
+
 /// Lexical-validation outcomes from `validate_name`. Each variant carries
 /// just enough information for the matching message factory in
 /// `messages.rs` to render an operator-friendly explanation.
@@ -56,7 +70,14 @@ pub enum NameError {
     Empty,
     InvalidStart(char),
     InvalidCharacter(char),
-    TooLong { len: usize, max: usize },
+    TooLong {
+        len: usize,
+        max: usize,
+    },
+    /// Lexically valid but appears in `RESERVED_NAMES`. The error message
+    /// uses the name itself (already in dispatch context) so this variant
+    /// is payload-free.
+    Reserved,
 }
 
 /// State-based conflict outcomes from `check_conflict` (the create-side
@@ -390,6 +411,13 @@ pub fn validate_name(name: &str) -> Result<(), NameError> {
         if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
             return Err(NameError::InvalidCharacter(c));
         }
+    }
+    // Reserved-name check runs after the lexical guards so a name like
+    // `Wheel` (capital W) still trips the more-specific `InvalidStart`
+    // feedback rather than the blunter `Reserved` one. Exact match
+    // intentionally — `rooty` is fine, only bare `root` is refused.
+    if RESERVED_NAMES.contains(&name) {
+        return Err(NameError::Reserved);
     }
     Ok(())
 }

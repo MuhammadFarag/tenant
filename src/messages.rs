@@ -193,6 +193,9 @@ pub(crate) fn invalid_name(name: &str, error: &NameError) -> Message {
         NameError::TooLong { len, max } => {
             format!("tenant: name '{name}' is too long ({len} characters; maximum is {max})")
         }
+        NameError::Reserved => {
+            format!("tenant: name '{name}' is reserved (matches a system or role name)")
+        }
     };
     Message {
         summary: Some(summary),
