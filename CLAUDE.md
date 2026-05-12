@@ -26,21 +26,30 @@ walks the V<n> commits.
 
 ```
 src/lib.rs        — public API: pub fn run; declares modules; Cli + Verb + parse;
-                    composition-root mode swap (DryRunExecutor when cli.dry_run)
-src/commands.rs   — dispatch (the match on Verb) — no I/O, no cli.dry_run check;
-                    emits via reporter.emit_err (failures, refusals) and
-                    reporter.emit (convergent-noop success). Create-side
-                    matches CreateError::{Group, User, UserWithRollback, Profile};
+                    composition-root mode swap (DryRunExecutor when cli.dry_run);
+                    constructs Reporter with the active Executor reference so
+                    plan + echo lines render lazily via Op::describe_via.
+src/commands.rs   — dispatch (the match on Verb) — no I/O, no cli.dry_run check.
+                    Calls Reporter's verb-named methods directly: refuse_*
+                    methods for validation / conflict / eligibility refusals;
+                    create_group_failed / create_failed / create_rollback_failed
+                    / create_profile_failed for create's four error variants;
+                    destroy_failed / destroy_profile_failed via
+                    `surface_destroy_error` for both destroy arms;
+                    shell_failed for shell spawn failures; destroy_absent for
+                    the convergent noop. Create-side matches
+                    CreateError::{Group, User, UserWithRollback, Profile};
                     destroy-side matches the 5-variant Eligibility and surfaces
-                    DestroyError::{Account, Profile} via `surface_destroy_error`.
-                    Shell-side reuses the same Eligibility classifier but
-                    collapses NotPresent + OrphanGroup into a single
-                    `shell_absent` refusal (the operator wants a shell; the
-                    lingering group alone can't host one) and clamps the
-                    child shell's i32 exit code into u8 for propagation.
+                    DestroyError::{Account, Profile}. Shell-side reuses the
+                    same Eligibility classifier but collapses NotPresent +
+                    OrphanGroup into a single `refuse_shell_absent` refusal
+                    (the operator wants a shell; the lingering group alone
+                    can't host one) and clamps the child shell's i32 exit
+                    code into u8 for propagation.
 src/accounts.rs   — Reader trait + StubReader / MacosReader (dscl);
                     Writer struct (composes AccountOp / ProfileOp values into
-                    verb-level flows, hands them to the Executor); validate_name,
+                    verb-level flows, hands them to the Executor via the
+                    generic `run<O: WritableOp>` helper); validate_name,
                     check_conflict, destroy_eligibility.
                     `tenant_share_group_name(name)` is the single source of
                     truth for the `<name>-tenant-share` suffix. `create_tenant`
@@ -54,13 +63,18 @@ src/accounts.rs   — Reader trait + StubReader / MacosReader (dscl);
                     convergence path (DeleteShareGroup + ProfileOp::Delete).
                     `shell_into_tenant` builds a LoginAsUser op solely for
                     plan rendering and dispatches through `Executor::login`,
-                    returning the child shell's i32 exit code.
-                    `parse_id_line` is the shared parser for both UID and
-                    GID dscl listings (negative-ID filter + lowest-wins fold).
+                    returning the child shell's i32 exit code. The private
+                    `run<O: WritableOp>` helper couples per-step `$` echo +
+                    execute into one call — the Writer body reads as build
+                    ops → reporter.<verb>_starting → self.run(op, reporter)
+                    per step → reporter.<verb>_done. `parse_id_line` is the
+                    shared parser for both UID and GID dscl listings
+                    (negative-ID filter + lowest-wins fold).
 src/allocation.rs — UidAllocator + GidAllocator (both iterate from
                     TENANT_UID_FLOOR = 600; consult disjoint Reader maps,
                     independent values)
-src/executor.rs   — Per-domain Op enums + unified Executor substrate.
+src/executor.rs   — Per-domain Op enums + unified Executor substrate + the
+                    `Op` ADT root + `WritableOp` trait bridge.
                     `AccountOp` variants: CreateShareGroup, DeleteShareGroup,
                     CreateTenantUser, DeleteTenantUser, LookupUserRecord (the
                     dscl-read probe; success means record present),
@@ -74,56 +88,43 @@ src/executor.rs   — Per-domain Op enums + unified Executor substrate.
                     AccountError>` and `execute_profile(op) -> Result<(),
                     ProfileError>` (perform the side effect on this host);
                     `login(name) -> Result<i32, AccountError>` (interactive
-                    path with inherited stdio and child exit code). Impls:
-                    `MacosExecutor` (production; argv knowledge lives in the
-                    private `account_argv` helper and the literal-shell
-                    describe arms; `execute_account` spawns capturing,
-                    `login` spawns inheriting), `StubExecutor` (records ops
-                    via `account_ops()` / `profile_ops()` / `logins()`; per-op
-                    failure injection via `fail_account_op(op, err)`;
-                    blanket failure via `fail_account_blanket(code, stderr)`;
-                    one-shot profile failure via `fail_next_profile(err)`;
-                    login exit code via `login_exit_code(n)`; in-memory
-                    profile state simulation via `with_existing_profile` +
-                    `has_profile` + `profile_state`), `DryRunExecutor`
-                    (no-op execute / login; describe delegates to
-                    MacosExecutor). `AccountError { Spawn, NonZero { code,
-                    stderr } }` mirrors the previous ExecError shape; the
-                    `Display` impl prefixes "process exited with code N"
-                    and appends captured stderr when present.
-src/messages.rs   — Message struct (summary / summary_verbose / dry_run_summary /
-                    detail) + per-action factories. `PlanStep<'a>` carries a
-                    pre-rendered display line + optional `# <note>`
-                    annotation; the writer builds plans via `PlanStep::plain`
-                    / `PlanStep::annotated` using the executor's `describe_*`
-                    output. `render_plan` joins steps with two-space
-                    indentation and appends the annotation suffix when set.
-                    Create trio (would_create_tenant / creating_tenant /
-                    created_tenant) — created_tenant inlines UID + GID in
-                    verbose. Destroy trio (would_destroy_tenant /
-                    destroying_tenant / destroyed_tenant). Orphan-group trio
-                    (would_destroy_orphan_group / destroying_orphan_group /
-                    destroyed_orphan_group) — standard-mode framing names the
-                    tenant; verbose adds the literal group name. `running`
-                    is the unified per-step echo factory (`$ <rendered>`),
-                    used for both real shell-outs and synthetic profile
-                    steps. Error factories: `create_group_failed`,
-                    `create_failed`, `create_profile_failed`,
-                    `rollback_failed` (em-dash-suffixed recovery hint),
-                    `destroy_failed`, `destroy_profile_failed`, plus
-                    destroy_absent, not_a_tenant, system_account_refusal,
-                    invalid_name, name_conflict. Shell pair
-                    (would_shell_into_tenant / shelling_into_tenant) — pair
-                    not trio because there's no post-exec confirmation (the
-                    operator IS the shell after login returns). The
-                    "Shelling into" intent line lives in `summary` (not
-                    `summary_verbose`) so it emits in standard mode too —
-                    without a post-exec line to do the talking, standard-mode
-                    silence would leave the operator looking at a bare sudo
-                    prompt with no project-side context. Shell refusals:
-                    shell_absent (collapsed NotPresent+OrphanGroup),
-                    shell_not_a_tenant, shell_system_account_refusal,
-                    shell_failed (spawn failure).
+                    path with inherited stdio and child exit code).
+                    `Op<'a>` is the top-level ADT wrapper for "any op,
+                    regardless of domain" — variants are Account(&AccountOp)
+                    and Profile(&ProfileOp). `Op::describe_via(executor)` is
+                    the one place that matches on domain for display purposes,
+                    dispatching to `executor.describe_account` or
+                    `executor.describe_profile`. The Reporter uses Op for both
+                    upfront plan rendering and per-step `$` echo lines.
+                    `WritableOp` is the bridge from a leaf op to typed
+                    execution — `execute_via(executor) -> Result<(),
+                    Self::Error>` returns the domain-specific error type, and
+                    `op_ref() -> Op<'_>` produces the Op for echo display.
+                    Implemented for `AccountOp` (Error = AccountError) and
+                    `ProfileOp` (Error = ProfileError). `Writer::run` is
+                    generic over `WritableOp`, so one method handles both
+                    domains while preserving typed errors. LoginAsUser is
+                    intentionally NOT routed through `WritableOp` — the
+                    Writer's shell path calls `executor.login(name)` directly
+                    because login's stdio inheritance + i32 return are
+                    incompatible with `execute_account`'s capture + unit
+                    return. Impls: `MacosExecutor` (production; argv knowledge
+                    lives in the private `account_argv` helper and the
+                    literal-shell describe arms; `execute_account` spawns
+                    capturing, `login` spawns inheriting), `StubExecutor`
+                    (records ops via `account_ops()` / `profile_ops()` /
+                    `logins()`; per-op failure injection via
+                    `fail_account_op(op, err)`; blanket failure via
+                    `fail_account_blanket(code, stderr)`; one-shot profile
+                    failure via `fail_next_profile(err)`; login exit code via
+                    `login_exit_code(n)`; in-memory profile state simulation
+                    via `with_existing_profile` + `has_profile` +
+                    `profile_state`), `DryRunExecutor` (no-op execute / login;
+                    describe delegates to MacosExecutor). `AccountError
+                    { Spawn, NonZero { code, stderr } }` mirrors the previous
+                    ExecError shape; the `Display` impl prefixes "process
+                    exited with code N" and appends captured stderr when
+                    present.
 src/profile.rs    — Domain data shapes for the profile-op interface that
                     Executor owns: `ProfileError` (wraps fs or injected
                     failure messages); `default_profile_toml()` (the
@@ -131,14 +132,36 @@ src/profile.rs    — Domain data shapes for the profile-op interface that
                     create-time); `display_path_for(name)` (the literal-`~`
                     form used in plan / echo / error frames; the absolute
                     path lives privately inside MacosExecutor).
-src/reporter.rs   — Reporter holds (stdout, stderr, verbose, dry_run); methods
-                    emit_err / emit (always-on-stdout) / emit_real_only /
-                    emit_dry_only with mode-aware summary selection.
-                    `summary_verbose` applies in both real+verbose AND
-                    dry-run+verbose (verbose-intent honors the operator's
-                    `-v` regardless of mode); `dry_run_summary` is the
-                    dry-run-specific override when no verbose override exists.
-src/main.rs       — composition root: MacosReader::new() + MacosExecutor; tenant::run
+src/reporter.rs   — Operator-facing output: the layer between domain ops and
+                    what the operator reads. Holds (stdout, stderr, verbose,
+                    dry_run, executor); each verb has its own pre-exec /
+                    post-exec methods that bake in the verb-specific phrasing
+                    and handle mode/verbosity branching internally. Verb
+                    methods:
+                      create_starting(name, plan) / create_done(name, uid, gid)
+                      destroy_starting(name, plan) / destroy_done(name)
+                      orphan_group_starting(name, plan) /
+                        orphan_group_done(name)
+                      shell_starting(name, login_op)  — pair, no _done
+                      destroy_absent(name)            — convergent noop
+                    Plan parameter shape: `&[(Op<'_>, Option<&'static str>)]`
+                    — `Op` for domain dispatch, the `Option<&'static str>`
+                    slot for per-step annotations (cycle 1's `# on rollback`).
+                    The Reporter walks the plan via `render_plan` (private),
+                    calling `op.describe_via(self.executor)` per step. The
+                    per-step echo method `step(op: Op<'_>)` emits `$
+                    <rendered>` in real+verbose only, lazily rendering via
+                    `Op::describe_via`. Refusal methods (all to stderr,
+                    operator-friendly framing): refuse_invalid_name,
+                    refuse_name_conflict, refuse_not_a_tenant,
+                    refuse_system_account, refuse_shell_absent,
+                    refuse_shell_not_a_tenant, refuse_shell_system_account.
+                    Failure methods (also stderr): create_group_failed,
+                    create_failed, create_rollback_failed (em-dash-suffixed
+                    recovery hint), create_profile_failed, destroy_failed,
+                    destroy_profile_failed, shell_failed.
+src/main.rs       — composition root: MacosReader::new() + MacosExecutor;
+                    tenant::run
 
 tests/cli.rs           — every E2E test here; helpers run_with (default
                          NeverExecutor — panics on use, guards "should not
@@ -160,55 +183,58 @@ tests/macos_executor.rs — per-variant unit tests pinning the literal shell-
 
 Things that are easy to violate and would matter:
 
-- **Intent / mechanism split** — every user-facing emission has a "summary"
-  (intent) and an optional "detail" (mechanism — the rendered shell-style
-  line, verbose only). Reporter picks the right summary for the current
-  mode/verbosity from up to four Message fields: `summary` (default),
-  `summary_verbose` (verbose override — applies in BOTH real+verbose AND
-  dry-run+verbose; e.g. inlining UID+GID or naming the suffixed group),
-  and `dry_run_summary` (dry-run-specific override when no verbose
-  override exists; "Would create…" vs "Creating…"). Verbose intent
-  wins over mode-specific framing — the operator's `-v` request applies
-  regardless of `--dry-run`. Action factories live in `messages.rs`.
-  The pattern for a side-effecting verb is three bracketing
-  messages: `would_<action>` for dry-only pre-exec, `<action>ing`
-  (gerund) for real-verbose-only pre-exec intent + mechanism,
-  `<action>ed` (past participle) for real-only post-exec confirmation.
-  Each is emitted via the matching Reporter method (`emit_dry_only` /
-  `emit_real_only`). For verbs that issue more than one substrate call
-  (destroy was the first; create grew to four steps in cycle 1), the
-  `would_<action>` / `<action>ing` factories take `&[PlanStep<'_>]`
-  and render the full pessimistic plan as multi-line detail; `running`
-  Messages then emit `$ <rendered>` echo lines per substrate call inside
-  the Writer. Conditional steps appear in the upfront plan but only echo
-  if they actually run — the plan-vs-echo asymmetry is the operator-
-  visible signal that a conditional step was skipped. The create plan's
-  rollback line carries an `# on rollback` annotation in the plan
-  (rolls back only on CreateTenantUser failure); the rollback also
-  appears in the echo block when it actually fires (e.g. on partial-
-  failure paths). The annotation channel is general — cycle 2's PF
-  restore-on-reload-failure step will share the same shape.
-  Interactive verbs like `shell` use a 2-message pair (no post-exec
-  past-participle) — the operator IS the shell after `login` returns,
+- **Intent / mechanism split** — every user-facing emission is two-tier:
+  a summary line (intent) and an optional indented detail block
+  (mechanism, verbose only). Per-verb methods on `Reporter`
+  (`create_starting` / `create_done`, `destroy_starting` / `destroy_done`,
+  `orphan_group_starting` / `orphan_group_done`, `shell_starting`,
+  plus refusal and failure methods) bake in the verb-specific phrasing
+  and branch internally on (dry_run, verbose) to pick the right text.
+  Each verb's `_starting` method takes a plan
+  (`&[(Op<'_>, Option<&'static str>)]` — Op for domain dispatch, the
+  optional annotation slot for `# on rollback`-style notes); verbose
+  mode renders the plan as a multi-line indented block. The Writer
+  then emits per-step `$ <rendered>` echo lines via `Reporter::step` as
+  each op executes — `step` is silent in dry-run and standard mode,
+  active only in real+verbose. Conditional steps appear in the upfront
+  plan but only echo if they actually run; the plan-vs-echo asymmetry
+  is the operator-visible signal that a conditional step was skipped.
+  The create plan's rollback line carries an `# on rollback` annotation
+  (fires only on CreateTenantUser failure); the rollback also appears
+  in the echo block when it actually fires. The annotation channel is
+  general — cycle 2's PF restore-on-reload-failure step will share the
+  same shape. Interactive verbs like `shell` use a `_starting`-only
+  pair (no `_done`) — the operator IS the shell after `login` returns,
   so a "Shelled into…" line after they exit would print to the host's
   terminal in a different session context. The "Shelling into" intent
-  populates `summary` (not `summary_verbose`) so it shows in standard
-  mode too — there's no post-exec line to acknowledge the action
-  otherwise.
+  emits in standard mode too (not just verbose) so there's a
+  project-side acknowledgement before the bare sudo prompt.
 - **Intent (data) vs mechanism (substrate impl)** — the Writer expresses
   intent via `AccountOp` / `ProfileOp` values; argv-construction and
   subprocess spawning live exclusively inside `MacosExecutor`'s
   `describe_account` / `execute_account` (plus the private `account_argv`
-  helper). No `build_*_argv` helpers at the Writer level — they were
-  removed when the intent/mechanism split landed. The Writer never sees
-  argv; tests assert on op identity (`exec.account_ops()[N] ==
-  AccountOp::CreateShareGroup { name: "dev".into(), gid: 600 }`), and the
-  literal shell-command shape is pinned narrowly via
-  `tests/macos_executor.rs` (one test per variant). Verbose-mode E2E
-  stdout assertions in `cli.rs` still pin the operator-visible bytes
-  end-to-end; the per-variant unit tests are the focused mechanism
-  contract so a future swap (e.g. dseditgroup → dscl . -create) touches
-  exactly one place per op.
+  helper). The Writer never sees argv; tests assert on op identity
+  (`exec.account_ops()[N] == AccountOp::CreateShareGroup { name:
+  "dev".into(), gid: 600 }`), and the literal shell-command shape is
+  pinned narrowly via `tests/macos_executor.rs` (one test per variant).
+  Verbose-mode E2E stdout assertions in `cli.rs` still pin the
+  operator-visible bytes end-to-end; the per-variant unit tests are
+  the focused mechanism contract so a future swap (e.g. dseditgroup
+  → dscl . -create) touches exactly one place per op.
+- **ADT hierarchy: Op → AccountOp / ProfileOp; WritableOp bridges
+  back** — `Op<'a>` is the top-level enum wrapping `&AccountOp` or
+  `&ProfileOp`. `AccountOp` and `ProfileOp` are leaf ADTs with their
+  own variants. `Op::describe_via(executor)` is the one place that
+  matches on domain for display purposes — Reporter's plan rendering
+  and per-step echo both flow through it. Execution goes the other
+  direction: the `WritableOp` trait bridges from a leaf op back to a
+  typed execution path, with `Self::Error` preserving the per-domain
+  error type (`AccountError` for AccountOp, `ProfileError` for
+  ProfileOp). `Writer::run<O: WritableOp>` is generic over the trait;
+  one method handles both domains while keeping
+  `CreateError::Group(AccountError)` / `Profile(ProfileError)` typed
+  end-to-end. The asymmetry is honest: display is uniform (one Op enum
+  for all ops), execution is typed (per-domain errors).
 - **Interactive verbs use `login`, not `execute_account`** — `Executor`
   has two execution substitution points: `execute_account` captures
   stdout/stderr so sysadminctl chatter is suppressed on success (good
@@ -218,52 +244,59 @@ Things that are easy to violate and would matter:
   `execute_account` would silently swallow the shell session's output.
   `login` returns `Result<i32, AccountError>` — the i32 is the child's
   exit code for propagation, `AccountError` is reserved for spawn
-  failures only. Tests pin both via StubExecutor: `fail_account_op(op,
-  err)` / `fail_account_blanket(code, stderr)` for `execute_account`,
+  failures only. `LoginAsUser` is intentionally NOT a `WritableOp`
+  impl (its return type and stdio semantics are incompatible with the
+  trait's `execute_via`); the Writer's shell path calls
+  `executor.login(name)` directly. The LoginAsUser variant exists in
+  `AccountOp` solely for plan/echo rendering via `Op::describe_via`.
+  Tests pin both via StubExecutor: `fail_account_op(op, err)` /
+  `fail_account_blanket(code, stderr)` for `execute_account`,
   `login_exit_code(n)` for `login`.
 - **Probe via Executor, not Reader live re-read** — when a verb needs to
   re-check OS state mid-execution (destroy's LookupUserRecord residue
   probe is the canonical case), the probe is a regular substrate call
-  (`execute_account(&AccountOp::LookupUserRecord{..})`) whose result
-  drives a branch in the Writer (`Ok(())` means record present;
-  `Err(AccountError::NonZero{..})` means the dscl probe found clean,
-  cleanup-skip). The Reader trait stays snapshot-then-act: it's the
-  in-memory view the dispatcher decided against. The Executor is the
-  test seam; per-op overrides in StubExecutor (`fail_account_op`) let
-  tests pin both probe outcomes. Don't add a "live re-read" method to
-  Reader — it would confuse the snapshot doctrine.
-- **No I/O in command logic** — verbs receive `&mut Reporter`, emit via
-  `reporter.emit_err(...)` (failure paths) or `reporter.emit(...)`
-  (mode-neutral success messages like destroy's convergent-noop), return
-  `u8`. They never touch raw writers, check `cli.verbose`, or check
-  `cli.dry_run`. The `accounts::Writer` struct also emits via Reporter —
-  it's explicitly an I/O layer (it dispatches substrate calls and renders
-  plan/echo) and owns intent + mechanism rendering for its own actions,
-  using `emit_real_only` / `emit_dry_only` to scope output to the
-  appropriate mode.
+  (`Writer::run(&AccountOp::LookupUserRecord{..})` → `execute_account`
+  under the hood) whose result drives a branch in the Writer
+  (`Ok(())` means record present; `Err(AccountError::NonZero{..})`
+  means the dscl probe found clean, cleanup-skip). The Reader trait
+  stays snapshot-then-act: it's the in-memory view the dispatcher
+  decided against. The Executor is the test seam; per-op overrides in
+  StubExecutor (`fail_account_op`) let tests pin both probe outcomes.
+  Don't add a "live re-read" method to Reader — it would confuse the
+  snapshot doctrine.
+- **No I/O in command logic** — verbs in `commands::dispatch` call
+  Reporter's verb-named methods (`refuse_*`, `create_*_failed`,
+  `destroy_*_failed`, `shell_failed`, `destroy_absent`) for all
+  user-facing output. They never touch raw writers, check `cli.verbose`,
+  or check `cli.dry_run` — mode branching lives inside Reporter. The
+  `accounts::Writer` struct also calls Reporter's verb-named methods
+  (`create_starting` / `create_done` / etc.) plus `Reporter::step` per
+  substrate call; it owns intent + plan composition for its own actions
+  but defers all mode/verbosity filtering to the Reporter.
 - **Lexical → state-based check order** — `validate_name` runs before
   `check_conflict` (create) / `destroy_eligibility` (destroy) in dispatch.
   Cheaper failure first.
 - **Convergent semantics for teardown verbs** — `destroy <name>` against
   an absent tenant is a successful noop, not an error. The state-based
-  precheck (`destroy_eligibility`) returns `NotPresent` and dispatch emits
-  the noop message + exit 0. When the user is absent but a stale
-  `<name>-tenant-share` group remains (e.g. a prior destroy that failed
-  at the dseditgroup-delete step), `destroy_eligibility` returns
-  `OrphanGroup` and dispatch calls `Writer::destroy_orphan_group` to
-  converge — the operator's mental model of destroy ("after this, the
-  host has no trace of <name>") is preserved across partial-failure
-  recovery. Same convergent contract applies to future teardown verbs.
+  precheck (`destroy_eligibility`) returns `NotPresent` and dispatch
+  emits the noop via `reporter.destroy_absent(name)` + exit 0. When the
+  user is absent but a stale `<name>-tenant-share` group remains (e.g.
+  a prior destroy that failed at the dseditgroup-delete step),
+  `destroy_eligibility` returns `OrphanGroup` and dispatch calls
+  `Writer::destroy_orphan_group` to converge — the operator's mental
+  model of destroy ("after this, the host has no trace of <name>") is
+  preserved across partial-failure recovery. Same convergent contract
+  applies to future teardown verbs.
 - **`<name>-tenant-share` is the canonical group name** —
   `accounts::tenant_share_group_name(name)` is the single source of
   truth for the suffix. `check_conflict`, `Writer::create_tenant`,
   `Writer::destroy_tenant`, `Writer::destroy_orphan_group`,
-  `destroy_eligibility::OrphanGroup`, and the user-facing
-  `name_conflict` / `create_group_failed` / `rollback_failed` /
-  orphan-group factories all derive the literal string from this
-  function (and from `MacosExecutor::describe_account` arms that
-  produce the rendered shell-command lines). Tests pin the literal
-  `dev-tenant-share` text to catch any drift. Don't inline
+  `destroy_eligibility::OrphanGroup`, and the user-facing Reporter
+  methods (`refuse_name_conflict`, `create_group_failed`,
+  `create_rollback_failed`, `orphan_group_*`) all derive the literal
+  string from this function (and from `MacosExecutor::describe_account`
+  arms that produce the rendered shell-command lines). Tests pin the
+  literal `dev-tenant-share` text to catch any drift. Don't inline
   `format!("{name}-tenant-share")` at call sites — the centralization
   lets a future suffix change happen with one edit.
 - **Decoupled UID/GID allocation** — `UidAllocator` reads `used_uids`,
@@ -276,18 +309,20 @@ Things that are easy to violate and would matter:
   against a regression that wires `-i` to `lowest_free_uid`.
 - **Create partial-failure rollback** — `Writer::create_tenant`
   returns `CreateError::{Group(e), User(e), UserWithRollback{user,
-  rollback}, Profile(e)}`. The dispatcher renders distinct messages per
-  variant — `create_group_failed` for `Group` (no user touched),
-  `create_failed` for `User` (rollback succeeded), TWO emit_err calls
-  for `UserWithRollback` (the original failure first, then
-  `rollback_failed` with the em-dash-suffixed `— host now has an orphan
-  group; next 'tenant destroy <name>' will converge`), and
-  `create_profile_failed` for `Profile` (locked policy: user + group
-  stay on the host; recovery is `tenant destroy <name>` — the
-  Destroyable arm cleans the user + group, profile-rm is a noop on
-  the missing-profile case). The recovery story is load-bearing UX:
-  the operator doesn't need to read source to know what to do next.
-  `OrphanGroup` eligibility is the corresponding convergence path.
+  rollback}, Profile(e)}`. The dispatcher routes each variant to a
+  distinct Reporter method — `reporter.create_group_failed` for
+  `Group` (no user touched), `reporter.create_failed` for `User`
+  (rollback succeeded), TWO Reporter calls for `UserWithRollback`
+  (`reporter.create_failed` first with the original error, then
+  `reporter.create_rollback_failed` with the em-dash-suffixed
+  `— host now has an orphan group; next 'tenant destroy <name>' will
+  converge`), and `reporter.create_profile_failed` for `Profile`
+  (locked policy: user + group stay on the host; recovery is `tenant
+  destroy <name>` — the Destroyable arm cleans the user + group,
+  profile-rm is a noop on the missing-profile case). The recovery
+  story is load-bearing UX: the operator doesn't need to read source
+  to know what to do next. `OrphanGroup` eligibility is the
+  corresponding convergence path.
 - **Tenant-floor guard on destroy** — `destroy_eligibility` refuses with
   `EX_USAGE 64` when the named account exists with a UID below
   `TENANT_UID_FLOOR` (`NotATenant`) or with no positive UID at all
@@ -311,11 +346,10 @@ Things that are easy to violate and would matter:
   (`MacosReader`, `MacosExecutor`); tests build their own (`StubReader`,
   `StubExecutor` / `NeverExecutor`). Writer is constructed inside `run`
   from the active Executor (`DryRunExecutor` swapped in when
-  `cli.dry_run`), so the test seam stays at the Executor boundary while
-  the Writer is an internal implementation detail. The Executor absorbs
-  what used to be a separate ProfileStore seam — one trait carries both
-  account-domain and profile-domain methods so the composition root has
-  exactly one substrate to wire.
+  `cli.dry_run`), and Reporter is constructed with the same active
+  Executor reference so it can render plan + echo lines lazily via
+  `Op::describe_via`. The test seam stays at the Executor boundary
+  while the Writer and Reporter are internal implementation details.
 - **Exit codes** — `0` success (including destroy's convergent noop on
   an already-absent tenant AND the orphan-group convergence path); `64`
   (`EX_USAGE`, sysexits.h) for any user-input failure — validation,

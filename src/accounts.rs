@@ -3,8 +3,7 @@ use std::io;
 use std::process::Command;
 
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::executor::{self, AccountError, AccountOp, ProfileOp};
-use crate::messages::{self, PlanStep};
+use crate::executor::{self, AccountError, AccountOp, Op, ProfileOp, WritableOp};
 use crate::profile::ProfileError;
 use crate::reporter::Reporter;
 
@@ -398,49 +397,38 @@ impl<'a> Writer<'a> {
         let rollback_group = AccountOp::DeleteShareGroup { name: name.into() };
         let create_profile = ProfileOp::Create { name: name.into() };
 
-        let plan_group_line = self.executor.describe_account(&create_group);
-        let plan_user_line = self.executor.describe_account(&add_user);
-        let plan_rollback_line = self.executor.describe_account(&rollback_group);
-        let plan_profile_line = self.executor.describe_profile(&create_profile);
+        reporter.create_starting(
+            name,
+            &[
+                (Op::Account(&create_group), None),
+                (Op::Account(&add_user), None),
+                (Op::Account(&rollback_group), Some("on rollback")),
+                (Op::Profile(&create_profile), None),
+            ],
+        );
 
-        let plan = [
-            PlanStep::plain(&plan_group_line),
-            PlanStep::plain(&plan_user_line),
-            PlanStep::annotated(&plan_rollback_line, "on rollback"),
-            PlanStep::plain(&plan_profile_line),
-        ];
-
-        reporter.emit_dry_only(messages::would_create_tenant(name, &plan));
-        reporter.emit_real_only(messages::creating_tenant(name, &plan));
-
-        reporter.emit_real_only(messages::running(&plan_group_line));
-        self.executor
-            .execute_account(&create_group)
+        self.run(&create_group, reporter)
             .map_err(CreateError::Group)?;
-
-        reporter.emit_real_only(messages::running(&plan_user_line));
-        match self.executor.execute_account(&add_user) {
+        match self.run(&add_user, reporter) {
             Ok(()) => {
-                // Profile-write is the 4th step. Echo goes through the
-                // unified `running` factory against the substrate's
-                // describe output — no special-case echo factory needed.
-                // A profile-write failure doesn't roll back the user or
-                // group; recovery is `tenant destroy <name>`.
-                reporter.emit_real_only(messages::running(&plan_profile_line));
-                self.executor
-                    .execute_profile(&create_profile)
+                // Profile-write is the 4th step. Echo goes through
+                // `self.run` against `Op::describe_via` — no special-case
+                // factory needed. A profile-write failure doesn't roll
+                // back the user or group; recovery is `tenant destroy
+                // <name>`.
+                self.run(&create_profile, reporter)
                     .map_err(CreateError::Profile)?;
-                reporter.emit_real_only(messages::created_tenant(name, uid, gid));
+                reporter.create_done(name, uid, gid);
                 Ok(())
             }
             Err(user_err) => {
                 // CreateTenantUser failed after the group was created.
-                // Roll back by deleting the just-created group so the host
-                // returns to its pre-create state. The `$` echo for the
-                // rollback fires here regardless of whether the rollback
-                // itself succeeds — the operator should see what we tried.
-                reporter.emit_real_only(messages::running(&plan_rollback_line));
-                match self.executor.execute_account(&rollback_group) {
+                // Roll back by deleting the just-created group so the
+                // host returns to its pre-create state. The `$` echo
+                // for the rollback fires inside `self.run` regardless of
+                // whether the rollback itself succeeds — the operator
+                // should see what we tried.
+                match self.run(&rollback_group, reporter) {
                     Ok(()) => Err(CreateError::User(user_err)),
                     Err(rollback_err) => Err(CreateError::UserWithRollback {
                         user: user_err,
@@ -473,32 +461,22 @@ impl<'a> Writer<'a> {
         let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
         let delete_profile = ProfileOp::Delete { name: name.into() };
 
-        let plan_delete_user_line = self.executor.describe_account(&delete_user);
-        let plan_probe_line = self.executor.describe_account(&probe);
-        let plan_cleanup_line = self.executor.describe_account(&cleanup);
-        let plan_delete_group_line = self.executor.describe_account(&delete_group);
-        let plan_delete_profile_line = self.executor.describe_profile(&delete_profile);
+        reporter.destroy_starting(
+            name,
+            &[
+                (Op::Account(&delete_user), None),
+                (Op::Account(&probe), None),
+                (Op::Account(&cleanup), None),
+                (Op::Account(&delete_group), None),
+                (Op::Profile(&delete_profile), None),
+            ],
+        );
 
-        let plan = [
-            PlanStep::plain(&plan_delete_user_line),
-            PlanStep::plain(&plan_probe_line),
-            PlanStep::plain(&plan_cleanup_line),
-            PlanStep::plain(&plan_delete_group_line),
-            PlanStep::plain(&plan_delete_profile_line),
-        ];
-
-        reporter.emit_dry_only(messages::would_destroy_tenant(name, &plan));
-        reporter.emit_real_only(messages::destroying_tenant(name, &plan));
-
-        reporter.emit_real_only(messages::running(&plan_delete_user_line));
-        self.executor.execute_account(&delete_user)?;
-
-        reporter.emit_real_only(messages::running(&plan_probe_line));
-        match self.executor.execute_account(&probe) {
+        self.run(&delete_user, reporter)?;
+        match self.run(&probe, reporter) {
             Ok(()) => {
                 // Probe succeeded → DS record still present → run cleanup.
-                reporter.emit_real_only(messages::running(&plan_cleanup_line));
-                self.executor.execute_account(&cleanup)?;
+                self.run(&cleanup, reporter)?;
             }
             Err(AccountError::NonZero { .. }) => {
                 // Probe returned non-zero (typically eDSRecordNotFound)
@@ -509,15 +487,11 @@ impl<'a> Writer<'a> {
             Err(other) => return Err(DestroyError::Account(other)),
         }
 
-        reporter.emit_real_only(messages::running(&plan_delete_group_line));
-        self.executor.execute_account(&delete_group)?;
-
-        reporter.emit_real_only(messages::running(&plan_delete_profile_line));
-        self.executor
-            .execute_profile(&delete_profile)
+        self.run(&delete_group, reporter)?;
+        self.run(&delete_profile, reporter)
             .map_err(DestroyError::Profile)?;
 
-        reporter.emit_real_only(messages::destroyed_tenant(name));
+        reporter.destroy_done(name);
         Ok(())
     }
 
@@ -525,7 +499,7 @@ impl<'a> Writer<'a> {
     /// the user-side teardown applies), but the suffixed
     /// `<name>-tenant-share` group is still on the host. Issues two
     /// substrate calls (DeleteShareGroup + ProfileOp::Delete) bracketed
-    /// by the would/destroying/destroyed orphan-group Message trio. The
+    /// by the orphan-group `_starting` / `_done` Reporter pair. The
     /// profile step is always attempted (idempotent Delete) so the "host
     /// has no trace of <name> after destroy" contract holds even on the
     /// convergence path.
@@ -537,52 +511,52 @@ impl<'a> Writer<'a> {
         let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
         let delete_profile = ProfileOp::Delete { name: name.into() };
 
-        let plan_delete_group_line = self.executor.describe_account(&delete_group);
-        let plan_delete_profile_line = self.executor.describe_profile(&delete_profile);
+        reporter.orphan_group_starting(
+            name,
+            &[
+                (Op::Account(&delete_group), None),
+                (Op::Profile(&delete_profile), None),
+            ],
+        );
 
-        let plan = [
-            PlanStep::plain(&plan_delete_group_line),
-            PlanStep::plain(&plan_delete_profile_line),
-        ];
-
-        reporter.emit_dry_only(messages::would_destroy_orphan_group(name, &plan));
-        reporter.emit_real_only(messages::destroying_orphan_group(name, &plan));
-
-        reporter.emit_real_only(messages::running(&plan_delete_group_line));
-        self.executor.execute_account(&delete_group)?;
-
-        reporter.emit_real_only(messages::running(&plan_delete_profile_line));
-        self.executor
-            .execute_profile(&delete_profile)
+        self.run(&delete_group, reporter)?;
+        self.run(&delete_profile, reporter)
             .map_err(DestroyError::Profile)?;
 
-        reporter.emit_real_only(messages::destroyed_orphan_group(name));
+        reporter.orphan_group_done(name);
         Ok(())
     }
 
     /// Interactive shell entry into the tenant. The LoginAsUser op is
-    /// built only to feed `describe_account` for the plan/echo lines —
-    /// execution goes through the substrate's `login` method because the
-    /// return type (child exit code) and stdio semantics (inherit, don't
-    /// capture) are incompatible with the non-interactive
-    /// `execute_account` path. Pre-exec emits the would/shelling pair
-    /// through the Reporter; no post-exec confirmation — the operator IS
-    /// the shell, so a "Shelled into …" line after they exit would be
-    /// at best redundant and at worst land in a different terminal
-    /// context.
+    /// built only to feed `describe_account` for the plan and echo
+    /// lines; execution goes through the substrate's `login` method
+    /// because the return type (child exit code) and stdio semantics
+    /// (inherit, don't capture) are incompatible with the
+    /// non-interactive `execute_account` path. Pre-exec emits the
+    /// would / shelling intent through the Reporter. There is no
+    /// post-exec confirmation: the operator IS the shell after `login`
+    /// returns, so a "Shelled into …" line afterwards would be at best
+    /// redundant and at worst land in a different terminal context.
     pub(crate) fn shell_into_tenant(
         &self,
         name: &str,
         reporter: &mut Reporter,
     ) -> Result<i32, AccountError> {
         let login = AccountOp::LoginAsUser { name: name.into() };
-        let line = self.executor.describe_account(&login);
-
-        reporter.emit_dry_only(messages::would_shell_into_tenant(name, &line));
-        reporter.emit_real_only(messages::shelling_into_tenant(name, &line));
-
-        reporter.emit_real_only(messages::running(&line));
+        reporter.shell_starting(name, &login);
+        reporter.step(Op::Account(&login));
         self.executor.login(name)
+    }
+
+    /// Run a single op: emit the `$` echo line (in real+verbose) and
+    /// execute the op against the substrate. Generic over `WritableOp`
+    /// so `AccountOp` and `ProfileOp` both flow through one method, each
+    /// preserving its domain-specific error type. The echo + execute
+    /// coupling means a Writer caller can't accidentally execute without
+    /// echoing or echo without executing.
+    fn run<O: WritableOp>(&self, op: &O, reporter: &mut Reporter) -> Result<(), O::Error> {
+        reporter.step(op.op_ref());
+        op.execute_via(self.executor)
     }
 }
 

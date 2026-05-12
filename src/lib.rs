@@ -7,7 +7,6 @@ pub mod accounts;
 pub mod allocation;
 mod commands;
 pub mod executor;
-mod messages;
 pub mod profile;
 mod reporter;
 
@@ -54,7 +53,7 @@ pub fn run(
         executor
     };
     let writer = accounts::Writer::new(active_executor);
-    let mut reporter = Reporter::new(stdout, stderr, cli.verbose, cli.dry_run);
+    let mut reporter = Reporter::new(stdout, stderr, cli.verbose, cli.dry_run, active_executor);
     commands::dispatch(cli, accounts, &writer, &mut reporter)
 }
 

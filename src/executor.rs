@@ -152,6 +152,65 @@ pub trait Executor {
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), ProfileError>;
 }
 
+/// Top-level ADT wrapper for "any op, regardless of domain." Used by the
+/// Reporter for uniform display dispatch — `Op::describe_via` picks the
+/// right substrate method based on which sub-domain the op belongs to.
+/// Execution stays on the bare `AccountOp` / `ProfileOp` types (via the
+/// `WritableOp` trait) so per-domain error types stay typed and the
+/// dispatcher's `CreateError::Group / User / Profile` distinction is
+/// preserved end-to-end. The ADT hierarchy is honest: `Op` is the root,
+/// `AccountOp` / `ProfileOp` are the leaf ADTs, each with their own
+/// variants.
+pub enum Op<'a> {
+    Account(&'a AccountOp),
+    Profile(&'a ProfileOp),
+}
+
+impl<'a> Op<'a> {
+    /// Render the op as an operator-facing display line. The match here
+    /// is the one place in the codebase that has to know the account vs
+    /// profile split for display purposes.
+    pub fn describe_via(&self, executor: &dyn Executor) -> String {
+        match self {
+            Op::Account(op) => executor.describe_account(op),
+            Op::Profile(op) => executor.describe_profile(op),
+        }
+    }
+}
+
+/// Bridge from a leaf op to the typed execution path. `Writer::run` uses
+/// this to execute an op with its domain-specific error type while still
+/// going through `Op::describe_via` for the echo line. Ops that don't
+/// fit (notably `AccountOp::LoginAsUser`, which goes through
+/// `Executor::login` for its interactive stdio semantics) can still be
+/// rendered via `Op::describe_via` without implementing `WritableOp` —
+/// they just don't flow through `Writer::run`.
+pub trait WritableOp {
+    type Error;
+    fn execute_via(&self, executor: &dyn Executor) -> Result<(), Self::Error>;
+    fn op_ref(&self) -> Op<'_>;
+}
+
+impl WritableOp for AccountOp {
+    type Error = AccountError;
+    fn execute_via(&self, executor: &dyn Executor) -> Result<(), AccountError> {
+        executor.execute_account(self)
+    }
+    fn op_ref(&self) -> Op<'_> {
+        Op::Account(self)
+    }
+}
+
+impl WritableOp for ProfileOp {
+    type Error = ProfileError;
+    fn execute_via(&self, executor: &dyn Executor) -> Result<(), ProfileError> {
+        executor.execute_profile(self)
+    }
+    fn op_ref(&self) -> Op<'_> {
+        Op::Profile(self)
+    }
+}
+
 /// Production substrate. Knows the macOS tool argv and the XDG-style profile
 /// path convention. The argv-building logic that previously lived in the
 /// `build_*_argv` family (and the synthetic-argv hacks for profile ops) is
