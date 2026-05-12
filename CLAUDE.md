@@ -152,7 +152,14 @@ src/executor.rs   — Per-domain Op enums + unified Executor substrate + the
                     login exit code via `login_exit_code(n)`; in-memory
                     profile state simulation via `with_existing_profile` +
                     `has_profile` + `profile_state`; in-memory pf.conf state
-                    via `with_pf_conf` reads through `read_pf_conf`),
+                    via `with_pf_conf` reads through `read_pf_conf`;
+                    per-name Create-content override via
+                    `with_create_profile_content(name, content)` so a
+                    create-flow test can simulate the
+                    read_profile + parse + render_anchor path with
+                    non-empty allowlists — production always writes
+                    `default_profile_toml()`, the override lets a test
+                    swap in a custom toml without rewriting the default),
                     `DryRunExecutor` (no-op execute / login; describe
                     delegates to MacosExecutor; `read_profile` returns
                     `default_profile_toml()` — the cycle-1 fact that

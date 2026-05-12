@@ -868,6 +868,62 @@ fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
 }
 
 #[test]
+fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() {
+    // Closes the automated end-to-end gap on the allow path: the
+    // sibling test above pins the data flow with the empty default;
+    // this test simulates "the scaffolded profile had runtime hosts"
+    // via `with_create_profile_content` and pins that the same data
+    // flow (read_profile → parse → render_anchor) carries the hosts
+    // all the way to `InstallAnchor.body`. The cycle-2 manual smoke
+    // (`.features/cycle2-allow-smoke.sh`) verifies the same flow
+    // against real pfctl + egress traffic; this is the unit-level
+    // counterpart that catches regressions without needing root.
+    let populated = "schema_version = 1\n\
+                     \n\
+                     [allowlist.runtime]\n\
+                     hosts = [\"example.com\", \"api.anthropic.com\"]\n\
+                     \n\
+                     [allowlist.install]\n\
+                     hosts = []\n";
+    let exec = StubExecutor::new().with_create_profile_content("dev", populated);
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let body = exec
+        .firewall_ops()
+        .into_iter()
+        .find_map(|op| match op {
+            tenant::executor::FirewallOp::InstallAnchor { body, .. } => Some(body),
+            _ => None,
+        })
+        .expect("InstallAnchor op must have been issued");
+    // Backslash-continued table with both hosts in input order.
+    assert!(
+        body.contains(
+            "table <allowed> persist { \\\n  \
+             example.com \\\n  \
+             api.anthropic.com \\\n}\n"
+        ),
+        "anchor body must include populated backslash-continued table \
+         with hosts in profile order; got:\n{body}"
+    );
+    // Empty-table form must NOT appear (cross-check that the populated
+    // path replaced the empty path, not appended).
+    assert!(
+        !body.contains("table <allowed> persist { }"),
+        "anchor body must NOT include the empty-table form when hosts present; got:\n{body}"
+    );
+    // Sanity: the rules + scoping are unchanged.
+    assert!(
+        body.contains("pass out quick on lo0 user dev"),
+        "anchor body must still include loopback pass; got:\n{body}"
+    );
+    assert!(
+        body.contains("block out quick proto { tcp udp } from any to any user dev"),
+        "anchor body must still include catchall block; got:\n{body}"
+    );
+}
+
+#[test]
 fn create_real_mode_update_conf_content_reflects_existing_pf_conf() {
     // ensure_anchor_ref runs against the host's current pf.conf — if
     // the host already has unrelated anchors, those stay intact and

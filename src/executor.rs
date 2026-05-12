@@ -834,6 +834,17 @@ pub struct StubExecutor {
     /// ops as side effects on a real-host fs, and tests assert behavior
     /// via `firewall_ops()` rather than by re-reading conf state.
     pf_conf_state: RefCell<String>,
+
+    /// Per-name override for what `ProfileOp::Create` writes. When
+    /// present, `execute_profile(Create)` stores this content under
+    /// `name` instead of `default_profile_toml()`. Models "as if the
+    /// scaffolded default had different runtime/install hosts" —
+    /// lets create-flow tests exercise the read_profile + parse +
+    /// render_anchor path with non-empty allowlists without
+    /// rewriting `default_profile_toml`. The cycle-2 allow-path
+    /// manual smoke validates this end-to-end against real pfctl; the
+    /// automated counterpart pins the same data flow through the stub.
+    create_profile_overrides: RefCell<HashMap<String, String>>,
 }
 
 impl StubExecutor {
@@ -925,6 +936,22 @@ impl StubExecutor {
         self
     }
 
+    /// Override the content that `ProfileOp::Create` writes for `name`.
+    /// Production always writes `default_profile_toml()` (empty
+    /// allowlists); this builder lets a create-flow test simulate
+    /// "what if the scaffolded default included some hosts" without
+    /// rewriting the default. The downstream `read_profile` then sees
+    /// the override, so `parse` + `render_anchor` produce a populated
+    /// `InstallAnchor.body` — closing the automated end-to-end loop on
+    /// the allow path (manual smoke verifies the same data flow
+    /// against real pfctl).
+    pub fn with_create_profile_content(self, name: &str, content: &str) -> Self {
+        self.create_profile_overrides
+            .borrow_mut()
+            .insert(name.to_string(), content.to_string());
+        self
+    }
+
     pub fn profile_state(&self) -> HashMap<String, String> {
         self.profile_state.borrow().clone()
     }
@@ -969,9 +996,19 @@ impl Executor for StubExecutor {
         }
         match op {
             ProfileOp::Create { name } => {
+                // Honor a `with_create_profile_content` override if one
+                // was registered for this name; otherwise write the
+                // production default. Lets create-flow tests exercise
+                // the non-empty-allowlist code path.
+                let content = self
+                    .create_profile_overrides
+                    .borrow()
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(default_profile_toml);
                 self.profile_state
                     .borrow_mut()
-                    .insert(name.clone(), default_profile_toml());
+                    .insert(name.clone(), content);
             }
             ProfileOp::Delete { name } => {
                 self.profile_state.borrow_mut().remove(name);
