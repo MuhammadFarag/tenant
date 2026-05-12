@@ -1,7 +1,9 @@
 #[cfg(target_os = "macos")]
 use tenant::accounts::Reader;
 use tenant::accounts::StubReader;
-use tenant::executor::{AccountError, AccountOp, Executor, ProfileOp, StubExecutor};
+use tenant::executor::{
+    AccountError, AccountOp, Executor, FirewallError, FirewallOp, ProfileOp, StubExecutor,
+};
 
 /// Default executor for tests that should not reach the exec stage —
 /// validation failures, conflicts, and dry-run paths. Panics on any
@@ -23,6 +25,18 @@ impl Executor for NeverExecutor {
     }
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), tenant::profile::ProfileError> {
         panic!("executor unexpectedly invoked (execute_profile) with op: {op:?}");
+    }
+    fn read_profile(&self, name: &str) -> Result<String, tenant::profile::ProfileError> {
+        panic!("executor unexpectedly invoked (read_profile) with name: {name:?}");
+    }
+    fn read_pf_conf(&self) -> Result<String, FirewallError> {
+        panic!("executor unexpectedly invoked (read_pf_conf)");
+    }
+    fn describe_firewall(&self, op: &FirewallOp) -> String {
+        panic!("executor unexpectedly invoked (describe_firewall) with op: {op:?}");
+    }
+    fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
+        panic!("executor unexpectedly invoked (execute_firewall) with op: {op:?}");
     }
 }
 
@@ -106,7 +120,16 @@ fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n";
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
+                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
+                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
+                sudo pfctl -e\n";
     assert_eq!(stdout, want);
 }
 
@@ -139,7 +162,16 @@ fn verbose_shows_lowest_free_uid_with_gap_and_gid_at_floor() {
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 602 -GID 600\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n";
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
+                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
+                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
+                sudo pfctl -e\n";
     assert_eq!(stdout, want);
 }
 
@@ -205,7 +237,16 @@ fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
                 sudo dseditgroup -o create -n . -i 601 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 601\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n";
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
+                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
+                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
+                sudo pfctl -e\n";
     assert_eq!(stdout, want);
 }
 
@@ -231,7 +272,16 @@ fn verbose_uid_and_gid_allocators_cross_over() {
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 601 -GID 600\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n";
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
+                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
+                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
+                sudo pfctl -e\n";
     assert_eq!(stdout, want);
 }
 
@@ -510,10 +560,24 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n\
+                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
+                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
+                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
+                sudo pfctl -e\n\
                 $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
                 $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
                 $ tee ~/.config/tenant/profiles/dev.toml < default.toml\n\
+                $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
+                $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
+                $ sudo tee /etc/pf.conf < updated.conf\n\
+                $ sudo pfctl -f /etc/pf.conf\n\
+                $ sudo pfctl -e\n\
                 Created tenant 'dev' (UID 600, GID 600).\n";
     assert_eq!(stdout, want);
 }
@@ -677,7 +741,16 @@ fn create_real_mode_verbose_shows_rollback_echo() {
                        sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
                        sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
                        sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                       tee ~/.config/tenant/profiles/dev.toml < default.toml\n\
+                       tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
+                       sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                       sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+                       sudo tee /etc/pf.conf < updated.conf\n  \
+                       sudo pfctl -f /etc/pf.conf\n  \
+                       sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
+                       sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
+                       sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
+                       sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
+                       sudo pfctl -e\n\
                        $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
                        $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
                        $ sudo dseditgroup -o delete -n . dev-tenant-share\n";
@@ -730,6 +803,264 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
                        \u{2014} host now has an orphan group; next 'tenant destroy dev' will converge\n";
     assert_eq!(stderr, want_stderr);
     assert_eq!(exec.account_ops().len(), 3);
+}
+
+#[test]
+fn create_real_mode_invokes_firewall_ops_in_locked_order() {
+    // Locked PF flow: BackupConfig → InstallAnchor → UpdateConfig →
+    // Reload → Enable. Pins the order of `firewall_ops()` recorded by
+    // the stub on a clean-host (empty pf.conf) success path.
+    let exec = StubExecutor::new();
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let ops = exec.firewall_ops();
+    let names: Vec<&'static str> = ops
+        .iter()
+        .map(|op| match op {
+            tenant::executor::FirewallOp::BackupConfig => "BackupConfig",
+            tenant::executor::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
+            tenant::executor::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
+            tenant::executor::FirewallOp::Reload => "Reload",
+            tenant::executor::FirewallOp::Enable => "Enable",
+            tenant::executor::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
+            tenant::executor::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
+            tenant::executor::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "BackupConfig",
+            "InstallAnchor",
+            "UpdateConfig",
+            "Reload",
+            "Enable",
+        ],
+    );
+}
+
+#[test]
+fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
+    // Profile read → parse → render_anchor: the InstallAnchor body
+    // should contain the rendered anchor with the runtime allowlist.
+    // Cycle 2 writes the default profile (empty runtime hosts) before
+    // reading, so the body's table is the empty `{ }` form. Pins the
+    // read→parse→render data flow end-to-end.
+    let exec = StubExecutor::new();
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let body = exec
+        .firewall_ops()
+        .into_iter()
+        .find_map(|op| match op {
+            tenant::executor::FirewallOp::InstallAnchor { body, .. } => Some(body),
+            _ => None,
+        })
+        .expect("InstallAnchor op must have been issued");
+    assert!(
+        body.contains("table <allowed> persist { }"),
+        "anchor body must include empty allowlist table; got:\n{body}"
+    );
+    assert!(
+        body.contains("pass out quick on lo0 user dev"),
+        "anchor body must include loopback pass; got:\n{body}"
+    );
+}
+
+#[test]
+fn create_real_mode_update_conf_content_reflects_existing_pf_conf() {
+    // ensure_anchor_ref runs against the host's current pf.conf — if
+    // the host already has unrelated anchors, those stay intact and
+    // tenant's lines append. The stub's `with_pf_conf` simulates the
+    // existing-host state.
+    let initial = "# host's existing pf.conf\nset block-policy drop\n";
+    let exec = StubExecutor::new().with_pf_conf(initial);
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let updated = exec
+        .firewall_ops()
+        .into_iter()
+        .find_map(|op| match op {
+            tenant::executor::FirewallOp::UpdateConfig { content } => Some(content),
+            _ => None,
+        })
+        .expect("UpdateConfig op must have been issued");
+    assert!(
+        updated.starts_with(initial),
+        "updated pf.conf must preserve existing content; got:\n{updated}"
+    );
+    assert!(
+        updated.contains("anchor \"tenant-dev\""),
+        "updated pf.conf must reference tenant anchor; got:\n{updated}"
+    );
+    assert!(
+        updated.contains("load anchor \"tenant-dev\" from \"/etc/pf.anchors/tenant-dev\""),
+        "updated pf.conf must include load-anchor line; got:\n{updated}"
+    );
+}
+
+#[test]
+fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
+    // Locked recovery posture: a firewall step failing after the
+    // account+profile ops have succeeded leaves the host with user +
+    // group + profile in place. Recovery is `tenant destroy <name>`
+    // — the Destroyable arm cleans up all of them. Operator sees a
+    // create_firewall_failed message at EX_IOERR.
+    let exec = StubExecutor::new().fail_firewall_op(
+        tenant::executor::FirewallOp::InstallAnchor {
+            name: "dev".into(),
+            body: tenant::firewall::render_anchor("dev", &[]),
+        },
+        FirewallError::Fs {
+            path: "/etc/pf.anchors/tenant-dev".to_string(),
+            message: "permission denied".to_string(),
+        },
+    );
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
+    assert!(stdout.is_empty());
+    assert_eq!(
+        stderr,
+        "tenant: failed to install firewall for 'dev': \
+         filesystem error at /etc/pf.anchors/tenant-dev: permission denied\n"
+    );
+    // User + group + profile remain on the host.
+    assert_eq!(exec.account_ops().len(), 2, "user+group ops both ran");
+    assert!(
+        exec.has_profile("dev"),
+        "profile should remain present after firewall failure"
+    );
+}
+
+#[test]
+fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence() {
+    // When Reload fails the writer must run the locked 4-step recovery:
+    // RestoreConfigFromBackup → RemoveAnchor → Reload → FlushAnchor
+    // (best-effort post-restore). FlushAnchor clears any in-kernel
+    // anchor state from the failed initial Reload. Total firewall_ops:
+    // BackupConfig, InstallAnchor, UpdateConfig, Reload (the failure),
+    // RestoreConfigFromBackup, RemoveAnchor, Reload (recovery),
+    // FlushAnchor (recovery). Eight ops; the original reload failure
+    // surfaces as the CreateError after recovery runs.
+    let exec = StubExecutor::new().fail_firewall_op(
+        tenant::executor::FirewallOp::Reload,
+        FirewallError::NonZero {
+            code: 1,
+            stderr: "syntax error".to_string(),
+        },
+    );
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.starts_with("tenant: failed to install firewall for 'dev':"),
+        "expected install-firewall-failed framing; got: {stderr:?}"
+    );
+    let op_names: Vec<&'static str> = exec
+        .firewall_ops()
+        .iter()
+        .map(|op| match op {
+            tenant::executor::FirewallOp::BackupConfig => "BackupConfig",
+            tenant::executor::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
+            tenant::executor::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
+            tenant::executor::FirewallOp::Reload => "Reload",
+            tenant::executor::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
+            tenant::executor::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
+            tenant::executor::FirewallOp::Enable => "Enable",
+            tenant::executor::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
+        })
+        .collect();
+    assert_eq!(
+        op_names,
+        vec![
+            "BackupConfig",
+            "InstallAnchor",
+            "UpdateConfig",
+            "Reload",
+            "RestoreConfigFromBackup",
+            "RemoveAnchor",
+            "Reload",
+            "FlushAnchor",
+        ],
+        "recovery sequence must run after reload failure"
+    );
+}
+
+#[test]
+fn create_reload_failure_with_failed_restore_surfaces_recovery_hint_naming_backup_path() {
+    // Recovery-of-recovery: if RestoreConfigFromBackup itself fails,
+    // the writer surfaces FirewallError::RestoreFailed which renders
+    // with the em-dash-suffixed manual-recovery hint naming the
+    // backup path. The host is left in a half-edited state; only the
+    // operator (with shell access) can resolve.
+    let exec = StubExecutor::new()
+        .fail_firewall_op(
+            tenant::executor::FirewallOp::Reload,
+            FirewallError::NonZero {
+                code: 1,
+                stderr: "syntax error".to_string(),
+            },
+        )
+        .fail_firewall_op(
+            tenant::executor::FirewallOp::RestoreConfigFromBackup,
+            FirewallError::NonZero {
+                code: 1,
+                stderr: "cp: permission denied".to_string(),
+            },
+        );
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR");
+    assert!(
+        stderr.contains("pf.conf restore from /etc/pf.conf.tenant-backup failed"),
+        "expected RestoreFailed framing; got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf to recover"),
+        "expected manual recovery hint; got: {stderr:?}"
+    );
+}
+
+#[test]
+fn create_pf_enable_failure_surfaces_via_create_firewall_failed() {
+    // Enable is the last firewall step. Failure here means rules
+    // loaded but enforcement is off — surface as create_firewall_failed
+    // at EX_IOERR. Recovery posture per locked policy: user + group +
+    // profile + anchor remain on host; `tenant destroy` converges.
+    let exec = StubExecutor::new().fail_firewall_op(
+        tenant::executor::FirewallOp::Enable,
+        FirewallError::NonZero {
+            code: 1,
+            stderr: "pfctl: operation not permitted".to_string(),
+        },
+    );
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR");
+    assert!(
+        stderr.starts_with("tenant: failed to install firewall for 'dev':"),
+        "got: {stderr:?}"
+    );
+    // All preceding firewall steps ran; Enable was the failure.
+    assert_eq!(exec.firewall_ops().len(), 5, "5 firewall ops up to Enable");
+}
+
+#[test]
+fn create_dry_run_bypasses_firewall_executor() {
+    // Dry-run swaps in DryRunExecutor; the wired StubExecutor's
+    // firewall_ops list stays empty. Mirrors the cycle-1
+    // `create_dry_run_does_not_write_profile` discipline for firewall.
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(
+        StubReader::default(),
+        &exec,
+        &["create", "dev", "--dry-run"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, "Would create tenant 'dev'.\n");
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "firewall executor should not be invoked in dry-run; got: {:?}",
+        exec.firewall_ops()
+    );
 }
 
 #[test]
@@ -823,7 +1154,12 @@ fn destroy_dry_run_verbose_shows_mechanism() {
                 dscl . -read /Users/dev\n  \
                 sudo dscl . -delete /Users/dev\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n";
+                rm -f ~/.config/tenant/profiles/dev.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo pfctl -a tenant-dev -F all\n";
     assert_eq!(stdout, want);
 }
 
@@ -872,12 +1208,22 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
                 dscl . -read /Users/dev\n  \
                 sudo dscl . -delete /Users/dev\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n\
+                rm -f ~/.config/tenant/profiles/dev.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo pfctl -a tenant-dev -F all\n\
                 $ sudo sysadminctl -deleteUser dev\n\
                 $ dscl . -read /Users/dev\n\
                 $ sudo dscl . -delete /Users/dev\n\
                 $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
                 $ rm -f ~/.config/tenant/profiles/dev.toml\n\
+                $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
+                $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
+                $ sudo tee /etc/pf.conf < updated.conf\n\
+                $ sudo pfctl -f /etc/pf.conf\n\
+                $ sudo pfctl -a tenant-dev -F all\n\
                 Destroyed tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }
@@ -995,11 +1341,21 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
                 dscl . -read /Users/dev\n  \
                 sudo dscl . -delete /Users/dev\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n\
+                rm -f ~/.config/tenant/profiles/dev.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo pfctl -a tenant-dev -F all\n\
                 $ sudo sysadminctl -deleteUser dev\n\
                 $ dscl . -read /Users/dev\n\
                 $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
                 $ rm -f ~/.config/tenant/profiles/dev.toml\n\
+                $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
+                $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
+                $ sudo tee /etc/pf.conf < updated.conf\n\
+                $ sudo pfctl -f /etc/pf.conf\n\
+                $ sudo pfctl -a tenant-dev -F all\n\
                 Destroyed tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }
@@ -1342,7 +1698,12 @@ fn destroy_dry_run_verbose_for_orphan_group() {
     assert_eq!(code, 0);
     let want = "Would destroy orphan group 'dev-tenant-share' for tenant 'dev'.\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n";
+                rm -f ~/.config/tenant/profiles/dev.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo pfctl -a tenant-dev -F all\n";
     assert_eq!(stdout, want);
 }
 
@@ -1360,9 +1721,19 @@ fn destroy_real_mode_verbose_for_orphan_group() {
     assert_eq!(code, 0);
     let want = "Destroying orphan group 'dev-tenant-share' for tenant 'dev'.\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n\
+                rm -f ~/.config/tenant/profiles/dev.toml\n  \
+                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
+                sudo tee /etc/pf.conf < updated.conf\n  \
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo pfctl -a tenant-dev -F all\n\
                 $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
                 $ rm -f ~/.config/tenant/profiles/dev.toml\n\
+                $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
+                $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
+                $ sudo tee /etc/pf.conf < updated.conf\n\
+                $ sudo pfctl -f /etc/pf.conf\n\
+                $ sudo pfctl -a tenant-dev -F all\n\
                 Destroyed orphan group 'dev-tenant-share' for tenant 'dev'.\n";
     assert_eq!(stdout, want);
 }
@@ -1406,6 +1777,216 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
          dseditgroup: not authorized\n"
     );
     assert_eq!(exec.account_ops().len(), 1);
+}
+
+#[test]
+fn destroy_real_mode_invokes_firewall_teardown_in_locked_order() {
+    // Destroy PF teardown order: BackupConfig → RemoveAnchor →
+    // UpdateConfig → Reload. No Enable on destroy. Pins
+    // `firewall_ops()` shape on a clean-host destroy.
+    let exec = StubExecutor::new();
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let op_names: Vec<&'static str> = exec
+        .firewall_ops()
+        .iter()
+        .map(|op| match op {
+            tenant::executor::FirewallOp::BackupConfig => "BackupConfig",
+            tenant::executor::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
+            tenant::executor::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
+            tenant::executor::FirewallOp::Reload => "Reload",
+            tenant::executor::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
+            tenant::executor::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
+            tenant::executor::FirewallOp::Enable => "Enable",
+            tenant::executor::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
+        })
+        .collect();
+    assert_eq!(
+        op_names,
+        vec![
+            "BackupConfig",
+            "RemoveAnchor",
+            "UpdateConfig",
+            "Reload",
+            "FlushAnchor",
+        ],
+    );
+}
+
+#[test]
+fn destroy_real_mode_update_conf_drops_tenant_anchor_ref() {
+    // remove_anchor_ref must strip the tenant's anchor + load lines
+    // from pf.conf. With a pre-loaded conf that references both
+    // tenant-dev and tenant-other, the UpdateConfig content should
+    // have tenant-dev gone and tenant-other untouched.
+    let initial = "anchor \"tenant-other\"\n\
+                   anchor \"tenant-dev\"\n\
+                   load anchor \"tenant-other\" from \"/etc/pf.anchors/tenant-other\"\n\
+                   load anchor \"tenant-dev\" from \"/etc/pf.anchors/tenant-dev\"\n";
+    let exec = StubExecutor::new().with_pf_conf(initial);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let updated = exec
+        .firewall_ops()
+        .into_iter()
+        .find_map(|op| match op {
+            tenant::executor::FirewallOp::UpdateConfig { content } => Some(content),
+            _ => None,
+        })
+        .expect("UpdateConfig must have been issued");
+    assert!(
+        !updated.contains("tenant-dev"),
+        "tenant-dev lines should be removed; got:\n{updated}"
+    );
+    assert!(
+        updated.contains("anchor \"tenant-other\""),
+        "tenant-other lines must remain; got:\n{updated}"
+    );
+}
+
+#[test]
+fn destroy_firewall_reload_failure_surfaces_via_destroy_firewall_failed() {
+    // Reload failure during destroy: no recovery (per locked policy
+    // — symmetric restore would re-reference the just-deleted anchor
+    // file). Surface as destroy_firewall_failed at EX_IOERR.
+    let exec = StubExecutor::new().fail_firewall_op(
+        tenant::executor::FirewallOp::Reload,
+        FirewallError::NonZero {
+            code: 1,
+            stderr: "syntax error".to_string(),
+        },
+    );
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected");
+    assert!(
+        stderr.starts_with("tenant: failed to tear down firewall for 'dev':"),
+        "got: {stderr:?}"
+    );
+}
+
+#[test]
+fn destroy_orphan_group_tears_down_firewall_too() {
+    // Convergence-path: a tenant left with orphan group state may also
+    // have orphan PF state (e.g. a create that failed mid-firewall
+    // before getting to UpdateConfig+Reload). The convergence path
+    // includes the full PF teardown to clean both.
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubExecutor::new();
+    let (code, _stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let op_names: Vec<&'static str> = exec
+        .firewall_ops()
+        .iter()
+        .map(|op| match op {
+            tenant::executor::FirewallOp::BackupConfig => "BackupConfig",
+            tenant::executor::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
+            tenant::executor::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
+            tenant::executor::FirewallOp::Reload => "Reload",
+            tenant::executor::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
+            tenant::executor::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
+            tenant::executor::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
+            tenant::executor::FirewallOp::Enable => "Enable",
+        })
+        .collect();
+    assert_eq!(
+        op_names,
+        vec![
+            "BackupConfig",
+            "RemoveAnchor",
+            "UpdateConfig",
+            "Reload",
+            "FlushAnchor",
+        ],
+        "orphan-group convergence must include full firewall teardown"
+    );
+}
+
+#[test]
+fn destroy_firewall_idempotent_when_anchor_already_absent() {
+    // The anchor file may already be gone (RemoveAnchor returns Ok
+    // from the stub regardless of prior state — `rm -f` semantics on
+    // the macOS side too). pf.conf may have no tenant ref. The
+    // teardown still runs all five ops; UpdateConfig writes the
+    // unchanged pf.conf back; FlushAnchor on an unknown anchor is a
+    // noop on the macOS side. End state: idempotent success.
+    let exec = StubExecutor::new().with_pf_conf("# host pf.conf, no tenant refs\n");
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    // Still issued the five ops — destroy doesn't short-circuit based
+    // on prior state; it just runs idempotent ops.
+    assert_eq!(exec.firewall_ops().len(), 5);
+}
+
+#[test]
+fn destroy_invokes_flush_anchor_as_final_firewall_step() {
+    // The load-bearing post-smoke fix: pfctl -f never garbage-collects
+    // anchors after their `load anchor` directive is removed, so
+    // destroy must explicitly flush the in-kernel rules. Pin this as
+    // the LAST firewall op on the destroy path.
+    let exec = StubExecutor::new();
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let last = exec
+        .firewall_ops()
+        .last()
+        .cloned()
+        .expect("at least one firewall op must run");
+    assert_eq!(
+        last,
+        tenant::executor::FirewallOp::FlushAnchor { name: "dev".into() },
+        "FlushAnchor must be the final firewall op on destroy"
+    );
+}
+
+#[test]
+fn destroy_orphan_group_invokes_flush_anchor_as_final_firewall_step() {
+    // Same load-bearing flush, on the convergence path.
+    let stub = StubReader {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubExecutor::new();
+    let (code, _stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let last = exec
+        .firewall_ops()
+        .last()
+        .cloned()
+        .expect("at least one firewall op must run");
+    assert_eq!(
+        last,
+        tenant::executor::FirewallOp::FlushAnchor { name: "dev".into() },
+        "FlushAnchor must be the final firewall op on orphan-group destroy"
+    );
+}
+
+#[test]
+fn create_success_path_does_not_invoke_flush_anchor() {
+    // Negative pin: create's success path INSTALLS the anchor; there's
+    // nothing to flush. FlushAnchor only runs on the destroy paths and
+    // on create's reload-failure recovery path (covered by a separate
+    // test). Without this guard, an accidental wiring of FlushAnchor
+    // into the success path would silently wipe the rules we just
+    // installed.
+    let exec = StubExecutor::new();
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !exec
+            .firewall_ops()
+            .iter()
+            .any(|op| matches!(op, tenant::executor::FirewallOp::FlushAnchor { .. })),
+        "FlushAnchor must NOT appear in create's success-path firewall_ops; got: {:?}",
+        exec.firewall_ops()
+    );
 }
 
 #[test]

@@ -3,8 +3,11 @@ use std::io;
 use std::process::Command;
 
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::executor::{self, AccountError, AccountOp, Op, ProfileOp, WritableOp};
-use crate::profile::ProfileError;
+use crate::executor::{
+    self, AccountError, AccountOp, FirewallError, FirewallOp, Op, ProfileOp, WritableOp,
+};
+use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
+use crate::profile::{ProfileError, display_path_for, parse};
 use crate::reporter::Reporter;
 
 pub trait Reader {
@@ -72,8 +75,8 @@ const RESERVED_NAMES: &[&str] = &[
 ];
 
 /// Lexical-validation outcomes from `validate_name`. Each variant carries
-/// just enough information for the matching message factory in
-/// `messages.rs` to render an operator-friendly explanation.
+/// just enough information for the matching `Reporter::refuse_invalid_name`
+/// arm to render an operator-friendly explanation.
 #[derive(Debug)]
 pub enum NameError {
     Empty,
@@ -330,6 +333,16 @@ pub(crate) enum CreateError {
     /// user + group, and the profile-rm step is a noop when the profile
     /// is absent.
     Profile(ProfileError),
+    /// CreateShareGroup + CreateTenantUser + ProfileOp::Create all
+    /// succeeded; a firewall step failed. Same locked recovery policy
+    /// as `Profile`: the user + group + profile stay present, operator
+    /// recovers via `tenant destroy <name>` (the Destroyable arm
+    /// converges all of them, including any partially-installed PF
+    /// anchor — the destroy-side firewall teardown is idempotent).
+    /// Read/parse failures on the just-written profile also flow here
+    /// as `FirewallError::Fs` (path = the profile path) because the
+    /// failure surfaces during the firewall composition step.
+    Firewall(FirewallError),
 }
 
 /// Granular error type for the destroy writers (both `destroy_tenant`
@@ -343,6 +356,14 @@ pub(crate) enum CreateError {
 pub(crate) enum DestroyError {
     Account(AccountError),
     Profile(ProfileError),
+    /// A firewall teardown step failed (BackupConfig / RemoveAnchor /
+    /// UpdateConfig / Reload). Unlike create, destroy has no recovery
+    /// path on reload failure — the symmetric "restore from backup"
+    /// would re-introduce a reference to the already-removed anchor
+    /// file, putting the host in a worse state. Operator gets the
+    /// failure framed with `destroy_firewall_failed` so they know
+    /// which step tripped.
+    Firewall(FirewallError),
 }
 
 impl From<AccountError> for DestroyError {
@@ -378,13 +399,31 @@ impl<'a> Writer<'a> {
         gid: u32,
         reporter: &mut Reporter,
     ) -> Result<(), CreateError> {
-        // Four-step composition: CreateShareGroup → CreateTenantUser → (on
-        // failure) DeleteShareGroup rollback → (on success)
-        // ProfileOp::Create. The share-group must exist before
-        // CreateTenantUser so the new user's home directory chowns to the
-        // tenant-share group rather than staff. The rollback step is
-        // shown in the plan unconditionally (the operator sees the
-        // algorithm) but echoes only when it fires.
+        // Twelve-step composition. Account + profile (cycle 1):
+        //   1. CreateShareGroup
+        //   2. CreateTenantUser
+        //   3. DeleteShareGroup  # on rollback (if step 2 fails)
+        //   4. ProfileOp::Create
+        // Firewall normal flow:
+        //   5. BackupConfig
+        //   6. InstallAnchor
+        //   7. UpdateConfig
+        //   8. Reload
+        //   9. RestoreConfigFromBackup  # on reload failure
+        //   10. RemoveAnchor             # on reload failure
+        //   11. Reload                   # on reload failure
+        //   12. Enable
+        // The recovery sequence (9-11) runs only if step 8 fails;
+        // create aborts with `CreateError::Firewall` regardless of
+        // whether the recovery itself succeeds. Recovery-of-recovery
+        // (restore fails) surfaces as `FirewallError::RestoreFailed`
+        // with the backup path + manual recovery hint.
+        //
+        // The read_profile + parse + render_anchor + read_pf_conf +
+        // ensure_anchor_ref work that produces the InstallAnchor body
+        // and UpdateConfig content happens BETWEEN step 4 and step 5,
+        // is implicit in the plan, and surfaces as
+        // CreateError::Firewall on failure.
         let create_group = AccountOp::CreateShareGroup {
             name: name.into(),
             gid,
@@ -396,6 +435,27 @@ impl<'a> Writer<'a> {
         };
         let rollback_group = AccountOp::DeleteShareGroup { name: name.into() };
         let create_profile = ProfileOp::Create { name: name.into() };
+        let backup = FirewallOp::BackupConfig;
+        let restore = FirewallOp::RestoreConfigFromBackup;
+        let reload = FirewallOp::Reload;
+        let enable = FirewallOp::Enable;
+        let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
+        let flush_anchor = FirewallOp::FlushAnchor { name: name.into() };
+
+        // Plan-time placeholder firewall ops. The describe arms for
+        // InstallAnchor and UpdateConfig don't include `body` /
+        // `content` in their rendered text, so plan + echo lines come
+        // out identical to the real-body ops constructed below — but
+        // we can't build the real bodies yet, because that needs a
+        // read of the not-yet-written profile and the host's current
+        // pf.conf.
+        let install_anchor_plan = FirewallOp::InstallAnchor {
+            name: name.into(),
+            body: String::new(),
+        };
+        let update_conf_plan = FirewallOp::UpdateConfig {
+            content: String::new(),
+        };
 
         reporter.create_starting(
             name,
@@ -404,6 +464,15 @@ impl<'a> Writer<'a> {
                 (Op::Account(&add_user), None),
                 (Op::Account(&rollback_group), Some("on rollback")),
                 (Op::Profile(&create_profile), None),
+                (Op::Firewall(&backup), None),
+                (Op::Firewall(&install_anchor_plan), None),
+                (Op::Firewall(&update_conf_plan), None),
+                (Op::Firewall(&reload), None),
+                (Op::Firewall(&restore), Some("on reload failure")),
+                (Op::Firewall(&remove_anchor), Some("on reload failure")),
+                (Op::Firewall(&reload), Some("on reload failure")),
+                (Op::Firewall(&flush_anchor), Some("on reload failure")),
+                (Op::Firewall(&enable), None),
             ],
         );
 
@@ -411,13 +480,67 @@ impl<'a> Writer<'a> {
             .map_err(CreateError::Group)?;
         match self.run(&add_user, reporter) {
             Ok(()) => {
-                // Profile-write is the 4th step. Echo goes through
-                // `self.run` against `Op::describe_via` — no special-case
-                // factory needed. A profile-write failure doesn't roll
-                // back the user or group; recovery is `tenant destroy
-                // <name>`.
                 self.run(&create_profile, reporter)
                     .map_err(CreateError::Profile)?;
+                // Profile is now on disk. Read + parse + render the
+                // anchor body, read current pf.conf + ensure the
+                // anchor ref. Read/parse failures land in
+                // CreateError::Firewall as FirewallError::Fs with the
+                // profile path baked in — the failure surfaces during
+                // the firewall step from the operator's POV.
+                let profile_content = self.executor.read_profile(name).map_err(|e| {
+                    CreateError::Firewall(FirewallError::Fs {
+                        path: display_path_for(name),
+                        message: format!("read failed: {e}"),
+                    })
+                })?;
+                let parsed_profile = parse(&profile_content).map_err(|e| {
+                    CreateError::Firewall(FirewallError::Fs {
+                        path: display_path_for(name),
+                        message: format!("parse failed: {e}"),
+                    })
+                })?;
+                let pf_conf_current = self
+                    .executor
+                    .read_pf_conf()
+                    .map_err(CreateError::Firewall)?;
+                let install_anchor = FirewallOp::InstallAnchor {
+                    name: name.into(),
+                    body: render_anchor(name, &parsed_profile.allowlist.runtime.hosts),
+                };
+                let update_conf = FirewallOp::UpdateConfig {
+                    content: ensure_anchor_ref(&pf_conf_current, name),
+                };
+                // Firewall normal flow.
+                self.run(&backup, reporter).map_err(CreateError::Firewall)?;
+                self.run(&install_anchor, reporter)
+                    .map_err(CreateError::Firewall)?;
+                self.run(&update_conf, reporter)
+                    .map_err(CreateError::Firewall)?;
+                if let Err(reload_err) = self.run(&reload, reporter) {
+                    // Recovery: restore conf → remove anchor → reload
+                    // → flush anchor (best-effort post-restore).
+                    // FlushAnchor is the symmetric counter to the
+                    // partial in-kernel state from the failed initial
+                    // Reload — without it, even after restoring
+                    // pf.conf and removing the anchor file, the
+                    // partially-loaded rules would persist under the
+                    // (now-orphaned) anchor name. Restore failure is
+                    // the recovery-of-recovery case; surface as
+                    // RestoreFailed so the Reporter message names the
+                    // backup path. Otherwise propagate the original
+                    // reload error.
+                    if self.run(&restore, reporter).is_err() {
+                        return Err(CreateError::Firewall(FirewallError::RestoreFailed {
+                            path: crate::firewall::PF_CONF_BACKUP.to_string(),
+                        }));
+                    }
+                    let _ = self.run(&remove_anchor, reporter);
+                    let _ = self.run(&reload, reporter);
+                    let _ = self.run(&flush_anchor, reporter);
+                    return Err(CreateError::Firewall(reload_err));
+                }
+                self.run(&enable, reporter).map_err(CreateError::Firewall)?;
                 reporter.create_done(name, uid, gid);
                 Ok(())
             }
@@ -444,22 +567,41 @@ impl<'a> Writer<'a> {
         name: &str,
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
-        // Five-step composition:
-        //   1. DeleteTenantUser   — the canonical destroy (sysadminctl)
-        //   2. LookupUserRecord   — residue probe; success means the DS
-        //      record is still present (gates the conditional cleanup)
-        //   3. DeleteUserRecord   — belt-and-braces low-level cleanup;
-        //      conditional on the probe finding residue
-        //   4. DeleteShareGroup   — the Phase-3 group cleanup
+        // Ten-step composition:
+        //   1. DeleteTenantUser   — sysadminctl
+        //   2. LookupUserRecord   — residue probe
+        //   3. DeleteUserRecord   — conditional dscl cleanup
+        //   4. DeleteShareGroup   — Phase-3 group cleanup
         //   5. ProfileOp::Delete  — cycle 1's profile cleanup
-        // The probe's exit code drives the conditional. Plan shows all
-        // five steps; echo block shows what actually ran (the conditional
-        // cleanup line is absent when the probe found clean).
+        //   6. BackupConfig       — pf.conf snapshot before edits
+        //   7. RemoveAnchor       — delete /etc/pf.anchors/tenant-<name>
+        //   8. UpdateConfig       — write pf.conf with tenant ref removed
+        //   9. Reload             — pfctl -f
+        //   10. FlushAnchor       — pfctl -a tenant-<name> -F all
+        // PF teardown sits after the account/profile cleanup so the
+        // tenant can't open new sockets while we're tearing down their
+        // ruleset. FlushAnchor is the load-bearing last step — pfctl
+        // -f doesn't garbage-collect anchors whose `load anchor`
+        // directive has been removed, so without explicit flush the
+        // previous tenant's rules persist in kernel memory and the
+        // next tenant getting the same UID inherits them silently. No
+        // recovery on reload failure (the symmetric restore would
+        // re-reference the just-removed anchor file).
         let delete_user = AccountOp::DeleteTenantUser { name: name.into() };
         let probe = AccountOp::LookupUserRecord { name: name.into() };
         let cleanup = AccountOp::DeleteUserRecord { name: name.into() };
         let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
         let delete_profile = ProfileOp::Delete { name: name.into() };
+        let backup = FirewallOp::BackupConfig;
+        let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
+        let reload = FirewallOp::Reload;
+        let flush_anchor = FirewallOp::FlushAnchor { name: name.into() };
+        // Plan-time placeholder for UpdateConfig — describe text
+        // ignores the `content` field, so this matches the real op
+        // built below for execution.
+        let update_conf_plan = FirewallOp::UpdateConfig {
+            content: String::new(),
+        };
 
         reporter.destroy_starting(
             name,
@@ -469,20 +611,21 @@ impl<'a> Writer<'a> {
                 (Op::Account(&cleanup), None),
                 (Op::Account(&delete_group), None),
                 (Op::Profile(&delete_profile), None),
+                (Op::Firewall(&backup), None),
+                (Op::Firewall(&remove_anchor), None),
+                (Op::Firewall(&update_conf_plan), None),
+                (Op::Firewall(&reload), None),
+                (Op::Firewall(&flush_anchor), None),
             ],
         );
 
         self.run(&delete_user, reporter)?;
         match self.run(&probe, reporter) {
             Ok(()) => {
-                // Probe succeeded → DS record still present → run cleanup.
                 self.run(&cleanup, reporter)?;
             }
             Err(AccountError::NonZero { .. }) => {
-                // Probe returned non-zero (typically eDSRecordNotFound)
-                // → DS is clean → no cleanup needed. The cleanup `$`
-                // line stays absent so the operator can see what actually
-                // ran vs the plan above.
+                // Probe found DS clean → no cleanup.
             }
             Err(other) => return Err(DestroyError::Account(other)),
         }
@@ -490,6 +633,28 @@ impl<'a> Writer<'a> {
         self.run(&delete_group, reporter)?;
         self.run(&delete_profile, reporter)
             .map_err(DestroyError::Profile)?;
+
+        // Firewall teardown. read_pf_conf + remove_anchor_ref runs
+        // here (after profile delete) so failures surface via
+        // DestroyError::Firewall rather than confusing the earlier
+        // account/profile-domain errors.
+        let pf_conf_current = self
+            .executor
+            .read_pf_conf()
+            .map_err(DestroyError::Firewall)?;
+        let update_conf = FirewallOp::UpdateConfig {
+            content: remove_anchor_ref(&pf_conf_current, name),
+        };
+        self.run(&backup, reporter)
+            .map_err(DestroyError::Firewall)?;
+        self.run(&remove_anchor, reporter)
+            .map_err(DestroyError::Firewall)?;
+        self.run(&update_conf, reporter)
+            .map_err(DestroyError::Firewall)?;
+        self.run(&reload, reporter)
+            .map_err(DestroyError::Firewall)?;
+        self.run(&flush_anchor, reporter)
+            .map_err(DestroyError::Firewall)?;
 
         reporter.destroy_done(name);
         Ok(())
@@ -508,20 +673,59 @@ impl<'a> Writer<'a> {
         name: &str,
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
+        // Seven-step convergence path: DeleteShareGroup + ProfileOp::Delete
+        // (cycle 1) + the five-step PF teardown (cycle 2 including
+        // FlushAnchor). If a partial create left an anchor or pf.conf
+        // reference, the firewall steps converge it here too — and if
+        // there's nothing to tear down, each step is idempotent
+        // (RemoveAnchor on missing file is a noop, UpdateConfig on
+        // conf without our anchor is a noop, FlushAnchor on an
+        // unknown anchor is a noop) so the convergence path stays
+        // single-pass.
         let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
         let delete_profile = ProfileOp::Delete { name: name.into() };
+        let backup = FirewallOp::BackupConfig;
+        let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
+        let reload = FirewallOp::Reload;
+        let flush_anchor = FirewallOp::FlushAnchor { name: name.into() };
+        let update_conf_plan = FirewallOp::UpdateConfig {
+            content: String::new(),
+        };
 
         reporter.orphan_group_starting(
             name,
             &[
                 (Op::Account(&delete_group), None),
                 (Op::Profile(&delete_profile), None),
+                (Op::Firewall(&backup), None),
+                (Op::Firewall(&remove_anchor), None),
+                (Op::Firewall(&update_conf_plan), None),
+                (Op::Firewall(&reload), None),
+                (Op::Firewall(&flush_anchor), None),
             ],
         );
 
         self.run(&delete_group, reporter)?;
         self.run(&delete_profile, reporter)
             .map_err(DestroyError::Profile)?;
+
+        let pf_conf_current = self
+            .executor
+            .read_pf_conf()
+            .map_err(DestroyError::Firewall)?;
+        let update_conf = FirewallOp::UpdateConfig {
+            content: remove_anchor_ref(&pf_conf_current, name),
+        };
+        self.run(&backup, reporter)
+            .map_err(DestroyError::Firewall)?;
+        self.run(&remove_anchor, reporter)
+            .map_err(DestroyError::Firewall)?;
+        self.run(&update_conf, reporter)
+            .map_err(DestroyError::Firewall)?;
+        self.run(&reload, reporter)
+            .map_err(DestroyError::Firewall)?;
+        self.run(&flush_anchor, reporter)
+            .map_err(DestroyError::Firewall)?;
 
         reporter.orphan_group_done(name);
         Ok(())

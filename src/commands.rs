@@ -50,6 +50,10 @@ pub(crate) fn dispatch(
                     reporter.create_profile_failed(&name, &e);
                     EX_IOERR
                 }
+                Err(accounts::CreateError::Firewall(e)) => {
+                    reporter.create_firewall_failed(&name, &e);
+                    EX_IOERR
+                }
             }
         }
         Verb::Shell { name } => {
@@ -136,5 +140,6 @@ fn surface_destroy_error(reporter: &mut Reporter, name: &str, error: &accounts::
     match error {
         accounts::DestroyError::Account(e) => reporter.destroy_failed(name, e),
         accounts::DestroyError::Profile(e) => reporter.destroy_profile_failed(name, e),
+        accounts::DestroyError::Firewall(e) => reporter.destroy_firewall_failed(name, e),
     }
 }

@@ -23,9 +23,12 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
 /// Account-domain operations. The writer expresses *what* to do (create the
@@ -86,8 +89,11 @@ pub enum AccountOp {
 
 /// Profile-domain operations. The store-backed `~/.config/tenant/profiles/<name>.toml`
 /// file is the host-side artifact; the substrate handles the actual fs work
-/// (or in-memory recording for tests). `Read` lands in cycle 2 when the PF
-/// anchor renderer needs the allowlist.
+/// (or in-memory recording for tests). Cycle 2's profile read path lives on
+/// `Executor::read_profile` (a dedicated method, not a variant here) because
+/// the return type — file content, not unit — doesn't fit
+/// `execute_profile`'s shape. Parallels `login`'s carve-out from
+/// `execute_account` for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileOp {
     /// Write the default profile content for `name`. Idempotent overwrite
@@ -97,8 +103,66 @@ pub enum ProfileOp {
     /// Remove the profile file. Idempotent: NotFound is success, mirroring
     /// the operator's mental model of `rm -f`.
     Delete { name: String },
-    // Cycle 2 adds:
-    // Read { name: String },
+}
+
+/// Firewall-domain operations. macOS implements per-tenant firewall rules
+/// as a named PF anchor (`/etc/pf.anchors/tenant-<name>`) referenced from
+/// `/etc/pf.conf` and loaded via `pfctl -f`. The substrate handles the
+/// actual file writes (atomic tempfile + sudo mv + sudo chmod) and the
+/// pfctl invocations; the writer composes these ops into the create/destroy
+/// flows.
+///
+/// `Anchor` stays in the variant names because it's the project's domain
+/// vocabulary for "named per-tenant firewall ruleset"; `Pf` prefixes drop
+/// from `Reload` / `Enable` because the tool's name (pfctl) lives in
+/// `MacosExecutor`, not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirewallOp {
+    /// Write the rendered anchor body to `/etc/pf.anchors/tenant-<name>`.
+    /// `name` is the tenant name; the anchor file's full name
+    /// (`tenant-<name>`) is constructed by `MacosExecutor` from it. `body`
+    /// is the precomputed anchor content (from `firewall::render_anchor`).
+    InstallAnchor { name: String, body: String },
+
+    /// Remove `/etc/pf.anchors/tenant-<name>`. Idempotent: NotFound is
+    /// success on production, mirroring the operator's mental model of
+    /// `rm -f`.
+    RemoveAnchor { name: String },
+
+    /// Copy `/etc/pf.conf` to `/etc/pf.conf.tenant-backup`. Fixed backup
+    /// path (no timestamps) — deterministic recovery, overwritten each
+    /// invocation.
+    BackupConfig,
+
+    /// Copy `/etc/pf.conf.tenant-backup` back to `/etc/pf.conf`. The
+    /// recovery half of `BackupConfig`. Runs on `Reload` failure during
+    /// create.
+    RestoreConfigFromBackup,
+
+    /// Write the precomputed pf.conf content to `/etc/pf.conf`. `content`
+    /// is the output of `firewall::ensure_anchor_ref` (create-side) or
+    /// `firewall::remove_anchor_ref` (destroy-side).
+    UpdateConfig { content: String },
+
+    /// `pfctl -f /etc/pf.conf` — reload the firewall ruleset. Non-zero
+    /// exit on syntax or anchor errors triggers the recovery path on
+    /// create.
+    Reload,
+
+    /// `sudo pfctl -a tenant-<name> -F all` — flush the in-kernel
+    /// rules and tables stored under the named anchor. `pfctl -f` only
+    /// walks the parent ruleset and never garbage-collects anchors
+    /// whose `load anchor` directive has been removed: without this
+    /// explicit flush, destroy leaves the previous tenant's rules
+    /// loaded under an orphan anchor name, and the next tenant getting
+    /// the same UID would silently inherit them. Symmetric counter to
+    /// the create-side `InstallAnchor`. Idempotent: flushing an empty
+    /// or unknown anchor is a noop on macOS.
+    FlushAnchor { name: String },
+
+    /// `pfctl -e` — enable the firewall. Treated as idempotent at the
+    /// substrate: "already enabled" stderr maps to `Ok(())`.
+    Enable,
 }
 
 /// Account-domain error. Same shape as the pre-refactor `ExecError` — the
@@ -128,6 +192,48 @@ impl fmt::Display for AccountError {
     }
 }
 
+/// Firewall-domain error. Same `Spawn` / `NonZero` shape as `AccountError`
+/// for pfctl invocations; two additional variants for the fs side of
+/// firewall ops:
+/// - `Fs` covers tempfile / mv / chmod failures during anchor/pf.conf
+///   writes; carries the path so the operator-facing frame can name what
+///   failed.
+/// - `RestoreFailed` is the recovery-of-recovery case: a `Reload` failure
+///   triggered a `RestoreConfigFromBackup`, and the restore itself failed.
+///   The host now carries a half-edited pf.conf; the message names the
+///   backup path and the manual recovery command.
+#[derive(Debug)]
+pub enum FirewallError {
+    Spawn(io::Error),
+    NonZero { code: i32, stderr: String },
+    Fs { path: String, message: String },
+    RestoreFailed { path: String },
+}
+
+impl fmt::Display for FirewallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FirewallError::Spawn(e) => write!(f, "failed to spawn process: {e}"),
+            FirewallError::NonZero { code, stderr } => {
+                let trimmed = stderr.trim();
+                if trimmed.is_empty() {
+                    write!(f, "process exited with code {code}")
+                } else {
+                    write!(f, "process exited with code {code}: {trimmed}")
+                }
+            }
+            FirewallError::Fs { path, message } => {
+                write!(f, "filesystem error at {path}: {message}")
+            }
+            FirewallError::RestoreFailed { path } => write!(
+                f,
+                "pf.conf restore from {path} failed \u{2014} \
+                 sudo cp {path} /etc/pf.conf to recover"
+            ),
+        }
+    }
+}
+
 /// Host-side substrate. Knows how to render ops as operator-facing display
 /// lines (`describe_*`) and how to execute them on this host (`execute_*` +
 /// `login`). Production wires `MacosExecutor` (knows dseditgroup,
@@ -150,6 +256,24 @@ pub trait Executor {
 
     fn describe_profile(&self, op: &ProfileOp) -> String;
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), ProfileError>;
+
+    /// Read the on-disk profile TOML content for `name`. Separate from
+    /// `execute_profile` because the return type (file content, not unit)
+    /// doesn't fit `execute_profile`'s shape — same carve-out rationale
+    /// as `login`. Cycle 2's create-side firewall step calls this to feed
+    /// the anchor renderer.
+    fn read_profile(&self, name: &str) -> Result<String, ProfileError>;
+
+    /// Read the current `/etc/pf.conf` content. Used by the Writer to
+    /// compute the post-edit conf via `firewall::ensure_anchor_ref` /
+    /// `remove_anchor_ref` before issuing `FirewallOp::UpdateConfig`.
+    /// Same carve-out rationale as `read_profile`: the return type is
+    /// content, not unit. Dry-run returns an empty conf — the plan
+    /// focuses on what tenant adds, not what's already there.
+    fn read_pf_conf(&self) -> Result<String, FirewallError>;
+
+    fn describe_firewall(&self, op: &FirewallOp) -> String;
+    fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError>;
 }
 
 /// Top-level ADT wrapper for "any op, regardless of domain." Used by the
@@ -164,16 +288,18 @@ pub trait Executor {
 pub enum Op<'a> {
     Account(&'a AccountOp),
     Profile(&'a ProfileOp),
+    Firewall(&'a FirewallOp),
 }
 
 impl<'a> Op<'a> {
     /// Render the op as an operator-facing display line. The match here
-    /// is the one place in the codebase that has to know the account vs
-    /// profile split for display purposes.
+    /// is the one place in the codebase that has to know the
+    /// account/profile/firewall split for display purposes.
     pub fn describe_via(&self, executor: &dyn Executor) -> String {
         match self {
             Op::Account(op) => executor.describe_account(op),
             Op::Profile(op) => executor.describe_profile(op),
+            Op::Firewall(op) => executor.describe_firewall(op),
         }
     }
 }
@@ -208,6 +334,16 @@ impl WritableOp for ProfileOp {
     }
     fn op_ref(&self) -> Op<'_> {
         Op::Profile(self)
+    }
+}
+
+impl WritableOp for FirewallOp {
+    type Error = FirewallError;
+    fn execute_via(&self, executor: &dyn Executor) -> Result<(), FirewallError> {
+        executor.execute_firewall(self)
+    }
+    fn op_ref(&self) -> Op<'_> {
+        Op::Firewall(self)
     }
 }
 
@@ -312,6 +448,176 @@ impl Executor for MacosExecutor {
             },
         }
     }
+
+    fn read_profile(&self, name: &str) -> Result<String, ProfileError> {
+        let path = profile_path(name)?;
+        fs::read_to_string(&path).map_err(|e| ProfileError {
+            message: e.to_string(),
+        })
+    }
+
+    fn describe_firewall(&self, op: &FirewallOp) -> String {
+        match op {
+            FirewallOp::InstallAnchor { name, .. } => {
+                // Pretend-shell `sudo tee … < anchor.body` framing — the
+                // operator sees the file path and a `<` marker for the
+                // content; the actual mechanism inside `execute_firewall`
+                // is tempfile + sudo mv + sudo chmod. Matches the
+                // ProfileOp::Create convention (`tee … < default.toml`),
+                // with `sudo` because the target is privileged.
+                format!("sudo tee /etc/pf.anchors/tenant-{name} < anchor.body")
+            }
+            FirewallOp::RemoveAnchor { name } => {
+                format!("sudo rm -f /etc/pf.anchors/tenant-{name}")
+            }
+            FirewallOp::BackupConfig => {
+                "sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup".to_string()
+            }
+            FirewallOp::RestoreConfigFromBackup => {
+                "sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf".to_string()
+            }
+            FirewallOp::UpdateConfig { .. } => "sudo tee /etc/pf.conf < updated.conf".to_string(),
+            FirewallOp::Reload => "sudo pfctl -f /etc/pf.conf".to_string(),
+            FirewallOp::FlushAnchor { name } => {
+                format!("sudo pfctl -a tenant-{name} -F all")
+            }
+            FirewallOp::Enable => "sudo pfctl -e".to_string(),
+        }
+    }
+
+    fn read_pf_conf(&self) -> Result<String, FirewallError> {
+        fs::read_to_string(PF_CONF).map_err(|e| FirewallError::Fs {
+            path: PF_CONF.to_string(),
+            message: e.to_string(),
+        })
+    }
+
+    fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
+        match op {
+            FirewallOp::InstallAnchor { name, body } => {
+                write_privileged(&tenant_anchor_path(name), body)
+            }
+            FirewallOp::RemoveAnchor { name } => {
+                // `sudo rm -f <path>` — idempotent on the macOS side
+                // (`rm -f` returns 0 on NotFound), so a partial-state
+                // destroy doesn't trip here.
+                spawn_firewall(&[
+                    "sudo".into(),
+                    "rm".into(),
+                    "-f".into(),
+                    tenant_anchor_path(name),
+                ])
+            }
+            FirewallOp::BackupConfig => spawn_firewall(&[
+                "sudo".into(),
+                "cp".into(),
+                PF_CONF.into(),
+                PF_CONF_BACKUP.into(),
+            ]),
+            FirewallOp::RestoreConfigFromBackup => {
+                // Recovery half: copy the backup back. A failure here
+                // means the host carries a half-edited pf.conf with no
+                // clean automated path back; surface as `RestoreFailed`
+                // so the Reporter message names the backup path and
+                // includes the manual recovery command.
+                spawn_firewall(&[
+                    "sudo".into(),
+                    "cp".into(),
+                    PF_CONF_BACKUP.into(),
+                    PF_CONF.into(),
+                ])
+                .map_err(|_| FirewallError::RestoreFailed {
+                    path: PF_CONF_BACKUP.to_string(),
+                })
+            }
+            FirewallOp::UpdateConfig { content } => write_privileged(PF_CONF, content),
+            FirewallOp::Reload => {
+                spawn_firewall(&["sudo".into(), "pfctl".into(), "-f".into(), PF_CONF.into()])
+            }
+            FirewallOp::FlushAnchor { name } => spawn_firewall(&[
+                "sudo".into(),
+                "pfctl".into(),
+                "-a".into(),
+                format!("tenant-{name}"),
+                "-F".into(),
+                "all".into(),
+            ]),
+            FirewallOp::Enable => {
+                // `pfctl -e` exits non-zero with "pf already enabled"
+                // when already on. Treat both success and
+                // already-enabled as success — the plugin's defensive
+                // pattern, transcribed verbatim.
+                match spawn_firewall(&["sudo".into(), "pfctl".into(), "-e".into()]) {
+                    Ok(()) => Ok(()),
+                    Err(FirewallError::NonZero { stderr, .. })
+                        if stderr.to_lowercase().contains("already enabled") =>
+                    {
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
+}
+
+/// Write `content` to a privileged absolute `path` via the tempfile +
+/// sudo mv + sudo chmod pattern from the plugin's
+/// `phase02_pf.py::_write_anchor_file`. Atomic from the operator's
+/// viewpoint: either the file lands fully or it doesn't.
+fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
+    let tmp_path = tempfile_path();
+    let mut tmp = fs::File::create(&tmp_path).map_err(|e| FirewallError::Fs {
+        path: tmp_path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    tmp.write_all(content.as_bytes())
+        .map_err(|e| FirewallError::Fs {
+            path: tmp_path.display().to_string(),
+            message: e.to_string(),
+        })?;
+    drop(tmp);
+
+    let tmp_str = tmp_path.display().to_string();
+    let result = (|| -> Result<(), FirewallError> {
+        spawn_firewall(&["sudo".into(), "mv".into(), tmp_str.clone(), path.into()])?;
+        spawn_firewall(&["sudo".into(), "chmod".into(), "0644".into(), path.into()])
+    })();
+    // Best-effort cleanup — `sudo mv` may have moved it already, which
+    // makes remove_file a NotFound that we silently swallow.
+    let _ = fs::remove_file(&tmp_path);
+    result
+}
+
+/// Privately-named tempfile under the OS temp dir. PID + nanos suffix
+/// to avoid collision between concurrent tenant invocations (rare in
+/// the create/destroy verbs, but cheap to guard against).
+fn tempfile_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let mut path = env::temp_dir();
+    path.push(format!("tenant-pf-{pid}-{nanos}.tmp"));
+    path
+}
+
+fn spawn_firewall(argv: &[String]) -> Result<(), FirewallError> {
+    let (program, rest) = argv
+        .split_first()
+        .ok_or_else(|| FirewallError::Spawn(io::Error::other("argv is empty")))?;
+    let output = Command::new(program)
+        .args(rest)
+        .output()
+        .map_err(FirewallError::Spawn)?;
+    if !output.status.success() {
+        return Err(FirewallError::NonZero {
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Extract the tenant name from any `ProfileOp` variant. Centralizes the
@@ -442,6 +748,28 @@ impl Executor for DryRunExecutor {
     fn execute_profile(&self, _op: &ProfileOp) -> Result<(), ProfileError> {
         Ok(())
     }
+    /// Dry-run reads return the default profile content. At create-time
+    /// the writer reads the profile after the (simulated) `ProfileOp::Create`
+    /// step — the operator's mental model is "the file would now exist with
+    /// the scaffolded default", so the dry-run read returns exactly that.
+    /// No verb reads the profile outside the create flow, so this default
+    /// covers every dry-run path that hits `read_profile`.
+    fn read_profile(&self, _name: &str) -> Result<String, ProfileError> {
+        Ok(default_profile_toml())
+    }
+    /// Dry-run reads return an empty pf.conf — the plan focuses on what
+    /// tenant adds to the file, not what's already there. The Writer's
+    /// `ensure_anchor_ref(empty, name)` produces a clean two-line conf
+    /// representing tenant's contribution.
+    fn read_pf_conf(&self) -> Result<String, FirewallError> {
+        Ok(String::new())
+    }
+    fn describe_firewall(&self, op: &FirewallOp) -> String {
+        MacosExecutor.describe_firewall(op)
+    }
+    fn execute_firewall(&self, _op: &FirewallOp) -> Result<(), FirewallError> {
+        Ok(())
+    }
 }
 
 /// Test substitute. Records every op invocation (for behavioral assertions)
@@ -453,6 +781,7 @@ impl Executor for DryRunExecutor {
 pub struct StubExecutor {
     account_ops: RefCell<Vec<AccountOp>>,
     profile_ops: RefCell<Vec<ProfileOp>>,
+    firewall_ops: RefCell<Vec<FirewallOp>>,
     logins: RefCell<Vec<String>>,
 
     /// Per-op failure overrides for `execute_account`. First match (by full
@@ -472,6 +801,18 @@ pub struct StubExecutor {
     /// it fires. Mirrors the pre-refactor `StubProfileStore::with_write_failure`.
     profile_failure: RefCell<Option<ProfileError>>,
 
+    /// Per-op failure overrides for `execute_firewall`. First match wins
+    /// (by full equality on the op value). Same shape as
+    /// `account_overrides` — lets a test pin "the InstallAnchor step fails
+    /// but BackupConfig succeeded" without affecting unrelated firewall
+    /// ops in the same flow.
+    firewall_overrides: RefCell<Vec<(FirewallOp, FirewallError)>>,
+
+    /// One-shot failure for the next `execute_firewall` call that doesn't
+    /// match an override. Useful when the test cares about "the next pfctl
+    /// invocation fails" without naming which op specifically.
+    firewall_failure: RefCell<Option<FirewallError>>,
+
     /// Exit code returned by `login`. Default 0; tests set this to pin the
     /// shell-verb's exit-code propagation contract.
     login_exit_code: Cell<i32>,
@@ -480,9 +821,19 @@ pub struct StubExecutor {
     /// mutates this — `Create` writes `default_profile_toml()` under the
     /// tenant name, `Delete` removes the entry — so tests can assert on
     /// presence/absence (`has_profile`) and byte-exact content
-    /// (`profile_state`). Mirrors the pre-refactor `StubProfileStore`'s
+    /// (`profile_state`). Also serves as the `read_profile` backing store:
+    /// reads return the entry under `name` if present, else a "not found"
+    /// `ProfileError`. Mirrors the pre-refactor `StubProfileStore`'s
     /// `HashMap<String, String>` backing.
     profile_state: RefCell<HashMap<String, String>>,
+
+    /// In-memory simulation of `/etc/pf.conf` for `read_pf_conf`. Default
+    /// empty. Tests with non-empty starting state (e.g. a host with
+    /// another tenant already installed) pre-load via `with_pf_conf`.
+    /// Not mutated by `execute_firewall` — the substrate models pfctl
+    /// ops as side effects on a real-host fs, and tests assert behavior
+    /// via `firewall_ops()` rather than by re-reading conf state.
+    pf_conf_state: RefCell<String>,
 }
 
 impl StubExecutor {
@@ -514,6 +865,22 @@ impl StubExecutor {
         self
     }
 
+    /// Configure the next `execute_firewall` call matching `op` to fail
+    /// with `err`. Matches by full equality on the op value. Mirrors
+    /// `fail_account_op`.
+    pub fn fail_firewall_op(self, op: FirewallOp, err: FirewallError) -> Self {
+        self.firewall_overrides.borrow_mut().push((op, err));
+        self
+    }
+
+    /// Configure the next non-matching `execute_firewall` call to fail
+    /// with `err`. One-shot — cleared after firing. Mirrors
+    /// `fail_next_profile`.
+    pub fn fail_next_firewall(self, err: FirewallError) -> Self {
+        *self.firewall_failure.borrow_mut() = Some(err);
+        self
+    }
+
     /// Configure the value returned by `login`. Pins the shell-verb's
     /// exit-code propagation contract.
     pub fn login_exit_code(self, code: i32) -> Self {
@@ -529,6 +896,10 @@ impl StubExecutor {
         self.profile_ops.borrow().clone()
     }
 
+    pub fn firewall_ops(&self) -> Vec<FirewallOp> {
+        self.firewall_ops.borrow().clone()
+    }
+
     pub fn logins(&self) -> Vec<String> {
         self.logins.borrow().clone()
     }
@@ -542,6 +913,15 @@ impl StubExecutor {
         self.profile_state
             .borrow_mut()
             .insert(name.to_string(), content.to_string());
+        self
+    }
+
+    /// Pre-load `/etc/pf.conf` content for `read_pf_conf`. Used by
+    /// cycle-2 tests that need a host-state with existing anchor refs
+    /// (so `ensure_anchor_ref` / `remove_anchor_ref` exercise the
+    /// non-empty case).
+    pub fn with_pf_conf(self, content: &str) -> Self {
+        *self.pf_conf_state.borrow_mut() = content.to_string();
         self
     }
 
@@ -596,6 +976,37 @@ impl Executor for StubExecutor {
             ProfileOp::Delete { name } => {
                 self.profile_state.borrow_mut().remove(name);
             }
+        }
+        Ok(())
+    }
+
+    fn read_profile(&self, name: &str) -> Result<String, ProfileError> {
+        match self.profile_state.borrow().get(name) {
+            Some(content) => Ok(content.clone()),
+            None => Err(ProfileError {
+                message: format!("profile '{name}' not found"),
+            }),
+        }
+    }
+
+    fn read_pf_conf(&self) -> Result<String, FirewallError> {
+        Ok(self.pf_conf_state.borrow().clone())
+    }
+
+    fn describe_firewall(&self, op: &FirewallOp) -> String {
+        MacosExecutor.describe_firewall(op)
+    }
+
+    fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
+        self.firewall_ops.borrow_mut().push(op.clone());
+        let mut overrides = self.firewall_overrides.borrow_mut();
+        if let Some(idx) = overrides.iter().position(|(target, _)| target == op) {
+            let (_, err) = overrides.remove(idx);
+            return Err(err);
+        }
+        drop(overrides);
+        if let Some(err) = self.firewall_failure.borrow_mut().take() {
+            return Err(err);
         }
         Ok(())
     }

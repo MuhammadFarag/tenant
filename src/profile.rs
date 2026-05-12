@@ -12,6 +12,8 @@
 use std::fmt;
 use std::io;
 
+use serde::Deserialize;
+
 /// Display path for the tenant's profile, with a literal `~` (not the
 /// expanded `$HOME`). Used in user-facing plan/echo lines so the rendered
 /// output is host-independent — the operator's `~` is the universally
@@ -43,11 +45,11 @@ pub fn default_profile_toml() -> String {
 }
 
 /// Failure shape for the profile domain. Wraps any error surfaced from
-/// the substrate's `execute_profile` impl (fs failures in production,
-/// caller-injected failures in tests). The dispatcher renders this
-/// through `messages::create_profile_failed` / `destroy_profile_failed`
-/// so the operator sees the path that failed without having to read
-/// source.
+/// the substrate's `execute_profile` / `read_profile` impls (fs failures
+/// in production, caller-injected failures in tests). The dispatcher
+/// renders this through `Reporter::create_profile_failed` /
+/// `destroy_profile_failed` so the operator sees the path that failed
+/// without having to read source.
 #[derive(Debug)]
 pub struct ProfileError {
     pub message: String,
@@ -65,4 +67,57 @@ impl From<io::Error> for ProfileError {
             message: e.to_string(),
         }
     }
+}
+
+/// Parsed per-tenant profile. Cycle 2's create-side firewall step reads
+/// the on-disk TOML via `Executor::read_profile`, then runs this `parse`
+/// on the content to extract the allowlist tiers for `render_anchor`.
+///
+/// `schema_version` is checked against the supported set (currently just
+/// `1`) before structural deserialization so a future schema bump
+/// produces an operator-readable refusal rather than a low-level serde
+/// error frame. Host order is preserved across parse → render so the
+/// anchor file's host order matches the operator's grouping intent in
+/// the profile.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct Profile {
+    pub schema_version: u32,
+    pub allowlist: Allowlist,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct Allowlist {
+    pub runtime: Tier,
+    pub install: Tier,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct Tier {
+    pub hosts: Vec<String>,
+}
+
+/// Parse profile TOML content into a typed `Profile`. Pre-checks
+/// `schema_version` against the supported set (currently just `1`) so a
+/// version bump produces a refusal message that names the version
+/// explicitly; structural failures (missing sections, wrong types) fall
+/// through to serde's error frame, which the dispatcher rewraps in the
+/// path-naming Reporter frame.
+pub fn parse(content: &str) -> Result<Profile, ProfileError> {
+    // Pre-check schema_version separately so the refusal phrasing
+    // doesn't depend on serde's error formatting. Falls through silently
+    // if the field is absent or the wrong type — the typed deserialize
+    // below catches both cases with its own (acceptable) message.
+    let raw: toml::Value = toml::from_str(content).map_err(|e: toml::de::Error| ProfileError {
+        message: format!("invalid TOML: {e}"),
+    })?;
+    if let Some(schema) = raw.get("schema_version").and_then(|v| v.as_integer())
+        && schema != 1
+    {
+        return Err(ProfileError {
+            message: format!("schema_version {schema} not understood (this tenant supports 1)"),
+        });
+    }
+    toml::from_str(content).map_err(|e| ProfileError {
+        message: e.to_string(),
+    })
 }

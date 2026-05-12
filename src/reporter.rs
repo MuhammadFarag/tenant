@@ -18,7 +18,7 @@
 use std::io::Write;
 
 use crate::accounts::{ConflictError, NameError, tenant_share_group_name};
-use crate::executor::{AccountError, AccountOp, Executor, Op};
+use crate::executor::{AccountError, AccountOp, Executor, FirewallError, Op};
 use crate::profile::{ProfileError, display_path_for};
 
 pub(crate) struct Reporter<'a> {
@@ -313,6 +313,20 @@ impl<'a> Reporter<'a> {
         );
     }
 
+    /// Failure shape for any firewall step during create (BackupConfig,
+    /// InstallAnchor, UpdateConfig, Reload, Enable) AND for read/parse
+    /// failures on the just-written profile (which surface as
+    /// `FirewallError::Fs` with the profile path baked in). The
+    /// `FirewallError::Display` impl carries enough detail (path or
+    /// process exit context) that the operator doesn't need to read
+    /// source; the framing here adds the verb-level context.
+    pub fn create_firewall_failed(&mut self, name: &str, err: &FirewallError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to install firewall for '{name}': {err}"
+        );
+    }
+
     pub fn destroy_failed(&mut self, name: &str, err: &AccountError) {
         let _ = writeln!(self.stderr, "tenant: failed to destroy '{name}': {err}");
     }
@@ -322,6 +336,18 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(
             self.stderr,
             "tenant: failed to remove profile '{path}' for '{name}': {err}"
+        );
+    }
+
+    /// Failure shape for any firewall teardown step during destroy
+    /// (BackupConfig, RemoveAnchor, UpdateConfig, Reload) AND for
+    /// pf.conf read failures. Same framing rationale as
+    /// `create_firewall_failed`: the verb-level context goes here, the
+    /// path/process detail comes from `FirewallError::Display`.
+    pub fn destroy_firewall_failed(&mut self, name: &str, err: &FirewallError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to tear down firewall for '{name}': {err}"
         );
     }
 

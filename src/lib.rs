@@ -7,6 +7,7 @@ pub mod accounts;
 pub mod allocation;
 mod commands;
 pub mod executor;
+pub mod firewall;
 pub mod profile;
 mod reporter;
 

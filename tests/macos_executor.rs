@@ -16,7 +16,7 @@
 //! larger stdout block. A focused per-variant test reads cleaner and
 //! catches drift more precisely.
 
-use tenant::executor::{AccountOp, Executor, MacosExecutor, ProfileOp};
+use tenant::executor::{AccountOp, Executor, FirewallOp, MacosExecutor, ProfileOp};
 
 #[test]
 fn macos_describes_create_share_group() {
@@ -104,5 +104,82 @@ fn macos_describes_profile_delete() {
     assert_eq!(
         s.describe_profile(&ProfileOp::Delete { name: "dev".into() }),
         "rm -f ~/.config/tenant/profiles/dev.toml",
+    );
+}
+
+#[test]
+fn macos_describes_install_anchor() {
+    // Body content is intentionally not in the rendered line — the
+    // pretend-shell `< anchor.body` marker says "content comes from
+    // elsewhere", matching the ProfileOp::Create convention.
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_firewall(&FirewallOp::InstallAnchor {
+            name: "dev".into(),
+            body: "ignored for describe".into(),
+        }),
+        "sudo tee /etc/pf.anchors/tenant-dev < anchor.body",
+    );
+}
+
+#[test]
+fn macos_describes_remove_anchor() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_firewall(&FirewallOp::RemoveAnchor { name: "dev".into() }),
+        "sudo rm -f /etc/pf.anchors/tenant-dev",
+    );
+}
+
+#[test]
+fn macos_describes_backup_config() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_firewall(&FirewallOp::BackupConfig),
+        "sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup",
+    );
+}
+
+#[test]
+fn macos_describes_restore_config_from_backup() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_firewall(&FirewallOp::RestoreConfigFromBackup),
+        "sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf",
+    );
+}
+
+#[test]
+fn macos_describes_update_config() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_firewall(&FirewallOp::UpdateConfig {
+            content: "ignored for describe".into(),
+        }),
+        "sudo tee /etc/pf.conf < updated.conf",
+    );
+}
+
+#[test]
+fn macos_describes_reload() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_firewall(&FirewallOp::Reload),
+        "sudo pfctl -f /etc/pf.conf",
+    );
+}
+
+#[test]
+fn macos_describes_enable() {
+    let s = MacosExecutor;
+    assert_eq!(s.describe_firewall(&FirewallOp::Enable), "sudo pfctl -e",);
+}
+
+#[test]
+fn macos_describes_flush_anchor() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_firewall(&FirewallOp::FlushAnchor { name: "dev".into() }),
+        "sudo pfctl -a tenant-dev -F all",
     );
 }
