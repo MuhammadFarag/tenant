@@ -3,9 +3,9 @@ use std::io;
 use std::process::Command;
 
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::executor::{ExecError, Executor};
-use crate::messages;
-use crate::profile::{ProfileError, ProfileStore, default_profile_toml};
+use crate::executor::{self, AccountError, AccountOp, ProfileOp};
+use crate::messages::{self, PlanStep};
+use crate::profile::ProfileError;
 use crate::reporter::Reporter;
 
 pub trait Reader {
@@ -297,181 +297,150 @@ fn run_dscl(args: &[&str]) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Side-effecting half of the accounts API. Verbs ask in domain terms;
-/// the impl owns argv construction and self-emits intent + (verbose)
-/// mechanism via the Reporter handed in. Mode (real vs dry-run) is not
-/// the Writer's concern — each method always renders the same three
-/// bracketed Messages (`would_<action>` / `<action>ing` / `<action>ed`)
-/// and always invokes the executor. The Reporter filters each Message
-/// down to the right mode/verbosity; the Executor is a no-op in dry-run.
-pub(crate) trait Writer {
-    fn create_tenant(
-        &self,
-        name: &str,
-        uid: u32,
-        gid: u32,
-        reporter: &mut Reporter,
-    ) -> Result<(), CreateError>;
-
-    fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), DestroyError>;
-
-    /// Cycle-5 convergence path: the tenant user is already absent (so
-    /// none of the user-side teardown applies), but the suffixed
-    /// `<name>-tenant-share` group is still on the host. Issues exactly
-    /// one exec call — `sudo dseditgroup -o delete -n .
-    /// <name>-tenant-share` — bracketed by its own three-message
-    /// `would_destroy_orphan_group` / `destroying_orphan_group` /
-    /// `destroyed_orphan_group` trio, mirroring the discipline of the
-    /// full destroy path. Sub-cycle 1.8 will extend this arm to also
-    /// remove a residual profile (the convergence contract is "host has
-    /// no trace of `<name>`"), which is why the return type is
-    /// `DestroyError` not `ExecError`.
-    fn destroy_orphan_group(&self, name: &str, reporter: &mut Reporter)
-    -> Result<(), DestroyError>;
-
-    /// Interactive shell entry into the tenant. Hands `["sudo", "-iu",
-    /// <name>]` to the executor's `exec_into` substitution point (inherits
-    /// stdin/stdout/stderr so sudo can prompt and the login shell can drive
-    /// the controlling terminal). Returns the child's exit code on clean
-    /// shell exit; bubbles `ExecError` only for spawn failures (sudo not
-    /// found, etc.). Pre-exec emits the would/shelling pair through the
-    /// Reporter; no post-exec confirmation — the operator IS the shell,
-    /// so a "Shelled into …" line after they exit would be at best
-    /// redundant and at worst land in a different terminal context.
-    fn shell_into_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<i32, ExecError>;
-}
-
 /// Granular error type for the create writer. Phase 3 splits the create
-/// flow into two exec calls (dseditgroup-create + sysadminctl-addUser),
-/// each of which can fail. The dispatcher needs to know which one failed
-/// so it can render the right error message: `create_group_failed` if
+/// flow into two account-domain ops (CreateShareGroup +
+/// CreateTenantUser), each of which can fail; cycle 1 adds the
+/// profile-write step. The dispatcher needs to know which one failed so
+/// it can render the right error message: `create_group_failed` if
 /// dseditgroup tripped (the user wasn't touched), `create_failed` if
 /// sysadminctl tripped (the writer ran a rollback). The third variant
-/// covers the worst case where the rollback itself failed — the host
-/// is left with an orphan group, which the operator needs to know about
-/// so they can re-run destroy to converge.
+/// covers the worst case where the rollback itself failed — the host is
+/// left with an orphan group, which the operator needs to know about so
+/// they can re-run destroy to converge.
 #[derive(Debug)]
 pub(crate) enum CreateError {
-    /// dseditgroup-create failed before sysadminctl ran. No rollback —
+    /// CreateShareGroup failed before CreateTenantUser ran. No rollback —
     /// the group was never created. The user is untouched.
-    Group(ExecError),
-    /// sysadminctl-addUser failed; the rollback dseditgroup-delete
-    /// succeeded. Host is back to its pre-create state.
-    User(ExecError),
-    /// sysadminctl-addUser failed AND the rollback dseditgroup-delete
-    /// also failed. The host now has an orphan `<name>-tenant-share`
-    /// group with no corresponding user. The dispatcher emits two stderr
+    Group(AccountError),
+    /// CreateTenantUser failed; the rollback DeleteShareGroup succeeded.
+    /// Host is back to its pre-create state.
+    User(AccountError),
+    /// CreateTenantUser failed AND the rollback DeleteShareGroup also
+    /// failed. The host now has an orphan `<name>-tenant-share` group
+    /// with no corresponding user. The dispatcher emits two stderr
     /// lines, the second pointing the operator at `tenant destroy` for
     /// convergence (cycle 5's OrphanGroup arm).
     UserWithRollback {
-        user: ExecError,
-        rollback: ExecError,
+        user: AccountError,
+        rollback: AccountError,
     },
-    /// dseditgroup-create + sysadminctl-addUser both succeeded; the
-    /// profile-write failed (disk full, permission denied, etc.).
-    /// Locked policy: leave the user + group present. The operator's
-    /// recovery is `tenant destroy <name>` — the Destroyable arm cleans
-    /// up the user + group, and the profile-rm step is a noop when the
-    /// profile is absent. No rollback variants needed because
-    /// `std::fs::write` failures are rare and the convergence story is
-    /// already covered.
+    /// CreateShareGroup + CreateTenantUser both succeeded; the
+    /// profile-write failed (disk full, permission denied, etc.). Locked
+    /// policy: leave the user + group present. The operator's recovery
+    /// is `tenant destroy <name>` — the Destroyable arm cleans up the
+    /// user + group, and the profile-rm step is a noop when the profile
+    /// is absent.
     Profile(ProfileError),
 }
 
 /// Granular error type for the destroy writers (both `destroy_tenant`
-/// and `destroy_orphan_group`). Cycle 1 introduces this when destroy
-/// gains its 5th step (profile-rm) and the dispatcher needs to render a
-/// distinct error message for profile-rm failure (operator sees the
-/// path, not a generic `process exited with code N` frame). The
-/// `From<ExecError>` impl lets the writers keep `?` propagation on
-/// their existing executor.run calls.
+/// and `destroy_orphan_group`). Distinguishes account-domain failures
+/// (sysadminctl-deleteUser, dscl-cleanup, dseditgroup-delete) from
+/// profile-domain failures (profile-rm) so the dispatcher can render
+/// each with operator-appropriate framing. The `From<AccountError>`
+/// impl lets the writers keep `?` propagation on their `execute_account`
+/// calls.
 #[derive(Debug)]
 pub(crate) enum DestroyError {
-    Exec(ExecError),
+    Account(AccountError),
     Profile(ProfileError),
 }
 
-impl From<ExecError> for DestroyError {
-    fn from(e: ExecError) -> Self {
-        DestroyError::Exec(e)
+impl From<AccountError> for DestroyError {
+    fn from(e: AccountError) -> Self {
+        DestroyError::Account(e)
     }
 }
 
-pub(crate) struct MacosWriter<'a> {
-    executor: &'a dyn Executor,
-    profiles: &'a dyn ProfileStore,
+/// Side-effecting half of the accounts API. Verbs ask in domain terms
+/// via `AccountOp` and `ProfileOp` values handed to the substrate; the
+/// substrate (production: `MacosExecutor`) owns argv construction and
+/// the actual subprocess invocation; this writer composes ops into
+/// verb-level flows and emits intent + (verbose) mechanism via the
+/// Reporter handed in. Mode (real vs dry-run) is not the Writer's
+/// concern — each method always renders the same bracketed
+/// `would_<action>` / `<action>ing` / `<action>ed` Messages and always
+/// invokes the substrate. The Reporter filters each Message down to
+/// the right mode/verbosity; the substrate's `DryRunExecutor` impl is
+/// a no-op in dry-run.
+pub(crate) struct Writer<'a> {
+    executor: &'a dyn executor::Executor,
 }
 
-impl<'a> MacosWriter<'a> {
-    pub(crate) fn new(executor: &'a dyn Executor, profiles: &'a dyn ProfileStore) -> Self {
-        Self { executor, profiles }
+impl<'a> Writer<'a> {
+    pub(crate) fn new(executor: &'a dyn executor::Executor) -> Self {
+        Self { executor }
     }
-}
 
-impl<'a> Writer for MacosWriter<'a> {
-    fn create_tenant(
+    pub(crate) fn create_tenant(
         &self,
         name: &str,
         uid: u32,
         gid: u32,
         reporter: &mut Reporter,
     ) -> Result<(), CreateError> {
-        // Two exec calls compose create — group-first, then user:
-        //   1. sudo dseditgroup -o create -n . -i <gid> <name>-tenant-share
-        //   2. sudo sysadminctl -addUser <name> ... -GID <gid>
-        // The group MUST exist before sysadminctl runs so the user's
-        // home directory ownership lands on the tenant-share group, not
-        // staff (sysadminctl chowns the home dir to the group named by
-        // -GID at creation time).
-        // The 3rd "rollback" line in the plan is the success-path
-        // counterpart: if sysadminctl fails, cycle 3's rollback path
-        // runs `sudo dseditgroup -o delete -n . <name>-tenant-share`.
-        // It's shown in the pre-exec plan regardless of outcome (the
-        // operator sees the algorithm) but only echoes in the `$` block
-        // when it actually fires.
-        let group_argv = build_dseditgroup_create_argv(name, gid);
-        let user_argv = build_create_argv(name, uid, gid);
-        let rollback_argv = build_dseditgroup_delete_argv(name);
+        // Four-step composition: CreateShareGroup → CreateTenantUser → (on
+        // failure) DeleteShareGroup rollback → (on success)
+        // ProfileOp::Create. The share-group must exist before
+        // CreateTenantUser so the new user's home directory chowns to the
+        // tenant-share group rather than staff. The rollback step is
+        // shown in the plan unconditionally (the operator sees the
+        // algorithm) but echoes only when it fires.
+        let create_group = AccountOp::CreateShareGroup {
+            name: name.into(),
+            gid,
+        };
+        let add_user = AccountOp::CreateTenantUser {
+            name: name.into(),
+            uid,
+            gid,
+        };
+        let rollback_group = AccountOp::DeleteShareGroup { name: name.into() };
+        let create_profile = ProfileOp::Create { name: name.into() };
 
-        reporter.emit_dry_only(messages::would_create_tenant(
-            name,
-            &group_argv,
-            &user_argv,
-            &rollback_argv,
-        ));
-        reporter.emit_real_only(messages::creating_tenant(
-            name,
-            &group_argv,
-            &user_argv,
-            &rollback_argv,
-        ));
+        let plan_group_line = self.executor.describe_account(&create_group);
+        let plan_user_line = self.executor.describe_account(&add_user);
+        let plan_rollback_line = self.executor.describe_account(&rollback_group);
+        let plan_profile_line = self.executor.describe_profile(&create_profile);
 
-        reporter.emit_real_only(messages::running_argv(&group_argv));
-        self.executor.run(&group_argv).map_err(CreateError::Group)?;
+        let plan = [
+            PlanStep::plain(&plan_group_line),
+            PlanStep::plain(&plan_user_line),
+            PlanStep::annotated(&plan_rollback_line, "on rollback"),
+            PlanStep::plain(&plan_profile_line),
+        ];
 
-        reporter.emit_real_only(messages::running_argv(&user_argv));
-        match self.executor.run(&user_argv) {
+        reporter.emit_dry_only(messages::would_create_tenant(name, &plan));
+        reporter.emit_real_only(messages::creating_tenant(name, &plan));
+
+        reporter.emit_real_only(messages::running(&plan_group_line));
+        self.executor
+            .execute_account(&create_group)
+            .map_err(CreateError::Group)?;
+
+        reporter.emit_real_only(messages::running(&plan_user_line));
+        match self.executor.execute_account(&add_user) {
             Ok(()) => {
-                // Profile-write is the 4th step. Echo line uses the
-                // pretend-shell `tee <path> < default.toml` framing
-                // (see `running_profile_write`). A profile-write failure
-                // doesn't roll back the user or group — operator
-                // recovers via `tenant destroy <name>` (Destroyable arm
-                // handles a missing-profile case as a noop on the rm
-                // step).
-                reporter.emit_real_only(messages::running_profile_write(name));
-                write_default_profile(self.profiles, name).map_err(CreateError::Profile)?;
+                // Profile-write is the 4th step. Echo goes through the
+                // unified `running` factory against the substrate's
+                // describe output — no special-case echo factory needed.
+                // A profile-write failure doesn't roll back the user or
+                // group; recovery is `tenant destroy <name>`.
+                reporter.emit_real_only(messages::running(&plan_profile_line));
+                self.executor
+                    .execute_profile(&create_profile)
+                    .map_err(CreateError::Profile)?;
                 reporter.emit_real_only(messages::created_tenant(name, uid, gid));
                 Ok(())
             }
             Err(user_err) => {
-                // Sysadminctl-addUser failed after the group was created.
+                // CreateTenantUser failed after the group was created.
                 // Roll back by deleting the just-created group so the host
                 // returns to its pre-create state. The `$` echo for the
                 // rollback fires here regardless of whether the rollback
                 // itself succeeds — the operator should see what we tried.
-                reporter.emit_real_only(messages::running_argv(&rollback_argv));
-                match self.executor.run(&rollback_argv) {
+                reporter.emit_real_only(messages::running(&plan_rollback_line));
+                match self.executor.execute_account(&rollback_group) {
                     Ok(()) => Err(CreateError::User(user_err)),
                     Err(rollback_err) => Err(CreateError::UserWithRollback {
                         user: user_err,
@@ -482,255 +451,139 @@ impl<'a> Writer for MacosWriter<'a> {
         }
     }
 
-    fn destroy_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<(), DestroyError> {
-        // Four commands compose the destroy mechanism:
-        //   1. sysadminctl -deleteUser           — the canonical destroy
-        //   2. dscl . -read /Users/<name>        — residue probe (no sudo;
-        //      reads on the local node don't require it)
-        //   3. sudo dscl . -delete /Users/<name> — belt-and-braces user
-        //      cleanup, conditional on the probe finding the DS record
-        //      still present. sysadminctl can leave a stale DS record in
-        //      some failure shapes (caught the hard way by the sandbox
-        //      plugin that originally inspired this CLI); the
-        //      probe-and-cleanup makes destroy convergent toward absence.
-        //   4. sudo dseditgroup -o delete -n . <name>-tenant-share — the
-        //      Phase-3 group cleanup. The V1.8 sysadminctl-cascade only
-        //      caught implicit `<name>` groups; the renamed
-        //      `<name>-tenant-share` group doesn't inherit that cleanup,
-        //      so this step is load-bearing — without it the host would
-        //      carry an orphan group after every destroy.
-        //   5. rm -f ~/.config/tenant/profiles/<name>.toml — cycle 1's
-        //      profile cleanup. Synthetic argv (the actual call goes
-        //      through ProfileStore, not a real `rm`) so the plan
-        //      renderer can format it uniformly with the shell-out lines.
-        //      `rm -f` reflects the idempotent semantics: NotFound is
-        //      success, mirroring `XdgProfileStore::remove`.
-        let sysadminctl_delete = build_destroy_sysadminctl_argv(name);
-        let dscl_probe = build_dscl_read_user_argv(name);
-        let dscl_cleanup = build_dscl_delete_user_argv(name);
-        let group_delete = build_dseditgroup_delete_argv(name);
-        let profile_remove = build_profile_remove_synthetic_argv(name);
-        let plan: [&[String]; 5] = [
-            &sysadminctl_delete,
-            &dscl_probe,
-            &dscl_cleanup,
-            &group_delete,
-            &profile_remove,
+    pub(crate) fn destroy_tenant(
+        &self,
+        name: &str,
+        reporter: &mut Reporter,
+    ) -> Result<(), DestroyError> {
+        // Five-step composition:
+        //   1. DeleteTenantUser   — the canonical destroy (sysadminctl)
+        //   2. LookupUserRecord   — residue probe; success means the DS
+        //      record is still present (gates the conditional cleanup)
+        //   3. DeleteUserRecord   — belt-and-braces low-level cleanup;
+        //      conditional on the probe finding residue
+        //   4. DeleteShareGroup   — the Phase-3 group cleanup
+        //   5. ProfileOp::Delete  — cycle 1's profile cleanup
+        // The probe's exit code drives the conditional. Plan shows all
+        // five steps; echo block shows what actually ran (the conditional
+        // cleanup line is absent when the probe found clean).
+        let delete_user = AccountOp::DeleteTenantUser { name: name.into() };
+        let probe = AccountOp::LookupUserRecord { name: name.into() };
+        let cleanup = AccountOp::DeleteUserRecord { name: name.into() };
+        let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
+        let delete_profile = ProfileOp::Delete { name: name.into() };
+
+        let plan_delete_user_line = self.executor.describe_account(&delete_user);
+        let plan_probe_line = self.executor.describe_account(&probe);
+        let plan_cleanup_line = self.executor.describe_account(&cleanup);
+        let plan_delete_group_line = self.executor.describe_account(&delete_group);
+        let plan_delete_profile_line = self.executor.describe_profile(&delete_profile);
+
+        let plan = [
+            PlanStep::plain(&plan_delete_user_line),
+            PlanStep::plain(&plan_probe_line),
+            PlanStep::plain(&plan_cleanup_line),
+            PlanStep::plain(&plan_delete_group_line),
+            PlanStep::plain(&plan_delete_profile_line),
         ];
 
-        // Pre-exec: dry-run shows the full plan; real-verbose shows the
-        // intent + plan. Both render the dscl-cleanup unconditionally —
-        // pre-exec can't know what the probe will return at runtime, so
-        // the operator sees the algorithm. The dseditgroup-delete is
-        // also always shown; it's unconditional at runtime too.
         reporter.emit_dry_only(messages::would_destroy_tenant(name, &plan));
         reporter.emit_real_only(messages::destroying_tenant(name, &plan));
 
-        // Per-exec echo + run pairs. `running_argv` Messages have only
-        // `summary_verbose` populated, so they render only in real+verbose;
-        // `emit_real_only` filters them out in dry-run.
-        reporter.emit_real_only(messages::running_argv(&sysadminctl_delete));
-        self.executor.run(&sysadminctl_delete)?;
+        reporter.emit_real_only(messages::running(&plan_delete_user_line));
+        self.executor.execute_account(&delete_user)?;
 
-        reporter.emit_real_only(messages::running_argv(&dscl_probe));
-        match self.executor.run(&dscl_probe) {
+        reporter.emit_real_only(messages::running(&plan_probe_line));
+        match self.executor.execute_account(&probe) {
             Ok(()) => {
                 // Probe succeeded → DS record still present → run cleanup.
-                reporter.emit_real_only(messages::running_argv(&dscl_cleanup));
-                self.executor.run(&dscl_cleanup)?;
+                reporter.emit_real_only(messages::running(&plan_cleanup_line));
+                self.executor.execute_account(&cleanup)?;
             }
-            Err(ExecError::NonZero { .. }) => {
-                // Probe returned non-zero (typically eDSRecordNotFound
-                // from dscl when the user is absent) → DS is clean → no
-                // cleanup needed. The cleanup `$` line stays absent so the
-                // operator can see what actually ran vs the plan above.
+            Err(AccountError::NonZero { .. }) => {
+                // Probe returned non-zero (typically eDSRecordNotFound)
+                // → DS is clean → no cleanup needed. The cleanup `$`
+                // line stays absent so the operator can see what actually
+                // ran vs the plan above.
             }
-            Err(other) => return Err(DestroyError::Exec(other)),
+            Err(other) => return Err(DestroyError::Account(other)),
         }
 
-        reporter.emit_real_only(messages::running_argv(&group_delete));
-        self.executor.run(&group_delete)?;
+        reporter.emit_real_only(messages::running(&plan_delete_group_line));
+        self.executor.execute_account(&delete_group)?;
 
-        // 5th step: profile-rm. Idempotent (NotFound is Ok in both
-        // `XdgProfileStore` and `StubProfileStore`). A profile-rm
-        // failure is surfaced via the new `DestroyError::Profile`
-        // variant; the dispatcher renders it with `destroy_profile_failed`
-        // so the operator sees the specific path that failed instead of
-        // a generic exec-error frame.
-        reporter.emit_real_only(messages::running_profile_remove(name));
-        self.profiles.remove(name).map_err(DestroyError::Profile)?;
+        reporter.emit_real_only(messages::running(&plan_delete_profile_line));
+        self.executor
+            .execute_profile(&delete_profile)
+            .map_err(DestroyError::Profile)?;
 
         reporter.emit_real_only(messages::destroyed_tenant(name));
         Ok(())
     }
 
-    fn shell_into_tenant(&self, name: &str, reporter: &mut Reporter) -> Result<i32, ExecError> {
-        // Single-argv exec_into path. v1 uses `sudo -iu <name>` and lets
-        // sudo prompt for the host password on a cold timestamp; the next
-        // cycle will add a sudoers entry so this becomes `sudo -n -iu`
-        // and never prompts. Same Reporter discipline as the other writer
-        // methods: dry-only/real-only pre-exec messages, real-only `$`
-        // echo, no post-exec line (the operator IS the shell now).
-        let argv = build_shell_argv(name);
-
-        reporter.emit_dry_only(messages::would_shell_into_tenant(name, &argv));
-        reporter.emit_real_only(messages::shelling_into_tenant(name, &argv));
-
-        reporter.emit_real_only(messages::running_argv(&argv));
-        self.executor.exec_into(&argv)
-    }
-
-    fn destroy_orphan_group(
+    /// Convergence path: the tenant user is already absent (so none of
+    /// the user-side teardown applies), but the suffixed
+    /// `<name>-tenant-share` group is still on the host. Issues two
+    /// substrate calls (DeleteShareGroup + ProfileOp::Delete) bracketed
+    /// by the would/destroying/destroyed orphan-group Message trio. The
+    /// profile step is always attempted (idempotent Delete) so the "host
+    /// has no trace of <name> after destroy" contract holds even on the
+    /// convergence path.
+    pub(crate) fn destroy_orphan_group(
         &self,
         name: &str,
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
-        // Two-step convergence path (cycle 1.8 added profile-rm). Same
-        // Reporter discipline as the full destroy: dry-only / real-only
-        // pre-exec messages, real-only `$` echo per step, real-only
-        // post-exec confirmation. The profile step is always attempted
-        // (idempotent rm) so the "host has no trace of <name> after
-        // destroy" contract holds even on the convergence path.
-        let group_delete = build_dseditgroup_delete_argv(name);
-        let profile_remove = build_profile_remove_synthetic_argv(name);
-        let plan: [&[String]; 2] = [&group_delete, &profile_remove];
+        let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
+        let delete_profile = ProfileOp::Delete { name: name.into() };
+
+        let plan_delete_group_line = self.executor.describe_account(&delete_group);
+        let plan_delete_profile_line = self.executor.describe_profile(&delete_profile);
+
+        let plan = [
+            PlanStep::plain(&plan_delete_group_line),
+            PlanStep::plain(&plan_delete_profile_line),
+        ];
 
         reporter.emit_dry_only(messages::would_destroy_orphan_group(name, &plan));
         reporter.emit_real_only(messages::destroying_orphan_group(name, &plan));
 
-        reporter.emit_real_only(messages::running_argv(&group_delete));
-        self.executor.run(&group_delete)?;
+        reporter.emit_real_only(messages::running(&plan_delete_group_line));
+        self.executor.execute_account(&delete_group)?;
 
-        reporter.emit_real_only(messages::running_profile_remove(name));
-        self.profiles.remove(name).map_err(DestroyError::Profile)?;
+        reporter.emit_real_only(messages::running(&plan_delete_profile_line));
+        self.executor
+            .execute_profile(&delete_profile)
+            .map_err(DestroyError::Profile)?;
 
         reporter.emit_real_only(messages::destroyed_orphan_group(name));
         Ok(())
     }
-}
 
-/// Write the default profile for `name` into the store. Shared by
-/// `create_tenant` (the only caller in cycle 1). Centralizing it keeps
-/// the default-content source (`profile::default_profile_toml`) one
-/// grep away from any future caller and lets cycle 1.5's
-/// `CreateError::Profile` wiring change just the error-surfacing site,
-/// not the call site.
-fn write_default_profile(profiles: &dyn ProfileStore, name: &str) -> Result<(), ProfileError> {
-    profiles.write(name, &default_profile_toml())
-}
+    /// Interactive shell entry into the tenant. The LoginAsUser op is
+    /// built only to feed `describe_account` for the plan/echo lines —
+    /// execution goes through the substrate's `login` method because the
+    /// return type (child exit code) and stdio semantics (inherit, don't
+    /// capture) are incompatible with the non-interactive
+    /// `execute_account` path. Pre-exec emits the would/shelling pair
+    /// through the Reporter; no post-exec confirmation — the operator IS
+    /// the shell, so a "Shelled into …" line after they exit would be
+    /// at best redundant and at worst land in a different terminal
+    /// context.
+    pub(crate) fn shell_into_tenant(
+        &self,
+        name: &str,
+        reporter: &mut Reporter,
+    ) -> Result<i32, AccountError> {
+        let login = AccountOp::LoginAsUser { name: name.into() };
+        let line = self.executor.describe_account(&login);
 
-/// Phase-shell command shape: `sudo -iu <name>`. `-i` makes sudo run a
-/// login shell (full env reset, sources the tenant's shell rc files); `-u`
-/// selects the target user. Minimal on purpose — `-n` (non-interactive,
-/// "fail if a prompt is needed") is deferred to the sudoers-entry cycle
-/// when we can guarantee the timestamp-cache state.
-fn build_shell_argv(name: &str) -> Vec<String> {
-    vec!["sudo".into(), "-iu".into(), name.into()]
-}
+        reporter.emit_dry_only(messages::would_shell_into_tenant(name, &line));
+        reporter.emit_real_only(messages::shelling_into_tenant(name, &line));
 
-fn build_create_argv(name: &str, uid: u32, gid: u32) -> Vec<String> {
-    vec![
-        "sudo".into(),
-        "sysadminctl".into(),
-        "-addUser".into(),
-        name.into(),
-        "-fullName".into(),
-        format!("Tenant: {name}"),
-        "-shell".into(),
-        "/bin/zsh".into(),
-        "-UID".into(),
-        uid.to_string(),
-        "-GID".into(),
-        gid.to_string(),
-    ]
-}
-
-/// Phase 3's group-create command. Uses `dseditgroup` (not `dscl . -create`)
-/// because dseditgroup is the higher-level, OD-aware tool — it sets up the
-/// metadata fields sysadminctl expects to find when wiring the primary
-/// group. `-n .` targets the local node (matches sysadminctl's default
-/// node selection). `-i <gid>` is the load-bearing argument: sysadminctl
-/// will be invoked next with `-GID <gid>` pointing at this just-created
-/// group, so the GID number must match.
-fn build_dseditgroup_create_argv(name: &str, gid: u32) -> Vec<String> {
-    vec![
-        "sudo".into(),
-        "dseditgroup".into(),
-        "-o".into(),
-        "create".into(),
-        "-n".into(),
-        ".".into(),
-        "-i".into(),
-        gid.to_string(),
-        tenant_share_group_name(name),
-    ]
-}
-
-/// Phase 3's group-delete command, used both as the rollback step in
-/// `create_tenant` (when sysadminctl-addUser fails after the group was
-/// created) and as the unconditional last step in `destroy_tenant` (the
-/// sysadminctl-cascade only catches groups named after the user, so a
-/// renamed primary group must be deleted explicitly to avoid orphan
-/// state).
-fn build_dseditgroup_delete_argv(name: &str) -> Vec<String> {
-    vec![
-        "sudo".into(),
-        "dseditgroup".into(),
-        "-o".into(),
-        "delete".into(),
-        "-n".into(),
-        ".".into(),
-        tenant_share_group_name(name),
-    ]
-}
-
-fn build_destroy_sysadminctl_argv(name: &str) -> Vec<String> {
-    vec![
-        "sudo".into(),
-        "sysadminctl".into(),
-        "-deleteUser".into(),
-        name.into(),
-    ]
-}
-
-/// Residue probe: `dscl . -read /Users/<name>` exits 0 when the DS record
-/// exists and non-zero (typically eDSRecordNotFound) when it doesn't. No
-/// sudo — reads on the local node don't require it. The `destroy_tenant`
-/// writer uses the exit code to decide whether the conditional cleanup
-/// runs.
-fn build_dscl_read_user_argv(name: &str) -> Vec<String> {
-    vec![
-        "dscl".into(),
-        ".".into(),
-        "-read".into(),
-        format!("/Users/{name}"),
-    ]
-}
-
-/// Synthetic argv for the destroy verb's plan rendering. The actual
-/// removal goes through `ProfileStore::remove` (which the dispatcher
-/// constructs from `XdgProfileStore` or `StubProfileStore`), not a
-/// `rm` subprocess. Sharing the `[&[String]]` plan-rendering pipeline
-/// with the real shell-out steps keeps the verbose-mode output uniform
-/// — operator sees a 5-line plan with the rm framing matching the
-/// `running_profile_remove` echo line shape.
-fn build_profile_remove_synthetic_argv(name: &str) -> Vec<String> {
-    use crate::profile::display_path_for;
-    vec!["rm".into(), "-f".into(), display_path_for(name)]
-}
-
-/// Belt-and-braces cleanup: `sudo dscl . -delete /Users/<name>` removes a
-/// stale DS record that sysadminctl `-deleteUser` may have left behind.
-/// Only runs when `build_dscl_read_user_argv`'s probe shows the record is
-/// still present. Needs sudo (writes to the local node).
-fn build_dscl_delete_user_argv(name: &str) -> Vec<String> {
-    vec![
-        "sudo".into(),
-        "dscl".into(),
-        ".".into(),
-        "-delete".into(),
-        format!("/Users/{name}"),
-    ]
+        reporter.emit_real_only(messages::running(&line));
+        self.executor.login(name)
+    }
 }
 
 /// Lexical name guard: `[a-z][a-z0-9_-]{0,30}`. The leading-letter rule

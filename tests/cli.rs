@@ -1,30 +1,37 @@
 #[cfg(target_os = "macos")]
 use tenant::accounts::Reader;
 use tenant::accounts::StubReader;
-use tenant::executor::{ExecError, Executor, StubExecutor};
-use tenant::profile::StubProfileStore;
+use tenant::executor::{AccountError, AccountOp, Executor, ProfileOp, StubExecutor};
 
 /// Default executor for tests that should not reach the exec stage —
-/// validation failures, conflicts, and dry-run paths. Panics on use, so
-/// any accidental exec from a path that's meant to be no-op surfaces
-/// loudly instead of being silently absorbed.
+/// validation failures, conflicts, and dry-run paths. Panics on any
+/// substrate call, so any accidental invocation from a path that's
+/// meant to be no-op surfaces loudly instead of being silently absorbed.
 struct NeverExecutor;
 impl Executor for NeverExecutor {
-    fn run(&self, argv: &[String]) -> Result<(), ExecError> {
-        panic!("executor unexpectedly invoked with argv: {argv:?}");
+    fn describe_account(&self, op: &AccountOp) -> String {
+        panic!("executor unexpectedly invoked (describe_account) with op: {op:?}");
     }
-    fn exec_into(&self, argv: &[String]) -> Result<i32, ExecError> {
-        panic!("executor unexpectedly invoked (exec_into) with argv: {argv:?}");
+    fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError> {
+        panic!("executor unexpectedly invoked (execute_account) with op: {op:?}");
+    }
+    fn login(&self, name: &str) -> Result<i32, AccountError> {
+        panic!("executor unexpectedly invoked (login) with name: {name:?}");
+    }
+    fn describe_profile(&self, op: &ProfileOp) -> String {
+        panic!("executor unexpectedly invoked (describe_profile) with op: {op:?}");
+    }
+    fn execute_profile(&self, op: &ProfileOp) -> Result<(), tenant::profile::ProfileError> {
+        panic!("executor unexpectedly invoked (execute_profile) with op: {op:?}");
     }
 }
 
 fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
     let exec = NeverExecutor;
-    let profiles = StubProfileStore::new();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let code = tenant::run(&args, &stub, &exec, &profiles, &mut stdout, &mut stderr);
+    let code = tenant::run(&args, &stub, &exec, &mut stdout, &mut stderr);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -32,33 +39,11 @@ fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
     )
 }
 
-/// Build a `Vec<String>` argv from `&[&str]` — the shape `StubExecutor`
-/// records calls in. Used in assertions where reading three or four parallel
-/// argv literals is easier than the inline `.iter().map(...).collect()`
-/// chain.
-fn argv(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|s| (*s).to_string()).collect()
-}
-
 fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u8, String, String) {
-    let profiles = StubProfileStore::new();
-    run_with_exec_and_profiles(stub, exec, &profiles, args)
-}
-
-/// Variant for tests that need to inject a pre-loaded or failure-configured
-/// `StubProfileStore` AND/OR assert against its post-run state. The default
-/// `run_with_exec` constructs a fresh empty store internally; this helper
-/// hands the store back to the caller. Used by cycle-1 profile tests.
-fn run_with_exec_and_profiles(
-    stub: StubReader,
-    exec: &StubExecutor,
-    profiles: &StubProfileStore,
-    args: &[&str],
-) -> (u8, String, String) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let code = tenant::run(&args, &stub, exec, profiles, &mut stdout, &mut stderr);
+    let code = tenant::run(&args, &stub, exec, &mut stdout, &mut stderr);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -418,19 +403,17 @@ fn create_succeeds_when_unrelated_user_exists() {
 
 #[test]
 fn create_writes_default_profile_to_store() {
-    // Cycle 1's smallest red→green for the profile feature: after a
-    // successful real-mode create, the ProfileStore must contain a
-    // profile keyed by the tenant name. Content-shape assertion lives
-    // in the dedicated TOML test below; this test only pins presence.
+    // After a successful real-mode create, the substrate's profile state
+    // contains an entry keyed by the tenant name. Content-shape
+    // assertion lives in the dedicated TOML test below; this test only
+    // pins presence via `StubExecutor::has_profile`.
     let exec = StubExecutor::new();
-    let profiles = StubProfileStore::new();
-    let (code, _stdout, stderr) =
-        run_with_exec_and_profiles(StubReader::default(), &exec, &profiles, &["create", "dev"]);
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        profiles.has_profile("dev"),
-        "expected profile 'dev' to be present after create; snapshot={:?}",
-        profiles.snapshot()
+        exec.has_profile("dev"),
+        "expected profile 'dev' to be present after create; state={:?}",
+        exec.profile_state()
     );
 }
 
@@ -442,14 +425,10 @@ fn create_writes_profile_with_correct_toml_shape() {
     // No `[share]` section — that's Claude-Code-specific and out of
     // scope for the generic Rust port.
     let exec = StubExecutor::new();
-    let profiles = StubProfileStore::new();
-    let (code, _stdout, stderr) =
-        run_with_exec_and_profiles(StubReader::default(), &exec, &profiles, &["create", "dev"]);
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    let snapshot = profiles.snapshot();
-    let content = snapshot
-        .get("dev")
-        .expect("profile 'dev' should be present");
+    let state = exec.profile_state();
+    let content = state.get("dev").expect("profile 'dev' should be present");
     let want = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -462,74 +441,55 @@ fn create_writes_profile_with_correct_toml_shape() {
 
 #[test]
 fn create_dry_run_does_not_write_profile() {
-    // Dry-run swap-in of `DryRunProfileStore` means the wired
-    // `StubProfileStore` never receives a write call. Mirrors the
-    // executor-side `dry_run_bypasses_injected_executor` test. Pins
-    // the composition-root dry-run plumbing on the new ProfileStore
-    // seam.
+    // Dry-run swap-in of `DryRunExecutor` means the wired `StubExecutor`
+    // never receives an `execute_profile` call. Mirrors the
+    // `dry_run_bypasses_injected_executor` test for the executor side.
     let exec = StubExecutor::new();
-    let profiles = StubProfileStore::new();
-    let (code, stdout, stderr) = run_with_exec_and_profiles(
+    let (code, stdout, stderr) = run_with_exec(
         StubReader::default(),
         &exec,
-        &profiles,
         &["create", "dev", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Would create tenant 'dev'.\n");
     assert!(
-        !profiles.has_profile("dev"),
-        "profile should not be written in dry-run; snapshot={:?}",
-        profiles.snapshot()
+        !exec.has_profile("dev"),
+        "profile should not be written in dry-run; state={:?}",
+        exec.profile_state()
     );
 }
 
 #[test]
 fn create_real_mode_standard_emits_only_post_exec_confirmation() {
     // Standard real mode is silent before exec; one confirmation line
-    // after. No UID/GID — that's reserved for verbose mode. Phase 3
-    // changed the exec count from 1 to 2 (dseditgroup-create first, then
-    // sysadminctl-addUser): the group must exist before sysadminctl so
-    // the new user's home directory chowns to `dev-tenant-share`, not
-    // `staff`. The two-argv order is load-bearing for that reason; this
-    // test pins it.
+    // after. No UID/GID — that's reserved for verbose mode. The op
+    // order is load-bearing: CreateShareGroup must precede
+    // CreateTenantUser so the new user's home directory chowns to
+    // `dev-tenant-share` (sysadminctl chowns the home dir to the group
+    // named by `-GID` at creation time); this test pins both the order
+    // and the operand values.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Created tenant 'dev'.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
-    let calls = exec.calls();
-    assert_eq!(calls.len(), 2, "expected dseditgroup + sysadminctl");
     assert_eq!(
-        calls[0],
-        argv(&[
-            "sudo",
-            "dseditgroup",
-            "-o",
-            "create",
-            "-n",
-            ".",
-            "-i",
-            "600",
-            "dev-tenant-share",
-        ]),
+        exec.account_ops(),
+        vec![
+            AccountOp::CreateShareGroup {
+                name: "dev".into(),
+                gid: 600
+            },
+            AccountOp::CreateTenantUser {
+                name: "dev".into(),
+                uid: 600,
+                gid: 600
+            },
+        ],
     );
     assert_eq!(
-        calls[1],
-        argv(&[
-            "sudo",
-            "sysadminctl",
-            "-addUser",
-            "dev",
-            "-fullName",
-            "Tenant: dev",
-            "-shell",
-            "/bin/zsh",
-            "-UID",
-            "600",
-            "-GID",
-            "600",
-        ]),
+        exec.profile_ops(),
+        vec![ProfileOp::Create { name: "dev".into() }],
     );
 }
 
@@ -560,18 +520,18 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
 
 #[test]
 fn create_profile_write_failure_surfaces_with_user_and_group_present() {
-    // Per the design lock: dseditgroup-create + sysadminctl-addUser have
-    // both succeeded by the time profile-write fires, so a profile-write
-    // failure does NOT roll back the user or group. Operator sees an
-    // EX_IOERR with a new `create_profile_failed` message that names the
-    // profile path (so they don't have to grep source). Their recovery
-    // is `tenant destroy <name>` — destroy's Destroyable arm cleans up
-    // the user+group, and the missing profile case is a successful noop
-    // for the profile-rm step.
-    let exec = StubExecutor::new();
-    let profiles = StubProfileStore::new().with_write_failure("disk full");
-    let (code, stdout, stderr) =
-        run_with_exec_and_profiles(StubReader::default(), &exec, &profiles, &["create", "dev"]);
+    // Per the design lock: CreateShareGroup + CreateTenantUser have
+    // both succeeded by the time the profile step fires, so a
+    // profile-write failure does NOT roll back the user or group.
+    // Operator sees an EX_IOERR with the `create_profile_failed` message
+    // that names the profile path (so they don't have to grep source).
+    // Their recovery is `tenant destroy <name>` — destroy's Destroyable
+    // arm cleans up the user+group, and the missing profile case is a
+    // successful noop for the profile-rm step.
+    let exec = StubExecutor::new().fail_next_profile(tenant::profile::ProfileError {
+        message: "disk full".into(),
+    });
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -579,17 +539,19 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
         "tenant: failed to write profile '~/.config/tenant/profiles/dev.toml' \
          for 'dev': disk full\n"
     );
-    // Two exec calls (dseditgroup + sysadminctl) — no rollback, since
-    // the locked policy is "leave user+group present on profile failure".
+    // Two account ops (CreateShareGroup + CreateTenantUser) — no
+    // rollback, since the locked policy is "leave user+group present on
+    // profile failure".
     assert_eq!(
-        exec.calls().len(),
+        exec.account_ops().len(),
         2,
-        "expected dseditgroup + sysadminctl; no rollback"
+        "expected CreateShareGroup + CreateTenantUser; no rollback"
     );
-    // Profile is absent from the store (the write failed) — pins the
-    // fact that the failure is a real failure, not a silent success.
+    // Profile is absent from the simulated state (the write failed) —
+    // pins the fact that the failure is a real failure, not a silent
+    // success.
     assert!(
-        !profiles.has_profile("dev"),
+        !exec.has_profile("dev"),
         "profile should be absent after write failure"
     );
 }
@@ -605,9 +567,10 @@ fn dry_run_bypasses_injected_executor() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Would create tenant 'dev'.\n");
     assert!(
-        exec.calls().is_empty(),
-        "executor should not be invoked in dry-run mode; got calls: {:?}",
-        exec.calls()
+        exec.account_ops().is_empty() && exec.profile_ops().is_empty(),
+        "executor should not be invoked in dry-run mode; account_ops={:?}, profile_ops={:?}",
+        exec.account_ops(),
+        exec.profile_ops()
     );
 }
 
@@ -620,7 +583,7 @@ fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
     // back because dseditgroup-create itself failed), exit EX_IOERR, and
     // emit the new `create_group_failed` shape that names the group
     // explicitly so the operator knows the user wasn't touched.
-    let exec = StubExecutor::failing(78);
+    let exec = StubExecutor::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -628,23 +591,33 @@ fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
         stderr,
         "tenant: failed to create group 'dev-tenant-share' for 'dev': process exited with code 78\n"
     );
-    assert_eq!(exec.calls().len(), 1, "should abort after dseditgroup");
+    assert_eq!(
+        exec.account_ops().len(),
+        1,
+        "should abort after CreateShareGroup"
+    );
 }
 
 #[test]
 fn create_sysadminctl_failure_rolls_back_dseditgroup() {
-    // The partial-failure case Phase 3 was designed for: dseditgroup-create
-    // succeeded, but sysadminctl-addUser failed. Without rollback the host
+    // The partial-failure case Phase 3 was designed for: CreateShareGroup
+    // succeeded, but CreateTenantUser failed. Without rollback the host
     // would carry an orphan `<name>-tenant-share` group with no
-    // corresponding user. The writer must invoke
-    // `sudo dseditgroup -o delete -n . <name>-tenant-share` to converge
-    // back to the pre-create state, then surface the *original*
-    // sysadminctl failure as the error (the rollback succeeded so it's
-    // not separately reportable). Three exec calls in total.
-    let exec = StubExecutor::new().with_response_to_stderr(
-        &["sudo", "sysadminctl", "-addUser", "dev"],
-        78,
-        "sysadminctl: -addUser failed: existing record\n",
+    // corresponding user. The writer must invoke a DeleteShareGroup op
+    // to converge back to the pre-create state, then surface the
+    // *original* user-creation failure as the error (the rollback
+    // succeeded so it's not separately reportable). Three account ops
+    // in total.
+    let exec = StubExecutor::new().fail_account_op(
+        AccountOp::CreateTenantUser {
+            name: "dev".into(),
+            uid: 600,
+            gid: 600,
+        },
+        AccountError::NonZero {
+            code: 78,
+            stderr: "sysadminctl: -addUser failed: existing record\n".into(),
+        },
     );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
@@ -654,41 +627,20 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
         "tenant: failed to create 'dev': process exited with code 78: \
          sysadminctl: -addUser failed: existing record\n"
     );
-    let calls = exec.calls();
     assert_eq!(
-        calls.len(),
-        3,
-        "expected dseditgroup-create + sysadminctl + dseditgroup-delete (rollback)"
-    );
-    assert_eq!(
-        calls[0],
-        argv(&[
-            "sudo",
-            "dseditgroup",
-            "-o",
-            "create",
-            "-n",
-            ".",
-            "-i",
-            "600",
-            "dev-tenant-share",
-        ]),
-    );
-    assert_eq!(
-        calls[1][0..4],
-        argv(&["sudo", "sysadminctl", "-addUser", "dev"])[..]
-    );
-    assert_eq!(
-        calls[2],
-        argv(&[
-            "sudo",
-            "dseditgroup",
-            "-o",
-            "delete",
-            "-n",
-            ".",
-            "dev-tenant-share",
-        ]),
+        exec.account_ops(),
+        vec![
+            AccountOp::CreateShareGroup {
+                name: "dev".into(),
+                gid: 600
+            },
+            AccountOp::CreateTenantUser {
+                name: "dev".into(),
+                uid: 600,
+                gid: 600
+            },
+            AccountOp::DeleteShareGroup { name: "dev".into() },
+        ],
     );
 }
 
@@ -701,10 +653,16 @@ fn create_real_mode_verbose_shows_rollback_echo() {
     // confirmation — the create failed. Stderr carries the original
     // sysadminctl error; the rollback's success is signaled implicitly
     // by the absence of a rollback-failed line.
-    let exec = StubExecutor::new().with_response_to_stderr(
-        &["sudo", "sysadminctl", "-addUser", "dev"],
-        78,
-        "sysadminctl: -addUser failed: existing record\n",
+    let exec = StubExecutor::new().fail_account_op(
+        AccountOp::CreateTenantUser {
+            name: "dev".into(),
+            uid: 600,
+            gid: 600,
+        },
+        AccountError::NonZero {
+            code: 78,
+            stderr: "sysadminctl: -addUser failed: existing record\n".into(),
+        },
     );
     let (code, stdout, stderr) =
         run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
@@ -744,23 +702,23 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
     // dev' will converge` is the load-bearing piece: the operator
     // shouldn't have to read the source to find out how to clean up.
     let exec = StubExecutor::new()
-        .with_response_to_stderr(
-            &["sudo", "sysadminctl", "-addUser", "dev"],
-            78,
-            "sysadminctl: -addUser failed: existing record\n",
+        .fail_account_op(
+            AccountOp::CreateTenantUser {
+                name: "dev".into(),
+                uid: 600,
+                gid: 600,
+            },
+            AccountError::NonZero {
+                code: 78,
+                stderr: "sysadminctl: -addUser failed: existing record\n".into(),
+            },
         )
-        .with_response_to_stderr(
-            &[
-                "sudo",
-                "dseditgroup",
-                "-o",
-                "delete",
-                "-n",
-                ".",
-                "dev-tenant-share",
-            ],
-            1,
-            "dseditgroup: not authorized\n",
+        .fail_account_op(
+            AccountOp::DeleteShareGroup { name: "dev".into() },
+            AccountError::NonZero {
+                code: 1,
+                stderr: "dseditgroup: not authorized\n".into(),
+            },
         );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR");
@@ -771,7 +729,7 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
                        dseditgroup: not authorized \
                        \u{2014} host now has an orphan group; next 'tenant destroy dev' will converge\n";
     assert_eq!(stderr, want_stderr);
-    assert_eq!(exec.calls().len(), 3);
+    assert_eq!(exec.account_ops().len(), 3);
 }
 
 #[test]
@@ -779,7 +737,7 @@ fn create_real_mode_dseditgroup_failure_surfaces_executor_stderr() {
     // Companion to the above — when dseditgroup-create has captured stderr,
     // it flows through ExecError::Display unchanged. Pins the error-shape
     // contract end-to-end.
-    let exec = StubExecutor::failing_with(
+    let exec = StubExecutor::new().fail_account_blanket(
         78,
         "dseditgroup: cannot create group dev-tenant-share: not authorized\n",
     );
@@ -812,22 +770,13 @@ fn destroy_removes_profile_file_from_store() {
     // with a profile so the test pins "present before, absent after"
     // — defending against a regression that wires destroy without the
     // profile step.
-    let exec = StubExecutor::new();
-    let profiles = StubProfileStore::new().with_profile("dev", "schema_version = 1\n");
-    assert!(
-        profiles.has_profile("dev"),
-        "pre-condition: profile present"
-    );
-    let (code, stdout, stderr) = run_with_exec_and_profiles(
-        stub_with_tenant("dev"),
-        &exec,
-        &profiles,
-        &["destroy", "dev"],
-    );
+    let exec = StubExecutor::new().with_existing_profile("dev", "schema_version = 1\n");
+    assert!(exec.has_profile("dev"), "pre-condition: profile present");
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
     assert!(
-        !profiles.has_profile("dev"),
+        !exec.has_profile("dev"),
         "profile should be removed after destroy"
     );
 }
@@ -837,16 +786,11 @@ fn destroy_succeeds_when_profile_already_absent() {
     // Idempotent rm: the operator may have manually removed the profile
     // (or a prior destroy failed mid-flight). Destroy must converge to
     // success regardless. Mirrors `XdgProfileStore::remove`'s
-    // NotFound-as-Ok semantics — the StubProfileStore enforces the same
-    // contract by silently dropping a missing-key remove.
-    let exec = StubExecutor::new();
-    let profiles = StubProfileStore::new(); // empty; no profile loaded
-    let (code, stdout, stderr) = run_with_exec_and_profiles(
-        stub_with_tenant("dev"),
-        &exec,
-        &profiles,
-        &["destroy", "dev"],
-    );
+    // NotFound-as-Ok semantics — the `StubExecutor`'s profile-state
+    // simulation enforces the same contract by silently dropping a
+    // missing-key remove.
+    let exec = StubExecutor::new(); // empty; no profile loaded
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
 }
@@ -885,43 +829,28 @@ fn destroy_dry_run_verbose_shows_mechanism() {
 
 #[test]
 fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
-    // StubExecutor::new() returns Ok by default → the dscl-read probe sees
-    // the DS record as still present → the conditional dscl-delete runs.
-    // Phase 3 adds an unconditional fourth call (dseditgroup-delete on
-    // the tenant-share group). Four exec calls in standard mode; stdout
-    // is still the single confirmation line (mechanism is suppressed
-    // without -v).
+    // StubExecutor::new() returns Ok by default → the LookupUserRecord
+    // probe sees the DS record as still present → the conditional
+    // DeleteUserRecord cleanup runs. The DeleteShareGroup is
+    // unconditional. Four account ops in standard mode; stdout is still
+    // the single confirmation line (mechanism is suppressed without -v).
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
-    let calls = exec.calls();
     assert_eq!(
-        calls.len(),
-        4,
-        "expected sysadminctl + dscl-read + dscl-delete + dseditgroup-delete"
+        exec.account_ops(),
+        vec![
+            AccountOp::DeleteTenantUser { name: "dev".into() },
+            AccountOp::LookupUserRecord { name: "dev".into() },
+            AccountOp::DeleteUserRecord { name: "dev".into() },
+            AccountOp::DeleteShareGroup { name: "dev".into() },
+        ],
     );
     assert_eq!(
-        calls[0],
-        argv(&["sudo", "sysadminctl", "-deleteUser", "dev"])
-    );
-    assert_eq!(calls[1], argv(&["dscl", ".", "-read", "/Users/dev"]));
-    assert_eq!(
-        calls[2],
-        argv(&["sudo", "dscl", ".", "-delete", "/Users/dev"])
-    );
-    assert_eq!(
-        calls[3],
-        argv(&[
-            "sudo",
-            "dseditgroup",
-            "-o",
-            "delete",
-            "-n",
-            ".",
-            "dev-tenant-share",
-        ]),
+        exec.profile_ops(),
+        vec![ProfileOp::Delete { name: "dev".into() }],
     );
 }
 
@@ -964,32 +893,24 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
     // sysadminctl + dscl-read + dseditgroup-delete (no dscl-delete).
     // The plan-vs-echo asymmetry around dscl-delete remains the
     // operator's signal that the dscl path was clean.
-    let exec = StubExecutor::new().with_response_to(&["dscl", ".", "-read", "/Users/dev"], 56);
+    let exec = StubExecutor::new().fail_account_op(
+        AccountOp::LookupUserRecord { name: "dev".into() },
+        AccountError::NonZero {
+            code: 56,
+            stderr: String::new(),
+        },
+    );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
-    let calls = exec.calls();
     assert_eq!(
-        calls.len(),
-        3,
-        "expected sysadminctl + dscl-read + dseditgroup-delete (dscl-delete skipped)"
-    );
-    assert_eq!(
-        calls[0],
-        argv(&["sudo", "sysadminctl", "-deleteUser", "dev"])
-    );
-    assert_eq!(calls[1], argv(&["dscl", ".", "-read", "/Users/dev"]));
-    assert_eq!(
-        calls[2],
-        argv(&[
-            "sudo",
-            "dseditgroup",
-            "-o",
-            "delete",
-            "-n",
-            ".",
-            "dev-tenant-share",
-        ]),
+        exec.account_ops(),
+        vec![
+            AccountOp::DeleteTenantUser { name: "dev".into() },
+            AccountOp::LookupUserRecord { name: "dev".into() },
+            AccountOp::DeleteShareGroup { name: "dev".into() },
+        ],
+        "expected DeleteTenantUser + LookupUserRecord + DeleteShareGroup (cleanup skipped)"
     );
 }
 
@@ -1004,18 +925,12 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
     // `destroy_failed` shape; the captured dseditgroup stderr inside
     // ExecError carries enough detail (the dseditgroup tool prints its
     // own argv-aware context) for the operator to diagnose.
-    let exec = StubExecutor::new().with_response_to_stderr(
-        &[
-            "sudo",
-            "dseditgroup",
-            "-o",
-            "delete",
-            "-n",
-            ".",
-            "dev-tenant-share",
-        ],
-        78,
-        "dseditgroup: cannot remove group dev-tenant-share: not authorized\n",
+    let exec = StubExecutor::new().fail_account_op(
+        AccountOp::DeleteShareGroup { name: "dev".into() },
+        AccountError::NonZero {
+            code: 78,
+            stderr: "dseditgroup: cannot remove group dev-tenant-share: not authorized\n".into(),
+        },
     );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
@@ -1025,9 +940,9 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
         "tenant: failed to destroy 'dev': process exited with code 78: \
          dseditgroup: cannot remove group dev-tenant-share: not authorized\n"
     );
-    // All four steps attempted — the failure is on the dseditgroup-delete,
-    // not before.
-    assert_eq!(exec.calls().len(), 4);
+    // All four account ops attempted — the failure is on
+    // DeleteShareGroup, not before.
+    assert_eq!(exec.account_ops().len(), 4);
 }
 
 #[test]
@@ -1038,10 +953,12 @@ fn destroy_real_mode_dscl_cleanup_failure_surfaces_as_destroy_failure() {
     // success while the host still carries a stale DS record. Treat a
     // dscl-delete NonZero as a destroy failure (EX_IOERR), with the
     // captured stderr surfaced via ExecError::Display.
-    let exec = StubExecutor::new().with_response_to_stderr(
-        &["sudo", "dscl", ".", "-delete", "/Users/dev"],
-        78,
-        "dscl: cannot remove /Users/dev: not authorized\n",
+    let exec = StubExecutor::new().fail_account_op(
+        AccountOp::DeleteUserRecord { name: "dev".into() },
+        AccountError::NonZero {
+            code: 78,
+            stderr: "dscl: cannot remove /Users/dev: not authorized\n".into(),
+        },
     );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
@@ -1050,9 +967,9 @@ fn destroy_real_mode_dscl_cleanup_failure_surfaces_as_destroy_failure() {
         "tenant: failed to destroy 'dev': process exited with code 78: \
          dscl: cannot remove /Users/dev: not authorized\n"
     );
-    // Sysadminctl + dscl-read + dscl-delete all attempted — the failure
-    // is on the third call, not before.
-    assert_eq!(exec.calls().len(), 3);
+    // DeleteTenantUser + LookupUserRecord + DeleteUserRecord attempted
+    // — the failure is on the third op, not before.
+    assert_eq!(exec.account_ops().len(), 3);
 }
 
 #[test]
@@ -1063,7 +980,13 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
     // state. The dseditgroup-delete echo still appears — that step is
     // unconditional. The asymmetry between plan and echo around
     // dscl-delete is the operator's signal that the dscl path was clean.
-    let exec = StubExecutor::new().with_response_to(&["dscl", ".", "-read", "/Users/dev"], 56);
+    let exec = StubExecutor::new().fail_account_op(
+        AccountOp::LookupUserRecord { name: "dev".into() },
+        AccountError::NonZero {
+            code: 56,
+            stderr: String::new(),
+        },
+    );
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
@@ -1187,13 +1110,12 @@ fn destroy_accepts_at_floor() {
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "edge"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed tenant 'edge'.\n");
-    // Four calls: sysadminctl-deleteUser + dscl-read probe + (probe
-    // defaults to Ok with a vanilla StubExecutor) sudo-dscl-delete cleanup
-    // + Phase-3's unconditional dseditgroup-delete.
+    // Four account ops: DeleteTenantUser + LookupUserRecord (probe
+    // defaults to Ok) + DeleteUserRecord cleanup + DeleteShareGroup.
     assert_eq!(
-        exec.calls().len(),
+        exec.account_ops().len(),
         4,
-        "sysadminctl + dscl-read + dscl-delete + dseditgroup-delete"
+        "DeleteTenantUser + LookupUserRecord + DeleteUserRecord + DeleteShareGroup"
     );
 }
 
@@ -1300,7 +1222,7 @@ fn destroy_rejects_overlong_name() {
 
 #[test]
 fn destroy_real_mode_propagates_exec_failure() {
-    let exec = StubExecutor::failing(78);
+    let exec = StubExecutor::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -1308,12 +1230,13 @@ fn destroy_real_mode_propagates_exec_failure() {
         stderr,
         "tenant: failed to destroy 'dev': process exited with code 78\n"
     );
-    assert_eq!(exec.calls().len(), 1);
+    assert_eq!(exec.account_ops().len(), 1);
 }
 
 #[test]
 fn destroy_real_mode_failure_surfaces_executor_stderr() {
-    let exec = StubExecutor::failing_with(78, "sysadminctl: -deleteUser failed: not authorized\n");
+    let exec = StubExecutor::new()
+        .fail_account_blanket(78, "sysadminctl: -deleteUser failed: not authorized\n");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -1335,9 +1258,10 @@ fn destroy_dry_run_bypasses_injected_executor() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Would destroy tenant 'dev'.\n");
     assert!(
-        exec.calls().is_empty(),
-        "executor should not be invoked in dry-run mode; got calls: {:?}",
-        exec.calls()
+        exec.account_ops().is_empty() && exec.profile_ops().is_empty(),
+        "executor should not be invoked in dry-run mode; account_ops={:?}, profile_ops={:?}",
+        exec.account_ops(),
+        exec.profile_ops()
     );
 }
 
@@ -1360,19 +1284,10 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed orphan group for tenant 'dev'.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
-    let calls = exec.calls();
-    assert_eq!(calls.len(), 1, "expected dseditgroup-delete only");
     assert_eq!(
-        calls[0],
-        argv(&[
-            "sudo",
-            "dseditgroup",
-            "-o",
-            "delete",
-            "-n",
-            ".",
-            "dev-tenant-share",
-        ]),
+        exec.account_ops(),
+        vec![AccountOp::DeleteShareGroup { name: "dev".into() }],
+        "expected DeleteShareGroup only"
     );
 }
 
@@ -1388,18 +1303,13 @@ fn destroy_orphan_group_also_removes_profile_if_present() {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
-    let exec = StubExecutor::new();
-    let profiles = StubProfileStore::new().with_profile("dev", "schema_version = 1\n");
-    assert!(
-        profiles.has_profile("dev"),
-        "pre-condition: profile present"
-    );
-    let (code, stdout, stderr) =
-        run_with_exec_and_profiles(stub, &exec, &profiles, &["destroy", "dev"]);
+    let exec = StubExecutor::new().with_existing_profile("dev", "schema_version = 1\n");
+    assert!(exec.has_profile("dev"), "pre-condition: profile present");
+    let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Destroyed orphan group for tenant 'dev'.\n");
     assert!(
-        !profiles.has_profile("dev"),
+        !exec.has_profile("dev"),
         "profile should be removed by orphan-group convergence"
     );
 }
@@ -1486,7 +1396,7 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
-    let exec = StubExecutor::failing_with(78, "dseditgroup: not authorized\n");
+    let exec = StubExecutor::new().fail_account_blanket(78, "dseditgroup: not authorized\n");
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -1495,7 +1405,7 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
         "tenant: failed to destroy 'dev': process exited with code 78: \
          dseditgroup: not authorized\n"
     );
-    assert_eq!(exec.calls().len(), 1);
+    assert_eq!(exec.account_ops().len(), 1);
 }
 
 #[test]
@@ -1525,17 +1435,20 @@ fn shell_dry_run_verbose_shows_mechanism() {
 
 #[test]
 fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
-    // Standard real mode: one pre-exec intent line, then exec_into. Unlike
+    // Standard real mode: one pre-exec intent line, then login. Unlike
     // create/destroy, no post-exec confirmation — the operator IS the
-    // shell after exec_into returns. Single exec call recorded.
+    // shell after login returns. Single login call recorded.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Shelling into 'dev'.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
-    let calls = exec.calls();
-    assert_eq!(calls.len(), 1, "expected one exec_into call");
-    assert_eq!(calls[0], argv(&["sudo", "-iu", "dev"]));
+    assert_eq!(exec.logins(), vec!["dev".to_string()]);
+    assert!(
+        exec.account_ops().is_empty(),
+        "login should not record account_ops: {:?}",
+        exec.account_ops()
+    );
 }
 
 #[test]
@@ -1708,12 +1621,12 @@ fn shell_propagates_child_exit_code() {
     // its own. Stub the executor's exec_into to return 5; tenant exits 5.
     // The "Shelling into" intent line still emits — pre-exec emission
     // happens before exec_into is consulted.
-    let exec = StubExecutor::new().with_exec_into_code(5);
+    let exec = StubExecutor::new().login_exit_code(5);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 5, "stderr={stderr:?}");
     assert_eq!(stdout, "Shelling into 'dev'.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
-    assert_eq!(exec.calls().len(), 1);
+    assert_eq!(exec.logins().len(), 1);
 }
 
 #[test]
@@ -1730,9 +1643,10 @@ fn shell_dry_run_bypasses_injected_executor() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "Would shell into 'dev'.\n");
     assert!(
-        exec.calls().is_empty(),
-        "executor should not be invoked in dry-run; got: {:?}",
-        exec.calls()
+        exec.account_ops().is_empty() && exec.logins().is_empty(),
+        "executor should not be invoked in dry-run; account_ops={:?}, logins={:?}",
+        exec.account_ops(),
+        exec.logins()
     );
 }
 

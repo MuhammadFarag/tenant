@@ -1,5 +1,5 @@
 use crate::accounts::{ConflictError, NameError, tenant_share_group_name};
-use crate::executor::ExecError;
+use crate::executor::AccountError;
 use crate::profile::{ProfileError, display_path_for};
 
 pub(crate) struct Message {
@@ -15,53 +15,64 @@ pub(crate) struct Message {
     pub detail: Option<String>,
 }
 
+/// One step in a plan — a pre-rendered display line plus an optional
+/// `# <note>` annotation suffix. The annotation channel lets conditional
+/// steps signal their conditionality in the upfront plan (cycle 1's `# on
+/// rollback`; cycle 2's `# on reload failure` will share the same shape).
+/// Borrows the rendered string from a let-bound `String` in the writer
+/// scope so the plan can be built once and indexed for both the upfront
+/// `detail` block and per-step `$` echo lines without cloning.
+pub(crate) struct PlanStep<'a> {
+    pub rendered: &'a str,
+    pub annotation: Option<&'static str>,
+}
+
+impl<'a> PlanStep<'a> {
+    pub fn plain(rendered: &'a str) -> Self {
+        Self {
+            rendered,
+            annotation: None,
+        }
+    }
+
+    pub fn annotated(rendered: &'a str, note: &'static str) -> Self {
+        Self {
+            rendered,
+            annotation: Some(note),
+        }
+    }
+}
+
 /// Pre-exec dry-run message: "Would create tenant 'X'." plus the planned
-/// 3-line plan as detail. Phase 3 issues two exec calls (group-first then
-/// sysadminctl) plus a third "on rollback" line that documents what fires
-/// if sysadminctl fails after the group was created. The rollback line is
+/// multi-step plan as detail. Phase 3 issues two real exec calls
+/// (group-first then sysadminctl) plus a third `# on rollback` annotated
+/// line that documents what fires if sysadminctl fails after the group
+/// was created; cycle 1 adds the profile-write step as a fourth
+/// pretend-shell `tee <path> < default.toml` line. The rollback line is
 /// always in the plan — pre-exec can't know what runtime will do, so the
-/// operator sees the full algorithm. Emitted via `emit_dry_only`.
-pub(crate) fn would_create_tenant(
-    name: &str,
-    group_argv: &[String],
-    user_argv: &[String],
-    rollback_argv: &[String],
-) -> Message {
+/// operator sees the full algorithm. The annotation is cycle 2.0's
+/// generalization that lets cycle 2 layer in PF-restore steps the same way.
+/// Emitted via `emit_dry_only`.
+pub(crate) fn would_create_tenant(name: &str, plan: &[PlanStep<'_>]) -> Message {
     Message {
         summary: Some(format!("Would create tenant '{name}'.")),
         summary_verbose: None,
         dry_run_summary: None,
-        detail: Some(render_create_plan(
-            name,
-            group_argv,
-            user_argv,
-            rollback_argv,
-        )),
+        detail: Some(render_plan(plan)),
     }
 }
 
-/// Pre-exec real-mode counterpart of `would_create_tenant`. Same 3-line
-/// plan; summary lives in `summary_verbose` so standard real mode stays
-/// silent until the post-exec confirmation. Pairs with `running_argv`
-/// emissions that follow during execution. The success-path `$` echo has
-/// only 2 lines (no rollback); cycle 3's rollback path adds the 3rd
-/// echo. Emitted via `emit_real_only`.
-pub(crate) fn creating_tenant(
-    name: &str,
-    group_argv: &[String],
-    user_argv: &[String],
-    rollback_argv: &[String],
-) -> Message {
+/// Pre-exec real-mode counterpart of `would_create_tenant`. Same plan;
+/// summary lives in `summary_verbose` so standard real mode stays silent
+/// until the post-exec confirmation. Pairs with `running` emissions that
+/// follow during execution. The success-path `$` echo omits the rollback
+/// line; the failure path adds it back. Emitted via `emit_real_only`.
+pub(crate) fn creating_tenant(name: &str, plan: &[PlanStep<'_>]) -> Message {
     Message {
         summary: None,
         summary_verbose: Some(format!("Creating tenant '{name}'.")),
         dry_run_summary: None,
-        detail: Some(render_create_plan(
-            name,
-            group_argv,
-            user_argv,
-            rollback_argv,
-        )),
+        detail: Some(render_plan(plan)),
     }
 }
 
@@ -80,11 +91,11 @@ pub(crate) fn created_tenant(name: &str, uid: u32, gid: u32) -> Message {
 }
 
 /// Error-path message for the create verb when sysadminctl-addUser
-/// returns non-zero. Cycle 3 wires this. The captured stderr (carried
-/// inside `ExecError::NonZero`) flows through `ExecError::Display` and
+/// returns non-zero. The captured stderr (carried inside
+/// `AccountError::NonZero`) flows through `AccountError::Display` and
 /// gets appended after the "process exited with code N" prefix when
 /// present. Emitted via `emit_err`.
-pub(crate) fn create_failed(name: &str, error: &ExecError) -> Message {
+pub(crate) fn create_failed(name: &str, error: &AccountError) -> Message {
     Message {
         summary: Some(format!("tenant: failed to create '{name}': {error}")),
         summary_verbose: None,
@@ -117,7 +128,7 @@ pub(crate) fn create_profile_failed(name: &str, error: &ProfileError) -> Message
 /// remediation is different (no orphan user to clean up, just retry the
 /// create). Names the suffixed group literally so the operator can
 /// inspect it directly via dscl.
-pub(crate) fn create_group_failed(name: &str, error: &ExecError) -> Message {
+pub(crate) fn create_group_failed(name: &str, error: &AccountError) -> Message {
     let group = tenant_share_group_name(name);
     Message {
         summary: Some(format!(
@@ -136,7 +147,7 @@ pub(crate) fn create_group_failed(name: &str, error: &ExecError) -> Message {
 /// `tenant destroy <name>` will converge via the OrphanGroup eligibility
 /// arm. Emitted via a second `emit_err` call right after `create_failed`,
 /// so the operator gets both lines in a predictable order.
-pub(crate) fn rollback_failed(name: &str, error: &ExecError) -> Message {
+pub(crate) fn rollback_failed(name: &str, error: &AccountError) -> Message {
     let group = tenant_share_group_name(name);
     Message {
         summary: Some(format!(
@@ -150,84 +161,54 @@ pub(crate) fn rollback_failed(name: &str, error: &ExecError) -> Message {
 }
 
 /// Pre-exec dry-run twin of `would_create_tenant`. "Would destroy tenant
-/// 'X'." with the full pessimistic plan as detail (one indented argv per
-/// line). Multi-argv because destroy issues sysadminctl `-deleteUser` plus
-/// a dscl `-read` residue probe plus a conditional `dscl -delete` cleanup.
-/// The dscl-delete is shown unconditionally — dry-run can't know what the
-/// probe would have found, so the operator sees the algorithm. Emitted via
-/// `emit_dry_only`.
-pub(crate) fn would_destroy_tenant(name: &str, argvs: &[&[String]]) -> Message {
+/// 'X'." with the full pessimistic plan as detail. Multi-step because
+/// destroy issues sysadminctl `-deleteUser` plus a dscl `-read` residue
+/// probe plus a conditional `dscl -delete` cleanup plus the
+/// dseditgroup-delete plus the profile-rm. The dscl-delete is shown
+/// unconditionally — dry-run can't know what the probe would have found,
+/// so the operator sees the algorithm. Emitted via `emit_dry_only`.
+pub(crate) fn would_destroy_tenant(name: &str, plan: &[PlanStep<'_>]) -> Message {
     Message {
         summary: Some(format!("Would destroy tenant '{name}'.")),
         summary_verbose: None,
         dry_run_summary: None,
-        detail: Some(render_plan(argvs)),
+        detail: Some(render_plan(plan)),
     }
 }
 
-/// Pre-exec real-mode twin of `creating_tenant`. Same multi-argv plan
+/// Pre-exec real-mode twin of `creating_tenant`. Same multi-step plan
 /// rendering as `would_destroy_tenant`, but verbose-only (the summary
-/// lives in `summary_verbose`) so standard real mode stays silent until the
-/// post-exec confirmation. Pairs with `running_argv` emissions that follow
+/// lives in `summary_verbose`) so standard real mode stays silent until
+/// the post-exec confirmation. Pairs with `running` emissions that follow
 /// during execution. Emitted via `emit_real_only`.
-pub(crate) fn destroying_tenant(name: &str, argvs: &[&[String]]) -> Message {
+pub(crate) fn destroying_tenant(name: &str, plan: &[PlanStep<'_>]) -> Message {
     Message {
         summary: None,
         summary_verbose: Some(format!("Destroying tenant '{name}'.")),
         dry_run_summary: None,
-        detail: Some(render_plan(argvs)),
+        detail: Some(render_plan(plan)),
     }
 }
 
-/// Per-exec echo line emitted just before each Executor.run call during a
-/// real-verbose run: `$ <argv>`. Follows the upfront plan block so the
-/// operator sees the planned commands first, then which ones actually ran
-/// (the dscl-delete cleanup is conditional, so its `$` line is absent when
-/// the probe finds DS clean). Verbose-only (lives in `summary_verbose`);
-/// emitted via `emit_real_only` so dry-run stays silent.
-pub(crate) fn running_argv(argv: &[String]) -> Message {
+/// Per-step echo line: `$ <rendered>`. Cycle 2.0 unification — both real
+/// shell-outs and synthetic steps (profile-write, profile-remove) flow
+/// through this one factory; the rendered string is whatever the
+/// substrate's `describe_*` method produced for the step. Verbose-only
+/// (lives in `summary_verbose`); emitted via `emit_real_only` so dry-run
+/// stays silent.
+pub(crate) fn running(rendered: &str) -> Message {
     Message {
         summary: None,
-        summary_verbose: Some(format!("$ {}", shell_join(argv))),
-        dry_run_summary: None,
-        detail: None,
-    }
-}
-
-/// Per-step echo line for the profile-write step. Sibling to
-/// `running_argv` — same `$ ` prefix and verbose-only emission — but
-/// renders the pretend-shell `tee <path> < default.toml` form because
-/// the step is `std::fs::write`, not a real argv. Single source of
-/// truth for the line shape (used by both `create_tenant` execution
-/// echo and the matching plan rendering in `render_create_plan`).
-pub(crate) fn running_profile_write(name: &str) -> Message {
-    Message {
-        summary: None,
-        summary_verbose: Some(format!("$ tee {} < default.toml", display_path_for(name))),
-        dry_run_summary: None,
-        detail: None,
-    }
-}
-
-/// Per-step echo line for the profile-rm step. Counterpart of
-/// `running_profile_write` for the destroy side. `rm -f` reflects the
-/// idempotent semantics (NotFound is success at both the
-/// `XdgProfileStore` and `StubProfileStore` layers); `rm` (no `-f`)
-/// would be misleading because the operator isn't asked to confirm and
-/// missing-file isn't surfaced as an error.
-pub(crate) fn running_profile_remove(name: &str) -> Message {
-    Message {
-        summary: None,
-        summary_verbose: Some(format!("$ rm -f {}", display_path_for(name))),
+        summary_verbose: Some(format!("$ {rendered}")),
         dry_run_summary: None,
         detail: None,
     }
 }
 
 /// Post-exec real-mode confirmation. Unlike `created_tenant`, no UID is
-/// inlined in verbose: a destroyed account's old UID is not new information
-/// to the operator who just asked us to destroy it. Emitted via
-/// `emit_real_only`.
+/// inlined in verbose: a destroyed account's old UID is not new
+/// information to the operator who just asked us to destroy it. Emitted
+/// via `emit_real_only`.
 pub(crate) fn destroyed_tenant(name: &str) -> Message {
     Message {
         summary: Some(format!("Destroyed tenant '{name}'.")),
@@ -237,10 +218,11 @@ pub(crate) fn destroyed_tenant(name: &str) -> Message {
     }
 }
 
-/// Error-path twin of `create_failed`. Emitted via `emit_err` when
-/// sysadminctl `-deleteUser` returns non-zero; captured stderr flows
-/// through `ExecError::Display`.
-pub(crate) fn destroy_failed(name: &str, error: &ExecError) -> Message {
+/// Error-path twin of `create_failed`. Emitted via `emit_err` when any
+/// account-domain step (sysadminctl-delete, dscl-cleanup, or
+/// dseditgroup-delete) returns non-zero; captured stderr flows through
+/// `AccountError::Display`.
+pub(crate) fn destroy_failed(name: &str, error: &AccountError) -> Message {
     Message {
         summary: Some(format!("tenant: failed to destroy '{name}': {error}")),
         summary_verbose: None,
@@ -268,11 +250,11 @@ pub(crate) fn destroy_profile_failed(name: &str, error: &ProfileError) -> Messag
 }
 
 /// Pre-exec dry-run message for the orphan-group convergence path.
-/// Standard mode names the tenant (parallel to the rest of the destroy UX
-/// — the operator typed `tenant destroy dev`); verbose adds the suffixed
-/// group name and the mechanism so the operator can see and grep for
-/// the literal resource. Emitted via `emit_dry_only`.
-pub(crate) fn would_destroy_orphan_group(name: &str, argvs: &[&[String]]) -> Message {
+/// Standard mode names the tenant (parallel to the rest of the destroy
+/// UX — the operator typed `tenant destroy dev`); verbose adds the
+/// suffixed group name and the mechanism so the operator can see and
+/// grep for the literal resource. Emitted via `emit_dry_only`.
+pub(crate) fn would_destroy_orphan_group(name: &str, plan: &[PlanStep<'_>]) -> Message {
     let group = tenant_share_group_name(name);
     Message {
         summary: Some(format!("Would destroy orphan group for tenant '{name}'.")),
@@ -280,18 +262,15 @@ pub(crate) fn would_destroy_orphan_group(name: &str, argvs: &[&[String]]) -> Mes
             "Would destroy orphan group '{group}' for tenant '{name}'."
         )),
         dry_run_summary: None,
-        detail: Some(render_plan(argvs)),
+        detail: Some(render_plan(plan)),
     }
 }
 
 /// Pre-exec real-mode counterpart: "Destroying orphan group …". Summary
 /// lives in `summary_verbose` (silent in standard real mode); verbose
-/// adds the suffixed group name. Pairs with the `running_argv` emissions
-/// that follow. Emitted via `emit_real_only`. Cycle 1.8 grew the plan
-/// from a single argv to a 2-step plan (dseditgroup-delete + profile-rm)
-/// so the orphan-group convergence path also restores the "no trace of
-/// `<name>` after destroy" contract.
-pub(crate) fn destroying_orphan_group(name: &str, argvs: &[&[String]]) -> Message {
+/// adds the suffixed group name. Pairs with the `running` emissions
+/// that follow. Emitted via `emit_real_only`.
+pub(crate) fn destroying_orphan_group(name: &str, plan: &[PlanStep<'_>]) -> Message {
     let group = tenant_share_group_name(name);
     Message {
         summary: None,
@@ -299,7 +278,7 @@ pub(crate) fn destroying_orphan_group(name: &str, argvs: &[&[String]]) -> Messag
             "Destroying orphan group '{group}' for tenant '{name}'."
         )),
         dry_run_summary: None,
-        detail: Some(render_plan(argvs)),
+        detail: Some(render_plan(plan)),
     }
 }
 
@@ -320,15 +299,15 @@ pub(crate) fn destroyed_orphan_group(name: &str) -> Message {
 }
 
 /// Pre-exec dry-run message for the shell verb: "Would shell into 'X'."
-/// Verbose adds the single-argv mechanism preview. Single-argv plan
+/// Verbose adds the single-step mechanism preview. Single-step plan
 /// (unlike create/destroy) — there's no fan-out, just `sudo -iu <name>`.
 /// Emitted via `emit_dry_only`.
-pub(crate) fn would_shell_into_tenant(name: &str, argv: &[String]) -> Message {
+pub(crate) fn would_shell_into_tenant(name: &str, rendered: &str) -> Message {
     Message {
         summary: Some(format!("Would shell into '{name}'.")),
         summary_verbose: None,
         dry_run_summary: None,
-        detail: Some(format!("  {}", shell_join(argv))),
+        detail: Some(format!("  {rendered}")),
     }
 }
 
@@ -337,22 +316,23 @@ pub(crate) fn would_shell_into_tenant(name: &str, argv: &[String]) -> Message {
 /// post-exec confirmation does the talking), shell has no post-exec
 /// confirmation — the operator IS the shell after this fires. So the
 /// "Shelling into" line is the only acknowledgement the operator gets,
-/// and it shows in both standard and verbose. Emitted via `emit_real_only`.
-pub(crate) fn shelling_into_tenant(name: &str, argv: &[String]) -> Message {
+/// and it shows in both standard and verbose. Emitted via
+/// `emit_real_only`.
+pub(crate) fn shelling_into_tenant(name: &str, rendered: &str) -> Message {
     Message {
         summary: Some(format!("Shelling into '{name}'.")),
         summary_verbose: None,
         dry_run_summary: None,
-        detail: Some(format!("  {}", shell_join(argv))),
+        detail: Some(format!("  {rendered}")),
     }
 }
 
-/// Error-path message for the shell verb when `exec_into` returns
-/// `ExecError` (spawn failure — sudo not found, fork failed). Distinct
-/// from `create_failed` / `destroy_failed` so log-greps can disambiguate
-/// the verb. Non-zero shell exits are NOT errors here; they're propagated
-/// as tenant's own exit code by the dispatcher.
-pub(crate) fn shell_failed(name: &str, error: &ExecError) -> Message {
+/// Error-path message for the shell verb when `login` returns
+/// `AccountError` (spawn failure — sudo not found, fork failed).
+/// Distinct from `create_failed` / `destroy_failed` so log-greps can
+/// disambiguate the verb. Non-zero shell exits are NOT errors here;
+/// they're propagated as tenant's own exit code by the dispatcher.
+pub(crate) fn shell_failed(name: &str, error: &AccountError) -> Message {
     Message {
         summary: Some(format!("tenant: failed to shell into '{name}': {error}")),
         summary_verbose: None,
@@ -362,11 +342,12 @@ pub(crate) fn shell_failed(name: &str, error: &ExecError) -> Message {
 }
 
 /// Refusal message for `shell <name>` where the tenant doesn't exist
-/// (NotPresent or OrphanGroup eligibility — per Q3, OrphanGroup collapses
-/// to the same refusal because the group alone can't host a shell session).
-/// Maps to EX_USAGE at the dispatch layer. Frames the action as "cannot
-/// shell into" rather than "refusing to" because the issue is "the target
-/// doesn't exist," not a guard-rail refusing an unsafe operation.
+/// (NotPresent or OrphanGroup eligibility — per Q3, OrphanGroup
+/// collapses to the same refusal because the group alone can't host a
+/// shell session). Maps to EX_USAGE at the dispatch layer. Frames the
+/// action as "cannot shell into" rather than "refusing to" because the
+/// issue is "the target doesn't exist," not a guard-rail refusing an
+/// unsafe operation.
 pub(crate) fn shell_absent(name: &str) -> Message {
     Message {
         summary: Some(format!(
@@ -380,9 +361,9 @@ pub(crate) fn shell_absent(name: &str) -> Message {
 
 /// Refusal message for `shell <name>` where the account exists with a
 /// positive UID below the tenant floor. Twin of `not_a_tenant` for
-/// destroy — same floor, different verb framing ("refusing to shell into"
-/// vs "refusing to destroy"). Names the floor explicitly so the operator
-/// can disambiguate without reading the source.
+/// destroy — same floor, different verb framing ("refusing to shell
+/// into" vs "refusing to destroy"). Names the floor explicitly so the
+/// operator can disambiguate without reading the source.
 pub(crate) fn shell_not_a_tenant(name: &str, uid: u32, floor: u32) -> Message {
     Message {
         summary: Some(format!(
@@ -395,9 +376,10 @@ pub(crate) fn shell_not_a_tenant(name: &str, uid: u32, floor: u32) -> Message {
 }
 
 /// Refusal message for `shell <name>` where the account exists in the
-/// user listing but has no positive UID — twin of `system_account_refusal`
-/// for destroy. Same `(true, None)` Reader pattern; same refusal rationale
-/// (the account very much exists; we just won't shell into it).
+/// user listing but has no positive UID — twin of
+/// `system_account_refusal` for destroy. Same `(true, None)` Reader
+/// pattern; same refusal rationale (the account very much exists; we
+/// just won't shell into it).
 pub(crate) fn shell_system_account_refusal(name: &str) -> Message {
     Message {
         summary: Some(format!(
@@ -410,8 +392,8 @@ pub(crate) fn shell_system_account_refusal(name: &str) -> Message {
 }
 
 /// Convergent-noop message for the destroy verb: account already absent,
-/// so destroy is a successful no-op. Tense-neutral so the same line works
-/// in real and dry-run modes (no separate "Would …" twin).
+/// so destroy is a successful no-op. Tense-neutral so the same line
+/// works in real and dry-run modes (no separate "Would …" twin).
 pub(crate) fn destroy_absent(name: &str) -> Message {
     Message {
         summary: Some(format!("tenant '{name}' does not exist; nothing to do.")),
@@ -482,10 +464,10 @@ pub(crate) fn invalid_name(name: &str, error: &NameError) -> Message {
 
 /// Conflict-refusal message for the create verb: the requested name is
 /// already a user, the `<name>-tenant-share` group is already taken, or
-/// both. The group-side messages name the suffixed group literally so the
-/// operator can run `dscl . -read /Groups/<name>-tenant-share` directly
-/// without having to guess the convention. Emitted via `emit_err`;
-/// produces `EX_USAGE 64` at the dispatch layer.
+/// both. The group-side messages name the suffixed group literally so
+/// the operator can run `dscl . -read /Groups/<name>-tenant-share`
+/// directly without having to guess the convention. Emitted via
+/// `emit_err`; produces `EX_USAGE 64` at the dispatch layer.
 pub(crate) fn name_conflict(name: &str, error: &ConflictError) -> Message {
     let group = tenant_share_group_name(name);
     let summary = match error {
@@ -503,56 +485,18 @@ pub(crate) fn name_conflict(name: &str, error: &ConflictError) -> Message {
     }
 }
 
-/// Shell-quote argv for display. Args containing whitespace get wrapped in
-/// double quotes so the rendered line is paste-safe; bare args stay bare.
-/// Used only for the verbose mechanism line — the executor takes argv
-/// directly and never goes through a shell.
-fn shell_join(argv: &[String]) -> String {
-    argv.iter()
-        .map(|a| {
-            if a.chars().any(char::is_whitespace) {
-                format!("\"{a}\"")
-            } else {
-                a.clone()
-            }
+/// Render a multi-step plan as a single newline-separated string with
+/// `  ` (two-space) indentation per line, plus an optional `  # …`
+/// annotation suffix per step. The Reporter writes the composite as one
+/// `detail` block; the indentation distinguishes plan lines from the
+/// `$ ` execution-echo lines emitted by `running`.
+fn render_plan(steps: &[PlanStep<'_>]) -> String {
+    steps
+        .iter()
+        .map(|step| match step.annotation {
+            Some(note) => format!("  {}  # {note}", step.rendered),
+            None => format!("  {}", step.rendered),
         })
         .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Render a multi-argv plan as a single newline-separated string with
-/// `  ` (two-space) indentation per line. The Reporter writes the
-/// composite as one `detail` block; the indentation distinguishes plan
-/// lines from the `$ ` execution-echo lines emitted by `running_argv`.
-fn render_plan(argvs: &[&[String]]) -> String {
-    argvs
-        .iter()
-        .map(|a| format!("  {}", shell_join(a)))
-        .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Specialized plan rendering for the create verb. Three real-mode
-/// shell-out lines plus a fourth profile-write step rendered in a
-/// pretend-shell `tee <path> < default.toml` framing — there's no real
-/// `tee` invocation (it's a `std::fs::write`) but the form keeps the
-/// `$` echo block visually uniform and signals to the operator "a file
-/// landed here." `< default.toml` is fictional (the default content is
-/// in-binary) but conveys "the default template" without dragging the
-/// schema body into the plan. The `# on rollback` annotation on line 3
-/// keeps the conditional-step display convention the dscl-cleanup
-/// pioneered.
-fn render_create_plan(
-    name: &str,
-    group: &[String],
-    user: &[String],
-    rollback: &[String],
-) -> String {
-    format!(
-        "  {}\n  {}\n  {}  # on rollback\n  tee {} < default.toml",
-        shell_join(group),
-        shell_join(user),
-        shell_join(rollback),
-        display_path_for(name),
-    )
 }

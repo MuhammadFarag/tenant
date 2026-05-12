@@ -8,7 +8,7 @@ const EX_IOERR: u8 = 74;
 pub(crate) fn dispatch(
     cli: Cli,
     accounts: &dyn accounts::Reader,
-    writer: &dyn accounts::Writer,
+    writer: &accounts::Writer<'_>,
     reporter: &mut Reporter,
 ) -> u8 {
     match cli.verb {
@@ -139,7 +139,7 @@ pub(crate) fn dispatch(
 /// break; `destroy_profile_failed` names the profile path explicitly.
 fn surface_destroy_error(reporter: &mut Reporter, name: &str, error: &accounts::DestroyError) {
     match error {
-        accounts::DestroyError::Exec(e) => {
+        accounts::DestroyError::Account(e) => {
             reporter.emit_err(messages::destroy_failed(name, e));
         }
         accounts::DestroyError::Profile(e) => {
