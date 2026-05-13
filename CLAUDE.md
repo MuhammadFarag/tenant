@@ -53,10 +53,11 @@ src/doctor.rs     — pure functions for the doctor verb: `curated_paths(host, t
 src/reporter.rs   — operator-facing output. Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); `refuse_*` and `*_failed` methods to stderr; `step(op)` echoes per substrate call in real+verbose; plan rendering flows through `Op::describe_via`. Doctor uses `doctor_starting` (verbose curated-list block + dry-run intent), `doctor_finding`, `doctor_done_summary`, `doctor_failed`, `doctor_env_policy_failed`, `doctor_all_tenants_noop`, and `refuse_doctor_*` family.
 src/main.rs       — composition root: prod impls + `tenant::run`. Reads `$USER` for the host identity passed to doctor.
 
-tests/cli.rs             — E2E tests. Helpers `run_with` (NeverExecutor — panics on substrate use, guards "should not touch the host" paths) and `run_with_exec` (caller-owned StubExecutor for real-mode assertions). Behavioral assertions on op identity; display assertions byte-exact. `TEST_HOST` constant pins doctor's host-username so curated-path expansion is deterministic.
+tests/cli*.rs            — E2E tests, one binary per verb (`tests/cli_<verb>.rs`) plus `tests/cli.rs` for cross-cutting CLI parser tests. Shared helpers (`NeverExecutor`, `run_with` / `run_with_exec`, `TEST_HOST`, stub builders) live in `tests/common/mod.rs`. Each per-verb file's top-of-file comment describes its scope.
+tests/macos_executor.rs  — per-variant pins of the `MacosExecutor::describe_*` argv contract. One test per Account/Profile/Firewall variant so a future tool swap (dseditgroup → dscl . -create; pfctl → some future PF manager) touches one place per op.
+tests/macos_reader.rs    — `MacosReader::new()` dscl-integration smoke (`#[cfg(target_os = "macos")]`). Symmetric with macos_executor.rs's per-substrate boundary pin.
 tests/doctor.rs          — combinatorial coverage on `doctor::curated_paths` shape, `classify` matrix, `Finding::Display` per-variant byte-form, and `Severity` ordering (load-bearing for `--strict`).
 tests/env_policy_parse.rs — combinatorial coverage on `doctor::has_env_delete_for` (directive shape variants: quoted/unquoted, `+=` vs `=`, single-var vs multi-var list, `Defaults` qualifiers).
-tests/macos_executor.rs  — per-variant pins of the `MacosExecutor::describe_*` argv contract. One test per Account/Profile/Firewall variant so a future tool swap (dseditgroup → dscl . -create; pfctl → some future PF manager) touches one place per op.
 tests/profile_parse.rs   — combinatorial coverage on `profile::parse`.
 tests/firewall_render.rs — combinatorial coverage on `firewall::render_anchor`.
 tests/firewall_conf.rs   — combinatorial coverage on `ensure_anchor_ref` / `remove_anchor_ref` / `is_anchor_referenced`.
@@ -383,12 +384,17 @@ Things that are easy to violate and would matter:
 
 ## Test discipline
 
-E2E-first. The bulk of tests live in `tests/cli.rs` and drive through
-`tenant::run` with a `StubReader`. Inline `#[cfg(test)] mod tests`
-blocks are out of style on this project; standalone unit-test files
-need explicit justification — `tests/macos_executor.rs` is the
-canonical precedent (per-variant `describe_*` pins for the argv
-contract). `tests/profile_parse.rs`, `tests/firewall_render.rs`,
+E2E-first. The bulk of tests live in `tests/cli_<verb>.rs` (one file
+per verb) and drive through `tenant::run` with a `StubReader`.
+`tests/cli.rs` retains cross-cutting CLI parser tests. Shared helpers
+(`NeverExecutor`, `run_with` / `run_with_exec`, stub builders) live in
+`tests/common/mod.rs`, pulled in via `mod common; use common::*;`.
+Inline `#[cfg(test)] mod tests` blocks are out of style on this
+project; standalone unit-test files need explicit justification —
+`tests/macos_executor.rs` and `tests/macos_reader.rs` are the
+canonical precedents for per-substrate boundary pins (argv contract
+for the executor; dscl-translation smoke for the reader).
+`tests/profile_parse.rs`, `tests/firewall_render.rs`,
 `tests/firewall_conf.rs`, `tests/doctor.rs`, and
 `tests/env_policy_parse.rs` each carry the same justification:
 combinatorial coverage on a pure function (`parse`, `render_anchor`,
@@ -400,13 +406,13 @@ per-shape unit testing is the right tool when the function's state
 space is combinatorial; CLI E2E remains the default for verb-level
 behavior.
 
-Two helpers in cli.rs: `run_with(stub, args) -> (u8, String, String)`
-wires a `NeverExecutor` (panics if any substrate method is called —
-guards "should not touch the host" paths like dry-run / validation /
-conflict). `run_with_exec(stub, &StubExecutor, args)` lets the test
-own the executor for real-mode assertions on op shape / configured
-failure. Both run the binary in-process and return exit code + stdout
-+ stderr as `String`s.
+Two helpers in `tests/common/mod.rs`: `run_with(stub, args) -> (u8,
+String, String)` wires a `NeverExecutor` (panics if any substrate
+method is called — guards "should not touch the host" paths like
+dry-run / validation / conflict). `run_with_exec(stub, &StubExecutor,
+args)` lets the test own the executor for real-mode assertions on op
+shape / configured failure. Both run the binary in-process and return
+exit code + stdout + stderr as `String`s.
 
 Behavioral assertions are on op identity (`exec.account_ops()` returns
 `Vec<AccountOp>`; same for `profile_ops()` / `firewall_ops()`;
