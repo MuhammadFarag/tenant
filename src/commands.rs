@@ -91,6 +91,44 @@ pub(crate) fn dispatch(
                 }
             }
         }
+        Verb::Mode { name, level } => {
+            if let Err(e) = accounts::validate_name(&name) {
+                reporter.refuse_invalid_name(&name, &e);
+                return EX_USAGE;
+            }
+            // Mode reuses `destroy_eligibility`'s 5-way classifier (per
+            // cycle-3's locked design). Same collapse as shell:
+            // NotPresent + OrphanGroup both refuse via `refuse_mode_absent`
+            // — the operator wants to switch a tenant's mode; the
+            // lingering group alone can't host one.
+            match accounts::destroy_eligibility(accounts, &name) {
+                accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+                    reporter.refuse_mode_absent(&name);
+                    EX_USAGE
+                }
+                accounts::Eligibility::NotATenant { uid } => {
+                    reporter.refuse_mode_not_a_tenant(&name, uid, TENANT_UID_FLOOR);
+                    EX_USAGE
+                }
+                accounts::Eligibility::SystemAccount => {
+                    reporter.refuse_mode_system_account(&name);
+                    EX_USAGE
+                }
+                accounts::Eligibility::Destroyable => {
+                    match writer.apply_tenant_mode(&name, level, reporter) {
+                        Ok(()) => 0,
+                        Err(accounts::ModeError::Profile(e)) => {
+                            reporter.mode_profile_failed(&name, &e);
+                            EX_IOERR
+                        }
+                        Err(accounts::ModeError::Firewall(e)) => {
+                            reporter.mode_failed(&name, &e);
+                            EX_IOERR
+                        }
+                    }
+                }
+            }
+        }
         Verb::Destroy { name } => {
             if let Err(e) = accounts::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);

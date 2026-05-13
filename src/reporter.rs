@@ -17,6 +17,7 @@
 
 use std::io::Write;
 
+use crate::ModeLevel;
 use crate::accounts::{ConflictError, NameError, tenant_share_group_name};
 use crate::executor::{AccountError, AccountOp, Executor, FirewallError, Op};
 use crate::profile::{ProfileError, display_path_for};
@@ -192,6 +193,51 @@ impl<'a> Reporter<'a> {
     }
 
     // ============================================================
+    // Mode verb
+    // ============================================================
+
+    /// Pre-exec disclosure for `mode`. Same mode pattern as
+    /// `create_starting` / `destroy_starting`: standard real is
+    /// silent (the post-exec `mode_done` does the talking); real+verbose
+    /// emits the "Applying" intent + indented plan; dry-run (any
+    /// verbosity) emits "Would apply" + (verbose: plan).
+    pub fn mode_starting(
+        &mut self,
+        name: &str,
+        level: ModeLevel,
+        plan: &[(Op<'_>, Option<&'static str>)],
+    ) {
+        let level_str = level.as_str();
+        let summary = match (self.dry_run, self.verbose) {
+            (true, _) => Some(format!(
+                "Would apply mode '{level_str}' to tenant '{name}'."
+            )),
+            (false, true) => Some(format!("Applying mode '{level_str}' to tenant '{name}'.")),
+            (false, false) => None,
+        };
+        if let Some(s) = summary {
+            let _ = writeln!(self.stdout, "{s}");
+        }
+        if self.verbose {
+            self.render_plan(plan);
+        }
+    }
+
+    /// Post-exec confirmation for `mode`. Silent in dry-run (would be
+    /// a lie — no reapply ran). Real (any verbosity): one summary line
+    /// naming the level.
+    pub fn mode_done(&mut self, name: &str, level: ModeLevel) {
+        if self.dry_run {
+            return;
+        }
+        let level_str = level.as_str();
+        let _ = writeln!(
+            self.stdout,
+            "Applied mode '{level_str}' to tenant '{name}'."
+        );
+    }
+
+    // ============================================================
     // Convergent noop (destroy on absent tenant)
     // ============================================================
 
@@ -276,6 +322,31 @@ impl<'a> Reporter<'a> {
         );
     }
 
+    /// Mode-side absent refusal. Like `refuse_shell_absent`, this
+    /// collapses `Eligibility::NotPresent` and `Eligibility::OrphanGroup`
+    /// — the operator wants to switch a tenant's mode; a lingering
+    /// `<name>-tenant-share` group doesn't host one.
+    pub fn refuse_mode_absent(&mut self, name: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: cannot apply mode to '{name}': does not exist"
+        );
+    }
+
+    pub fn refuse_mode_not_a_tenant(&mut self, name: &str, uid: u32, floor: u32) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: refusing to apply mode to '{name}': UID {uid} is below tenant floor {floor}"
+        );
+    }
+
+    pub fn refuse_mode_system_account(&mut self, name: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: refusing to apply mode to '{name}': system account (no tenant-range UID)"
+        );
+    }
+
     // ============================================================
     // Failures (stderr, EX_IOERR)
     // ============================================================
@@ -353,6 +424,29 @@ impl<'a> Reporter<'a> {
 
     pub fn shell_failed(&mut self, name: &str, err: &AccountError) {
         let _ = writeln!(self.stderr, "tenant: failed to shell into '{name}': {err}");
+    }
+
+    /// Failure shape for the `mode` verb's profile arm — read or parse
+    /// of the on-disk profile failed before any firewall step ran.
+    /// Parallels `destroy_profile_failed` / `create_profile_failed`'s
+    /// path-naming frame.
+    pub fn mode_profile_failed(&mut self, name: &str, err: &ProfileError) {
+        let path = display_path_for(name);
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to read profile '{path}' for '{name}': {err}"
+        );
+    }
+
+    /// Failure shape for the `mode` verb's firewall arm — any of the
+    /// reapply ops (InstallAnchor, Reload) tripped. The Display impl
+    /// on `FirewallError` carries the path or pfctl exit context;
+    /// the frame here names the verb intent.
+    pub fn mode_failed(&mut self, name: &str, err: &FirewallError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to apply firewall mode for '{name}': {err}"
+        );
     }
 
     // ============================================================

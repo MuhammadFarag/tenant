@@ -2,12 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::process::Command;
 
+use crate::ModeLevel;
 use crate::allocation::TENANT_UID_FLOOR;
 use crate::executor::{
     self, AccountError, AccountOp, FirewallError, FirewallOp, Op, ProfileOp, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
-use crate::profile::{ProfileError, display_path_for, parse};
+use crate::profile::{Profile, ProfileError, display_path_for, parse};
 use crate::reporter::Reporter;
 
 pub trait Reader {
@@ -372,6 +373,25 @@ impl From<AccountError> for DestroyError {
     }
 }
 
+/// Failure surface for the `mode` verb. Read/parse failures on the
+/// tenant's profile surface as `Profile`; anchor-write or pfctl-reload
+/// failures surface as `Firewall`. No `Account` arm — mode doesn't
+/// touch user/group state.
+///
+/// No automatic recovery on Reload failure. The host state after a
+/// Reload failure is "anchor file written with the new body, kernel
+/// rules still on the old body"; the verb is idempotent, so rerunning
+/// `tenant mode <name> <level>` resolves the divergence. The
+/// alternative (back-up the anchor and restore on failure) would
+/// mirror the create-side recovery but with a different fragility:
+/// the anchor-backup file is itself an artifact the operator might
+/// not expect.
+#[derive(Debug)]
+pub(crate) enum ModeError {
+    Profile(ProfileError),
+    Firewall(FirewallError),
+}
+
 /// Side-effecting half of the accounts API. Verbs ask in domain terms
 /// via `AccountOp` and `ProfileOp` values handed to the substrate; the
 /// substrate (production: `MacosExecutor`) owns argv construction and
@@ -731,6 +751,80 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    /// Apply a PF widening level to the tenant. Reads the on-disk
+    /// profile, renders a new anchor body from the runtime tier
+    /// (`level == Runtime`) or the union of runtime + install tiers
+    /// (`level == Install`), and reapplies via the existing
+    /// `FirewallOp::InstallAnchor` + `FirewallOp::Reload` pair.
+    ///
+    /// **No defensive `FlushAnchor`** before InstallAnchor (cycle-3
+    /// Q1 lock): the parent `load anchor` directive in `/etc/pf.conf`
+    /// stays in place across mode reapply, so `pfctl -f` re-reads the
+    /// anchor file and replaces the in-kernel ruleset on every reload.
+    /// The cycle-2 destroy-side FlushAnchor is load-bearing only when
+    /// the parent load directive is removed (orphan-anchor case);
+    /// mode-reapply is structurally different. The cycle-3 manual
+    /// smoke verifies empirically by checking the kernel `<allowed>`
+    /// table shrinks correctly on narrow-back.
+    ///
+    /// **No automatic recovery** on Reload failure (matches the
+    /// plugin's `reapply_anchor`). If Reload fails, the anchor file
+    /// reflects the new body but the kernel rules still match the
+    /// old body — operator reruns `tenant mode <name> <level>` to
+    /// retry. The verb is idempotent at the substrate.
+    pub(crate) fn apply_tenant_mode(
+        &self,
+        name: &str,
+        level: ModeLevel,
+        reporter: &mut Reporter,
+    ) -> Result<(), ModeError> {
+        // Two-op composition:
+        //   1. InstallAnchor — rewrite /etc/pf.anchors/tenant-<name>
+        //                      with the new body
+        //   2. Reload         — pfctl -f /etc/pf.conf
+        // The read_profile + parse + render_anchor work that produces
+        // the InstallAnchor body happens before step 1, is implicit
+        // in the plan, and surfaces as ModeError::Profile on failure
+        // (read or parse) or ModeError::Firewall::Fs (if a profile
+        // path resolution issue surfaces as a firewall fs error,
+        // which it doesn't today — profile reads return ProfileError).
+        let reload = FirewallOp::Reload;
+        // Plan-time placeholder InstallAnchor — describe ignores the
+        // `body` field, so the empty-string body still renders the
+        // same line as the real-body op constructed below.
+        let install_anchor_plan = FirewallOp::InstallAnchor {
+            name: name.into(),
+            body: String::new(),
+        };
+
+        reporter.mode_starting(
+            name,
+            level,
+            &[
+                (Op::Firewall(&install_anchor_plan), None),
+                (Op::Firewall(&reload), None),
+            ],
+        );
+
+        let profile_content = self
+            .executor
+            .read_profile(name)
+            .map_err(ModeError::Profile)?;
+        let parsed_profile = parse(&profile_content).map_err(ModeError::Profile)?;
+        let hosts = hosts_for_level(&parsed_profile, level);
+        let install_anchor = FirewallOp::InstallAnchor {
+            name: name.into(),
+            body: render_anchor(name, &hosts),
+        };
+
+        self.run(&install_anchor, reporter)
+            .map_err(ModeError::Firewall)?;
+        self.run(&reload, reporter).map_err(ModeError::Firewall)?;
+
+        reporter.mode_done(name, level);
+        Ok(())
+    }
+
     /// Interactive shell entry into the tenant. The LoginAsUser op is
     /// built only to feed `describe_account` for the plan and echo
     /// lines; execution goes through the substrate's `login` method
@@ -761,6 +855,22 @@ impl<'a> Writer<'a> {
     fn run<O: WritableOp>(&self, op: &O, reporter: &mut Reporter) -> Result<(), O::Error> {
         reporter.step(op.op_ref());
         op.execute_via(self.executor)
+    }
+}
+
+/// Select which hosts the rendered PF anchor body should include for
+/// the requested mode level. Runtime mode takes only `allowlist.runtime.hosts`;
+/// install mode is the union — runtime hosts first (preserving the
+/// operator's grouping intent in the profile), then install hosts.
+/// Order matters for `render_anchor`'s output stability.
+fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<String> {
+    match level {
+        ModeLevel::Runtime => profile.allowlist.runtime.hosts.clone(),
+        ModeLevel::Install => {
+            let mut hosts = profile.allowlist.runtime.hosts.clone();
+            hosts.extend(profile.allowlist.install.hosts.iter().cloned());
+            hosts
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::io::Write;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 pub mod accounts;
 pub mod allocation;
@@ -28,9 +28,49 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Verb {
-    Create { name: String },
-    Destroy { name: String },
-    Shell { name: String },
+    Create {
+        name: String,
+    },
+    Destroy {
+        name: String,
+    },
+    Shell {
+        name: String,
+    },
+    /// Apply a PF widening level to the named tenant. Re-renders the
+    /// anchor body from the profile's runtime or runtime+install host
+    /// set, writes it, and reloads pf. Install widening is intentionally
+    /// non-persistent — the contract for cycle 3 is "the operator
+    /// narrows back manually with `tenant mode <name> runtime`."
+    /// Auto-narrow on shell entry is deferred to cycle 4.
+    Mode {
+        name: String,
+        #[arg(value_enum)]
+        level: ModeLevel,
+    },
+}
+
+/// Which tier of the profile's allowlist the rendered PF anchor body
+/// should include. Runtime is the baseline (only `allowlist.runtime.hosts`);
+/// install is the widened set (`runtime + install`). Cycle 3 carves
+/// the binary distinction; future tiers (e.g. provisioning, ci) would
+/// extend the enum.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ModeLevel {
+    Runtime,
+    Install,
+}
+
+impl ModeLevel {
+    /// Operator-facing label used in plan / echo / refusal / done
+    /// messages. Matches the CLI literal so an operator who typed
+    /// `tenant mode dev runtime` sees the same word back.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ModeLevel::Runtime => "runtime",
+            ModeLevel::Install => "install",
+        }
+    }
 }
 
 pub fn run(

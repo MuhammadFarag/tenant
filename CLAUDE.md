@@ -12,7 +12,10 @@ the symmetric teardown verb that runs `sysadminctl -deleteUser`, a dscl
 residue probe + conditional cleanup, `dseditgroup -o delete`, profile
 removal, the PF teardown (backup → remove anchor → update pf.conf →
 reload), and a final `pfctl -a tenant-<name> -F all` to flush the
-anchor's in-kernel rules.
+anchor's in-kernel rules. `tenant mode <name> install|runtime` re-renders
+the per-tenant PF anchor with the requested allowlist tier (`runtime`
+only, or `runtime + install`) and reloads pf — used to widen the tenant's
+egress allowlist for install-tier work and narrow back when done.
 
 This crate is a Rust port of an earlier Go prototype (lives at
 `/Users/plugin-dev/src/tenant/` for cross-reference). The Rust version
@@ -33,7 +36,13 @@ walks the commits.
 src/lib.rs        — public API: pub fn run; declares modules; Cli + Verb + parse;
                     composition-root mode swap (DryRunExecutor when cli.dry_run);
                     constructs Reporter with the active Executor reference so
-                    plan + echo lines render lazily via Op::describe_via.
+                    plan + echo lines render lazily via Op::describe_via. Verb
+                    enum: `Create { name }`, `Destroy { name }`, `Shell { name }`,
+                    `Mode { name, level: ModeLevel }`. `ModeLevel { Runtime,
+                    Install }` derives `clap::ValueEnum` so the CLI surface is
+                    `tenant mode <name> <runtime|install>`; `as_str` produces
+                    the operator-facing label for plan/echo/done messages
+                    (matches the CLI literal verbatim).
 src/commands.rs   — dispatch (the match on Verb) — no I/O, no cli.dry_run check.
                     Calls Reporter's verb-named methods directly: refuse_*
                     methods for validation / conflict / eligibility refusals;
@@ -52,7 +61,12 @@ src/commands.rs   — dispatch (the match on Verb) — no I/O, no cli.dry_run ch
                     `refuse_shell_absent` refusal (the operator wants a
                     shell; the lingering group alone can't host one) and
                     clamps the child shell's i32 exit code into u8 for
-                    propagation.
+                    propagation. Mode-side mirrors shell's collapse —
+                    `refuse_mode_absent` for NotPresent + OrphanGroup,
+                    `refuse_mode_not_a_tenant` for NotATenant,
+                    `refuse_mode_system_account` for SystemAccount — and
+                    surfaces `ModeError::{Profile, Firewall}` via
+                    `mode_profile_failed` / `mode_failed`.
 src/accounts.rs   — Reader trait + StubReader / MacosReader (dscl);
                     Writer struct (composes AccountOp / ProfileOp / FirewallOp
                     values into verb-level flows, hands them to the Executor
@@ -77,11 +91,23 @@ src/accounts.rs   — Reader trait + StubReader / MacosReader (dscl);
                     ProfileOp::Delete + the same 5-step PF teardown).
                     `shell_into_tenant` builds a LoginAsUser op solely for
                     plan rendering and dispatches through `Executor::login`,
-                    returning the child shell's i32 exit code. The private
-                    `run<O: WritableOp>` helper couples per-step `$` echo +
-                    execute into one call. `parse_id_line` is the shared
-                    parser for both UID and GID dscl listings (negative-ID
-                    filter + lowest-wins fold).
+                    returning the child shell's i32 exit code.
+                    `apply_tenant_mode(name, level, reporter)` is the
+                    cycle-3 mode reapply: reads the profile (carve-out),
+                    parses, picks runtime hosts (level=Runtime) or
+                    runtime + install hosts (level=Install) via
+                    `hosts_for_level`, renders the anchor body, and runs
+                    the two-op `InstallAnchor → Reload` sequence. No
+                    defensive `FlushAnchor` (Q1 lock — pfctl-f replaces
+                    anchor rules on reload while the parent load
+                    directive stays in place). No auto-recovery on
+                    Reload failure (the verb is idempotent — rerun to
+                    retry). Returns `ModeError::{Profile, Firewall}`.
+                    The private `run<O: WritableOp>` helper couples
+                    per-step `$` echo + execute into one call.
+                    `parse_id_line` is the shared parser for both UID
+                    and GID dscl listings (negative-ID filter +
+                    lowest-wins fold).
 src/allocation.rs — UidAllocator + GidAllocator (both iterate from
                     TENANT_UID_FLOOR = 600; consult disjoint Reader maps,
                     independent values)
@@ -236,6 +262,8 @@ src/reporter.rs   — Operator-facing output: the layer between domain ops and
                       orphan_group_starting(name, plan) /
                         orphan_group_done(name)
                       shell_starting(name, login_op)  — pair, no _done
+                      mode_starting(name, level, plan) /
+                        mode_done(name, level)
                       destroy_absent(name)            — convergent noop
                     Plan parameter shape: `&[(Op<'_>, Option<&'static str>)]`
                     — `Op` for domain dispatch, the `Option<&'static str>`
@@ -250,12 +278,15 @@ src/reporter.rs   — Operator-facing output: the layer between domain ops and
                     framing): refuse_invalid_name, refuse_name_conflict,
                     refuse_not_a_tenant, refuse_system_account,
                     refuse_shell_absent, refuse_shell_not_a_tenant,
-                    refuse_shell_system_account. Failure methods (also
-                    stderr): create_group_failed, create_failed,
-                    create_rollback_failed (em-dash-suffixed recovery hint),
-                    create_profile_failed, create_firewall_failed,
-                    destroy_failed, destroy_profile_failed,
-                    destroy_firewall_failed, shell_failed.
+                    refuse_shell_system_account, refuse_mode_absent,
+                    refuse_mode_not_a_tenant, refuse_mode_system_account.
+                    Failure methods (also stderr): create_group_failed,
+                    create_failed, create_rollback_failed (em-dash-suffixed
+                    recovery hint), create_profile_failed,
+                    create_firewall_failed, destroy_failed,
+                    destroy_profile_failed, destroy_firewall_failed,
+                    shell_failed, mode_failed (firewall arm),
+                    mode_profile_failed (profile read/parse arm).
 src/main.rs       — composition root: MacosReader::new() + MacosExecutor;
                     tenant::run
 
@@ -490,7 +521,45 @@ Things that are easy to violate and would matter:
   empty/unknown anchor is a noop. Tests pin "FlushAnchor is the last
   firewall op on both destroy paths" AND "create's success path does
   NOT invoke FlushAnchor" (negative pin against accidental wiring that
-  would wipe rules we just installed).
+  would wipe rules we just installed). The narrowly-scoped phrasing
+  matters: cycle-3's `apply_tenant_mode` does NOT use FlushAnchor
+  before InstallAnchor (see next principle), because the
+  load-bearing-ness is specific to the "parent directive removed"
+  case. A defensive-flush habit would blur the principle.
+- **Mode-reapply is `InstallAnchor → Reload` with no defensive
+  FlushAnchor** (cycle-3 Q1 lock) — `tenant mode <name> install` and
+  `tenant mode <name> runtime` re-render the anchor body from the
+  profile's runtime or runtime+install host set and reload pf. The
+  parent `load anchor` directive in `/etc/pf.conf` stays in place
+  across mode reapply, so `pfctl -f` re-reads the anchor file and
+  replaces the in-kernel ruleset on every reload. This is
+  structurally different from the destroy case (where the load
+  directive is removed and pf has nothing to replace against), so
+  no `FlushAnchor` is needed. Plugin's `reapply_anchor` is the
+  prior art (no flush, years of operation). Verified empirically by
+  `.features/cycle3-smoke.sh` checking that the kernel `<allowed>`
+  table shrinks back to the runtime-tier size on narrow. If the
+  smoke ever flips this — table content from `mode install` lingers
+  after `mode runtime` — the fix is one line: insert
+  `FlushAnchor` before `InstallAnchor` in `Writer::apply_tenant_mode`.
+  Negative pin in tests: `mode` flow records exactly
+  `[InstallAnchor, Reload]` with no `FlushAnchor`, `BackupConfig`,
+  `RestoreConfigFromBackup`, `RemoveAnchor`, `UpdateConfig`, or
+  `Enable`.
+- **No auto-recovery on mode-reapply Reload failure** (cycle-3 Q4
+  lock) — if `Reload` fails after `InstallAnchor` rewrote the
+  anchor file, the host state is "anchor file on disk with new
+  body, kernel rules still on old body." Mode does NOT attempt a
+  symmetric `RestoreConfigFromBackup`-style recovery (the cycle-2
+  create-side pattern); the operator reruns `tenant mode <name>
+  <level>` to retry. The verb is idempotent at the substrate.
+  Rationale: a recovery sequence on mode would need to back up the
+  *anchor* (not pf.conf), introducing a new artifact (`pf.anchors/
+  tenant-<name>.tenant-backup` or similar) the operator might not
+  expect; the simpler rerun model is honest about what happened.
+  Tests pin "no `RestoreConfigFromBackup` / `RemoveAnchor` /
+  `FlushAnchor` / `BackupConfig` in firewall_ops on Reload failure"
+  to catch any drift toward defensive recovery.
 - **Tenant-floor guard on destroy** — `destroy_eligibility` refuses with
   `EX_USAGE 64` when the named account exists with a UID below
   `TENANT_UID_FLOOR` (`NotATenant`) or with no positive UID at all
@@ -523,15 +592,21 @@ Things that are easy to violate and would matter:
   (`EX_USAGE`, sysexits.h) for any user-input failure — validation,
   create-side conflict, destroy-side floor refusal (`NotATenant`),
   destroy-side system-account refusal (`SystemAccount`), shell-side
-  refusals (absent / orphan-group / not-a-tenant / system-account); `74`
-  (`EX_IOERR`) reserved for substrate execution failure (create-side
-  any of the 12 ops including PF; destroy-side any of the 9 ops; shell-
-  side `AccountError::Spawn` from `login`). Shell is the one verb that
-  does NOT take an exit code from the set above on its success path —
-  when `login` returns Ok, the child shell's exit code is propagated as
-  tenant's own exit (clamped 0..=255), so `tenant shell dev` with `exit
-  5` inside the session yields `tenant`-exit `5`. `1` is clap's default
-  for parse errors (we don't override).
+  refusals (absent / orphan-group / not-a-tenant / system-account),
+  mode-side refusals (same triple as shell — absent / orphan-group
+  collapse + not-a-tenant + system-account); `74` (`EX_IOERR`)
+  reserved for substrate execution failure (create-side any of the
+  12 ops including PF; destroy-side any of the 9 ops; shell-side
+  `AccountError::Spawn` from `login`; mode-side
+  `ModeError::Profile` or `ModeError::Firewall` from any of the 2
+  ops or the read_profile/parse pre-step). Shell is the one verb
+  that does NOT take an exit code from the set above on its success
+  path — when `login` returns Ok, the child shell's exit code is
+  propagated as tenant's own exit (clamped 0..=255), so `tenant
+  shell dev` with `exit 5` inside the session yields `tenant`-exit
+  `5`. `1` is clap's default for parse errors (we don't override) —
+  also covers mode's `ModeLevel` rejection by `clap::ValueEnum` for
+  any value other than `runtime` or `install`.
 - **Acronym casing** — Rust convention treats acronyms as words: `Uid`
   not `UID`, `Macos` not `MacOS`. Methods are `lowest_free_uid`, struct
   is `UidAllocator`, `MacosReader`.
@@ -590,8 +665,16 @@ They're local-only (`language: system`), no PyPI / GitHub deps. Run
 For manual macOS smoke (the production-side verification that the
 test stubs can't cover — actual sysadminctl, dscl, pfctl behavior +
 real network egress filtering): `bash .features/cycle2-smoke.sh
-[tenant-name]` runs every command from the cycle-2 smoke plan in order
-with self-documenting output. Designed for copy-paste-back review.
+[tenant-name]` runs every command from the cycle-2 smoke plan in
+order with self-documenting output. `bash .features/cycle2-allow-smoke.sh
+[tenant-name]` seeds a runtime host into the profile default and
+verifies allow-path egress. `bash .features/cycle3-smoke.sh
+[tenant-name]` seeds runtime + install hosts and exercises both
+`tenant mode <name> install` (widen) and `tenant mode <name>
+runtime` (narrow), checking the kernel `<allowed>` table size at
+each step — this is the empirical gate for the cycle-3 Q1 lock
+(no defensive `FlushAnchor`). All three are designed for
+copy-paste-back review.
 
 ## The seven-verb spec (forward-looking design)
 
@@ -604,7 +687,7 @@ Shipping status is in the git log, not here.
 | `status <name>` | health summary; `--strict` for exit-code-on-drift |
 | `shell <name>` | convergent recovery + login shell |
 | `exec <name>` | convergent recovery + one command |
-| `mode <name>` | session-scoped PF posture (strict / permissive) |
+| `mode <name> install\|runtime` | reapply tenant's PF anchor at the requested allowlist tier (shipped) |
 | `doctor` | host-level diagnostic + repair |
 | `destroy <name>` | teardown |
 
