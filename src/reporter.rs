@@ -19,7 +19,7 @@ use std::io::Write;
 
 use crate::ModeLevel;
 use crate::accounts::{ConflictError, NameError, tenant_share_group_name};
-use crate::executor::{AccountError, AccountOp, Executor, FirewallError, Op};
+use crate::executor::{AccountError, Executor, FirewallError, Op};
 use crate::profile::{ProfileError, display_path_for};
 
 pub(crate) struct Reporter<'a> {
@@ -179,7 +179,12 @@ impl<'a> Reporter<'a> {
     /// (the operator IS the shell after `login` returns), so without
     /// this line standard mode would leave the operator looking at a
     /// bare sudo prompt with no project-side context.
-    pub fn shell_starting(&mut self, name: &str, login_op: &AccountOp) {
+    ///
+    /// Plan grew from 1 to 3 lines in cycle 4: the auto-narrow's
+    /// `InstallAnchor → Reload` runs before `LoginAsUser`. The plan
+    /// shows all three; echo (via `step`) emits each `$ <line>` as
+    /// the writer drives the ops.
+    pub fn shell_starting(&mut self, name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
         let summary = if self.dry_run {
             format!("Would shell into '{name}'.")
         } else {
@@ -187,8 +192,7 @@ impl<'a> Reporter<'a> {
         };
         let _ = writeln!(self.stdout, "{summary}");
         if self.verbose {
-            let line = self.executor.describe_account(login_op);
-            let _ = writeln!(self.stdout, "  {line}");
+            self.render_plan(plan);
         }
     }
 
@@ -424,6 +428,33 @@ impl<'a> Reporter<'a> {
 
     pub fn shell_failed(&mut self, name: &str, err: &AccountError) {
         let _ = writeln!(self.stderr, "tenant: failed to shell into '{name}': {err}");
+    }
+
+    /// Cycle-4 shell-narrow profile arm — read or parse of the on-disk
+    /// profile failed during the auto-narrow that runs before `login`.
+    /// Distinct from `mode_profile_failed`'s wording because the
+    /// operator typed `tenant shell <name>`, not `tenant mode`; the
+    /// frame names the narrow as a step within the shell verb so the
+    /// recovery hint ("fix the profile, retry `tenant shell`") reads
+    /// in context. Path-naming convention mirrors `mode_profile_failed`.
+    pub fn shell_narrow_profile_failed(&mut self, name: &str, err: &ProfileError) {
+        let path = display_path_for(name);
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to read profile '{path}' for '{name}' before shell entry: {err}"
+        );
+    }
+
+    /// Cycle-4 shell-narrow firewall arm — InstallAnchor or Reload
+    /// tripped during the auto-narrow. Same parallel as
+    /// `shell_narrow_profile_failed`: distinct verb framing
+    /// ("before shell entry") so the operator sees the narrow as a
+    /// shell-verb step, not a mode-verb invocation they didn't make.
+    pub fn shell_narrow_failed(&mut self, name: &str, err: &FirewallError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to narrow firewall for '{name}' before shell entry: {err}"
+        );
     }
 
     /// Failure shape for the `mode` verb's profile arm — read or parse

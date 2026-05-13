@@ -83,8 +83,16 @@ pub(crate) fn dispatch(
                 accounts::Eligibility::Destroyable => {
                     match writer.shell_into_tenant(&name, reporter) {
                         Ok(code) => code.clamp(0, 255) as u8,
-                        Err(e) => {
+                        Err(accounts::ShellError::Account(e)) => {
                             reporter.shell_failed(&name, &e);
+                            EX_IOERR
+                        }
+                        Err(accounts::ShellError::Mode(accounts::ModeError::Profile(e))) => {
+                            reporter.shell_narrow_profile_failed(&name, &e);
+                            EX_IOERR
+                        }
+                        Err(accounts::ShellError::Mode(accounts::ModeError::Firewall(e))) => {
+                            reporter.shell_narrow_failed(&name, &e);
                             EX_IOERR
                         }
                     }

@@ -392,6 +392,21 @@ pub(crate) enum ModeError {
     Firewall(FirewallError),
 }
 
+/// Failure surface for the `shell` verb. The login spawn itself can
+/// fail with `Account`; the cycle-4 narrow-on-shell-entry can fail
+/// with `Mode` (read/parse the profile, or InstallAnchor / Reload).
+/// Abort-on-narrow-failure (cycle-4 Q2 lock) — the shell is NOT
+/// launched if the narrow can't complete, because doing so would
+/// leave the operator inside a session that might still be at the
+/// previous (potentially install-tier-widened) firewall posture.
+/// Operator recovery is `tenant mode <name> runtime` to narrow
+/// manually, then retry `tenant shell <name>`.
+#[derive(Debug)]
+pub(crate) enum ShellError {
+    Account(AccountError),
+    Mode(ModeError),
+}
+
 /// Side-effecting half of the accounts API. Verbs ask in domain terms
 /// via `AccountOp` and `ProfileOp` values handed to the substrate; the
 /// substrate (production: `MacosExecutor`) owns argv construction and
@@ -778,16 +793,14 @@ impl<'a> Writer<'a> {
         level: ModeLevel,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
-        // Two-op composition:
+        // Two-op composition (delegated to `reapply_anchor_for_level`):
         //   1. InstallAnchor — rewrite /etc/pf.anchors/tenant-<name>
         //                      with the new body
         //   2. Reload         — pfctl -f /etc/pf.conf
-        // The read_profile + parse + render_anchor work that produces
-        // the InstallAnchor body happens before step 1, is implicit
-        // in the plan, and surfaces as ModeError::Profile on failure
-        // (read or parse) or ModeError::Firewall::Fs (if a profile
-        // path resolution issue surfaces as a firewall fs error,
-        // which it doesn't today — profile reads return ProfileError).
+        // The mode-verb owns the intent/done emit; the helper owns the
+        // substrate calls. `shell_into_tenant` (cycle 4) calls the same
+        // helper to narrow-on-shell-entry without the mode-verb's
+        // "Applying mode '<level>' to tenant '<name>'." framing.
         let reload = FirewallOp::Reload;
         // Plan-time placeholder InstallAnchor — describe ignores the
         // `body` field, so the empty-string body still renders the
@@ -806,6 +819,26 @@ impl<'a> Writer<'a> {
             ],
         );
 
+        self.reapply_anchor_for_level(name, level, reporter)?;
+
+        reporter.mode_done(name, level);
+        Ok(())
+    }
+
+    /// Read the on-disk profile, render the anchor body at `level`,
+    /// and run the `InstallAnchor → Reload` sequence. The verb-level
+    /// intent/done emit lives at the call site (`mode_starting` /
+    /// `mode_done` for the `mode` verb; `shell_starting` for the
+    /// shell-entry narrow). No auto-recovery on Reload failure — the
+    /// op sequence is idempotent at the substrate; rerun to retry.
+    /// Same shape as cycle-3's `apply_tenant_mode` minus the
+    /// intent/done emit so it's shareable.
+    fn reapply_anchor_for_level(
+        &self,
+        name: &str,
+        level: ModeLevel,
+        reporter: &mut Reporter,
+    ) -> Result<(), ModeError> {
         let profile_content = self
             .executor
             .read_profile(name)
@@ -816,34 +849,60 @@ impl<'a> Writer<'a> {
             name: name.into(),
             body: render_anchor(name, &hosts),
         };
-
+        let reload = FirewallOp::Reload;
         self.run(&install_anchor, reporter)
             .map_err(ModeError::Firewall)?;
         self.run(&reload, reporter).map_err(ModeError::Firewall)?;
-
-        reporter.mode_done(name, level);
         Ok(())
     }
 
-    /// Interactive shell entry into the tenant. The LoginAsUser op is
-    /// built only to feed `describe_account` for the plan and echo
-    /// lines; execution goes through the substrate's `login` method
-    /// because the return type (child exit code) and stdio semantics
-    /// (inherit, don't capture) are incompatible with the
-    /// non-interactive `execute_account` path. Pre-exec emits the
-    /// would / shelling intent through the Reporter. There is no
-    /// post-exec confirmation: the operator IS the shell after `login`
+    /// Interactive shell entry into the tenant. Three logical steps:
+    /// (1) narrow the tenant's PF anchor back to runtime tier (cycle-4
+    /// auto-narrow — unconditional, idempotent, security-load-bearing),
+    /// (2) emit the verb's pre-exec intent + echo for the login op,
+    /// (3) hand off to the substrate's `login` method.
+    ///
+    /// The narrow uses `reapply_anchor_for_level` (shared with
+    /// `apply_tenant_mode`) — same data flow, no mode-verb intent/done
+    /// emit. If the narrow fails, the login is NOT launched (Q2 lock,
+    /// abort posture); the operator's recovery is `tenant mode <name>
+    /// runtime` to narrow manually, then retry.
+    ///
+    /// The LoginAsUser op is built only to feed `describe_account` for
+    /// the plan and echo lines; execution goes through the substrate's
+    /// `login` method because the return type (child exit code) and
+    /// stdio semantics (inherit, don't capture) are incompatible with
+    /// the non-interactive `execute_account` path. There is no post-
+    /// exec confirmation: the operator IS the shell after `login`
     /// returns, so a "Shelled into …" line afterwards would be at best
     /// redundant and at worst land in a different terminal context.
     pub(crate) fn shell_into_tenant(
         &self,
         name: &str,
         reporter: &mut Reporter,
-    ) -> Result<i32, AccountError> {
+    ) -> Result<i32, ShellError> {
+        // Plan-time placeholder InstallAnchor — describe ignores the
+        // `body` field, so the empty-string body renders the same line
+        // as the real-body op the helper constructs at execute time.
+        // Same pattern as `apply_tenant_mode`'s plan placeholder.
+        let install_anchor_plan = FirewallOp::InstallAnchor {
+            name: name.into(),
+            body: String::new(),
+        };
+        let reload_plan = FirewallOp::Reload;
         let login = AccountOp::LoginAsUser { name: name.into() };
-        reporter.shell_starting(name, &login);
+        reporter.shell_starting(
+            name,
+            &[
+                (Op::Firewall(&install_anchor_plan), None),
+                (Op::Firewall(&reload_plan), None),
+                (Op::Account(&login), None),
+            ],
+        );
+        self.reapply_anchor_for_level(name, ModeLevel::Runtime, reporter)
+            .map_err(ShellError::Mode)?;
         reporter.step(Op::Account(&login));
-        self.executor.login(name)
+        self.executor.login(name).map_err(ShellError::Account)
     }
 
     /// Run a single op: emit the `$` echo line (in real+verbose) and

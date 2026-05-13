@@ -16,6 +16,9 @@ anchor's in-kernel rules. `tenant mode <name> install|runtime` re-renders
 the per-tenant PF anchor with the requested allowlist tier (`runtime`
 only, or `runtime + install`) and reloads pf — used to widen the tenant's
 egress allowlist for install-tier work and narrow back when done.
+`tenant shell <name>` auto-narrows back to runtime tier before launching
+the login shell, so any leftover install-tier widening becomes truly
+session-scoped — the next shell entry resets the allowlist.
 
 This crate is a Rust port of an earlier Go prototype (lives at
 `/Users/plugin-dev/src/tenant/` for cross-reference). The Rust version
@@ -35,7 +38,7 @@ walks the commits.
 ```
 src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`; mode swap to `DryRunExecutor` when `--dry-run`; constructs Reporter with the active Executor.
 src/commands.rs   — verb dispatch (the `match` on `Verb`). No I/O, no mode/verbosity branching; routes to Reporter methods.
-src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`); `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute.
+src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`); shared private `reapply_anchor_for_level` helper drives both `apply_tenant_mode` and the shell's auto-narrow; `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute.
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both iterate from `TENANT_UID_FLOOR = 600`.
 src/executor.rs   — `Op` ADT root wrapping `AccountOp` / `ProfileOp` / `FirewallOp` leaves; `WritableOp` trait bridging leaves to typed execution; `Executor` trait (per-domain `describe_*` / `execute_*` pairs + `login` / `read_profile` / `read_pf_conf` non-unit carve-outs); `MacosExecutor` / `StubExecutor` / `DryRunExecutor` impls; `AccountError` / `ProfileError` / `FirewallError` types.
 src/profile.rs    — `Profile` / `Allowlist` / `Tier` serde shapes; `parse` (schema-version-checked); `default_profile_toml`; `display_path_for` (`~`-rendered form used in plan / echo / error frames).
@@ -199,6 +202,41 @@ Things that are easy to violate and would matter:
   mode flow records exactly `[InstallAnchor, Reload]` — no
   `FlushAnchor` / `BackupConfig` / `RestoreConfigFromBackup` /
   `RemoveAnchor` / `UpdateConfig` / `Enable`.
+
+- **Shell auto-narrows on entry, unconditionally, abort-on-failure**
+  — every `tenant shell <name>` reapplies the runtime-tier anchor
+  body via the shared `reapply_anchor_for_level(name,
+  ModeLevel::Runtime, reporter)` helper BEFORE handing off to
+  `Executor::login`. The narrow is unconditional (no "are we
+  already in runtime?" check) — same structural reasoning as Q2's
+  "on-disk anchor is the source of truth" lock; reapply is
+  idempotent at the substrate. The narrow is also load-bearing: if
+  it fails, the login is NOT launched. New `ShellError { Account,
+  Mode }` carries the abort posture through to `commands::dispatch`,
+  which routes Mode failures through `Reporter::shell_narrow_failed`
+  (firewall) and `Reporter::shell_narrow_profile_failed` (profile
+  read/parse). Both methods frame the failure as "before shell
+  entry" so the operator sees verb context, not mode-verb framing.
+  Operator recovery: `tenant mode <name> runtime` to narrow
+  manually, then retry `tenant shell <name>`. Cycle 4's shell plan
+  grows from 1 op (`LoginAsUser`) to 3 (`InstallAnchor` + `Reload`
+  + `LoginAsUser`); `shell_starting` takes a `plan` slice matching
+  create/destroy/mode's signature. Same no-defensive-flush /
+  no-auto-recovery posture as the mode verb (the helper is shared);
+  negative pin in tests confirms no `FlushAnchor` / `BackupConfig`
+  / `RestoreConfigFromBackup` / `RemoveAnchor` ever fires on the
+  shell path.
+
+- **Auto-narrow only protects the `tenant shell` entry path** —
+  an operator who runs `sudo -iu tenant` directly bypasses the
+  tenant binary and inherits whatever PF posture the anchor file
+  currently holds. If install-tier widening was left in place
+  before a reboot, pf.conf reloads the (still-widened) anchor on
+  boot and a direct `sudo -iu` enters under the widened posture.
+  `tenant shell <name>` is the canonical entry point; document
+  this limitation rather than mitigate it (would require either
+  always-render-runtime on every reboot, or a separate watcher
+  process — out of scope for cycle 4).
 
 - **Tenant-floor guard on destroy** — `destroy_eligibility` refuses
   with `EX_USAGE 64` when the named account exists with a UID
