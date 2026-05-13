@@ -16,10 +16,12 @@
 //! `# on rollback`.
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use crate::ModeLevel;
 use crate::accounts::{ConflictError, NameError, tenant_share_group_name};
-use crate::executor::{AccountError, Executor, FirewallError, Op};
+use crate::doctor::{Category, Finding};
+use crate::executor::{AccessMode, AccountError, Executor, FirewallError, Op, ProbeError};
 use crate::profile::{ProfileError, display_path_for};
 
 pub(crate) struct Reporter<'a> {
@@ -349,6 +351,108 @@ impl<'a> Reporter<'a> {
             self.stderr,
             "tenant: refusing to apply mode to '{name}': system account (no tenant-range UID)"
         );
+    }
+
+    /// Doctor-side absent refusal. Like `refuse_shell_absent` /
+    /// `refuse_mode_absent`, collapses `Eligibility::NotPresent` and
+    /// `Eligibility::OrphanGroup` — the operator wants to audit a
+    /// tenant, and a lingering `<name>-tenant-share` group with no
+    /// user behind it doesn't represent one.
+    pub fn refuse_doctor_absent(&mut self, name: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: cannot run doctor on '{name}': does not exist"
+        );
+    }
+
+    pub fn refuse_doctor_not_a_tenant(&mut self, name: &str, uid: u32, floor: u32) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: refusing to run doctor on '{name}': UID {uid} is below tenant floor {floor}"
+        );
+    }
+
+    pub fn refuse_doctor_system_account(&mut self, name: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: refusing to run doctor on '{name}': system account (no tenant-range UID)"
+        );
+    }
+
+    // ============================================================
+    // Doctor verb (cycle 5)
+    // ============================================================
+
+    /// Pre-walk disclosure for `doctor <name>`. Standard real mode is
+    /// silent (findings + summary do the talking); verbose (real OR
+    /// dry-run) emits a "Curated sensitive paths checked for tenant
+    /// 'X':" header followed by one indented `<verb> <path>` line per
+    /// curated entry — so the operator can see the bounded scope of
+    /// the audit (a clean "no findings" result is not a claim about
+    /// the host's overall security; it's about THESE PATHS).
+    /// Dry-run any verbosity also emits a "Would run doctor on tenant
+    /// 'X'." intent line up front so the verb's existence is visible
+    /// even when verbose is off.
+    pub fn doctor_starting(&mut self, name: &str, curated: &[(Category, AccessMode, PathBuf)]) {
+        if self.dry_run {
+            let _ = writeln!(self.stdout, "Would run doctor on tenant '{name}'.");
+        }
+        if self.verbose {
+            let _ = writeln!(
+                self.stdout,
+                "Curated sensitive paths checked for tenant '{name}':"
+            );
+            for (_, mode, path) in curated {
+                let verb = match mode {
+                    AccessMode::Read => "read",
+                    AccessMode::List => "list",
+                };
+                let _ = writeln!(self.stdout, "  {verb} {}", path.display());
+            }
+        }
+    }
+
+    /// One operator-facing line per finding, emitted as soon as the
+    /// probe that produced it returns. Output goes to stdout; finding
+    /// text is the byte-form pinned by `Finding::Display`.
+    pub fn doctor_finding(&mut self, finding: &Finding) {
+        let _ = writeln!(self.stdout, "{finding}");
+    }
+
+    /// Post-walk summary. With findings: silent (the finding lines did
+    /// the talking). Without findings: a single em-dash-suffixed line
+    /// confirming the audit ran and produced nothing — analogue of
+    /// `destroy_absent`'s "nothing to do" convergent shape.
+    pub fn doctor_done_summary(&mut self, name: &str, finding_count: usize) {
+        if self.dry_run {
+            return;
+        }
+        if finding_count == 0 {
+            let _ = writeln!(self.stdout, "doctor: tenant '{name}' \u{2014} no findings.");
+        }
+    }
+
+    /// Sub-cycle 3 noop for the bare `tenant doctor` (all-tenants)
+    /// form. Sub-cycle 5 replaces this with the real enumeration.
+    pub fn doctor_all_tenants_noop(&mut self) {
+        let _ = writeln!(self.stdout, "doctor: no tenants to audit.");
+    }
+
+    /// Substrate-failure framing for `doctor`. Mirrors `mode_failed` /
+    /// `shell_failed`: verb-level context, `ProbeError::Display`
+    /// carries the spawn / non-zero detail.
+    pub fn doctor_failed(&mut self, err: &ProbeError) {
+        let _ = writeln!(self.stderr, "tenant: failed to probe doctor: {err}");
+    }
+
+    /// Env-policy-read failure for `doctor`. The substrate could not
+    /// read `/etc/sudoers` (or a drop-in) to evaluate the
+    /// env-propagation policy. Most likely cause: the operator's
+    /// sudo session isn't cached; recovery is `sudo -v` followed by
+    /// rerunning doctor. Distinct from `doctor_failed` so the operator
+    /// sees the precise machinery that tripped.
+    pub fn doctor_env_policy_failed(&mut self, err: &crate::executor::EnvPolicyError) {
+        let _ = writeln!(self.stderr, "tenant: failed to read env policy: {err}");
     }
 
     // ============================================================

@@ -31,6 +31,36 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
+/// Which filesystem access predicate doctor's probe checks. `Read` maps to
+/// `test -r <path>` (POSIX read permission on a file or directory entry);
+/// `List` maps to `test -x <path>` against a directory (the POSIX execute
+/// bit on a directory grants the ability to list / traverse its entries —
+/// the term "list" is the doctor-domain word for that capability, not
+/// POSIX's "execute"). The substrate translates one access mode to one
+/// probe invocation; doctor's curated path list pairs each path with the
+/// access mode that matters for the threat (Read for secret-file
+/// contents, List for directory enumeration).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessMode {
+    Read,
+    List,
+}
+
+/// Probe verdict. `Allowed` means the tenant CAN access the path under
+/// the requested mode (the probe's exit code is zero); `Denied` covers
+/// the expected hardened-host case where the kernel refuses (POSIX,
+/// ACLs, sandbox, TCC — doctor doesn't distinguish; the cycle-1 brief's
+/// Q3 lock defers mechanism-of-denial to a future remediation cycle);
+/// `Unknown` is reserved for ambiguous probe outcomes (e.g. probe ran
+/// but produced indeterminate stderr). Doctor's `classify` collapses
+/// every non-Allowed outcome to no-finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessOutcome {
+    Allowed,
+    Denied,
+    Unknown,
+}
+
 /// Account-domain operations. The writer expresses *what* to do (create the
 /// share group, look up the OD record, log in as the tenant); the substrate
 /// knows *how*. macOS-specific tool choices (dseditgroup, sysadminctl, dscl)
@@ -192,6 +222,67 @@ impl fmt::Display for AccountError {
     }
 }
 
+/// Failure surface for `read_env_policy`. The substrate concatenates
+/// `/etc/sudoers` and every file in `/etc/sudoers.d/` (via `sudo cat`)
+/// into one text blob that doctor's parser grep through; either the
+/// `cat` invocation fails (spawn / non-zero) or the directory listing
+/// of `/etc/sudoers.d/` fails. Mirrors `FirewallError`'s shape with an
+/// extra `Fs` variant for the directory-listing case.
+#[derive(Debug)]
+pub enum EnvPolicyError {
+    Spawn(io::Error),
+    NonZero { code: i32, stderr: String },
+    Fs { path: String, message: String },
+}
+
+impl fmt::Display for EnvPolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EnvPolicyError::Spawn(e) => write!(f, "failed to spawn sudo: {e}"),
+            EnvPolicyError::NonZero { code, stderr } => {
+                let trimmed = stderr.trim();
+                if trimmed.is_empty() {
+                    write!(f, "sudo read exited with code {code}")
+                } else {
+                    write!(f, "sudo read exited with code {code}: {trimmed}")
+                }
+            }
+            EnvPolicyError::Fs { path, message } => {
+                write!(f, "filesystem error at {path}: {message}")
+            }
+        }
+    }
+}
+
+/// Probe-substrate error. Fires when the probe machinery itself failed —
+/// `sudo` not on PATH, fork failed, an unexpected non-zero exit pattern
+/// that doesn't map cleanly to Allowed / Denied. `Denied` and `Unknown`
+/// are NOT errors here — they're `AccessOutcome` variants the probe
+/// returns on its happy path. This error type fires only when doctor
+/// couldn't get a probe answer at all; the dispatcher routes it to
+/// `doctor_failed` and exits 74.
+#[derive(Debug)]
+pub enum ProbeError {
+    Spawn(io::Error),
+    NonZero { code: i32, stderr: String },
+}
+
+impl fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProbeError::Spawn(e) => write!(f, "failed to spawn probe: {e}"),
+            ProbeError::NonZero { code, stderr } => {
+                let trimmed = stderr.trim();
+                if trimmed.is_empty() {
+                    write!(f, "probe exited with code {code}")
+                } else {
+                    write!(f, "probe exited with code {code}: {trimmed}")
+                }
+            }
+        }
+    }
+}
+
 /// Firewall-domain error. Same `Spawn` / `NonZero` shape as `AccountError`
 /// for pfctl invocations; two additional variants for the fs side of
 /// firewall ops:
@@ -274,6 +365,33 @@ pub trait Executor {
 
     fn describe_firewall(&self, op: &FirewallOp) -> String;
     fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError>;
+
+    /// Probe whether `name` (a tenant) can access `path` under the
+    /// requested `mode`. Implementation invokes `sudo -n -u <name>
+    /// /usr/bin/test -<r|x> <path>` and maps the exit code: `0` →
+    /// `Allowed`, `1` → `Denied`, anything else → `Unknown`. Probe-
+    /// substrate failures (sudo not on PATH, fork failed) surface as
+    /// `ProbeError`. Carve-out method (same posture as `read_profile`
+    /// / `read_pf_conf` / `login`): the return type isn't `Result<(),
+    /// E>` so it doesn't fit the `WritableOp` shape, and probes aren't
+    /// the verb's intent — they're how doctor learns — so plan/echo
+    /// rendering doesn't apply.
+    fn probe_access_as_tenant(
+        &self,
+        name: &str,
+        path: &std::path::Path,
+        mode: AccessMode,
+    ) -> Result<AccessOutcome, ProbeError>;
+
+    /// Read the host's environment-propagation policy as the substrate
+    /// understands it. Concatenates `/etc/sudoers` + every file in
+    /// `/etc/sudoers.d/` into one text blob (newline-separated, no
+    /// origin attribution — doctor's parser greps for `env_delete`
+    /// directives without caring which file declared them). Carve-out
+    /// (same posture as `read_profile` / `read_pf_conf`): the return
+    /// type is content, not unit; the substrate handles privileged
+    /// reads, doctor handles parsing.
+    fn read_env_policy(&self) -> Result<String, EnvPolicyError>;
 }
 
 /// Top-level ADT wrapper for "any op, regardless of domain." Used by the
@@ -492,6 +610,97 @@ impl Executor for MacosExecutor {
         })
     }
 
+    fn probe_access_as_tenant(
+        &self,
+        name: &str,
+        path: &std::path::Path,
+        mode: AccessMode,
+    ) -> Result<AccessOutcome, ProbeError> {
+        // `/usr/bin/test -<flag> <path>` returns:
+        //   0  → predicate true (Allowed)
+        //   1  → predicate false (Denied — includes file-doesn't-exist;
+        //        cycle-1 brief Q3 lock accepts the ambiguity, cycle-2
+        //        remediation surfaces the mechanism).
+        //   ≥2 → anything else (Unknown — probe machinery hiccup).
+        // `sudo -n` is the non-interactive flag: if the operator's
+        // sudo session isn't already cached, sudo fails with non-zero
+        // and we surface as `ProbeError::NonZero`. The expected
+        // operator workflow is `sudo -v` (or any prior privileged
+        // command in the last ~5 min) before `tenant doctor`; the
+        // `--help` text documents this.
+        let flag = match mode {
+            AccessMode::Read => "-r",
+            AccessMode::List => "-x",
+        };
+        let path_str = path.to_string_lossy().into_owned();
+        let output = Command::new("sudo")
+            .args(["-n", "-u", name, "/usr/bin/test", flag, &path_str])
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        match output.status.code() {
+            Some(0) => Ok(AccessOutcome::Allowed),
+            Some(1) => Ok(AccessOutcome::Denied),
+            Some(code) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                // Distinguish "sudo couldn't authenticate" (machinery
+                // failure → ProbeError) from "test answered something
+                // weird" (kernel state weird → Unknown). A non-cached
+                // sudo session is the canonical machinery failure.
+                if stderr.contains("sudo: a password is required")
+                    || stderr.contains("sudo: a terminal is required")
+                {
+                    Err(ProbeError::NonZero { code, stderr })
+                } else {
+                    Ok(AccessOutcome::Unknown)
+                }
+            }
+            None => Err(ProbeError::NonZero {
+                code: -1,
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }),
+        }
+    }
+
+    fn read_env_policy(&self) -> Result<String, EnvPolicyError> {
+        // Read /etc/sudoers (sudoers files are mode 0440 root:wheel —
+        // not world-readable; sudo is required), then read every file
+        // in /etc/sudoers.d/. Concatenate with newlines so the
+        // parser's `env_delete` grep doesn't accidentally bridge the
+        // last line of one file into the first of the next. Origin
+        // attribution is intentionally dropped — doctor's parser
+        // doesn't need it, and a future cycle that wants attribution
+        // would have to introduce a wrapper type (we lean YAGNI).
+        let primary = read_privileged_text("/etc/sudoers")?;
+        let mut combined = primary;
+        if !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        let listing_output = Command::new("sudo")
+            .args(["-n", "ls", "-1", "/etc/sudoers.d"])
+            .output()
+            .map_err(EnvPolicyError::Spawn)?;
+        // A non-existent or unreadable /etc/sudoers.d/ is treated as
+        // "no drop-ins" rather than a hard failure — sudo doesn't
+        // require the dir to exist. Only surface as Fs error if sudo
+        // itself reported an authentication failure.
+        if listing_output.status.success() {
+            let listing = String::from_utf8_lossy(&listing_output.stdout).into_owned();
+            for entry in listing.lines() {
+                let trimmed = entry.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let path = format!("/etc/sudoers.d/{trimmed}");
+                let content = read_privileged_text(&path)?;
+                combined.push_str(&content);
+                if !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+            }
+        }
+        Ok(combined)
+    }
+
     fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
         match op {
             FirewallOp::InstallAnchor { name, body } => {
@@ -559,6 +768,25 @@ impl Executor for MacosExecutor {
             }
         }
     }
+}
+
+/// Read `path` via `sudo -n cat <path>`. Used for privileged-read
+/// access to `/etc/sudoers` and `/etc/sudoers.d/*`. Mirrors the
+/// `write_privileged` pattern in reverse: confine sudo invocation
+/// to one helper so the substrate code that calls it stays
+/// readable.
+fn read_privileged_text(path: &str) -> Result<String, EnvPolicyError> {
+    let output = Command::new("sudo")
+        .args(["-n", "cat", path])
+        .output()
+        .map_err(EnvPolicyError::Spawn)?;
+    if !output.status.success() {
+        return Err(EnvPolicyError::NonZero {
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Write `content` to a privileged absolute `path` via the tempfile +
@@ -770,6 +998,29 @@ impl Executor for DryRunExecutor {
     fn execute_firewall(&self, _op: &FirewallOp) -> Result<(), FirewallError> {
         Ok(())
     }
+
+    /// Dry-run skips probes entirely (sub-cycle 3 test pins this). The
+    /// dispatcher's `Verb::Doctor` arm short-circuits before calling
+    /// any executor probe under `--dry-run`; if anything does reach
+    /// this impl, return Unknown rather than fabricating a misleading
+    /// Allowed/Denied answer.
+    fn probe_access_as_tenant(
+        &self,
+        _name: &str,
+        _path: &std::path::Path,
+        _mode: AccessMode,
+    ) -> Result<AccessOutcome, ProbeError> {
+        Ok(AccessOutcome::Unknown)
+    }
+
+    /// Dry-run returns a "no-leak" placeholder env policy so the
+    /// dry-run plan output doesn't fire an EnvLeak finding. The
+    /// real env policy could go either way; for a "would-do"
+    /// preview, we lean against producing an actionable warning the
+    /// operator might then chase down outside of a real run.
+    fn read_env_policy(&self) -> Result<String, EnvPolicyError> {
+        Ok("Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string())
+    }
 }
 
 /// Test substitute. Records every op invocation (for behavioral assertions)
@@ -845,11 +1096,46 @@ pub struct StubExecutor {
     /// manual smoke validates this end-to-end against real pfctl; the
     /// automated counterpart pins the same data flow through the stub.
     create_profile_overrides: RefCell<HashMap<String, String>>,
+
+    /// Recorded probe invocations. Each entry is the `(name, path,
+    /// mode)` tuple as passed to `probe_access_as_tenant`. Tests
+    /// assert on this list to pin the curated probe sequence.
+    probes: RefCell<Vec<(String, PathBuf, AccessMode)>>,
+
+    /// Per-(name, path, mode) outcome overrides. First match (by full
+    /// equality on the tuple) wins; unmatched probes default to
+    /// `AccessOutcome::Denied` (the expected case for sensitive
+    /// paths). Mirrors `with_existing_profile` / `with_pf_conf`
+    /// builder shape.
+    probe_outcomes: RefCell<HashMap<(String, PathBuf, AccessMode), AccessOutcome>>,
+
+    /// One-shot probe failure injection. Fires on the next
+    /// `probe_access_as_tenant` call regardless of which tuple
+    /// matched; cleared after firing. Mirrors `fail_next_profile` /
+    /// `fail_next_firewall`. Used to pin substrate-failure exit-74
+    /// behavior.
+    probe_failure: RefCell<Option<ProbeError>>,
+
+    /// In-memory simulation of the host's concatenated env policy
+    /// (sudoers main + drop-ins). Default empty — production tests
+    /// set this via `with_env_policy_content` to model the operator's
+    /// real sudoers state.
+    env_policy_content: RefCell<String>,
+
+    /// One-shot env-policy read failure. Mirrors `probe_failure`.
+    env_policy_failure: RefCell<Option<EnvPolicyError>>,
 }
 
 impl StubExecutor {
     pub fn new() -> Self {
-        Self::default()
+        let s = Self::default();
+        // Default env policy to "no leak" so doctor tests that don't
+        // care about the env-leak path don't see a spurious EnvLeak
+        // finding. Sub-cycle 6 tests override with
+        // `with_env_policy_content` to exercise the leak case.
+        *s.env_policy_content.borrow_mut() =
+            "Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string();
+        s
     }
 
     /// Configure the next `execute_account` call matching `op` to fail with
@@ -959,6 +1245,54 @@ impl StubExecutor {
     pub fn has_profile(&self, name: &str) -> bool {
         self.profile_state.borrow().contains_key(name)
     }
+
+    /// Configure the probe outcome for one `(name, path, mode)` tuple.
+    /// Subsequent `probe_access_as_tenant(name, path, mode)` calls
+    /// return `outcome` instead of the default `Denied`. Used by
+    /// doctor tests to inject "this path IS readable from the tenant"
+    /// without poking the host's actual filesystem.
+    pub fn with_probe_outcome(
+        self,
+        name: &str,
+        path: &std::path::Path,
+        mode: AccessMode,
+        outcome: AccessOutcome,
+    ) -> Self {
+        self.probe_outcomes
+            .borrow_mut()
+            .insert((name.to_string(), path.to_path_buf(), mode), outcome);
+        self
+    }
+
+    /// Configure the next `probe_access_as_tenant` call to fail with
+    /// `err`. One-shot — cleared after firing. Mirrors
+    /// `fail_next_profile` / `fail_next_firewall`.
+    pub fn fail_next_probe(self, err: ProbeError) -> Self {
+        *self.probe_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    /// Recorded probe invocations in call order. Each entry is the
+    /// `(name, path, mode)` tuple the writer asked the substrate to
+    /// probe.
+    pub fn probes(&self) -> Vec<(String, PathBuf, AccessMode)> {
+        self.probes.borrow().clone()
+    }
+
+    /// Pre-load the host's env policy text for `read_env_policy`. Used
+    /// by doctor's env-leak tests to model the operator's `/etc/sudoers`
+    /// + `/etc/sudoers.d/*` concatenation without poking the host.
+    pub fn with_env_policy_content(self, content: &str) -> Self {
+        *self.env_policy_content.borrow_mut() = content.to_string();
+        self
+    }
+
+    /// Configure the next `read_env_policy` call to fail with `err`.
+    /// One-shot — cleared after firing.
+    pub fn fail_next_env_policy(self, err: EnvPolicyError) -> Self {
+        *self.env_policy_failure.borrow_mut() = Some(err);
+        self
+    }
 }
 
 impl Executor for StubExecutor {
@@ -1046,5 +1380,33 @@ impl Executor for StubExecutor {
             return Err(err);
         }
         Ok(())
+    }
+
+    fn probe_access_as_tenant(
+        &self,
+        name: &str,
+        path: &std::path::Path,
+        mode: AccessMode,
+    ) -> Result<AccessOutcome, ProbeError> {
+        self.probes
+            .borrow_mut()
+            .push((name.to_string(), path.to_path_buf(), mode));
+        if let Some(err) = self.probe_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        let outcome = self
+            .probe_outcomes
+            .borrow()
+            .get(&(name.to_string(), path.to_path_buf(), mode))
+            .copied()
+            .unwrap_or(AccessOutcome::Denied);
+        Ok(outcome)
+    }
+
+    fn read_env_policy(&self) -> Result<String, EnvPolicyError> {
+        if let Some(err) = self.env_policy_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self.env_policy_content.borrow().clone())
     }
 }

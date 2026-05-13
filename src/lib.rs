@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 pub mod accounts;
 pub mod allocation;
 mod commands;
+pub mod doctor;
 pub mod executor;
 pub mod firewall;
 pub mod profile;
@@ -48,6 +49,25 @@ pub(crate) enum Verb {
         #[arg(value_enum)]
         level: ModeLevel,
     },
+    /// Audit filesystem-exposure boundaries between host and tenants
+    /// by probing sensitive host paths as each tenant. Reports findings
+    /// for paths that are unexpectedly readable or listable from a
+    /// tenant account.
+    ///
+    /// Requires the operator to be a member of the `admin` group on
+    /// macOS so `sudo -u <tenant>` is permitted. On invocation, doctor
+    /// caches a sudo session up front (one Touch ID / password prompt);
+    /// subsequent probes run silently within that session.
+    ///
+    /// Run against a single tenant with `tenant doctor <name>`; run
+    /// against every tenant on the host with bare `tenant doctor`.
+    /// Pass `--strict` to exit non-zero when findings are present (1
+    /// for warnings only, 2 for any critical finding).
+    Doctor {
+        name: Option<String>,
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 /// Which tier of the profile's allowlist the rendered PF anchor body
@@ -77,6 +97,7 @@ pub fn run(
     args: &[String],
     accounts: &dyn accounts::Reader,
     executor: &dyn executor::Executor,
+    host: &str,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
@@ -95,7 +116,7 @@ pub fn run(
     };
     let writer = accounts::Writer::new(active_executor);
     let mut reporter = Reporter::new(stdout, stderr, cli.verbose, cli.dry_run, active_executor);
-    commands::dispatch(cli, accounts, &writer, &mut reporter)
+    commands::dispatch(cli, accounts, &writer, host, &mut reporter)
 }
 
 fn parse(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<Cli, u8> {

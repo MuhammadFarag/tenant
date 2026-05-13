@@ -4,8 +4,10 @@ use std::process::Command;
 
 use crate::ModeLevel;
 use crate::allocation::TENANT_UID_FLOOR;
+use crate::doctor::{Finding, curated_paths, has_env_delete_for};
 use crate::executor::{
-    self, AccountError, AccountOp, FirewallError, FirewallOp, Op, ProfileOp, WritableOp,
+    self, AccountError, AccountOp, EnvPolicyError, FirewallError, FirewallOp, Op, ProbeError,
+    ProfileOp, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
 use crate::profile::{Profile, ProfileError, display_path_for, parse};
@@ -27,6 +29,13 @@ pub trait Reader {
     /// canonical example: a `(has_user: true, uid_for: None)` pair is a
     /// system account, classified `Eligibility::SystemAccount`.
     fn uid_for(&self, name: &str) -> Option<u32>;
+    /// All account names with a tenant-range UID (>= `TENANT_UID_FLOOR`).
+    /// Order is alphabetical for stable downstream behavior — doctor's
+    /// all-tenants walk iterates this list and emits findings in the
+    /// same order across runs, so an operator's diff between two
+    /// `tenant doctor` invocations stays meaningful. System accounts
+    /// and below-floor accounts are excluded.
+    fn tenant_names(&self) -> Vec<String>;
 }
 
 #[derive(Default)]
@@ -56,6 +65,17 @@ impl Reader for StubReader {
 
     fn uid_for(&self, name: &str) -> Option<u32> {
         self.uid_by_name.get(name).copied()
+    }
+
+    fn tenant_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .uid_by_name
+            .iter()
+            .filter(|(_, uid)| **uid >= TENANT_UID_FLOOR)
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
     }
 }
 
@@ -265,6 +285,17 @@ impl Reader for MacosReader {
 
     fn uid_for(&self, name: &str) -> Option<u32> {
         self.uid_by_name.get(name).copied()
+    }
+
+    fn tenant_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .uid_by_name
+            .iter()
+            .filter(|(_, uid)| **uid >= TENANT_UID_FLOOR)
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
     }
 }
 
@@ -914,6 +945,162 @@ impl<'a> Writer<'a> {
     fn run<O: WritableOp>(&self, op: &O, reporter: &mut Reporter) -> Result<(), O::Error> {
         reporter.step(op.op_ref());
         op.execute_via(self.executor)
+    }
+
+    /// Doctor's single-tenant audit. Runs in two phases:
+    ///
+    /// 1. **Env-policy check.** Reads `/etc/sudoers` + drop-ins (via
+    ///    `Executor::read_env_policy`); if `SSH_AUTH_SOCK` is not in
+    ///    any `env_delete` directive, emits a host-wide `EnvLeak`
+    ///    warning finding. The check runs even in single-tenant mode
+    ///    because the leak affects EVERY tenant on the host.
+    /// 2. **Filesystem probe walk.** Iterates the curated path list,
+    ///    probing each `(path, mode)` tuple AS the tenant via
+    ///    `Executor::probe_access_as_tenant`. Allowed outcomes
+    ///    produce findings (severity per `doctor::classify`); Denied
+    ///    / Unknown produce nothing.
+    ///
+    /// `host` is the operator's login name on the host — needed to
+    /// expand `/Users/<host>/…` paths in the curated list. `others`
+    /// is the list of OTHER tenant names (for cross-tenant +
+    /// tenant-artifact probes).
+    pub(crate) fn doctor_tenant(
+        &self,
+        host: &str,
+        name: &str,
+        others: &[&str],
+        reporter: &mut Reporter,
+    ) -> Result<DoctorOutcome, DoctorError> {
+        let mut findings: Vec<Finding> = Vec::new();
+        if let Some(env_leak) = self.check_env_leak(reporter)? {
+            findings.push(env_leak);
+        }
+        findings.extend(self.probe_tenant_paths(host, name, others, reporter)?);
+        Ok(DoctorOutcome { findings })
+    }
+
+    /// Doctor's all-tenants audit. Runs the env-policy check ONCE
+    /// (the leak is host-wide; per-tenant emission would be noise),
+    /// then iterates every tenant-range account in alphabetical
+    /// order and runs the per-tenant probe walk. The `others` list
+    /// for each tenant is "every other tenant" so cross-tenant +
+    /// tenant-artifact probes fire correctly.
+    ///
+    /// If the host has no tenants, the env-policy check still runs
+    /// (the leak finding may still be operator-relevant even with
+    /// no tenants right now) and a "no tenants to audit" message is
+    /// emitted before the result is returned. Substrate-failure
+    /// posture is fail-fast: any `DoctorError` aborts the walk.
+    pub(crate) fn doctor_all_tenants(
+        &self,
+        host: &str,
+        accounts: &dyn Reader,
+        reporter: &mut Reporter,
+    ) -> Result<DoctorOutcome, DoctorError> {
+        let mut findings: Vec<Finding> = Vec::new();
+        if let Some(env_leak) = self.check_env_leak(reporter)? {
+            findings.push(env_leak);
+        }
+        let tenants = accounts.tenant_names();
+        if tenants.is_empty() {
+            reporter.doctor_all_tenants_noop();
+            return Ok(DoctorOutcome { findings });
+        }
+        for name in &tenants {
+            let others: Vec<&str> = tenants
+                .iter()
+                .filter(|n| *n != name)
+                .map(String::as_str)
+                .collect();
+            findings.extend(self.probe_tenant_paths(host, name, &others, reporter)?);
+        }
+        Ok(DoctorOutcome { findings })
+    }
+
+    /// Read the host's env policy + emit the `EnvLeak` finding if
+    /// `SSH_AUTH_SOCK` propagates. Returns the emitted finding (if
+    /// any) so the caller can aggregate it into the DoctorOutcome
+    /// for the `--strict` decision.
+    fn check_env_leak(&self, reporter: &mut Reporter) -> Result<Option<Finding>, EnvPolicyError> {
+        let policy = self.executor.read_env_policy()?;
+        if has_env_delete_for(&policy, "SSH_AUTH_SOCK") {
+            return Ok(None);
+        }
+        let finding = Finding::EnvLeak {
+            var: "SSH_AUTH_SOCK".to_string(),
+        };
+        reporter.doctor_finding(&finding);
+        Ok(Some(finding))
+    }
+
+    /// Probe one tenant's view of the curated path list. Emits
+    /// `doctor_starting` (curated-list disclosure in verbose;
+    /// dry-run intent line), then each filesystem finding inline,
+    /// then `doctor_done_summary` with the filesystem-finding count.
+    /// Env-leak handling is the caller's responsibility — this
+    /// method returns only filesystem findings.
+    fn probe_tenant_paths(
+        &self,
+        host: &str,
+        name: &str,
+        others: &[&str],
+        reporter: &mut Reporter,
+    ) -> Result<Vec<Finding>, ProbeError> {
+        let curated = curated_paths(host, name, others);
+        reporter.doctor_starting(name, &curated);
+        let mut findings: Vec<Finding> = Vec::new();
+        for (category, mode, path) in &curated {
+            let outcome = self.executor.probe_access_as_tenant(name, path, *mode)?;
+            if let Some(severity) = crate::doctor::classify(*category, outcome) {
+                let finding = Finding::FilesystemExposure {
+                    severity,
+                    tenant: name.to_string(),
+                    path: path.clone(),
+                    access: *mode,
+                };
+                reporter.doctor_finding(&finding);
+                findings.push(finding);
+            }
+        }
+        reporter.doctor_done_summary(name, findings.len());
+        Ok(findings)
+    }
+}
+
+/// Combined error surface for the doctor verb. `Probe` covers the
+/// filesystem-probe substrate; `EnvPolicy` covers the sudoers-read
+/// substrate. The dispatcher routes each variant to a Reporter
+/// method with verb-appropriate framing.
+#[derive(Debug)]
+pub(crate) enum DoctorError {
+    Probe(ProbeError),
+    EnvPolicy(EnvPolicyError),
+}
+
+impl From<ProbeError> for DoctorError {
+    fn from(e: ProbeError) -> Self {
+        DoctorError::Probe(e)
+    }
+}
+
+impl From<EnvPolicyError> for DoctorError {
+    fn from(e: EnvPolicyError) -> Self {
+        DoctorError::EnvPolicy(e)
+    }
+}
+
+/// Aggregated outcome of one `doctor` verb invocation. The findings
+/// list feeds operator-visible output (already emitted incrementally
+/// by the Reporter); `max_severity()` feeds the `--strict` exit-code
+/// decision at the dispatch layer.
+#[derive(Debug, Default)]
+pub(crate) struct DoctorOutcome {
+    pub findings: Vec<Finding>,
+}
+
+impl DoctorOutcome {
+    pub fn max_severity(&self) -> Option<crate::doctor::Severity> {
+        self.findings.iter().map(|f| f.severity()).max()
     }
 }
 

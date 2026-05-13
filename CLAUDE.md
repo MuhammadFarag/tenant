@@ -18,7 +18,13 @@ only, or `runtime + install`) and reloads pf — used to widen the tenant's
 egress allowlist for install-tier work and narrow back when done.
 `tenant shell <name>` auto-narrows back to runtime tier before launching
 the login shell, so any leftover install-tier widening becomes truly
-session-scoped — the next shell entry resets the allowlist.
+session-scoped — the next shell entry resets the allowlist. `tenant
+doctor [<name>]` is the read-only audit verb: it walks a curated list
+of sensitive host paths and probes each AS the tenant (via `sudo -n -u
+<name> /usr/bin/test -r|x`) plus reads the host's `/etc/sudoers` + drop-
+ins to detect SSH_AUTH_SOCK env propagation; reports findings on Allowed
+outcomes and the missing-env-delete case, with `--strict` mapping max
+severity to a non-zero exit code (1 warning / 2 critical).
 
 This crate is a Rust port of an earlier Go prototype (lives at
 `/Users/plugin-dev/src/tenant/` for cross-reference). The Rust version
@@ -36,17 +42,20 @@ walks the commits.
 ## File map
 
 ```
-src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`; mode swap to `DryRunExecutor` when `--dry-run`; constructs Reporter with the active Executor.
-src/commands.rs   — verb dispatch (the `match` on `Verb`). No I/O, no mode/verbosity branching; routes to Reporter methods.
-src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`); shared private `reapply_anchor_for_level` helper drives both `apply_tenant_mode` and the shell's auto-narrow; `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute.
+src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`; mode swap to `DryRunExecutor` when `--dry-run`; constructs Reporter with the active Executor. `run` takes `host: &str` (operator's login name) for doctor's curated-path expansion.
+src/commands.rs   — verb dispatch (the `match` on `Verb`). No I/O, no mode/verbosity branching; routes to Reporter methods. `doctor_exit_code(severity, strict)` maps doctor's outcome to 0/1/2.
+src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`, `doctor_tenant`, `doctor_all_tenants`); shared private `reapply_anchor_for_level` helper drives both `apply_tenant_mode` and the shell's auto-narrow; private `check_env_leak` + `probe_tenant_paths` helpers for doctor. `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute. `DoctorOutcome` + `DoctorError { Probe, EnvPolicy }` aggregate doctor's results.
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both iterate from `TENANT_UID_FLOOR = 600`.
-src/executor.rs   — `Op` ADT root wrapping `AccountOp` / `ProfileOp` / `FirewallOp` leaves; `WritableOp` trait bridging leaves to typed execution; `Executor` trait (per-domain `describe_*` / `execute_*` pairs + `login` / `read_profile` / `read_pf_conf` non-unit carve-outs); `MacosExecutor` / `StubExecutor` / `DryRunExecutor` impls; `AccountError` / `ProfileError` / `FirewallError` types.
+src/executor.rs   — `Op` ADT root wrapping `AccountOp` / `ProfileOp` / `FirewallOp` leaves; `WritableOp` trait bridging leaves to typed execution; `Executor` trait (per-domain `describe_*` / `execute_*` pairs + `login` / `read_profile` / `read_pf_conf` / `probe_access_as_tenant` / `read_env_policy` non-unit carve-outs); `MacosExecutor` / `StubExecutor` / `DryRunExecutor` impls; `AccountError` / `ProfileError` / `FirewallError` / `ProbeError` / `EnvPolicyError` types; `AccessMode` (Read / List) + `AccessOutcome` (Allowed / Denied / Unknown) for doctor's probe vocabulary.
 src/profile.rs    — `Profile` / `Allowlist` / `Tier` serde shapes; `parse` (schema-version-checked); `default_profile_toml`; `display_path_for` (`~`-rendered form used in plan / echo / error frames).
 src/firewall.rs   — pure functions for PF anchor + `/etc/pf.conf` line ops: `render_anchor`, `ensure_anchor_ref`, `remove_anchor_ref`, `is_anchor_referenced`; `tenant_anchor_name` / `_path` centralizers; `ANCHOR_DIR` / `PF_CONF` / `PF_CONF_BACKUP` constants.
-src/reporter.rs   — operator-facing output. Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); `refuse_*` and `*_failed` methods to stderr; `step(op)` echoes per substrate call in real+verbose; plan rendering flows through `Op::describe_via`.
-src/main.rs       — composition root: prod impls + `tenant::run`.
+src/doctor.rs     — pure functions for the doctor verb: `curated_paths(host, tenant, others)` returns the (Category, AccessMode, PathBuf) probe list; `classify(category, outcome) -> Option<Severity>` maps probe results to finding severity; `has_env_delete_for(policy, var)` parses sudoers for the env_delete directive; `Finding { FilesystemExposure, EnvLeak }` + `Severity { Info, Warning, Critical }` + `Category` types. All I/O lives in `Writer::doctor_*` orchestration on the executor; this module is grep-and-classify only.
+src/reporter.rs   — operator-facing output. Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); `refuse_*` and `*_failed` methods to stderr; `step(op)` echoes per substrate call in real+verbose; plan rendering flows through `Op::describe_via`. Doctor uses `doctor_starting` (verbose curated-list block + dry-run intent), `doctor_finding`, `doctor_done_summary`, `doctor_failed`, `doctor_env_policy_failed`, `doctor_all_tenants_noop`, and `refuse_doctor_*` family.
+src/main.rs       — composition root: prod impls + `tenant::run`. Reads `$USER` for the host identity passed to doctor.
 
-tests/cli.rs             — E2E tests. Helpers `run_with` (NeverExecutor — panics on substrate use, guards "should not touch the host" paths) and `run_with_exec` (caller-owned StubExecutor for real-mode assertions). Behavioral assertions on op identity; display assertions byte-exact.
+tests/cli.rs             — E2E tests. Helpers `run_with` (NeverExecutor — panics on substrate use, guards "should not touch the host" paths) and `run_with_exec` (caller-owned StubExecutor for real-mode assertions). Behavioral assertions on op identity; display assertions byte-exact. `TEST_HOST` constant pins doctor's host-username so curated-path expansion is deterministic.
+tests/doctor.rs          — combinatorial coverage on `doctor::curated_paths` shape, `classify` matrix, `Finding::Display` per-variant byte-form, and `Severity` ordering (load-bearing for `--strict`).
+tests/env_policy_parse.rs — combinatorial coverage on `doctor::has_env_delete_for` (directive shape variants: quoted/unquoted, `+=` vs `=`, single-var vs multi-var list, `Defaults` qualifiers).
 tests/macos_executor.rs  — per-variant pins of the `MacosExecutor::describe_*` argv contract. One test per Account/Profile/Firewall variant so a future tool swap (dseditgroup → dscl . -create; pfctl → some future PF manager) touches one place per op.
 tests/profile_parse.rs   — combinatorial coverage on `profile::parse`.
 tests/firewall_render.rs — combinatorial coverage on `firewall::render_anchor`.
@@ -268,15 +277,100 @@ Things that are easy to violate and would matter:
   the dry-run path renders plan + echo lines lazily via
   `Op::describe_via`. The test seam stays at the Executor boundary.
 
-- **Exit codes** — `0` success (including destroy's convergent noop
-  and the orphan-group convergence path); `64` (`EX_USAGE`,
+- **Exit codes** — `0` success (including destroy's convergent noop,
+  the orphan-group convergence path, and doctor's default-mode
+  "findings are informational" contract); `64` (`EX_USAGE`,
   sysexits.h) for user-input failure — validation, create-side
-  conflict, all refusals (destroy / shell / mode);
+  conflict, all refusals (destroy / shell / mode / doctor);
   `74` (`EX_IOERR`) for substrate execution failure on every verb
   except shell. Shell is the exception on its success path: when
   `login` returns Ok, the child shell's exit code propagates as
   tenant's own exit (clamped 0..=255). `1` is clap's default for
-  parse errors and `ModeLevel` rejection.
+  parse errors and `ModeLevel` rejection. Doctor's `--strict`
+  carves two more codes from its success path: `1` if findings
+  max at warning, `2` if any critical finding; without `--strict`
+  doctor always exits `0` on a successful walk.
+
+- **Probe-as-tenant subsumes ACL semantics at the kernel level** —
+  doctor's filesystem-exposure detection invokes `sudo -n -u
+  <tenant> /usr/bin/test -<r|x> <path>` and treats the kernel's
+  exit code as ground truth: 0 → `AccessOutcome::Allowed`, 1 →
+  `Denied`, anything else → `Unknown`. The kernel composes POSIX
+  permissions + ACLs + sandbox + TCC into the answer, so doctor
+  doesn't need an `effective_access(...)` pure function that
+  models macOS ACL semantics (including the macOS-specific `read`
+  → `list` / `execute` → `search` ACL-rewrite-on-re-read quirk
+  the sandbox plugin had to handle). Cycle-1 design Q3 lock:
+  `Denied` doesn't tell the operator WHY (POSIX vs ACL vs
+  sandbox); that mechanism reporting is parked for the cycle-2
+  remediation surface. Curated list collapses path-not-present
+  into the same `Denied` bucket (`test -r /nonexistent` returns
+  1) — operator irrelevance is accepted; sub-cycle 6's verbose
+  block names every path probed so a `no findings` verdict is
+  bounded to THIS LIST.
+
+- **Doctor's curated-path list is bounded and operator-visible** —
+  `doctor::curated_paths(host, tenant, others)` returns a fixed
+  list; cycle 1 doesn't accept an operator-supplied path glob.
+  Bounded scope is the contract: an operator reading "no
+  findings" needs to know the audit covers a known set, not
+  THEIR whole host. The verbose mode `Reporter::doctor_starting`
+  emits "Curated sensitive paths checked for tenant 'X':" + one
+  indented `<verb> <path>` line per entry, so the bounded scope
+  is explicit when the operator wants the detail. Standard mode
+  is silent on the list — most invocations don't need it. A
+  future cycle that broadens to user-supplied probe targets must
+  preserve the list-it-out semantics on verbose.
+
+- **Doctor's env-leak finding is host-wide, emitted once** —
+  `/etc/sudoers` + `/etc/sudoers.d/*` are read once per `tenant
+  doctor` invocation (host-level config, not per-tenant) and
+  parsed by `doctor::has_env_delete_for` for the
+  `SSH_AUTH_SOCK` directive. If absent, doctor emits one
+  `Finding::EnvLeak` regardless of which form (`tenant doctor
+  <name>` or bare `tenant doctor`) the operator used. The single
+  emit lives in `Writer::check_env_leak` and is called once at
+  the top of both `doctor_tenant` and `doctor_all_tenants` —
+  the all-tenants path does NOT re-check per tenant. Severity is
+  `Warning` (not `Critical`) because the leak depends on the
+  operator's session env actually carrying the var, and the
+  recovery is a one-line sudoers edit named in the finding text.
+  Cycle 1 hard-codes `SSH_AUTH_SOCK`; a future cycle may
+  generalize to a configurable var list. Env-policy substrate
+  uses a separate `EnvPolicyError` carve-out type (paralleling
+  `FirewallError`'s shape, distinct from `ProbeError`) so the
+  operator sees precise framing when sudo can't read sudoers.
+
+- **Only unqualified `Defaults env_delete` counts as protection** —
+  sudo's `Defaults` directive supports qualifiers — `Defaults:user`
+  scopes to invoking user, `Defaults>runas` scopes to target user
+  (`sudo -u`'s arg), `Defaults@host` scopes to host, `Defaults!cmd`
+  scopes to a command tag. `has_env_delete_for` accepts ONLY the
+  unqualified form. A `Defaults>plugin-dev env_delete += "X"`
+  applies only when sudo runs AS `plugin-dev` — it does NOT
+  protect `sudo -u <tenant>` invocations, even though the literal
+  text mentions `env_delete`. Discovered empirically during cycle
+  5's manual smoke: the operator's `/etc/sudoers.d/sandbox-access`
+  carried a runas-qualified directive that the original parser was
+  treating as universal, masking the actual leak. Negative pins
+  for all four qualifier shapes (`:`, `>`, `@`, `!`) live in
+  `tests/env_policy_parse.rs`. Tradeoff (Q5 lock): conservative-
+  false. An operator with a qualified directive that genuinely
+  covers their use case will see a false-positive leak warning;
+  recovery is to add an unqualified `Defaults env_delete +=
+  "SSH_AUTH_SOCK"` to silence.
+
+- **Doctor doesn't fit the WritableOp shape** — `probe_access_as_tenant`
+  and `read_env_policy` are Executor carve-out methods, NOT
+  `Op<'a>` variants. Doctor's probes are how it LEARNS, not
+  what the verb does — plan / echo / display dispatch would be
+  inappropriate (the operator doesn't need a `$ sudo -n -u
+  tenant test -r /Users/host/.ssh/id_rsa` line per probe in
+  verbose; that would be ~50 lines per tenant). Same posture as
+  `read_profile` / `read_pf_conf` / `login`. The curated list +
+  classify / has_env_delete_for / Finding live in `src/doctor.rs`
+  (pure functions), the orchestration lives in `Writer`. No
+  `Op::Doctor(_)` variant exists.
 
 - **Acronym casing** — Rust convention treats acronyms as words:
   `Uid` not `UID`, `Macos` not `MacOS`. Methods are
@@ -294,14 +388,17 @@ E2E-first. The bulk of tests live in `tests/cli.rs` and drive through
 blocks are out of style on this project; standalone unit-test files
 need explicit justification — `tests/macos_executor.rs` is the
 canonical precedent (per-variant `describe_*` pins for the argv
-contract). `tests/profile_parse.rs`, `tests/firewall_render.rs`, and
-`tests/firewall_conf.rs` each carry the same justification:
+contract). `tests/profile_parse.rs`, `tests/firewall_render.rs`,
+`tests/firewall_conf.rs`, `tests/doctor.rs`, and
+`tests/env_policy_parse.rs` each carry the same justification:
 combinatorial coverage on a pure function (`parse`, `render_anchor`,
-`ensure_anchor_ref` / `remove_anchor_ref` / `is_anchor_referenced`)
-whose call sites are inside the writer and would otherwise need many
-overlapping E2E tests. Per-variant or per-shape unit testing is the
-right tool when the function's state space is combinatorial; CLI E2E
-remains the default for verb-level behavior.
+`ensure_anchor_ref` / `remove_anchor_ref` / `is_anchor_referenced`,
+`curated_paths` / `classify` / `Finding::Display`,
+`has_env_delete_for`) whose call sites are inside the writer and
+would otherwise need many overlapping E2E tests. Per-variant or
+per-shape unit testing is the right tool when the function's state
+space is combinatorial; CLI E2E remains the default for verb-level
+behavior.
 
 Two helpers in cli.rs: `run_with(stub, args) -> (u8, String, String)`
 wires a `NeverExecutor` (panics if any substrate method is called —

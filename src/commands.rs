@@ -1,12 +1,34 @@
+use crate::doctor::Severity;
 use crate::{Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, reporter::Reporter};
 
 const EX_USAGE: u8 = 64;
 const EX_IOERR: u8 = 74;
+const EX_DOCTOR_WARNING: u8 = 1;
+const EX_DOCTOR_CRITICAL: u8 = 2;
+
+/// Map `(max_severity, --strict)` to an exit code. Sub-cycle 4 wires
+/// the `--strict` test cases:
+/// - Without strict: always exit 0 (findings are informational).
+/// - With strict, no findings (max = None): exit 0.
+/// - With strict, max = Info: exit 0 (info-tier doesn't trip --strict).
+/// - With strict, max = Warning: exit 1.
+/// - With strict, max = Critical: exit 2.
+fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
+    if !strict {
+        return 0;
+    }
+    match max_severity {
+        Some(Severity::Critical) => EX_DOCTOR_CRITICAL,
+        Some(Severity::Warning) => EX_DOCTOR_WARNING,
+        Some(Severity::Info) | None => 0,
+    }
+}
 
 pub(crate) fn dispatch(
     cli: Cli,
     accounts: &dyn accounts::Reader,
     writer: &accounts::Writer<'_>,
+    host: &str,
     reporter: &mut Reporter,
 ) -> u8 {
     match cli.verb {
@@ -137,6 +159,53 @@ pub(crate) fn dispatch(
                 }
             }
         }
+        Verb::Doctor { name, strict } => {
+            // Reuses `destroy_eligibility`'s 5-way classifier (same shape
+            // as shell / mode). NotPresent + OrphanGroup collapse into
+            // `refuse_doctor_absent` — a lingering `<name>-tenant-share`
+            // group with no user behind it can't be audited as a tenant.
+            // After the classifier clears, dispatch runs `doctor_tenant`
+            // and consults the `DoctorOutcome.max_severity()` plus the
+            // `--strict` flag to decide the exit code.
+            match name {
+                Some(n) => {
+                    if let Err(e) = accounts::validate_name(&n) {
+                        reporter.refuse_invalid_name(&n, &e);
+                        return EX_USAGE;
+                    }
+                    match accounts::destroy_eligibility(accounts, &n) {
+                        accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+                            reporter.refuse_doctor_absent(&n);
+                            EX_USAGE
+                        }
+                        accounts::Eligibility::NotATenant { uid } => {
+                            reporter.refuse_doctor_not_a_tenant(&n, uid, TENANT_UID_FLOOR);
+                            EX_USAGE
+                        }
+                        accounts::Eligibility::SystemAccount => {
+                            reporter.refuse_doctor_system_account(&n);
+                            EX_USAGE
+                        }
+                        accounts::Eligibility::Destroyable => {
+                            match writer.doctor_tenant(host, &n, &[], reporter) {
+                                Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
+                                Err(e) => {
+                                    surface_doctor_error(reporter, &e);
+                                    EX_IOERR
+                                }
+                            }
+                        }
+                    }
+                }
+                None => match writer.doctor_all_tenants(host, accounts, reporter) {
+                    Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
+                    Err(e) => {
+                        surface_doctor_error(reporter, &e);
+                        EX_IOERR
+                    }
+                },
+            }
+        }
         Verb::Destroy { name } => {
             if let Err(e) = accounts::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
@@ -187,5 +256,15 @@ fn surface_destroy_error(reporter: &mut Reporter, name: &str, error: &accounts::
         accounts::DestroyError::Account(e) => reporter.destroy_failed(name, e),
         accounts::DestroyError::Profile(e) => reporter.destroy_profile_failed(name, e),
         accounts::DestroyError::Firewall(e) => reporter.destroy_firewall_failed(name, e),
+    }
+}
+
+/// Route a `DoctorError` to the right Reporter framing — Probe-side
+/// failures (sudo prompt machinery) go to `doctor_failed`; env-policy
+/// failures (sudoers read) go to `doctor_env_policy_failed`.
+fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) {
+    match error {
+        accounts::DoctorError::Probe(e) => reporter.doctor_failed(e),
+        accounts::DoctorError::EnvPolicy(e) => reporter.doctor_env_policy_failed(e),
     }
 }
