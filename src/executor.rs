@@ -423,6 +423,22 @@ pub trait Executor {
     /// is the host-wide critical-tier finding that surfaces this
     /// state.
     fn read_pf_status(&self) -> Result<String, FirewallError>;
+
+    /// Read the on-disk per-tenant anchor file
+    /// (`firewall::tenant_anchor_path(name)`). Mode 0644 root-owned
+    /// (cycle 2's install flow sets this) — direct `fs::read_to_string`,
+    /// no sudo. Reuses `HostFileError` (same shape and substrate
+    /// posture as `read_pam_sudo`). Carve-out: content return, not
+    /// unit.
+    ///
+    /// Cycle 8's `Finding::AnchorBodyDrift` consumes this: doctor
+    /// compares the on-disk body byte-for-byte against
+    /// `firewall::render_anchor` over the runtime-tier hosts. The
+    /// "file" side complement to `read_kernel_pf_rules`'s "kernel"
+    /// side — neither alone is sufficient, since the two can drift
+    /// independently (operator hand-edit on the file, or a `pfctl
+    /// -f` race on the kernel).
+    fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError>;
 }
 
 /// Top-level ADT wrapper for "any op, regardless of domain." Used by the
@@ -843,6 +859,18 @@ impl Executor for MacosExecutor {
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(combined)
     }
+
+    fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError> {
+        // Mode 0644 root-owned — direct fs read, no sudo. Same
+        // substrate posture as `read_pam_sudo`. Path centralized via
+        // `firewall::tenant_anchor_path` so a future anchor-dir move
+        // flows through here without inline edits.
+        let path = crate::firewall::tenant_anchor_path(name);
+        fs::read_to_string(&path).map_err(|e| HostFileError::Fs {
+            path,
+            message: e.to_string(),
+        })
+    }
 }
 
 /// Read `path` via `sudo -n cat <path>`. Used for privileged-read
@@ -1122,6 +1150,17 @@ impl Executor for DryRunExecutor {
     fn read_pf_status(&self) -> Result<String, FirewallError> {
         Ok("Status: Enabled for 0 days 00:00:00\n".to_string())
     }
+
+    /// Dry-run returns the empty-allowlist render so the would-do
+    /// preview never fires a spurious `AnchorBodyDrift` finding —
+    /// `read_profile` already returns `default_profile_toml()` (empty
+    /// allowlists), so a runtime-tier render of the parsed default
+    /// is exactly `render_anchor(name, &[])`. Same posture as the
+    /// other read_* carve-outs: avoid actionable warnings in the
+    /// would-do preview.
+    fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError> {
+        Ok(crate::firewall::render_anchor(name, &[]))
+    }
 }
 
 /// Test substitute. Records every op invocation (for behavioral assertions)
@@ -1260,6 +1299,20 @@ pub struct StubExecutor {
     /// One-shot pf-status read failure. Mirrors
     /// `kernel_pf_rules_failure`.
     pf_status_failure: RefCell<Option<FirewallError>>,
+
+    /// Per-tenant in-memory simulation of the on-disk anchor body
+    /// (cycle 8). Lookup keyed by tenant name; a missing entry falls
+    /// back to the runtime-tier render of whatever profile is in
+    /// `profile_state` for the same name, OR to
+    /// `render_anchor(name, &[])` when no profile is present — both
+    /// shapes match what doctor would compute as "expected" so tests
+    /// that don't care about anchor-body drift don't see spurious
+    /// `AnchorBodyDrift` findings. Cycle 8 tests override with
+    /// `with_anchor_body` to exercise hand-edit drift.
+    anchor_body_state: RefCell<HashMap<String, String>>,
+
+    /// One-shot anchor-body read failure. Mirrors `pam_sudo_failure`.
+    anchor_body_failure: RefCell<Option<HostFileError>>,
 }
 
 impl StubExecutor {
@@ -1489,6 +1542,27 @@ impl StubExecutor {
         *self.pf_status_failure.borrow_mut() = Some(err);
         self
     }
+
+    /// Pre-load the on-disk anchor body for `name`.
+    /// `read_anchor_body(name)` returns this text. Used by cycle-8
+    /// tests to inject "operator hand-edited the file" or "anchor
+    /// matches install-tier render but not runtime-tier" drift cases.
+    /// Mirrors `with_kernel_pf_rules` (content-shaped subject —
+    /// no `_content` suffix).
+    pub fn with_anchor_body(self, name: &str, content: &str) -> Self {
+        self.anchor_body_state
+            .borrow_mut()
+            .insert(name.to_string(), content.to_string());
+        self
+    }
+
+    /// Configure the next `read_anchor_body` call to fail with `err`.
+    /// One-shot — cleared after firing. Pins substrate-failure
+    /// exit-74 behavior for the anchor-body carve-out.
+    pub fn fail_next_anchor_body(self, err: HostFileError) -> Self {
+        *self.anchor_body_failure.borrow_mut() = Some(err);
+        self
+    }
 }
 
 impl Executor for StubExecutor {
@@ -1634,5 +1708,26 @@ impl Executor for StubExecutor {
             return Err(err);
         }
         Ok(self.pf_status_content.borrow().clone())
+    }
+
+    fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError> {
+        if let Some(err) = self.anchor_body_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        if let Some(content) = self.anchor_body_state.borrow().get(name) {
+            return Ok(content.clone());
+        }
+        // Default: render from the profile state if present, else
+        // empty-allowlist render. Both shapes match what doctor would
+        // compute as "expected" so tests that don't care about
+        // anchor-body drift don't see spurious findings.
+        let hosts: Vec<String> = match self.profile_state.borrow().get(name) {
+            Some(toml) => match crate::profile::parse(toml) {
+                Ok(profile) => profile.allowlist.runtime.hosts.clone(),
+                Err(_) => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        Ok(crate::firewall::render_anchor(name, &hosts))
     }
 }

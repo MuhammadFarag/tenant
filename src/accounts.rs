@@ -4,7 +4,9 @@ use std::process::Command;
 
 use crate::ModeLevel;
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::doctor::{Finding, curated_paths, has_env_delete_for, has_pam_tid, pf_status_enabled};
+use crate::doctor::{
+    Finding, anchor_body_matches, curated_paths, has_env_delete_for, has_pam_tid, pf_status_enabled,
+};
 use crate::executor::{
     self, AccountError, AccountOp, FirewallError, FirewallOp, HostFileError, Op, ProbeError,
     ProfileOp, WritableOp,
@@ -1115,8 +1117,40 @@ impl<'a> Writer<'a> {
             reporter.doctor_finding(&drift);
             findings.push(drift);
         }
+        if let Some(drift) = self.check_anchor_body_drift(name)? {
+            reporter.doctor_finding(&drift);
+            findings.push(drift);
+        }
         reporter.doctor_done_summary(name, findings.len());
         Ok(findings)
+    }
+
+    /// Compare the on-disk anchor body for `name` against the
+    /// runtime-tier render of the current profile. Returns a
+    /// `Finding::AnchorBodyDrift` on mismatch, `None` on match.
+    /// Q4 lock: a profile that can't be read or parsed SKIPS the
+    /// check (returns `Ok(None)`) so a missing/corrupt profile is
+    /// reported by a different cycle's finding, not as a spurious
+    /// drift. Q9 lock: comparison is against the runtime tier only —
+    /// install-tier widening outside a shell session IS drift per
+    /// the cycle-4 session-scoped doctrine.
+    fn check_anchor_body_drift(&self, name: &str) -> Result<Option<Finding>, HostFileError> {
+        let profile_content = match self.executor.read_profile(name) {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        let parsed = match parse(&profile_content) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        let actual = self.executor.read_anchor_body(name)?;
+        let expected = render_anchor(name, &parsed.allowlist.runtime.hosts);
+        if anchor_body_matches(&actual, &expected) {
+            return Ok(None);
+        }
+        Ok(Some(Finding::AnchorBodyDrift {
+            tenant: name.to_string(),
+        }))
     }
 }
 

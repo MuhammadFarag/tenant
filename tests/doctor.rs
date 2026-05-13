@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use tenant::doctor::{Category, Finding, Severity, classify, curated_paths};
+use tenant::doctor::{Category, Finding, Severity, anchor_body_matches, classify, curated_paths};
 use tenant::executor::{AccessMode, AccessOutcome};
 
 // ============================================================
@@ -252,6 +252,68 @@ fn curated_paths_omits_self_from_other_lists() {
         !self_referential,
         "curated_paths should not probe self via the others list; got: {paths:?}"
     );
+}
+
+// ============================================================
+// Severity ordering — load-bearing for --strict (sub-cycle 4)
+// ============================================================
+
+// ============================================================
+// anchor_body_matches — byte-exact equality (cycle 8)
+// ============================================================
+//
+// Pure-function comparator for doctor's anchor-body drift check.
+// Compares the on-disk anchor body against the profile-derived
+// `render_anchor` output. Locked at byte-exact per the cycle-8
+// brief Q2: the render path is deterministic, so any difference is
+// real drift. Soften later (e.g. trim trailing whitespace) only if
+// false positives surface.
+
+#[test]
+fn anchor_body_matches_equal_strings_true() {
+    let body = "# PF anchor for tenant 'dev'\nblock return inet from any to any\n";
+    assert!(anchor_body_matches(body, body));
+}
+
+#[test]
+fn anchor_body_matches_extra_trailing_newline_false() {
+    // Byte-exact: trailing newline DOES count. Negative pin against
+    // a future "normalize trailing whitespace" softening that would
+    // also need to update this test deliberately.
+    let actual = "block return inet from any to any\n";
+    let expected = "block return inet from any to any\n\n";
+    assert!(!anchor_body_matches(actual, expected));
+}
+
+#[test]
+fn anchor_body_matches_empty_strings_true() {
+    // Edge case: both empty (e.g. file truncated to zero AND render
+    // produced empty — implausible but the function shouldn't choke).
+    assert!(anchor_body_matches("", ""));
+}
+
+// ============================================================
+// Finding::AnchorBodyDrift — Display + severity (cycle 8)
+// ============================================================
+
+#[test]
+fn finding_display_anchor_body_drift() {
+    let f = Finding::AnchorBodyDrift {
+        tenant: "dev".to_string(),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' anchor file drift \u{2014} on-disk body differs from profile-derived render; \
+         run `tenant mode dev runtime` to re-render and reload"
+    );
+}
+
+#[test]
+fn finding_anchor_body_drift_severity_is_warning() {
+    let f = Finding::AnchorBodyDrift {
+        tenant: "dev".to_string(),
+    };
+    assert_eq!(f.severity(), Severity::Warning);
 }
 
 // ============================================================

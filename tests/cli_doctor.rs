@@ -866,6 +866,223 @@ fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
     );
 }
 
+// ----- Sub-cycle 5: anchor-body drift (cycle 8) -----
+//
+// `Executor::read_anchor_body(name)` reads the on-disk anchor file
+// `/etc/pf.anchors/tenant-<name>` (mode 0644, direct fs read).
+// Doctor renders the expected body via `firewall::render_anchor`
+// over the profile's runtime-tier hosts and compares byte-exact via
+// `doctor::anchor_body_matches`. On mismatch, one
+// `Finding::AnchorBodyDrift` (Warning) per tenant; recovery is
+// `tenant mode <name> runtime`. Q4 lock: a profile that can't be
+// read or parsed SKIPS this check (no AnchorBodyDrift fires) and
+// the rest of doctor continues.
+//
+// Q9 lock: comparison is against the RUNTIME tier render only.
+// Install-tier widening outside an active shell session is itself
+// drift the operator should know about — symmetric with cycle 4's
+// shell auto-narrow doctrine.
+
+#[test]
+fn doctor_anchor_body_in_sync_no_finding() {
+    // Anchor body equals the runtime-tier render of the default
+    // profile. Happy path: zero AnchorBodyDrift findings; clean
+    // "no per-tenant findings" summary; exit 0.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("anchor file drift"),
+        "no anchor-body drift expected; stdout={stdout:?}"
+    );
+    assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
+}
+
+#[test]
+fn doctor_anchor_body_hand_edit_emits_warning() {
+    // Operator hand-edited the anchor file (added a stray comment
+    // line). Body diverges from profile-derived render → one
+    // AnchorBodyDrift Warning naming the recovery command.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let edited_body = format!(
+        "{}# stray operator edit\n",
+        tenant::firewall::render_anchor("dev", &[])
+    );
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &edited_body);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' anchor file drift"),
+        "expected anchor-body drift warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("on-disk body differs from profile-derived render"),
+        "drift finding should name what diverged; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant mode dev runtime"),
+        "drift finding should name the recovery command; stdout={stdout:?}"
+    );
+    let drift_count = stdout.matches("anchor file drift").count();
+    assert_eq!(
+        drift_count, 1,
+        "expected exactly one anchor-body drift line; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_anchor_body_profile_drift_emits_warning() {
+    // Operator updated the profile (added a runtime host) but
+    // didn't re-render. Anchor body == empty-allowlist render;
+    // profile now declares one host. Doctor renders expected with
+    // the new host → diverges from on-disk body → one drift line.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let new_profile = profile_with_hosts(&["example.com"], &[]);
+    let stale_body = tenant::firewall::render_anchor("dev", &[]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &new_profile)
+        .with_anchor_body("dev", &stale_body);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' anchor file drift"),
+        "expected anchor-body drift warning; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_anchor_body_drift_with_strict_exits_1() {
+    // AnchorBodyDrift is Warning-tier; --strict + warning-only → exit 1.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let edited_body = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &edited_body);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(
+        code, 1,
+        "expected exit 1 on warning+strict; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_anchor_body_profile_unreadable_skips_check() {
+    // Q4 lock: profile-read failure → SKIP the anchor-body check
+    // (no finding emitted from this check). Other checks still run;
+    // exit 0; clean summary. Negative pin: AnchorBodyDrift must NOT
+    // false-positive on profile-missing state.
+    let stub_reader = make_tenant_stub_reader("dev");
+    // No `with_existing_profile` → read_profile returns an error.
+    // No `with_anchor_body` → default (renders empty-allowlist).
+    let stub_exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("anchor file drift"),
+        "missing profile should skip the drift check; stdout={stdout:?}"
+    );
+    assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
+}
+
+#[test]
+fn doctor_anchor_body_substrate_failure_routes_to_host_file_failed_frame() {
+    // `HostFileError::Fs` on `read_anchor_body` propagates as a
+    // host-config-file read failure; doctor surfaces via the
+    // existing `doctor_host_file_failed` Reporter method (same
+    // path as pam.d/sudo substrate failures). Exit 74.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .fail_next_anchor_body(tenant::executor::HostFileError::Fs {
+            path: "/etc/pf.anchors/tenant-dev".to_string(),
+            message: "Permission denied (os error 13)".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(
+        !stdout.contains("anchor file drift"),
+        "substrate failure must abort before findings; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("failed to read host config"),
+        "stderr should frame as host-config-file read failure; got: {stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_anchor_body_drift_all_tenants_scoped_per_tenant() {
+    // Two tenants, only `dev` is drifted; `staging` is in sync.
+    // Bare `tenant doctor` must emit exactly the dev-scoped drift
+    // finding and nothing scoped to staging.
+    let stub_reader = make_two_tenant_stub_reader();
+    let default = tenant::profile::default_profile_toml();
+    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &default)
+        .with_existing_profile("staging", &default)
+        .with_anchor_body("dev", &edited);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("tenant 'dev' anchor file drift"),
+        "dev's drift finding should fire; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("tenant 'staging' anchor file drift"),
+        "staging should NOT show drift; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_anchor_body_drift_suppresses_no_findings_summary() {
+    // A per-tenant finding (AnchorBodyDrift) suppresses the
+    // "no per-tenant findings" summary line. Pins that the new
+    // variant is counted as PER-TENANT (not host-wide).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &edited);
+    let (_code, stdout, _stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert!(
+        !stdout.contains("no per-tenant findings"),
+        "drift finding should suppress clean summary; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_anchor_body_install_tier_match_still_drifts() {
+    // Q9 negative pin: anchor body matches the INSTALL-tier render
+    // (runtime+install hosts) but NOT the runtime-tier render
+    // (runtime only). The Q9 lock chose runtime-only comparison —
+    // install-tier widening outside a shell session IS drift the
+    // operator should know about. Verify drift still fires.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_hosts(&["runtime.example.com"], &["install.example.com"]);
+    // Anchor body matches install-tier render (BOTH hosts present).
+    let install_tier_body = tenant::firewall::render_anchor(
+        "dev",
+        &[
+            "runtime.example.com".to_string(),
+            "install.example.com".to_string(),
+        ],
+    );
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_anchor_body("dev", &install_tier_body);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("tenant 'dev' anchor file drift"),
+        "install-tier match must NOT satisfy the runtime-tier check; stdout={stdout:?}"
+    );
+}
+
 #[test]
 fn doctor_help_text_mentions_sudo_session_and_admin_requirement() {
     // Operator-UX commitment: `tenant doctor --help` documents the two

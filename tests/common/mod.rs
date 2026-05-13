@@ -67,6 +67,9 @@ impl Executor for NeverExecutor {
     fn read_pf_status(&self) -> Result<String, tenant::executor::FirewallError> {
         panic!("executor unexpectedly invoked (read_pf_status)");
     }
+    fn read_anchor_body(&self, name: &str) -> Result<String, tenant::executor::HostFileError> {
+        panic!("executor unexpectedly invoked (read_anchor_body): name={name:?}");
+    }
 }
 
 /// Host identity passed to `tenant::run`. Production reads `$USER`; tests

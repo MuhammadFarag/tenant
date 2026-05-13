@@ -121,6 +121,21 @@ pub enum Category {
 /// silently inert. Recovery is `sudo pfctl -e` (idempotent at the
 /// substrate; the create flow's `FirewallOp::Enable` is the same
 /// command).
+///
+/// `AnchorBodyDrift` is the per-tenant finding from cycle 8: the
+/// on-disk anchor file at `/etc/pf.anchors/tenant-<name>` differs
+/// byte-for-byte from what `firewall::render_anchor` would produce
+/// from the current profile (runtime tier — install widening is
+/// session-scoped, so any sustained install-tier on-disk state IS
+/// drift). Warning-tier; recovery is `tenant mode <name> runtime`
+/// (re-renders + reloads the anchor), same as `PfRuleDrift`.
+///
+/// Vocabulary note: the variant says "body" (the technical content
+/// concept) and the `Display` impl says "anchor file drift" / "on-disk
+/// body" (the operator's mental model — they hand-edited the FILE; the
+/// detail names what specifically diverged). Same deliberate
+/// two-level framing as `PfRuleDrift` ("rule" internally, "pf anchor"
+/// in Display).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
     FilesystemExposure {
@@ -138,6 +153,9 @@ pub enum Finding {
     },
     TouchIdMissing,
     PfDisabled,
+    AnchorBodyDrift {
+        tenant: String,
+    },
 }
 
 impl Finding {
@@ -148,6 +166,7 @@ impl Finding {
             Finding::PfRuleDrift { .. } => Severity::Warning,
             Finding::TouchIdMissing => Severity::Info,
             Finding::PfDisabled => Severity::Critical,
+            Finding::AnchorBodyDrift { .. } => Severity::Warning,
         }
     }
 }
@@ -195,8 +214,28 @@ impl fmt::Display for Finding {
                 "critical: pf is globally disabled \u{2014} no tenant firewall \
                  is enforcing; run `sudo pfctl -e` to enable"
             ),
+            Finding::AnchorBodyDrift { tenant } => write!(
+                f,
+                "warning: tenant '{tenant}' anchor file drift \u{2014} \
+                 on-disk body differs from profile-derived render; \
+                 run `tenant mode {tenant} runtime` to re-render and reload"
+            ),
         }
     }
+}
+
+/// Does the on-disk anchor body match the profile-derived expected
+/// body byte-for-byte? Caller passes the actual file content
+/// (`Executor::read_anchor_body`) and the expected render
+/// (`firewall::render_anchor` over the runtime-tier hosts).
+///
+/// Byte-exact per the cycle-8 brief Q2: `render_anchor` is
+/// deterministic — same profile + tenant produces identical output
+/// across runs — so any difference is real drift, not cosmetic. If
+/// trailing-whitespace or comment-edit false positives ever surface,
+/// soften the comparator here.
+pub fn anchor_body_matches(actual: &str, expected: &str) -> bool {
+    actual == expected
 }
 
 /// Does the env policy unconditionally delete `var` from propagation
