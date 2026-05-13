@@ -145,7 +145,7 @@ fn doctor_clean_host_emits_no_findings_summary() {
     let stub_exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "doctor: tenant 'dev' — no findings.\n");
+    assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
 }
 
 #[test]
@@ -485,6 +485,384 @@ fn doctor_non_strict_critical_still_exits_0() {
     assert_eq!(
         code, 0,
         "expected exit 0 on critical without --strict; stderr={stderr:?}"
+    );
+}
+
+// ============================================================
+// Cycle 7 — doctor cycle 2: host-config drift checks
+// ============================================================
+//
+// Three new checks (SC2 / SC3 / SC4):
+//   - SC2: PF rule presence (per-tenant; kernel anchor vs intent)
+//   - SC3: Touch-ID-for-sudo (host-wide; /etc/pam.d/sudo)
+//   - SC4: pfctl-enabled status (host-wide)
+// All checks share doctor's existing severity / --strict / exit-code
+// plumbing; new finding variants live in `src/doctor.rs::Finding`.
+
+// ----- Sub-cycle 2: PF rule presence (per-tenant) -----
+//
+// `Executor::read_kernel_pf_rules(name)` runs `sudo pfctl -a
+// tenant-<name> -sr` and returns the raw text; doctor's
+// `pf_rule_presence_check` does a structural check (line begins with
+// `pass ` AND a line begins with `block `, ignoring comments). The
+// structural shape catches "kernel anchor is empty or wrong" without
+// false-positiving on pfctl's output formatting cosmetics (Q7-a lock).
+// Recovery is `tenant mode <name> runtime` (re-renders + reloads the
+// anchor); Warning-tier severity.
+
+#[test]
+fn doctor_pf_rules_present_no_finding() {
+    // Stub default seeds both `block` + `pass` lines — happy path
+    // produces no PfRuleDrift finding. Pin: doctor still exits 0
+    // and the operator-visible summary is "no findings".
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("pf anchor drift"),
+        "no drift finding expected; stdout={stdout:?}"
+    );
+    assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
+}
+
+#[test]
+fn doctor_pf_rules_missing_pass_emits_warning() {
+    // Kernel anchor has `block` but no `pass` → one PfRuleDrift
+    // (warning). Finding line names which rule class is missing
+    // and points at the `tenant mode runtime` recovery.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec =
+        StubExecutor::new().with_kernel_pf_rules("dev", "block return inet from any to any\n");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' pf anchor drift"),
+        "expected pf drift warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("no `pass` rule in kernel anchor"),
+        "drift detail should name the missing rule class; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant mode dev runtime"),
+        "drift finding should name the recovery command; stdout={stdout:?}"
+    );
+    // Exactly one drift finding (not two).
+    let drift_count = stdout.matches("pf anchor drift").count();
+    assert_eq!(
+        drift_count, 1,
+        "expected exactly one drift line; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pf_rules_missing_block_emits_warning() {
+    // Symmetric: kernel anchor has `pass` but no `block` → one
+    // PfRuleDrift naming the missing block.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new()
+        .with_kernel_pf_rules("dev", "pass inet from 192.0.2.1 to <allowed> keep state\n");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("no `block` rule in kernel anchor"),
+        "drift detail should name the missing block; stdout={stdout:?}"
+    );
+    let drift_count = stdout.matches("pf anchor drift").count();
+    assert_eq!(
+        drift_count, 1,
+        "expected exactly one drift line; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pf_rules_empty_anchor_emits_two_warnings() {
+    // Empty kernel anchor → both `pass` AND `block` missing →
+    // two PfRuleDrift findings. Captures the "anchor file present
+    // but its in-kernel image is empty" case (e.g. pfctl reload
+    // partially failed leaving an empty anchor namespace).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_kernel_pf_rules("dev", "");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let drift_count = stdout.matches("pf anchor drift").count();
+    assert_eq!(
+        drift_count, 2,
+        "expected two drift lines; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("no `pass` rule"),
+        "first drift detail names missing pass; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("no `block` rule"),
+        "second drift detail names missing block; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pf_rules_drift_with_strict_exits_1() {
+    // PfRuleDrift is Warning-tier; --strict + warning-only → exit 1
+    // (per the severity-ordering contract). Pins the new variant
+    // through the --strict exit-code path.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_kernel_pf_rules("dev", "");
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(
+        code, 1,
+        "expected exit 1 on warning+strict; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_pf_rules_all_tenants_scoped_per_tenant() {
+    // Two tenants, only `dev` is drifted (empty kernel anchor);
+    // `staging` keeps the stub default (both rules present). Bare
+    // `tenant doctor` must emit exactly the dev-scoped drift
+    // findings and nothing scoped to staging.
+    let stub_reader = make_two_tenant_stub_reader();
+    let stub_exec = StubExecutor::new().with_kernel_pf_rules("dev", "");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("tenant 'dev' pf anchor drift"),
+        "dev's drift finding should fire; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("tenant 'staging' pf anchor drift"),
+        "staging should NOT show drift (default rules are happy); stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pf_rules_substrate_failure_routes_to_firewall_failed_frame() {
+    // `FirewallError::Spawn` on `read_kernel_pf_rules` propagates as
+    // a substrate-execution failure; doctor surfaces via the new
+    // `doctor_firewall_failed` Reporter method (distinct from
+    // `doctor_failed` (probe) and `doctor_host_file_failed`
+    // (sudoers/pam)). Exit 74 (EX_IOERR).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().fail_next_kernel_pf_rules(
+        tenant::executor::FirewallError::Spawn(std::io::Error::other("pfctl not found")),
+    );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    // doctor_starting fires (which writes to stdout) before
+    // read_kernel_pf_rules — so stdout MAY have the curated-path
+    // intro line. The substrate failure aborts before findings
+    // emit, so no finding lines on stdout.
+    assert!(
+        !stdout.contains("pf anchor drift"),
+        "substrate failure must abort before findings; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("failed to read pf state"),
+        "stderr should frame as firewall-read failure; got: {stderr:?}"
+    );
+}
+
+// ----- Sub-cycle 3: Touch-ID-for-sudo (host-wide) -----
+//
+// `Executor::read_pam_sudo()` reads `/etc/pam.d/sudo` (mode 0644,
+// direct fs read). Doctor's `has_pam_tid` parses for an active
+// `auth sufficient pam_tid.so` directive; if absent, doctor emits
+// one `Finding::TouchIdMissing` (info-tier) per invocation,
+// regardless of how many tenants are on the host. Info-tier per
+// Q5 lock — Touch ID is a recommendation aligned with the project's
+// NOPASSWD-sudoers stance, not a correctness drift.
+
+#[test]
+fn doctor_pam_tid_present_no_finding() {
+    // Stub default seeds `auth sufficient pam_tid.so` — happy path
+    // produces no TouchIdMissing finding.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("Touch ID for sudo not detected"),
+        "no Touch-ID finding expected; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pam_tid_absent_emits_info_finding() {
+    // Empty pam.d/sudo content → no pam_tid → one TouchIdMissing
+    // (info-tier). Operator-visible finding line names the exact
+    // edit needed to enable it.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_pam_sudo_content("");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("info: Touch ID for sudo not detected"),
+        "expected Touch-ID info finding; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("auth sufficient pam_tid.so"),
+        "finding should name the directive shape; stdout={stdout:?}"
+    );
+    // Exactly one Touch-ID line (not duplicated).
+    let count = stdout.matches("Touch ID for sudo not detected").count();
+    assert_eq!(count, 1, "expected one Touch-ID line; stdout={stdout:?}");
+}
+
+#[test]
+fn doctor_pam_tid_commented_emits_info_finding() {
+    // A `#`-prefixed line with `pam_tid.so` doesn't count as
+    // active — pam.d's stack ignores commented directives. Doctor
+    // should fire TouchIdMissing exactly as if the line were
+    // absent.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_pam_sudo_content(
+        "# auth       sufficient     pam_tid.so\n\
+         auth       required       pam_opendirectory.so\n",
+    );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("Touch ID for sudo not detected"),
+        "commented pam_tid must still trigger finding; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pam_tid_info_does_not_trip_strict() {
+    // Cycle 7 SC3 Q5 lock: TouchIdMissing is Info-tier. With
+    // --strict + ONLY a TouchIdMissing finding, exit code must be
+    // 0 (Info doesn't trip --strict's exit-1). Pin against a
+    // regression that bumps TouchIdMissing to Warning by accident.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_pam_sudo_content("");
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(code, 0, "Info should not trip --strict; stderr={stderr:?}");
+}
+
+#[test]
+fn doctor_pam_tid_all_tenants_emits_once() {
+    // Touch ID is a host-wide concern (one pam.d/sudo per host).
+    // Bare `tenant doctor` (all-tenants walk over two tenants)
+    // must emit the finding ONCE, not per-tenant.
+    let stub_reader = make_two_tenant_stub_reader();
+    let stub_exec = StubExecutor::new().with_pam_sudo_content("");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let count = stdout.matches("Touch ID for sudo not detected").count();
+    assert_eq!(
+        count, 1,
+        "all-tenants doctor must emit Touch-ID once; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pam_substrate_failure_routes_to_host_file_failed_frame() {
+    // `HostFileError::Fs` on read_pam_sudo propagates as a
+    // substrate-execution failure. Doctor surfaces via the existing
+    // `doctor_host_file_failed` (SC1 generalized it from env-policy
+    // to any host-config-file read). Exit 74 (EX_IOERR).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().fail_next_pam_sudo(tenant::executor::HostFileError::Fs {
+        path: "/etc/pam.d/sudo".to_string(),
+        message: "permission denied".to_string(),
+    });
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(
+        stdout.is_empty(),
+        "substrate failure aborts before findings; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("failed to read host config"),
+        "stderr should frame as host-config-read failure; got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("/etc/pam.d/sudo"),
+        "stderr should name the failed path; got: {stderr:?}"
+    );
+}
+
+// ----- Sub-cycle 4: pfctl-enabled (host-wide) -----
+//
+// `Executor::read_pf_status()` runs `sudo pfctl -si` and returns the
+// raw text; doctor's `pf_status_enabled` checks for the canonical
+// `Status: Enabled` line. If pf is globally disabled, NO tenant
+// anchor is enforcing — every tenant's firewall is silently inert
+// (Critical severity). One emission per `tenant doctor` invocation
+// (host-level, not per-tenant). Recovery: `sudo pfctl -e`.
+
+#[test]
+fn doctor_pf_enabled_no_finding() {
+    // Stub default has "Status: Enabled" — happy path produces
+    // no PfDisabled finding.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("pf is globally disabled"),
+        "no pf-disabled finding expected; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pf_disabled_emits_critical_finding() {
+    // pfctl -si reports "Status: Disabled" → one PfDisabled
+    // critical finding. With --strict, critical → exit 2.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(
+        code, 2,
+        "expected exit 2 on critical+strict; stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("critical: pf is globally disabled"),
+        "expected pf-disabled critical finding; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("sudo pfctl -e"),
+        "finding should name the recovery command; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pf_disabled_all_tenants_emits_once() {
+    // pf-enabled is a host-wide state — one pf, one finding,
+    // regardless of how many tenants are walked. Pin against a
+    // regression that per-tenant-emits the host-wide check.
+    let stub_reader = make_two_tenant_stub_reader();
+    let stub_exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
+    // Critical without --strict still exits 0.
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let count = stdout.matches("pf is globally disabled").count();
+    assert_eq!(
+        count, 1,
+        "all-tenants doctor must emit PfDisabled once; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
+    // `FirewallError::Spawn` on read_pf_status surfaces via the
+    // existing `doctor_firewall_failed` (SC2 added it); exit 74.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().fail_next_pf_status(
+        tenant::executor::FirewallError::Spawn(std::io::Error::other("pfctl not found")),
+    );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(
+        stdout.is_empty(),
+        "substrate failure aborts before findings; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("failed to read pf state"),
+        "stderr should frame as firewall-read failure; got: {stderr:?}"
     );
 }
 

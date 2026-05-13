@@ -98,6 +98,29 @@ pub enum Category {
 /// the operator's session env actually holding the var; recovery is
 /// a one-line `/etc/sudoers` edit. The finding line names the
 /// directive shape so the operator's fix is mechanical.
+///
+/// `PfRuleDrift` is the per-tenant finding from cycle 7 SC2: the
+/// kernel's anchor for `tenant-<name>` is missing a structural rule
+/// (no `pass` rule, no `block return` rule, or both — empty anchor).
+/// Warning-tier because the drift is recoverable via `tenant mode
+/// <name> runtime` (re-renders + reloads the anchor). `detail`
+/// names which structural rule is missing.
+///
+/// `TouchIdMissing` is the host-wide finding from cycle 7 SC3:
+/// `/etc/pam.d/sudo` has no active `pam_tid.so` directive. Info-tier
+/// per the cycle-7 brief Q5 lock — it's a recommendation aligned
+/// with the project's NOPASSWD-sudoers stance (Touch ID makes sudo
+/// faster AND adds an auth factor), not a correctness drift. Info
+/// findings do not trip `--strict`'s exit-1, so the operator sees
+/// the tip once but isn't nagged on every doctor run.
+///
+/// `PfDisabled` is the host-wide finding from cycle 7 SC4: pf's
+/// global enable state is off (`pfctl -d` was run, or pf never
+/// got enabled on this host). Critical-tier — when pf is off, NO
+/// tenant's firewall enforces anything; every tenant's anchor is
+/// silently inert. Recovery is `sudo pfctl -e` (idempotent at the
+/// substrate; the create flow's `FirewallOp::Enable` is the same
+/// command).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
     FilesystemExposure {
@@ -109,6 +132,12 @@ pub enum Finding {
     EnvLeak {
         var: String,
     },
+    PfRuleDrift {
+        tenant: String,
+        detail: &'static str,
+    },
+    TouchIdMissing,
+    PfDisabled,
 }
 
 impl Finding {
@@ -116,6 +145,9 @@ impl Finding {
         match self {
             Finding::FilesystemExposure { severity, .. } => *severity,
             Finding::EnvLeak { .. } => Severity::Warning,
+            Finding::PfRuleDrift { .. } => Severity::Warning,
+            Finding::TouchIdMissing => Severity::Info,
+            Finding::PfDisabled => Severity::Critical,
         }
     }
 }
@@ -146,6 +178,22 @@ impl fmt::Display for Finding {
                 f,
                 "warning: {var} not in env_delete \u{2014} host's session env leaks into 'tenant shell' sessions; \
                  add `Defaults env_delete += \"{var}\"` to /etc/sudoers"
+            ),
+            Finding::PfRuleDrift { tenant, detail } => write!(
+                f,
+                "warning: tenant '{tenant}' pf anchor drift \u{2014} {detail}; \
+                 run `tenant mode {tenant} runtime` to re-render and reload"
+            ),
+            Finding::TouchIdMissing => write!(
+                f,
+                "info: Touch ID for sudo not detected \u{2014} \
+                 add `auth sufficient pam_tid.so` to /etc/pam.d/sudo \
+                 to enable fingerprint-gated sudo"
+            ),
+            Finding::PfDisabled => write!(
+                f,
+                "critical: pf is globally disabled \u{2014} no tenant firewall \
+                 is enforcing; run `sudo pfctl -e` to enable"
             ),
         }
     }
@@ -333,6 +381,114 @@ pub fn curated_paths(
         ));
     }
 
+    out
+}
+
+/// Does `pfctl -si` report pf as enabled? (Cycle 7 SC4.)
+///
+/// Match shape: a non-comment line whose trimmed form starts with
+/// `Status: Enabled`. `pfctl -si`'s canonical first line is e.g.
+/// `Status: Enabled for 3 days 04:32:18` (uptime suffix varies);
+/// when pf is off, it reports `Status: Disabled`. Prefix match on
+/// `Status: Enabled` distinguishes cleanly. Leading whitespace is
+/// tolerated.
+pub fn pf_status_enabled(status: &str) -> bool {
+    for raw_line in status.lines() {
+        let line = raw_line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("Status: Enabled") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Does `/etc/pam.d/sudo` enable Touch-ID-for-sudo via an active
+/// `pam_tid.so` directive? (Cycle 7 SC3.)
+///
+/// Match shape: a non-comment line whose tokens are `auth sufficient
+/// pam_tid.so` (control == `sufficient`, module == `pam_tid.so`).
+/// Returns `true` on first hit; `false` if no such line is present.
+///
+/// Why `sufficient` specifically: pam.d's stack semantics give
+/// `sufficient` modules a short-circuit-on-success role — a passing
+/// `pam_tid.so sufficient` means sudo authenticates via Touch ID
+/// alone (no fallback to password). A `required` or `optional`
+/// pam_tid.so doesn't carry the same UX guarantee (Touch ID may
+/// run AND then still demand a password). Conservative-false: a
+/// non-`sufficient` directive reports as missing, prompting the
+/// operator to inspect and confirm.
+///
+/// Commented (`#`-prefixed) lines do not count. Leading whitespace
+/// is tolerated. Inline trailing comments after the module name are
+/// not parsed — pam.d doesn't accept them in the canonical sense, so
+/// `auth sufficient pam_tid.so # comment` is treated as a real line
+/// (the parser sees `auth`, `sufficient`, `pam_tid.so` as the first
+/// three tokens).
+pub fn has_pam_tid(pam_config: &str) -> bool {
+    for raw_line in pam_config.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        let kind = toks.next();
+        let control = toks.next();
+        let module = toks.next();
+        if kind == Some("auth") && control == Some("sufficient") && module == Some("pam_tid.so") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Structural-presence check on the kernel's pf rules for the
+/// `tenant-<name>` anchor (cycle 7 SC2). Returns up to two
+/// `PfRuleDrift` findings: one if no `pass` rule is present, one if
+/// no `block return` rule is present.
+///
+/// Structural (not exact line-by-line) per the cycle-7 brief Q7 lock:
+/// pfctl's output format isn't a stable contract (numerical IPs vs
+/// hostnames, table-reference reformatting) so an exact-match check
+/// would false-positive on cosmetic drift. The structural shape
+/// catches the case that actually matters — "kernel anchor is empty
+/// or missing one of the two rule classes the runtime requires".
+///
+/// Match shape: line begins with `pass ` (any pass rule) and
+/// separately a line begins with `block ` (any block rule). Both are
+/// case-sensitive lowercase per pfctl's canonical output. Leading
+/// whitespace is tolerated; commented-out lines (`#`-prefixed) do
+/// not count as a real rule.
+pub fn pf_rule_presence_check(rules: &str, tenant: &str) -> Vec<Finding> {
+    let mut out: Vec<Finding> = Vec::new();
+    let mut has_pass = false;
+    let mut has_block = false;
+    for raw in rules.lines() {
+        let line = raw.trim_start();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("pass ") {
+            has_pass = true;
+        }
+        if line.starts_with("block ") {
+            has_block = true;
+        }
+    }
+    if !has_pass {
+        out.push(Finding::PfRuleDrift {
+            tenant: tenant.to_string(),
+            detail: "no `pass` rule in kernel anchor",
+        });
+    }
+    if !has_block {
+        out.push(Finding::PfRuleDrift {
+            tenant: tenant.to_string(),
+            detail: "no `block` rule in kernel anchor",
+        });
+    }
     out
 }
 

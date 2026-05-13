@@ -4,9 +4,9 @@ use std::process::Command;
 
 use crate::ModeLevel;
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::doctor::{Finding, curated_paths, has_env_delete_for};
+use crate::doctor::{Finding, curated_paths, has_env_delete_for, has_pam_tid, pf_status_enabled};
 use crate::executor::{
-    self, AccountError, AccountOp, EnvPolicyError, FirewallError, FirewallOp, Op, ProbeError,
+    self, AccountError, AccountOp, FirewallError, FirewallOp, HostFileError, Op, ProbeError,
     ProfileOp, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
@@ -975,6 +975,12 @@ impl<'a> Writer<'a> {
         if let Some(env_leak) = self.check_env_leak(reporter)? {
             findings.push(env_leak);
         }
+        if let Some(touch_id) = self.check_touch_id_for_sudo(reporter)? {
+            findings.push(touch_id);
+        }
+        if let Some(pf_disabled) = self.check_pf_status(reporter)? {
+            findings.push(pf_disabled);
+        }
         findings.extend(self.probe_tenant_paths(host, name, others, reporter)?);
         Ok(DoctorOutcome { findings })
     }
@@ -1001,6 +1007,12 @@ impl<'a> Writer<'a> {
         if let Some(env_leak) = self.check_env_leak(reporter)? {
             findings.push(env_leak);
         }
+        if let Some(touch_id) = self.check_touch_id_for_sudo(reporter)? {
+            findings.push(touch_id);
+        }
+        if let Some(pf_disabled) = self.check_pf_status(reporter)? {
+            findings.push(pf_disabled);
+        }
         let tenants = accounts.tenant_names();
         if tenants.is_empty() {
             reporter.doctor_all_tenants_noop();
@@ -1021,7 +1033,7 @@ impl<'a> Writer<'a> {
     /// `SSH_AUTH_SOCK` propagates. Returns the emitted finding (if
     /// any) so the caller can aggregate it into the DoctorOutcome
     /// for the `--strict` decision.
-    fn check_env_leak(&self, reporter: &mut Reporter) -> Result<Option<Finding>, EnvPolicyError> {
+    fn check_env_leak(&self, reporter: &mut Reporter) -> Result<Option<Finding>, HostFileError> {
         let policy = self.executor.read_env_policy()?;
         if has_env_delete_for(&policy, "SSH_AUTH_SOCK") {
             return Ok(None);
@@ -1033,19 +1045,55 @@ impl<'a> Writer<'a> {
         Ok(Some(finding))
     }
 
-    /// Probe one tenant's view of the curated path list. Emits
-    /// `doctor_starting` (curated-list disclosure in verbose;
-    /// dry-run intent line), then each filesystem finding inline,
-    /// then `doctor_done_summary` with the filesystem-finding count.
-    /// Env-leak handling is the caller's responsibility — this
-    /// method returns only filesystem findings.
+    /// Read `/etc/pam.d/sudo` + emit the host-wide `TouchIdMissing`
+    /// finding if no active `auth sufficient pam_tid.so` directive
+    /// is present (cycle 7 SC3). Runs once per `tenant doctor`
+    /// invocation (single-emit, host-level); both `doctor_tenant`
+    /// and `doctor_all_tenants` call this. Returns the emitted
+    /// finding (if any) so the caller aggregates it for `--strict`.
+    fn check_touch_id_for_sudo(
+        &self,
+        reporter: &mut Reporter,
+    ) -> Result<Option<Finding>, HostFileError> {
+        let pam_config = self.executor.read_pam_sudo()?;
+        if has_pam_tid(&pam_config) {
+            return Ok(None);
+        }
+        let finding = Finding::TouchIdMissing;
+        reporter.doctor_finding(&finding);
+        Ok(Some(finding))
+    }
+
+    /// Read pf's global enable state + emit the host-wide
+    /// `PfDisabled` finding (Critical) if pf is off (cycle 7 SC4).
+    /// Runs once per `tenant doctor` invocation (single-emit,
+    /// host-level); a single global pf state covers every tenant
+    /// anchor.
+    fn check_pf_status(&self, reporter: &mut Reporter) -> Result<Option<Finding>, FirewallError> {
+        let status = self.executor.read_pf_status()?;
+        if pf_status_enabled(&status) {
+            return Ok(None);
+        }
+        let finding = Finding::PfDisabled;
+        reporter.doctor_finding(&finding);
+        Ok(Some(finding))
+    }
+
+    /// Probe one tenant's view of the curated path list, then
+    /// structural-check the kernel's pf anchor for the same tenant
+    /// (cycle 7 SC2). Emits `doctor_starting` (curated-list
+    /// disclosure in verbose; dry-run intent line), then each
+    /// filesystem finding inline, then any `PfRuleDrift` findings
+    /// inline, then `doctor_done_summary` with the total per-tenant
+    /// finding count. Env-leak + other host-wide findings are the
+    /// caller's responsibility.
     fn probe_tenant_paths(
         &self,
         host: &str,
         name: &str,
         others: &[&str],
         reporter: &mut Reporter,
-    ) -> Result<Vec<Finding>, ProbeError> {
+    ) -> Result<Vec<Finding>, DoctorError> {
         let curated = curated_paths(host, name, others);
         reporter.doctor_starting(name, &curated);
         let mut findings: Vec<Finding> = Vec::new();
@@ -1062,19 +1110,28 @@ impl<'a> Writer<'a> {
                 findings.push(finding);
             }
         }
+        let rules = self.executor.read_kernel_pf_rules(name)?;
+        for drift in crate::doctor::pf_rule_presence_check(&rules, name) {
+            reporter.doctor_finding(&drift);
+            findings.push(drift);
+        }
         reporter.doctor_done_summary(name, findings.len());
         Ok(findings)
     }
 }
 
 /// Combined error surface for the doctor verb. `Probe` covers the
-/// filesystem-probe substrate; `EnvPolicy` covers the sudoers-read
-/// substrate. The dispatcher routes each variant to a Reporter
-/// method with verb-appropriate framing.
+/// filesystem-probe substrate; `HostFile` covers reads of host
+/// config files (sudoers + drop-ins via `read_env_policy`;
+/// `/etc/pam.d/sudo` via `read_pam_sudo`); `Firewall` covers pfctl
+/// reads (`read_kernel_pf_rules` cycle 7 SC2; `read_pf_status` SC4).
+/// The dispatcher routes each variant to a Reporter method with
+/// verb-appropriate framing.
 #[derive(Debug)]
 pub(crate) enum DoctorError {
     Probe(ProbeError),
-    EnvPolicy(EnvPolicyError),
+    HostFile(HostFileError),
+    Firewall(FirewallError),
 }
 
 impl From<ProbeError> for DoctorError {
@@ -1083,9 +1140,15 @@ impl From<ProbeError> for DoctorError {
     }
 }
 
-impl From<EnvPolicyError> for DoctorError {
-    fn from(e: EnvPolicyError) -> Self {
-        DoctorError::EnvPolicy(e)
+impl From<HostFileError> for DoctorError {
+    fn from(e: HostFileError) -> Self {
+        DoctorError::HostFile(e)
+    }
+}
+
+impl From<FirewallError> for DoctorError {
+    fn from(e: FirewallError) -> Self {
+        DoctorError::Firewall(e)
     }
 }
 

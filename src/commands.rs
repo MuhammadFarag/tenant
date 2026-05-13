@@ -260,11 +260,14 @@ fn surface_destroy_error(reporter: &mut Reporter, name: &str, error: &accounts::
 }
 
 /// Route a `DoctorError` to the right Reporter framing — Probe-side
-/// failures (sudo prompt machinery) go to `doctor_failed`; env-policy
-/// failures (sudoers read) go to `doctor_env_policy_failed`.
+/// failures (sudo prompt machinery) go to `doctor_failed`; host-config
+/// file read failures (sudoers, pam.d/sudo) go to
+/// `doctor_host_file_failed`; firewall-read failures (pfctl) go to
+/// `doctor_firewall_failed`.
 fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) {
     match error {
         accounts::DoctorError::Probe(e) => reporter.doctor_failed(e),
-        accounts::DoctorError::EnvPolicy(e) => reporter.doctor_env_policy_failed(e),
+        accounts::DoctorError::HostFile(e) => reporter.doctor_host_file_failed(e),
+        accounts::DoctorError::Firewall(e) => reporter.doctor_firewall_failed(e),
     }
 }

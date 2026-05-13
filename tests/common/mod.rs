@@ -55,8 +55,17 @@ impl Executor for NeverExecutor {
             "executor unexpectedly invoked (probe_access_as_tenant): name={name:?} path={path:?} mode={mode:?}"
         );
     }
-    fn read_env_policy(&self) -> Result<String, tenant::executor::EnvPolicyError> {
+    fn read_env_policy(&self) -> Result<String, tenant::executor::HostFileError> {
         panic!("executor unexpectedly invoked (read_env_policy)");
+    }
+    fn read_kernel_pf_rules(&self, name: &str) -> Result<String, tenant::executor::FirewallError> {
+        panic!("executor unexpectedly invoked (read_kernel_pf_rules): name={name:?}");
+    }
+    fn read_pam_sudo(&self) -> Result<String, tenant::executor::HostFileError> {
+        panic!("executor unexpectedly invoked (read_pam_sudo)");
+    }
+    fn read_pf_status(&self) -> Result<String, tenant::executor::FirewallError> {
+        panic!("executor unexpectedly invoked (read_pf_status)");
     }
 }
 

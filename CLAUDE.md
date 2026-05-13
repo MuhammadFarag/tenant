@@ -21,9 +21,14 @@ the login shell, so any leftover install-tier widening becomes truly
 session-scoped — the next shell entry resets the allowlist. `tenant
 doctor [<name>]` is the read-only audit verb: it walks a curated list
 of sensitive host paths and probes each AS the tenant (via `sudo -n -u
-<name> /usr/bin/test -r|x`) plus reads the host's `/etc/sudoers` + drop-
-ins to detect SSH_AUTH_SOCK env propagation; reports findings on Allowed
-outcomes and the missing-env-delete case, with `--strict` mapping max
+<name> /usr/bin/test -r|x`); reads the host's `/etc/sudoers` + drop-ins
+to detect SSH_AUTH_SOCK env propagation; reads `/etc/pam.d/sudo` for an
+active `pam_tid.so` directive (Touch-ID-for-sudo, Info-tier);
+structural-checks each tenant's kernel pf anchor against `pfctl -a
+tenant-<name> -sr` for missing pass / block rules (Warning-tier
+drift); and reads `pfctl -si` to detect globally-disabled pf
+(Critical-tier — no anchor enforces). Reports findings on Allowed
+outcomes and the host-config drift cases, with `--strict` mapping max
 severity to a non-zero exit code (1 warning / 2 critical).
 
 This crate is a Rust port of an earlier Go prototype (lives at
@@ -44,13 +49,13 @@ walks the commits.
 ```
 src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`; mode swap to `DryRunExecutor` when `--dry-run`; constructs Reporter with the active Executor. `run` takes `host: &str` (operator's login name) for doctor's curated-path expansion.
 src/commands.rs   — verb dispatch (the `match` on `Verb`). No I/O, no mode/verbosity branching; routes to Reporter methods. `doctor_exit_code(severity, strict)` maps doctor's outcome to 0/1/2.
-src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`, `doctor_tenant`, `doctor_all_tenants`); shared private `reapply_anchor_for_level` helper drives both `apply_tenant_mode` and the shell's auto-narrow; private `check_env_leak` + `probe_tenant_paths` helpers for doctor. `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute. `DoctorOutcome` + `DoctorError { Probe, EnvPolicy }` aggregate doctor's results.
+src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`, `doctor_tenant`, `doctor_all_tenants`); shared private `reapply_anchor_for_level` helper drives both `apply_tenant_mode` and the shell's auto-narrow; private doctor helpers: `check_env_leak` + `check_touch_id_for_sudo` + `check_pf_status` (each host-wide, single-emit) and `probe_tenant_paths` (per-tenant; also runs the SC2 pf-rule structural check). `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute. `DoctorOutcome` + `DoctorError { Probe, HostFile, Firewall }` aggregate doctor's results.
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both iterate from `TENANT_UID_FLOOR = 600`.
-src/executor.rs   — `Op` ADT root wrapping `AccountOp` / `ProfileOp` / `FirewallOp` leaves; `WritableOp` trait bridging leaves to typed execution; `Executor` trait (per-domain `describe_*` / `execute_*` pairs + `login` / `read_profile` / `read_pf_conf` / `probe_access_as_tenant` / `read_env_policy` non-unit carve-outs); `MacosExecutor` / `StubExecutor` / `DryRunExecutor` impls; `AccountError` / `ProfileError` / `FirewallError` / `ProbeError` / `EnvPolicyError` types; `AccessMode` (Read / List) + `AccessOutcome` (Allowed / Denied / Unknown) for doctor's probe vocabulary.
+src/executor.rs   — `Op` ADT root wrapping `AccountOp` / `ProfileOp` / `FirewallOp` leaves; `WritableOp` trait bridging leaves to typed execution; `Executor` trait (per-domain `describe_*` / `execute_*` pairs + non-unit carve-outs: `login` / `read_profile` / `read_pf_conf` / `probe_access_as_tenant` / `read_env_policy` / `read_kernel_pf_rules` / `read_pam_sudo` / `read_pf_status`); `MacosExecutor` / `StubExecutor` / `DryRunExecutor` impls; `AccountError` / `ProfileError` / `FirewallError` / `ProbeError` / `HostFileError` types (HostFileError covers any privileged-or-cheap host-config-file read: sudoers + drop-ins, pam.d/sudo); `AccessMode` (Read / List) + `AccessOutcome` (Allowed / Denied / Unknown) for doctor's probe vocabulary.
 src/profile.rs    — `Profile` / `Allowlist` / `Tier` serde shapes; `parse` (schema-version-checked); `default_profile_toml`; `display_path_for` (`~`-rendered form used in plan / echo / error frames).
 src/firewall.rs   — pure functions for PF anchor + `/etc/pf.conf` line ops: `render_anchor`, `ensure_anchor_ref`, `remove_anchor_ref`, `is_anchor_referenced`; `tenant_anchor_name` / `_path` centralizers; `ANCHOR_DIR` / `PF_CONF` / `PF_CONF_BACKUP` constants.
-src/doctor.rs     — pure functions for the doctor verb: `curated_paths(host, tenant, others)` returns the (Category, AccessMode, PathBuf) probe list; `classify(category, outcome) -> Option<Severity>` maps probe results to finding severity; `has_env_delete_for(policy, var)` parses sudoers for the env_delete directive; `Finding { FilesystemExposure, EnvLeak }` + `Severity { Info, Warning, Critical }` + `Category` types. All I/O lives in `Writer::doctor_*` orchestration on the executor; this module is grep-and-classify only.
-src/reporter.rs   — operator-facing output. Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); `refuse_*` and `*_failed` methods to stderr; `step(op)` echoes per substrate call in real+verbose; plan rendering flows through `Op::describe_via`. Doctor uses `doctor_starting` (verbose curated-list block + dry-run intent), `doctor_finding`, `doctor_done_summary`, `doctor_failed`, `doctor_env_policy_failed`, `doctor_all_tenants_noop`, and `refuse_doctor_*` family.
+src/doctor.rs     — pure functions for the doctor verb: `curated_paths(host, tenant, others)` returns the (Category, AccessMode, PathBuf) probe list; `classify(category, outcome) -> Option<Severity>` maps probe results to finding severity; `has_env_delete_for(policy, var)` parses sudoers for the env_delete directive; `pf_rule_presence_check(rules, tenant)` returns up to two `PfRuleDrift` findings for missing `pass` / `block` rules in a kernel anchor; `has_pam_tid(pam_config)` parses `/etc/pam.d/sudo` for an active `auth sufficient pam_tid.so` directive; `pf_status_enabled(status)` checks pfctl -si output for "Status: Enabled". `Finding { FilesystemExposure, EnvLeak, PfRuleDrift, TouchIdMissing, PfDisabled }` + `Severity { Info, Warning, Critical }` + `Category` types. All I/O lives in `Writer::doctor_*` orchestration on the executor; this module is grep-and-classify only.
+src/reporter.rs   — operator-facing output. Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); `refuse_*` and `*_failed` methods to stderr; `step(op)` echoes per substrate call in real+verbose; plan rendering flows through `Op::describe_via`. Doctor uses `doctor_starting` (verbose curated-list block + dry-run intent), `doctor_finding`, `doctor_done_summary`, `doctor_failed` (probe substrate), `doctor_host_file_failed` (sudoers / pam.d/sudo substrate), `doctor_firewall_failed` (pfctl substrate), `doctor_all_tenants_noop`, and `refuse_doctor_*` family.
 src/main.rs       — composition root: prod impls + `tenant::run`. Reads `$USER` for the host identity passed to doctor.
 
 tests/cli*.rs            — E2E tests, one binary per verb (`tests/cli_<verb>.rs`) plus `tests/cli.rs` for cross-cutting CLI parser tests. Shared helpers (`NeverExecutor`, `run_with` / `run_with_exec`, `TEST_HOST`, stub builders) live in `tests/common/mod.rs`. Each per-verb file's top-of-file comment describes its scope.
@@ -58,6 +63,8 @@ tests/macos_executor.rs  — per-variant pins of the `MacosExecutor::describe_*`
 tests/macos_reader.rs    — `MacosReader::new()` dscl-integration smoke (`#[cfg(target_os = "macos")]`). Symmetric with macos_executor.rs's per-substrate boundary pin.
 tests/doctor.rs          — combinatorial coverage on `doctor::curated_paths` shape, `classify` matrix, `Finding::Display` per-variant byte-form, and `Severity` ordering (load-bearing for `--strict`).
 tests/env_policy_parse.rs — combinatorial coverage on `doctor::has_env_delete_for` (directive shape variants: quoted/unquoted, `+=` vs `=`, single-var vs multi-var list, `Defaults` qualifiers).
+tests/pf_rule_parse.rs   — combinatorial coverage on `doctor::pf_rule_presence_check` (empty / pass-only / block-only / both-present, comment / substring / whitespace tolerance, per-tenant naming).
+tests/pam_parse.rs       — combinatorial coverage on `doctor::has_pam_tid` (active / commented / wrong-control / wrong-kind / wrong-module / leading-whitespace / truncated-line).
 tests/profile_parse.rs   — combinatorial coverage on `profile::parse`.
 tests/firewall_render.rs — combinatorial coverage on `firewall::render_anchor`.
 tests/firewall_conf.rs   — combinatorial coverage on `ensure_anchor_ref` / `remove_anchor_ref` / `is_anchor_referenced`.
@@ -338,9 +345,10 @@ Things that are easy to violate and would matter:
   recovery is a one-line sudoers edit named in the finding text.
   Cycle 1 hard-codes `SSH_AUTH_SOCK`; a future cycle may
   generalize to a configurable var list. Env-policy substrate
-  uses a separate `EnvPolicyError` carve-out type (paralleling
-  `FirewallError`'s shape, distinct from `ProbeError`) so the
-  operator sees precise framing when sudo can't read sudoers.
+  uses the `HostFileError` carve-out type (renamed cycle 7 SC1
+  from `EnvPolicyError` to cover any host-config-file read —
+  sudoers, pam.d/sudo, future /etc/sysctl.conf) so the operator
+  sees precise framing when the substrate can't read the file.
 
 - **Only unqualified `Defaults env_delete` counts as protection** —
   sudo's `Defaults` directive supports qualifiers — `Defaults:user`
@@ -361,17 +369,71 @@ Things that are easy to violate and would matter:
   recovery is to add an unqualified `Defaults env_delete +=
   "SSH_AUTH_SOCK"` to silence.
 
-- **Doctor doesn't fit the WritableOp shape** — `probe_access_as_tenant`
-  and `read_env_policy` are Executor carve-out methods, NOT
-  `Op<'a>` variants. Doctor's probes are how it LEARNS, not
-  what the verb does — plan / echo / display dispatch would be
-  inappropriate (the operator doesn't need a `$ sudo -n -u
-  tenant test -r /Users/host/.ssh/id_rsa` line per probe in
-  verbose; that would be ~50 lines per tenant). Same posture as
-  `read_profile` / `read_pf_conf` / `login`. The curated list +
-  classify / has_env_delete_for / Finding live in `src/doctor.rs`
+- **Doctor doesn't fit the WritableOp shape** —
+  `probe_access_as_tenant`, `read_env_policy`,
+  `read_kernel_pf_rules`, `read_pam_sudo`, and `read_pf_status`
+  are Executor carve-out methods, NOT `Op<'a>` variants. Doctor's
+  probes are how it LEARNS, not what the verb does — plan / echo /
+  display dispatch would be inappropriate (the operator doesn't
+  need a `$ sudo -n -u tenant test -r /Users/host/.ssh/id_rsa`
+  line per probe in verbose; that would be ~50 lines per tenant).
+  Same posture as `read_profile` / `read_pf_conf` / `login`. The
+  curated list + classify / has_env_delete_for / pf_rule_presence_check /
+  has_pam_tid / pf_status_enabled / Finding live in `src/doctor.rs`
   (pure functions), the orchestration lives in `Writer`. No
   `Op::Doctor(_)` variant exists.
+
+- **PF rule presence is structural, not exact-match** — cycle 7
+  SC2's `pf_rule_presence_check(rules, tenant)` looks for AT LEAST
+  one line beginning with `pass ` and AT LEAST one beginning with
+  `block ` (after stripping leading whitespace and skipping comment
+  lines). Returns up to two `PfRuleDrift` Warning-tier findings.
+  Exact line-by-line comparison against the rendered anchor was
+  considered (Q7-b lock) and rejected: pfctl's output format isn't
+  a stable contract (numerical IPs vs hostnames, table-reference
+  reformatting, rule reordering between kernel versions). Structural
+  presence catches the case that actually matters — "kernel anchor
+  is empty or wrong" — without false-positiving on cosmetic drift.
+  Recovery is `tenant mode <name> runtime` (re-renders + reloads
+  the anchor); the finding text names that command.
+
+- **Touch-ID-for-sudo is Info-tier, not Warning** — cycle 7 SC3's
+  `Finding::TouchIdMissing` (emitted host-wide once per `tenant
+  doctor` invocation) is Info severity per the Q5 lock. The
+  rationale: Touch ID for sudo is a recommendation aligned with the
+  project's locked NOPASSWD-sudoers stance (Touch ID makes sudo
+  faster AND adds an auth factor), not a correctness drift. Info
+  findings do not trip `--strict`'s exit-1, so the operator sees
+  the one-time tip without `tenant doctor --strict` nagging on
+  every run. `has_pam_tid` accepts only `auth sufficient pam_tid.so`
+  (conservative-false: `required` or `optional` controls report
+  as missing because their pam.d semantics don't carry the same
+  short-circuit-on-success UX guarantee).
+
+- **PfDisabled is Critical, host-wide, one emit per invocation**
+  — cycle 7 SC4's `Finding::PfDisabled` fires when `pfctl -si`
+  doesn't report `Status: Enabled`. When pf is globally disabled,
+  NO tenant's anchor is enforcing — every tenant's firewall is
+  silently inert (the in-memory rule store still has entries; they
+  just aren't consulted on packet filtering). Critical severity is
+  load-bearing: this is the only doctor finding that says "your
+  isolation guarantee is currently zero." Recovery is `sudo pfctl
+  -e` (idempotent at the substrate; same command the create flow's
+  `FirewallOp::Enable` runs). Like the env-leak and Touch-ID
+  checks, it's host-level and emits once per `tenant doctor`
+  invocation regardless of how many tenants are walked.
+
+- **HostFileError covers multiple host-config substrates** —
+  renamed cycle 7 SC1 from `EnvPolicyError`. The shape (`Spawn` /
+  `NonZero` / `Fs`) fits any privileged-or-cheap host-config-file
+  read: sudoers + drop-ins via `read_env_policy` (privileged,
+  uses sudo cat), pam.d/sudo via `read_pam_sudo` (mode 0644,
+  direct fs read). A future check that reads /etc/sysctl.conf or
+  a launchd plist would reuse this type rather than introducing a
+  new error type per substrate. The Reporter's
+  `doctor_host_file_failed` frame is path-agnostic ("failed to
+  read host config: {err}") — the error's Display impl names the
+  specific path / process detail.
 
 - **Acronym casing** — Rust convention treats acronyms as words:
   `Uid` not `UID`, `Macos` not `MacOS`. Methods are

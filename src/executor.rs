@@ -222,24 +222,26 @@ impl fmt::Display for AccountError {
     }
 }
 
-/// Failure surface for `read_env_policy`. The substrate concatenates
-/// `/etc/sudoers` and every file in `/etc/sudoers.d/` (via `sudo cat`)
-/// into one text blob that doctor's parser grep through; either the
-/// `cat` invocation fails (spawn / non-zero) or the directory listing
-/// of `/etc/sudoers.d/` fails. Mirrors `FirewallError`'s shape with an
-/// extra `Fs` variant for the directory-listing case.
+/// Failure surface for privileged-or-cheap reads of host config files
+/// — `/etc/sudoers` + `/etc/sudoers.d/*` (sub-cycle 6) and
+/// `/etc/pam.d/sudo` (cycle 7 SC3). The substrate concatenates the
+/// readable text into one blob that doctor's parsers grep through;
+/// either the read invocation fails (spawn / non-zero on sudo-gated
+/// reads) or a direct filesystem read fails (cheap mode-0644 reads).
+/// Mirrors `FirewallError`'s shape with an extra `Fs` variant for the
+/// direct-read case.
 #[derive(Debug)]
-pub enum EnvPolicyError {
+pub enum HostFileError {
     Spawn(io::Error),
     NonZero { code: i32, stderr: String },
     Fs { path: String, message: String },
 }
 
-impl fmt::Display for EnvPolicyError {
+impl fmt::Display for HostFileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EnvPolicyError::Spawn(e) => write!(f, "failed to spawn sudo: {e}"),
-            EnvPolicyError::NonZero { code, stderr } => {
+            HostFileError::Spawn(e) => write!(f, "failed to spawn sudo: {e}"),
+            HostFileError::NonZero { code, stderr } => {
                 let trimmed = stderr.trim();
                 if trimmed.is_empty() {
                     write!(f, "sudo read exited with code {code}")
@@ -247,7 +249,7 @@ impl fmt::Display for EnvPolicyError {
                     write!(f, "sudo read exited with code {code}: {trimmed}")
                 }
             }
-            EnvPolicyError::Fs { path, message } => {
+            HostFileError::Fs { path, message } => {
                 write!(f, "filesystem error at {path}: {message}")
             }
         }
@@ -391,7 +393,36 @@ pub trait Executor {
     /// (same posture as `read_profile` / `read_pf_conf`): the return
     /// type is content, not unit; the substrate handles privileged
     /// reads, doctor handles parsing.
-    fn read_env_policy(&self) -> Result<String, EnvPolicyError>;
+    fn read_env_policy(&self) -> Result<String, HostFileError>;
+
+    /// Read the kernel's pf rules for the per-tenant anchor
+    /// `tenant-<name>`. Substrate is `sudo pfctl -a tenant-<name> -sr`;
+    /// the raw text is fed to `doctor::pf_rule_presence_check` which
+    /// looks for `pass` + `block` lines (structural check, not
+    /// line-by-line comparison). Reuses `FirewallError` because pfctl
+    /// is the substrate. Carve-out: content return, not unit.
+    fn read_kernel_pf_rules(&self, name: &str) -> Result<String, FirewallError>;
+
+    /// Read `/etc/pam.d/sudo` so doctor can check for an active
+    /// `pam_tid.so` line (Touch-ID-for-sudo). The file is mode 0644
+    /// on macOS — no sudo required; substrate is `fs::read_to_string`.
+    /// Reuses `HostFileError` (same shape as `read_env_policy`'s
+    /// privileged reads; the `Spawn` variant just doesn't fire on
+    /// this path). Carve-out: content return, not unit.
+    fn read_pam_sudo(&self) -> Result<String, HostFileError>;
+
+    /// Read pf's global enabled status. Substrate is `sudo pfctl
+    /// -si`; the raw text is fed to `doctor::pf_status_enabled`
+    /// which looks for the `Status: Enabled` line. Reuses
+    /// `FirewallError` (pfctl substrate). Carve-out: content
+    /// return, not unit.
+    ///
+    /// Why this matters: pf can be globally disabled with `pfctl
+    /// -d`. When disabled, NO anchor rules enforce — every tenant's
+    /// firewall is silently inert. Cycle 7 SC4's `Finding::PfDisabled`
+    /// is the host-wide critical-tier finding that surfaces this
+    /// state.
+    fn read_pf_status(&self) -> Result<String, FirewallError>;
 }
 
 /// Top-level ADT wrapper for "any op, regardless of domain." Used by the
@@ -661,7 +692,7 @@ impl Executor for MacosExecutor {
         }
     }
 
-    fn read_env_policy(&self) -> Result<String, EnvPolicyError> {
+    fn read_env_policy(&self) -> Result<String, HostFileError> {
         // Read /etc/sudoers (sudoers files are mode 0440 root:wheel —
         // not world-readable; sudo is required), then read every file
         // in /etc/sudoers.d/. Concatenate with newlines so the
@@ -678,7 +709,7 @@ impl Executor for MacosExecutor {
         let listing_output = Command::new("sudo")
             .args(["-n", "ls", "-1", "/etc/sudoers.d"])
             .output()
-            .map_err(EnvPolicyError::Spawn)?;
+            .map_err(HostFileError::Spawn)?;
         // A non-existent or unreadable /etc/sudoers.d/ is treated as
         // "no drop-ins" rather than a hard failure — sudo doesn't
         // require the dir to exist. Only surface as Fs error if sudo
@@ -768,6 +799,50 @@ impl Executor for MacosExecutor {
             }
         }
     }
+
+    fn read_kernel_pf_rules(&self, name: &str) -> Result<String, FirewallError> {
+        let output = Command::new("sudo")
+            .args(["-n", "pfctl", "-a", &format!("tenant-{name}"), "-sr"])
+            .output()
+            .map_err(FirewallError::Spawn)?;
+        if !output.status.success() {
+            return Err(FirewallError::NonZero {
+                code: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn read_pam_sudo(&self) -> Result<String, HostFileError> {
+        // `/etc/pam.d/sudo` is mode 0644 — direct fs read, no sudo.
+        // The `Fs` variant carries the path so the operator-facing
+        // frame names what failed.
+        fs::read_to_string("/etc/pam.d/sudo").map_err(|e| HostFileError::Fs {
+            path: "/etc/pam.d/sudo".to_string(),
+            message: e.to_string(),
+        })
+    }
+
+    fn read_pf_status(&self) -> Result<String, FirewallError> {
+        let output = Command::new("sudo")
+            .args(["-n", "pfctl", "-si"])
+            .output()
+            .map_err(FirewallError::Spawn)?;
+        if !output.status.success() {
+            return Err(FirewallError::NonZero {
+                code: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        // `pfctl -si` writes to BOTH stdout and stderr — the
+        // "Status: Enabled" line lands on stderr in practice. Combine
+        // both into one blob for the parser; tolerating the empty
+        // case if the user's host ever emits to a single stream.
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        Ok(combined)
+    }
 }
 
 /// Read `path` via `sudo -n cat <path>`. Used for privileged-read
@@ -775,13 +850,13 @@ impl Executor for MacosExecutor {
 /// `write_privileged` pattern in reverse: confine sudo invocation
 /// to one helper so the substrate code that calls it stays
 /// readable.
-fn read_privileged_text(path: &str) -> Result<String, EnvPolicyError> {
+fn read_privileged_text(path: &str) -> Result<String, HostFileError> {
     let output = Command::new("sudo")
         .args(["-n", "cat", path])
         .output()
-        .map_err(EnvPolicyError::Spawn)?;
+        .map_err(HostFileError::Spawn)?;
     if !output.status.success() {
-        return Err(EnvPolicyError::NonZero {
+        return Err(HostFileError::NonZero {
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
@@ -1018,8 +1093,34 @@ impl Executor for DryRunExecutor {
     /// real env policy could go either way; for a "would-do"
     /// preview, we lean against producing an actionable warning the
     /// operator might then chase down outside of a real run.
-    fn read_env_policy(&self) -> Result<String, EnvPolicyError> {
+    fn read_env_policy(&self) -> Result<String, HostFileError> {
         Ok("Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string())
+    }
+
+    /// Dry-run returns a "no-drift" placeholder so the would-do
+    /// preview doesn't fire spurious `PfRuleDrift` findings. Same
+    /// posture as `read_env_policy`: the plan is about what tenant
+    /// WOULD do, not about flagging unrelated host state.
+    fn read_kernel_pf_rules(&self, _name: &str) -> Result<String, FirewallError> {
+        Ok(
+            "block return inet from any to any\npass inet from 192.0.2.1 to <allowed> keep state\n"
+                .to_string(),
+        )
+    }
+
+    /// Dry-run returns a "Touch-ID-present" placeholder so the
+    /// would-do preview doesn't fire a spurious `TouchIdMissing`
+    /// finding. Real pam.d/sudo may differ; we avoid actionable
+    /// warnings in the would-do preview.
+    fn read_pam_sudo(&self) -> Result<String, HostFileError> {
+        Ok("auth       sufficient     pam_tid.so\n".to_string())
+    }
+
+    /// Dry-run returns a "pf enabled" placeholder so the would-do
+    /// preview doesn't fire a spurious `PfDisabled` finding. Same
+    /// posture as the other read_* carve-outs.
+    fn read_pf_status(&self) -> Result<String, FirewallError> {
+        Ok("Status: Enabled for 0 days 00:00:00\n".to_string())
     }
 }
 
@@ -1123,7 +1224,42 @@ pub struct StubExecutor {
     env_policy_content: RefCell<String>,
 
     /// One-shot env-policy read failure. Mirrors `probe_failure`.
-    env_policy_failure: RefCell<Option<EnvPolicyError>>,
+    env_policy_failure: RefCell<Option<HostFileError>>,
+
+    /// Per-tenant in-memory simulation of the kernel's pf rules for
+    /// the `tenant-<name>` anchor. Lookup keyed by tenant name; a
+    /// missing entry falls back to a "happy" default rules string
+    /// (both `pass` + `block` present) so doctor tests that don't
+    /// care about the PF-rule path don't see spurious `PfRuleDrift`
+    /// findings. SC2 tests override with `with_kernel_pf_rules` to
+    /// exercise drift cases.
+    kernel_pf_rules: RefCell<HashMap<String, String>>,
+
+    /// One-shot kernel-pf-rules read failure. Mirrors `probe_failure`
+    /// / `env_policy_failure`. Used to pin substrate-failure exit-74
+    /// behavior for the new firewall-read carve-out.
+    kernel_pf_rules_failure: RefCell<Option<FirewallError>>,
+
+    /// In-memory simulation of `/etc/pam.d/sudo`. Default is a
+    /// "Touch-ID-active" placeholder (see `StubExecutor::new`) so
+    /// doctor tests that don't care about the PAM path don't see
+    /// spurious `TouchIdMissing` findings. SC3 tests override with
+    /// `with_pam_sudo_content` to exercise the absent / commented
+    /// cases.
+    pam_sudo_content: RefCell<String>,
+
+    /// One-shot pam.d/sudo read failure. Mirrors `env_policy_failure`.
+    pam_sudo_failure: RefCell<Option<HostFileError>>,
+
+    /// In-memory simulation of `pfctl -si` output. Default is
+    /// "Status: Enabled" so doctor tests that don't care about
+    /// pf-enabled don't see spurious `PfDisabled` findings. SC4
+    /// tests override with `with_pf_status_content`.
+    pf_status_content: RefCell<String>,
+
+    /// One-shot pf-status read failure. Mirrors
+    /// `kernel_pf_rules_failure`.
+    pf_status_failure: RefCell<Option<FirewallError>>,
 }
 
 impl StubExecutor {
@@ -1135,6 +1271,16 @@ impl StubExecutor {
         // `with_env_policy_content` to exercise the leak case.
         *s.env_policy_content.borrow_mut() =
             "Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string();
+        // Default pam.d/sudo to "Touch ID active" so doctor tests
+        // that don't care about the Touch-ID-for-sudo path don't see
+        // a spurious TouchIdMissing finding. Cycle 7 SC3 tests
+        // override with `with_pam_sudo_content`.
+        *s.pam_sudo_content.borrow_mut() = "auth       sufficient     pam_tid.so\n".to_string();
+        // Default pf status to "Enabled" so doctor tests that don't
+        // care about the pf-enabled path don't see a spurious
+        // PfDisabled finding. Cycle 7 SC4 tests override with
+        // `with_pf_status_content`.
+        *s.pf_status_content.borrow_mut() = "Status: Enabled for 0 days 00:00:00\n".to_string();
         s
     }
 
@@ -1289,8 +1435,58 @@ impl StubExecutor {
 
     /// Configure the next `read_env_policy` call to fail with `err`.
     /// One-shot — cleared after firing.
-    pub fn fail_next_env_policy(self, err: EnvPolicyError) -> Self {
+    pub fn fail_next_env_policy(self, err: HostFileError) -> Self {
         *self.env_policy_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    /// Pre-load the kernel pf rules for the `tenant-<name>` anchor.
+    /// `read_kernel_pf_rules(name)` returns this text. Used by SC2
+    /// PF-rule-drift tests to inject "kernel anchor is empty" or
+    /// "kernel anchor is missing a pass rule" cases.
+    pub fn with_kernel_pf_rules(self, name: &str, content: &str) -> Self {
+        self.kernel_pf_rules
+            .borrow_mut()
+            .insert(name.to_string(), content.to_string());
+        self
+    }
+
+    /// Configure the next `read_kernel_pf_rules` call to fail with
+    /// `err`. One-shot — cleared after firing. Pins
+    /// substrate-failure exit-74 behavior for the firewall-read
+    /// carve-out.
+    pub fn fail_next_kernel_pf_rules(self, err: FirewallError) -> Self {
+        *self.kernel_pf_rules_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    /// Pre-load `/etc/pam.d/sudo` content for `read_pam_sudo`. Used
+    /// by SC3's Touch-ID-for-sudo tests to model "operator's pam.d
+    /// has it / doesn't have it / has it commented out".
+    pub fn with_pam_sudo_content(self, content: &str) -> Self {
+        *self.pam_sudo_content.borrow_mut() = content.to_string();
+        self
+    }
+
+    /// Configure the next `read_pam_sudo` call to fail with `err`.
+    /// One-shot — cleared after firing.
+    pub fn fail_next_pam_sudo(self, err: HostFileError) -> Self {
+        *self.pam_sudo_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    /// Pre-load the `pfctl -si` output for `read_pf_status`. Used
+    /// by SC4 tests to model "pf is disabled" vs "pf is enabled"
+    /// without poking the host's actual pf state.
+    pub fn with_pf_status_content(self, content: &str) -> Self {
+        *self.pf_status_content.borrow_mut() = content.to_string();
+        self
+    }
+
+    /// Configure the next `read_pf_status` call to fail with `err`.
+    /// One-shot — cleared after firing.
+    pub fn fail_next_pf_status(self, err: FirewallError) -> Self {
+        *self.pf_status_failure.borrow_mut() = Some(err);
         self
     }
 }
@@ -1403,10 +1599,40 @@ impl Executor for StubExecutor {
         Ok(outcome)
     }
 
-    fn read_env_policy(&self) -> Result<String, EnvPolicyError> {
+    fn read_env_policy(&self) -> Result<String, HostFileError> {
         if let Some(err) = self.env_policy_failure.borrow_mut().take() {
             return Err(err);
         }
         Ok(self.env_policy_content.borrow().clone())
+    }
+
+    fn read_kernel_pf_rules(&self, name: &str) -> Result<String, FirewallError> {
+        if let Some(err) = self.kernel_pf_rules_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        match self.kernel_pf_rules.borrow().get(name) {
+            Some(content) => Ok(content.clone()),
+            // Default to a "happy" rules string (both `pass` + `block`
+            // present) so tests that don't care about PF-drift don't
+            // see spurious findings. Tests that exercise drift inject
+            // via `with_kernel_pf_rules`.
+            None => Ok("block return inet from any to any\n\
+                        pass inet from 192.0.2.1 to <allowed> keep state\n"
+                .to_string()),
+        }
+    }
+
+    fn read_pam_sudo(&self) -> Result<String, HostFileError> {
+        if let Some(err) = self.pam_sudo_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self.pam_sudo_content.borrow().clone())
+    }
+
+    fn read_pf_status(&self) -> Result<String, FirewallError> {
+        if let Some(err) = self.pf_status_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self.pf_status_content.borrow().clone())
     }
 }

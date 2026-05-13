@@ -422,13 +422,22 @@ impl<'a> Reporter<'a> {
     /// Post-walk summary. With findings: silent (the finding lines did
     /// the talking). Without findings: a single em-dash-suffixed line
     /// confirming the audit ran and produced nothing — analogue of
-    /// `destroy_absent`'s "nothing to do" convergent shape.
+    /// `destroy_absent`'s "nothing to do" convergent shape. Scoped
+    /// to per-tenant findings (filesystem-exposure + pf rule drift) —
+    /// host-wide findings (env-leak, Touch-ID, pf-disabled) emit
+    /// upstream of this summary and are NOT counted here; the
+    /// wording is explicit so the operator doesn't read "no findings"
+    /// as "doctor said everything is clean" when host-wide warnings
+    /// are visible above.
     pub fn doctor_done_summary(&mut self, name: &str, finding_count: usize) {
         if self.dry_run {
             return;
         }
         if finding_count == 0 {
-            let _ = writeln!(self.stdout, "doctor: tenant '{name}' \u{2014} no findings.");
+            let _ = writeln!(
+                self.stdout,
+                "doctor: tenant '{name}' \u{2014} no per-tenant findings."
+            );
         }
     }
 
@@ -445,14 +454,27 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(self.stderr, "tenant: failed to probe doctor: {err}");
     }
 
-    /// Env-policy-read failure for `doctor`. The substrate could not
-    /// read `/etc/sudoers` (or a drop-in) to evaluate the
-    /// env-propagation policy. Most likely cause: the operator's
-    /// sudo session isn't cached; recovery is `sudo -v` followed by
-    /// rerunning doctor. Distinct from `doctor_failed` so the operator
-    /// sees the precise machinery that tripped.
-    pub fn doctor_env_policy_failed(&mut self, err: &crate::executor::EnvPolicyError) {
-        let _ = writeln!(self.stderr, "tenant: failed to read env policy: {err}");
+    /// Host-config-file read failure for `doctor`. The substrate could
+    /// not read a host config file (`/etc/sudoers` + drop-ins via
+    /// `read_env_policy`; `/etc/pam.d/sudo` via `read_pam_sudo`).
+    /// Most likely cause for sudoers: the operator's sudo session
+    /// isn't cached; recovery is `sudo -v` followed by rerunning
+    /// doctor. The error's `Display` carries the path / process
+    /// detail; this frame adds the verb-level context. Distinct from
+    /// `doctor_failed` (filesystem-probe machinery) so the operator
+    /// sees which substrate tripped.
+    pub fn doctor_host_file_failed(&mut self, err: &crate::executor::HostFileError) {
+        let _ = writeln!(self.stderr, "tenant: failed to read host config: {err}");
+    }
+
+    /// Firewall-read failure for `doctor`. The substrate could not
+    /// read pf state via `pfctl` (cycle 7 SC2's `read_kernel_pf_rules`;
+    /// SC4's `read_pf_status`). Most likely cause: sudo session isn't
+    /// cached (`sudo -v` recovers). Distinct from
+    /// `doctor_host_file_failed` (config-file substrate) so the
+    /// operator sees which machinery tripped.
+    pub fn doctor_firewall_failed(&mut self, err: &FirewallError) {
+        let _ = writeln!(self.stderr, "tenant: failed to read pf state: {err}");
     }
 
     // ============================================================
