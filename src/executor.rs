@@ -47,21 +47,25 @@ pub enum AccessMode {
 }
 
 /// Kind of filesystem entry at a tenant-side path, as the tenant sees
-/// it. `Absent` means no entry exists; `Symlink` means an existing
-/// symlink (which the share reapply can safely replace via `ln -sfn`);
-/// `Other` means a real file or directory occupies the path. Q12 lock:
-/// `Other` triggers `ShareError::TenantPathOccupied` so the operator
-/// chooses between editing the profile or removing the conflict
-/// manually — substrate never clobbers real operator data.
+/// it. `Absent` means no entry exists; `Symlink(target)` means an
+/// existing symlink (which the share reapply can safely replace via
+/// `ln -sfn`) carrying its resolved target so doctor can compare
+/// against the declared `host_path`; `Other` means a real file or
+/// directory occupies the path. Q12 lock: `Other` triggers
+/// `ShareError::TenantPathOccupied` so the operator chooses between
+/// editing the profile or removing the conflict manually — substrate
+/// never clobbers real operator data.
 ///
-/// Substrate composition: two `sudo -n -u <tenant> /bin/test`
-/// probes (`-L` for symlink, `-e` for existence) collapse into one of
-/// the three kinds. Substrate-machinery failures (sudo prompt cache
-/// expired, fork failed) surface as `ProbeError`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Substrate composition: a `sudo -n -u <tenant> /bin/test -L`
+/// probe (symlink check) then, on hit, a `sudo -n -u <tenant>
+/// /bin/readlink <path>` to capture the target; on miss, a `/bin/test
+/// -e` probe distinguishes `Absent` from `Other`. Substrate-machinery
+/// failures (sudo prompt cache expired, fork failed) surface as
+/// `ProbeError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathKind {
     Absent,
-    Symlink,
+    Symlink(std::path::PathBuf),
     Other,
 }
 
@@ -604,6 +608,21 @@ pub trait Executor {
     /// independently (operator hand-edit on the file, or a `pfctl
     /// -f` race on the kernel).
     fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError>;
+
+    /// Read the host-side ACL state on `path`. Substrate is `ls -lde
+    /// <path>` from the operator process (no sudo — operator owns or
+    /// has list-traverse on host_path; cycle-11 Q2 lock). Returns the
+    /// raw output as a single string for `doctor::has_group_acl_entry`
+    /// to grep. Reuses `ProbeError` because the substrate posture
+    /// mirrors `probe_access_as_tenant` (machinery-failure cases are
+    /// errors; "no matching entry" is a non-error outcome the parser
+    /// turns into a no-finding). Carve-out: content return, not unit.
+    ///
+    /// Cycle 11's `Finding::AclDrift` consumes this: doctor walks the
+    /// profile's `[[shares]]` array, calls `read_host_acl(host_path)`
+    /// for each, and emits AclDrift when the expected `<tenant>-tenant-share`
+    /// group ACL entry is absent.
+    fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError>;
 }
 
 /// Top-level ADT wrapper for "any op, regardless of domain." Used by the
@@ -1058,17 +1077,25 @@ impl Executor for MacosExecutor {
     }
 
     fn tenant_path_kind(&self, name: &str, path: &std::path::Path) -> Result<PathKind, ProbeError> {
-        // Two probes:
+        // Probes:
         //   `sudo -n -u <name> /bin/test -L <path>` → exit 0 = symlink
-        //   `sudo -n -u <name> /bin/test -e <path>` → exit 0 = exists
-        // Combine into PathKind:
-        //   -L 0           → Symlink
-        //   -L 1, -e 0     → Other
-        //   -L 1, -e 1     → Absent
+        //   On symlink-hit: `sudo -n -u <name> /usr/bin/readlink <path>`
+        //     captures the target string. readlink itself does not
+        //     resolve intermediate symlinks; we record what's literally
+        //     stored in the link entry. Doctor's SymlinkDrift comparator
+        //     is string-exact (cycle-11 Q3 lock).
+        //   On symlink-miss: `sudo -n -u <name> /bin/test -e <path>`
+        //     distinguishes Other vs Absent.
         // sudo-machinery failures (auth cache miss, fork failed) surface
-        // as `ProbeError`. Substring-match on stderr distinguishes
-        // machinery failure from "kernel says no" (same pattern as
-        // `probe_access_as_tenant`).
+        // as `ProbeError`. Same NonZero pattern as
+        // `probe_access_as_tenant`.
+        //
+        // Note on absolute paths: cycle-10's smoke pinned `/bin/test`
+        // (not `/usr/bin/test`); cycle-11's smoke pinned the inverse
+        // for readlink — Darwin 25.x ships readlink at `/usr/bin/`,
+        // not `/bin/`. `ln` is at `/bin/ln` (per cycle 10). No single
+        // bin-directory is canonical on macOS; the right answer is
+        // per-utility.
         let path_str = path.to_string_lossy().into_owned();
         let symlink_out = Command::new("sudo")
             .args(["-n", "-u", name, "/bin/test", "-L", &path_str])
@@ -1076,7 +1103,30 @@ impl Executor for MacosExecutor {
             .map_err(ProbeError::Spawn)?;
         if let Some(code) = symlink_out.status.code() {
             if code == 0 {
-                return Ok(PathKind::Symlink);
+                let readlink_out = Command::new("sudo")
+                    .args(["-n", "-u", name, "/usr/bin/readlink", &path_str])
+                    .output()
+                    .map_err(ProbeError::Spawn)?;
+                match readlink_out.status.code() {
+                    Some(0) => {
+                        let target = String::from_utf8_lossy(&readlink_out.stdout)
+                            .trim_end_matches('\n')
+                            .to_string();
+                        return Ok(PathKind::Symlink(std::path::PathBuf::from(target)));
+                    }
+                    Some(code) => {
+                        return Err(ProbeError::NonZero {
+                            code,
+                            stderr: String::from_utf8_lossy(&readlink_out.stderr).into_owned(),
+                        });
+                    }
+                    None => {
+                        return Err(ProbeError::NonZero {
+                            code: -1,
+                            stderr: String::from_utf8_lossy(&readlink_out.stderr).into_owned(),
+                        });
+                    }
+                }
             }
             if code != 1 {
                 // Sudo-auth failure surfaces with codes other than 0/1.
@@ -1107,6 +1157,28 @@ impl Executor for MacosExecutor {
                 stderr: String::from_utf8_lossy(&exists_out.stderr).into_owned(),
             }),
         }
+    }
+
+    fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
+        // Operator-process `ls -lde <path>` (cycle-11 Q2 lock: host-side
+        // ACL is host state, read from the operator process — no sudo,
+        // no run-as-tenant). `ls`'s exit code is 0 on success, non-zero
+        // when the path is unreadable (which IS a substrate failure for
+        // doctor's purposes — operator can't audit a path they can't
+        // list). Concatenate stdout+stderr so both `total N + entries`
+        // lines and any error blurb feed the parser uniformly.
+        let path_str = path.to_string_lossy().into_owned();
+        let output = Command::new("ls")
+            .args(["-lde", &path_str])
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        if !output.status.success() {
+            return Err(ProbeError::NonZero {
+                code: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
@@ -1510,6 +1582,16 @@ impl Executor for DryRunExecutor {
     ) -> Result<PathKind, ProbeError> {
         Ok(PathKind::Absent)
     }
+
+    /// Dry-run returns an empty listing. Unreachable under production
+    /// dry-run because `read_profile` returns `default_profile_toml()`
+    /// (no `[[shares]]`), so doctor's per-share-drift loop skips before
+    /// reaching this method. Defensive return preserves the
+    /// "no actionable warnings in the would-do preview" posture if a
+    /// future code path adds a default share.
+    fn read_host_acl(&self, _path: &std::path::Path) -> Result<String, ProbeError> {
+        Ok(String::new())
+    }
 }
 
 /// Test substitute. Records every op invocation (for behavioral assertions)
@@ -1687,6 +1769,18 @@ pub struct StubExecutor {
 
     /// One-shot `tenant_path_kind` failure. Mirrors `probe_failure`.
     tenant_path_kind_failure: RefCell<Option<ProbeError>>,
+
+    /// Per-path override for `read_host_acl`. First match wins;
+    /// unmatched lookups default to a synthesized listing that
+    /// satisfies `doctor::has_group_acl_entry` for every plausibly-named
+    /// tenant group — so tests that don't exercise AclDrift don't see
+    /// spurious findings. Tests that DO exercise AclDrift load a
+    /// listing without the expected group via `with_host_acl`.
+    host_acl_state: RefCell<HashMap<PathBuf, String>>,
+
+    /// Per-path one-shot failure injection for `read_host_acl`. First
+    /// match wins; cleared after firing. Mirrors `tenant_path_kind_failure`.
+    host_acl_failures: RefCell<HashMap<PathBuf, ProbeError>>,
 }
 
 impl StubExecutor {
@@ -1976,6 +2070,26 @@ impl StubExecutor {
         *self.tenant_path_kind_failure.borrow_mut() = Some(err);
         self
     }
+
+    /// Pre-load the `ls -lde` listing returned for `path`. Used by
+    /// cycle-11 doctor tests to model "host_path is missing the
+    /// `<tenant>-tenant-share` ACL entry" (triggers `Finding::AclDrift`)
+    /// or "host_path carries an unrelated group's entry" cases.
+    pub fn with_host_acl(self, path: &std::path::Path, listing: &str) -> Self {
+        self.host_acl_state
+            .borrow_mut()
+            .insert(path.to_path_buf(), listing.to_string());
+        self
+    }
+
+    /// Configure the next `read_host_acl(path)` call to fail with `err`.
+    /// One-shot — cleared after firing.
+    pub fn fail_next_host_acl(self, path: &std::path::Path, err: ProbeError) -> Self {
+        self.host_acl_failures
+            .borrow_mut()
+            .insert(path.to_path_buf(), err);
+        self
+    }
 }
 
 impl Executor for StubExecutor {
@@ -2170,8 +2284,30 @@ impl Executor for StubExecutor {
             .tenant_path_kinds
             .borrow()
             .get(&(name.to_string(), path.to_path_buf()))
-            .copied()
+            .cloned()
             .unwrap_or(PathKind::Absent);
         Ok(kind)
+    }
+
+    fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
+        if let Some(err) = self.host_acl_failures.borrow_mut().remove(path) {
+            return Err(err);
+        }
+        if let Some(listing) = self.host_acl_state.borrow().get(path) {
+            return Ok(listing.clone());
+        }
+        // Default listing: emit one synthetic ACL entry per known
+        // tenant (via profile_state's keys, which the stub_reader keeps
+        // aligned with the test's tenant set). Tests that don't
+        // exercise AclDrift see the matching entry for every tenant
+        // they audit; tests that DO exercise drift override via
+        // `with_host_acl(path, listing-without-entry)`.
+        let mut listing = String::new();
+        for name in self.profile_state.borrow().keys() {
+            listing.push_str(&format!(
+                " 0: group:{name}-tenant-share allow list,add_file,search\n"
+            ));
+        }
+        Ok(listing)
     }
 }

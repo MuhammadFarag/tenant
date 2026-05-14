@@ -1269,3 +1269,530 @@ fn doctor_help_text_mentions_sudo_session_and_admin_requirement() {
         "doctor --help should mention admin-group requirement; stdout={stdout:?}"
     );
 }
+
+// ============================================================
+// Cycle 11 SC3 — AclDrift on declared shares
+// ============================================================
+//
+// `Executor::read_host_acl(path)` reads `ls -lde <path>` and feeds
+// `doctor::has_group_acl_entry` to detect missing
+// `<tenant>-tenant-share` group entries on each declared share's
+// host_path. Warning-tier; recovery is `tenant reload <name>`.
+// Bounded scope: set of paths audited is exactly the profile's
+// `[[shares]]` array; no filesystem walking for orphan ACLs.
+
+#[test]
+fn doctor_share_acl_present_no_finding() {
+    // Default-stub `read_host_acl` returns a listing carrying the
+    // expected group's entry; symlink_kind is configured to point at
+    // the declared host_path. Happy path: zero drift findings; clean
+    // per-tenant summary.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("share ACL drift"),
+        "no AclDrift expected when ACL is present; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("share symlink drift"),
+        "no SymlinkDrift expected when symlink matches; stdout={stdout:?}"
+    );
+    assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
+}
+
+#[test]
+fn doctor_share_acl_missing_emits_warning() {
+    // Operator manually `chmod -a`'d the group ACL from the share's
+    // host_path. Listing now lacks the expected entry → one AclDrift
+    // Warning naming the host_path, group, and recovery command.
+    // SymlinkDrift is silenced by pre-loading the symlink kind so the
+    // test isolates the AclDrift signal.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_host_acl(
+            std::path::Path::new("/Users/Shared/src"),
+            "drwxr-xr-x 5 op staff 160 May  1 12:34 /Users/Shared/src\n",
+        )
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' share ACL drift"),
+        "expected AclDrift warning; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("share symlink drift"),
+        "SymlinkDrift should NOT fire when symlink is correct; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("dev-tenant-share"),
+        "AclDrift should name the expected group; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("/Users/Shared/src"),
+        "AclDrift should name the drifted host_path; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant reload dev"),
+        "AclDrift should name the recovery command; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_acl_missing_only_one_of_two_shares() {
+    // Two declared shares; only one is drifted. Exactly one AclDrift
+    // line; names the right path. SymlinkDrift silenced by pre-loading
+    // both symlinks as correct so the test isolates AclDrift signal.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(
+        &[],
+        &[],
+        &[
+            ("/Users/Shared/src", "rw", "$HOME/src"),
+            ("/Users/Shared/data", "ro", "$HOME/data"),
+        ],
+    );
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_host_acl(
+            std::path::Path::new("/Users/Shared/src"),
+            "drwxr-xr-x 5 op staff 160 May  1 12:34 /Users/Shared/src\n",
+        )
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+        )
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/data"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/data")),
+        );
+    // /Users/Shared/data falls through to the stub's default listing,
+    // which carries the dev-tenant-share entry → no drift.
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let drift_count = stdout.matches("share ACL drift").count();
+    assert_eq!(
+        drift_count, 1,
+        "expected exactly one AclDrift line; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("missing on /Users/Shared/src"),
+        "drift should name /Users/Shared/src; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("missing on /Users/Shared/data"),
+        "drift should NOT fire for /Users/Shared/data; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_acl_drift_with_strict_exits_1() {
+    // AclDrift is Warning-tier; --strict + warning-only → exit 1.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_host_acl(
+            std::path::Path::new("/Users/Shared/src"),
+            "drwxr-xr-x 5 op staff 160 May  1 12:34 /Users/Shared/src\n",
+        )
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+        );
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(
+        code, 1,
+        "expected exit 1 on warning+strict; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_share_drift_dry_run_emits_no_finding() {
+    // `--dry-run` swaps in DryRunExecutor whose `read_profile` returns
+    // `default_profile_toml()` (no `[[shares]]`); the share-drift
+    // loop never iterates regardless of the underlying stub's profile
+    // state. Intent line only; no AclDrift in stdout.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_host_acl(
+            std::path::Path::new("/Users/Shared/src"),
+            "drwxr-xr-x 5 op staff 160 May  1 12:34 /Users/Shared/src\n",
+        );
+    let (code, stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--dry-run"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("share ACL drift"),
+        "dry-run must not fire AclDrift; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.starts_with("Would run doctor on tenant 'dev'"),
+        "dry-run should emit intent line; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_drift_skips_when_profile_unreadable() {
+    // Cycle-8 Q4 parallel: profile-read failure SKIPS the share-drift
+    // check silently. No AclDrift; clean summary; exit 0. A future
+    // ProfileMissing finding would surface the profile state separately.
+    let stub_reader = make_tenant_stub_reader("dev");
+    // No `with_existing_profile` → read_profile returns an error.
+    let stub_exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("share ACL drift"),
+        "profile-missing should skip share-drift checks; stdout={stdout:?}"
+    );
+    assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
+}
+
+#[test]
+fn doctor_share_drift_substrate_failure_exits_74() {
+    // `ProbeError` on `read_host_acl` propagates as `DoctorError::Probe`;
+    // dispatcher routes through `doctor_failed` frame. Exit 74. Symlink
+    // kind isn't consulted because read_host_acl runs first per share
+    // entry and the failure aborts the whole walk.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .fail_next_host_acl(
+            std::path::Path::new("/Users/Shared/src"),
+            tenant::executor::ProbeError::NonZero {
+                code: 1,
+                stderr: "ls: /Users/Shared/src: Permission denied".to_string(),
+            },
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(
+        !stdout.contains("share ACL drift"),
+        "substrate failure must abort before the finding fires; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("doctor probe failed") || stderr.contains("probe exited"),
+        "stderr should frame the probe failure; got: {stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_share_drift_all_tenants_scoped_per_tenant() {
+    // Two tenants; only `dev`'s share is drifted. Bare `tenant doctor`
+    // must scope the AclDrift to dev and leave staging clean. Symlinks
+    // pre-loaded as correct so the test isolates AclDrift signal.
+    let stub_reader = make_two_tenant_stub_reader();
+    let profile_dev = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let profile_staging =
+        profile_with_shares(&[], &[], &[("/Users/Shared/data", "ro", "$HOME/data")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile_dev)
+        .with_existing_profile("staging", &profile_staging)
+        // Only dev's path is drifted; staging's falls through to default
+        // listing which contains the staging-tenant-share entry.
+        .with_host_acl(
+            std::path::Path::new("/Users/Shared/src"),
+            "drwxr-xr-x 5 op staff 160 May  1 12:34 /Users/Shared/src\n",
+        )
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+        )
+        .with_tenant_path_kind(
+            "staging",
+            std::path::Path::new("/Users/staging/data"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/data")),
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("tenant 'dev' share ACL drift"),
+        "dev's drift should fire; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("tenant 'staging' share ACL drift"),
+        "staging should NOT show drift; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_acl_drift_verbose_emits_guidance_block() {
+    // Cycle-9 contract: every Finding variant with a `guidance()` body
+    // emits the 4-section block under `-v`. AclDrift's body names the
+    // recovery command in the Recommended fix section. Symlink kind
+    // pre-loaded as correct so only AclDrift's guidance fires.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_host_acl(
+            std::path::Path::new("/Users/Shared/src"),
+            "drwxr-xr-x 5 op staff 160 May  1 12:34 /Users/Shared/src\n",
+        )
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("Why this matters"),
+        "verbose should emit guidance block header; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("Recommended fix"),
+        "verbose should emit Recommended-fix section; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant reload dev"),
+        "verbose guidance should name recovery; stdout={stdout:?}"
+    );
+}
+
+// ============================================================
+// Cycle 11 SC4 — SymlinkDrift on declared shares
+// ============================================================
+//
+// `Executor::tenant_path_kind(name, tenant_path)` returns one of
+// PathKind::{Absent, Symlink(target), Other}; doctor compares against
+// the declared host_path (Q3 lock: string-exact, no canonicalize) and
+// emits one of the three SymlinkActual cases.
+
+#[test]
+fn doctor_share_symlink_absent_emits_warning() {
+    // tenant_path doesn't exist (tenant `rm`'d the symlink, or it
+    // never was installed). PathKind::Absent → SymlinkDrift::Absent.
+    // ACL silenced via default stub listing carrying the entry.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Absent,
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' share symlink drift"),
+        "expected SymlinkDrift warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("/Users/dev/src is absent"),
+        "Absent case should name 'is absent'; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("expected symlink to /Users/Shared/src"),
+        "drift should name expected target; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant reload dev"),
+        "Absent case should name reload recovery; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_symlink_wrong_target_emits_warning() {
+    // tenant_path is a symlink but points at the wrong host path.
+    // PathKind::Symlink(actual) → SymlinkDrift::WrongTarget. Doctor's
+    // string-exact comparison treats /tmp/old ≠ /Users/Shared/src as
+    // drift even though both are reachable from disk.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/tmp/old")),
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' share symlink drift"),
+        "expected SymlinkDrift warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("/Users/dev/src points at /tmp/old"),
+        "WrongTarget case should name actual target; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("expected /Users/Shared/src"),
+        "WrongTarget case should name expected target; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant reload dev"),
+        "WrongTarget case should name reload recovery; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_symlink_not_symlink_emits_warning() {
+    // tenant_path is a real file or directory. PathKind::Other →
+    // SymlinkDrift::NotSymlink. Recovery requires manual cleanup
+    // before reload (cycle-10 Q12 TenantPathOccupied refusal).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Other,
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' share symlink drift"),
+        "expected SymlinkDrift warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("occupied by a real file or directory"),
+        "NotSymlink case should name 'occupied'; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("remove it manually, then run `tenant reload dev`"),
+        "NotSymlink case should name manual cleanup + reload recovery; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_symlink_matching_target_no_finding() {
+    // PathKind::Symlink(target) where target == declared host_path
+    // → no SymlinkDrift finding. The happy-path equality test on the
+    // cycle-11 Q3 string-exact comparator.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("share symlink drift"),
+        "no SymlinkDrift expected on matching target; stdout={stdout:?}"
+    );
+    assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
+}
+
+#[test]
+fn doctor_share_symlink_drift_with_strict_exits_1() {
+    // SymlinkDrift is Warning-tier; --strict + warning-only → exit 1.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Absent,
+        );
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(
+        code, 1,
+        "expected exit 1 on warning+strict; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_share_symlink_drift_dry_run_emits_no_finding() {
+    // DryRunExecutor's read_profile returns default_profile_toml()
+    // (no `[[shares]]`); share-drift loop never iterates. No
+    // SymlinkDrift output; intent line only.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Absent,
+        );
+    let (code, stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--dry-run"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("share symlink drift"),
+        "dry-run must not fire SymlinkDrift; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_symlink_substrate_failure_exits_74() {
+    // ProbeError on tenant_path_kind propagates as DoctorError::Probe;
+    // dispatcher routes through doctor_failed frame. Exit 74. Tests
+    // the "tenant_path_kind half" of the cycle-11 Q5 fail-fast posture
+    // (the AclDrift half lives in doctor_share_drift_substrate_failure_exits_74).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .fail_next_tenant_path_kind(tenant::executor::ProbeError::NonZero {
+            code: 1,
+            stderr: "sudo: command not found".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(
+        !stdout.contains("share symlink drift"),
+        "substrate failure must abort before the finding fires; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_share_symlink_drift_verbose_emits_case_tailored_guidance() {
+    // Cycle-9 contract for SymlinkDrift: each SymlinkActual sub-case
+    // emits its own guidance body. Smoke-test the Absent case names
+    // `ln -sfn` in the recovery; the byte-form pins in tests/doctor.rs
+    // cover the full bodies.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .with_tenant_path_kind(
+            "dev",
+            std::path::Path::new("/Users/dev/src"),
+            tenant::executor::PathKind::Absent,
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("Why this matters"),
+        "verbose should emit guidance block header; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("/bin/ln -sfn /Users/Shared/src /Users/dev/src"),
+        "Absent guidance should name the ln -sfn substrate; stdout={stdout:?}"
+    );
+}

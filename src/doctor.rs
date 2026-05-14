@@ -136,6 +136,27 @@ pub enum Category {
 /// detail names what specifically diverged). Same deliberate
 /// two-level framing as `PfRuleDrift` ("rule" internally, "pf anchor"
 /// in Display).
+///
+/// `AclDrift` is the cycle 11 per-tenant finding: a declared
+/// `[[shares]]` entry's `host_path` is missing the
+/// `<tenant>-tenant-share` group's `allow` ACL entry. Warning-tier;
+/// recovery is `tenant reload <name>` (cycle 10's substrate is
+/// idempotent — Grant re-applies cleanly). The set of paths audited
+/// is bounded by the profile's declared shares (cycle 11 NOT-in-scope:
+/// orphan-ACL detection across the host filesystem).
+///
+/// `SymlinkDrift` is the cycle 11 per-tenant finding: a declared
+/// share's `tenant_path` doesn't match the declared `host_path` via
+/// symlink. Three sub-cases via `SymlinkActual`: `Absent` (no entry
+/// at tenant_path — tenant `rm`'d the symlink or never had one),
+/// `WrongTarget(actual)` (symlink exists but points elsewhere — operator
+/// changed the profile's host_path without re-running reload), and
+/// `NotSymlink` (tenant_path is a real file or directory — Q12 reload
+/// would refuse; doctor surfaces the conflict before the next reload
+/// attempt). Warning-tier; recovery is `tenant reload <name>` for the
+/// first two cases and manual cleanup + reload for `NotSymlink`.
+/// Q3 lock: target comparison is string-exact (no canonicalize) —
+/// profile names operator's declared intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
     FilesystemExposure {
@@ -156,6 +177,32 @@ pub enum Finding {
     AnchorBodyDrift {
         tenant: String,
     },
+    AclDrift {
+        tenant: String,
+        host_path: PathBuf,
+        group: String,
+    },
+    SymlinkDrift {
+        tenant: String,
+        tenant_path: PathBuf,
+        expected_target: PathBuf,
+        actual: SymlinkActual,
+    },
+}
+
+/// What's actually present at a declared share's `tenant_path`, when
+/// it doesn't match the declared `host_path` symlink. Case-tailored
+/// guidance per variant — Absent / WrongTarget have the same recovery
+/// (`tenant reload <name>` re-creates the link via `ln -sfn`);
+/// NotSymlink requires manual cleanup first (reload would refuse with
+/// `ShareError::TenantPathOccupied`, per cycle-10 Q12). Q4 lock:
+/// `NotSymlink` is a SymlinkDrift case, NOT a separate `Finding`
+/// variant — all three express "symlink isn't what was declared".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymlinkActual {
+    Absent,
+    WrongTarget(PathBuf),
+    NotSymlink,
 }
 
 impl Finding {
@@ -167,6 +214,8 @@ impl Finding {
             Finding::TouchIdMissing => Severity::Info,
             Finding::PfDisabled => Severity::Critical,
             Finding::AnchorBodyDrift { .. } => Severity::Warning,
+            Finding::AclDrift { .. } => Severity::Warning,
+            Finding::SymlinkDrift { .. } => Severity::Warning,
         }
     }
 
@@ -351,6 +400,143 @@ Side-effects to know about
     verified."
                     .to_string(),
             ),
+            Finding::AclDrift {
+                tenant,
+                host_path,
+                group,
+            } => {
+                let path = host_path.display();
+                Some(format!(
+                    "Why this matters
+  The host path {path} is declared as a share for tenant '{tenant}' in
+  the profile, but the `{group}` group's ACL entry is missing from the
+  path's `ls -lde` listing. The tenant currently cannot reach the share
+  via group membership \u{2014} any read or write attempt either fails or
+  falls back to whatever POSIX bits the path carries. The most common
+  causes are a manual `chmod -a` on the operator's side, or a `cp -R`
+  that clobbered the entry as a side-effect.
+
+Recommended fix
+  tenant reload {tenant}
+  Re-applies every declared share in the tenant's profile. macOS
+  `chmod +a` is natively idempotent (cycle-10 doctrine \u{2014} re-applying
+  an existing entry is a noop, not a duplicate), so this is safe to
+  run regardless of the path's current ACL state.
+
+Side-effects to know about
+  \u{2022} Every share in the profile is re-applied, not just this one.
+    If another share has an unrelated pending refusal (host_path
+    missing on disk, tenant_path occupied by a real file), reload
+    will abort on it before reaching this entry; address those first.
+  \u{2022} The PF anchor is also re-rendered at runtime tier as a side
+    effect of `tenant reload`. If install-tier widening was active
+    when the operator last ran `tenant mode {tenant} install`, the
+    narrow drops it; rerun `mode install` afterward if still needed.
+
+Alternative
+  chmod +a \"group:{group} allow read,write,execute,delete,append,file_inherit,directory_inherit\" {path}
+  Re-applies just this one entry. Use when `tenant reload` is blocked
+  by an unrelated refusal. The bit list shown is the cycle-10 `rw`
+  default; for read-only shares omit `write,delete,append`."
+                ))
+            }
+            Finding::SymlinkDrift {
+                tenant,
+                tenant_path,
+                expected_target,
+                actual,
+            } => {
+                let tpath = tenant_path.display();
+                let expected = expected_target.display();
+                Some(match actual {
+                    SymlinkActual::Absent => format!(
+                        "Why this matters
+  The tenant_path {tpath} is declared in tenant '{tenant}'s profile to
+  symlink {expected}, but no entry exists at that path \u{2014} the tenant
+  `rm`'d the symlink, or it was never installed. The tenant cannot
+  reach the declared share through this path until the link is
+  restored.
+
+Recommended fix
+  tenant reload {tenant}
+  Re-runs the cycle-10 share-reapply substrate, which calls `sudo -n
+  -u {tenant} /bin/ln -sfn {expected} {tpath}`. `ln -sfn` is
+  idempotent — replaces any existing entry at the same path with the
+  declared symlink.
+
+Side-effects to know about
+  \u{2022} Every share in the profile is re-applied, not just this one.
+    If another share has an unrelated pending refusal, reload aborts
+    on it before reaching this entry; address those first.
+  \u{2022} The PF anchor is re-rendered at runtime tier as a side effect.
+    If install-tier widening was active, the narrow drops it; rerun
+    `tenant mode {tenant} install` afterward if still needed.
+
+Alternative
+  sudo -n -u {tenant} /bin/ln -sfn {expected} {tpath}
+  Recreates just this one link. Use when `tenant reload` is blocked
+  by an unrelated refusal."
+                    ),
+                    SymlinkActual::WrongTarget(actual_target) => {
+                        let actual = actual_target.display();
+                        format!(
+                            "Why this matters
+  The tenant_path {tpath} is declared in tenant '{tenant}'s profile to
+  symlink {expected}, but the link currently points at {actual}. The
+  most common cause is an operator edit to the profile's host_path
+  without a follow-up `tenant reload`. The tenant is still reaching A
+  share through this path, just not the one the profile names.
+
+Recommended fix
+  tenant reload {tenant}
+  Re-runs the cycle-10 share-reapply substrate, which calls `sudo -n
+  -u {tenant} /bin/ln -sfn {expected} {tpath}`. `ln -sfn` replaces
+  the existing symlink in place; no manual `rm` needed.
+
+Side-effects to know about
+  \u{2022} The old target {actual} stays on the host filesystem \u{2014} reload
+    only updates the link, it doesn't touch what was previously linked.
+    Clean up manually if appropriate.
+  \u{2022} Every share in the profile is re-applied, not just this one.
+    If another share has an unrelated pending refusal, reload aborts
+    before reaching this entry; address those first.
+
+Alternative
+  sudo -n -u {tenant} /bin/ln -sfn {expected} {tpath}
+  Updates just this one link. Use when `tenant reload` is blocked by
+  an unrelated refusal."
+                        )
+                    }
+                    SymlinkActual::NotSymlink => format!(
+                        "Why this matters
+  The tenant_path {tpath} is declared in tenant '{tenant}'s profile to
+  symlink {expected}, but a real file or directory currently occupies
+  that path \u{2014} not a symlink. `tenant reload` will refuse with
+  `TenantPathOccupied` rather than clobber it (cycle-10 Q12 doctrine
+  \u{2014} substrate never overwrites real operator data). Until the
+  conflict is removed, the declared share isn't reachable through
+  this path.
+
+Recommended fix
+  sudo -n -u {tenant} rm -rf {tpath} && tenant reload {tenant}
+  Removes the conflict from the tenant's perspective, then re-runs
+  the share-reapply substrate to install the declared symlink.
+  Verify the conflict's contents BEFORE running `rm -rf` \u{2014} this
+  step is destructive.
+
+Side-effects to know about
+  \u{2022} `rm -rf` deletes whatever's at {tpath}. If that content matters,
+    copy it elsewhere first.
+  \u{2022} Reload re-applies every declared share, not just this one.
+
+Alternative
+  Edit the profile to point tenant_path elsewhere
+  If the current content at {tpath} should be preserved AND the share
+  is still needed, change tenant_path in the profile to a free path,
+  then run `tenant reload {tenant}`."
+                    ),
+                })
+            }
         }
     }
 }
@@ -404,6 +590,47 @@ impl fmt::Display for Finding {
                  on-disk body differs from profile-derived render; \
                  run `tenant mode {tenant} runtime` to re-render and reload"
             ),
+            Finding::AclDrift {
+                tenant,
+                host_path,
+                group,
+            } => write!(
+                f,
+                "warning: tenant '{tenant}' share ACL drift \u{2014} \
+                 group '{group}' missing on {}; \
+                 run `tenant reload {tenant}` to re-apply",
+                host_path.display(),
+            ),
+            Finding::SymlinkDrift {
+                tenant,
+                tenant_path,
+                expected_target,
+                actual,
+            } => {
+                let tpath = tenant_path.display();
+                let expected = expected_target.display();
+                match actual {
+                    SymlinkActual::Absent => write!(
+                        f,
+                        "warning: tenant '{tenant}' share symlink drift \u{2014} \
+                         {tpath} is absent (expected symlink to {expected}); \
+                         run `tenant reload {tenant}` to re-create"
+                    ),
+                    SymlinkActual::WrongTarget(actual_target) => write!(
+                        f,
+                        "warning: tenant '{tenant}' share symlink drift \u{2014} \
+                         {tpath} points at {} (expected {expected}); \
+                         run `tenant reload {tenant}` to re-link",
+                        actual_target.display(),
+                    ),
+                    SymlinkActual::NotSymlink => write!(
+                        f,
+                        "warning: tenant '{tenant}' share symlink drift \u{2014} \
+                         {tpath} is occupied by a real file or directory (expected symlink to {expected}); \
+                         remove it manually, then run `tenant reload {tenant}`"
+                    ),
+                }
+            }
         }
     }
 }
@@ -713,6 +940,41 @@ pub fn pf_rule_presence_check(rules: &str, tenant: &str) -> Vec<Finding> {
         });
     }
     out
+}
+
+/// Does the `ls -lde` listing carry an `allow` ACL entry for `group`?
+///
+/// Match shape: any line containing the literal substring
+/// `group:<group> allow`. Looser than substring-matching the full
+/// canonical entry string — `chmod +a "group:dev-tenant-share allow
+/// read,write,..."` writes bits in one form but macOS canonicalizes
+/// to another on storage (e.g. `read,write,execute,delete,append` →
+/// `list,add_file,search,delete,add_subdirectory`), so any bit-list
+/// comparison would false-negative. The presence of the group's
+/// `allow` entry is the structural invariant doctor cares about; the
+/// specific bits are the operator's choice via the profile's
+/// `mode = "ro"` / `"rw"` and the cycle-10 `AclMode` translation.
+///
+/// Word-boundary discipline: we delimit the group name with `:` on
+/// the left and ` allow` on the right so a prefix-collision case like
+/// listing carrying `group:dev` while doctor queries `group:dev-tenant-share`
+/// does NOT match (`group:dev allow` ≠ `group:dev-tenant-share allow`).
+///
+/// Commented lines (`#`-prefixed after trim) do not count, matching
+/// the convention of the env-policy + pam parsers. `ls -lde` doesn't
+/// actually emit comments — defensive parser shape only.
+pub fn has_group_acl_entry(listing: &str, group: &str) -> bool {
+    let needle = format!("group:{group} allow");
+    for raw_line in listing.lines() {
+        let line = raw_line.trim_start();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.contains(&needle) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Render a curated path for the verbose-mode "Curated sensitive paths

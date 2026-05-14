@@ -8,7 +8,9 @@
 
 use std::path::PathBuf;
 
-use tenant::doctor::{Category, Finding, Severity, anchor_body_matches, classify, curated_paths};
+use tenant::doctor::{
+    Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify, curated_paths,
+};
 use tenant::executor::{AccessMode, AccessOutcome};
 
 // ============================================================
@@ -560,4 +562,255 @@ fn severity_ordering_critical_max() {
         [Severity::Info, Severity::Warning].iter().max(),
         Some(&Severity::Warning)
     );
+}
+
+// ============================================================
+// Finding::AclDrift — Display + severity (cycle 11 SC3)
+// ============================================================
+
+#[test]
+fn finding_display_acl_drift() {
+    let f = Finding::AclDrift {
+        tenant: "dev".to_string(),
+        host_path: std::path::PathBuf::from("/Users/Shared/src"),
+        group: "dev-tenant-share".to_string(),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' share ACL drift \u{2014} group 'dev-tenant-share' missing on /Users/Shared/src; \
+         run `tenant reload dev` to re-apply"
+    );
+}
+
+#[test]
+fn finding_acl_drift_severity_is_warning() {
+    let f = Finding::AclDrift {
+        tenant: "dev".to_string(),
+        host_path: std::path::PathBuf::from("/Users/Shared/src"),
+        group: "dev-tenant-share".to_string(),
+    };
+    assert_eq!(f.severity(), Severity::Warning);
+}
+
+#[test]
+fn guidance_acl_drift_byte_form() {
+    let f = Finding::AclDrift {
+        tenant: "dev".to_string(),
+        host_path: std::path::PathBuf::from("/Users/Shared/src"),
+        group: "dev-tenant-share".to_string(),
+    };
+    let expected = "Why this matters
+  The host path /Users/Shared/src is declared as a share for tenant 'dev' in
+  the profile, but the `dev-tenant-share` group's ACL entry is missing from the
+  path's `ls -lde` listing. The tenant currently cannot reach the share
+  via group membership \u{2014} any read or write attempt either fails or
+  falls back to whatever POSIX bits the path carries. The most common
+  causes are a manual `chmod -a` on the operator's side, or a `cp -R`
+  that clobbered the entry as a side-effect.
+
+Recommended fix
+  tenant reload dev
+  Re-applies every declared share in the tenant's profile. macOS
+  `chmod +a` is natively idempotent (cycle-10 doctrine \u{2014} re-applying
+  an existing entry is a noop, not a duplicate), so this is safe to
+  run regardless of the path's current ACL state.
+
+Side-effects to know about
+  \u{2022} Every share in the profile is re-applied, not just this one.
+    If another share has an unrelated pending refusal (host_path
+    missing on disk, tenant_path occupied by a real file), reload
+    will abort on it before reaching this entry; address those first.
+  \u{2022} The PF anchor is also re-rendered at runtime tier as a side
+    effect of `tenant reload`. If install-tier widening was active
+    when the operator last ran `tenant mode dev install`, the
+    narrow drops it; rerun `mode install` afterward if still needed.
+
+Alternative
+  chmod +a \"group:dev-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/src
+  Re-applies just this one entry. Use when `tenant reload` is blocked
+  by an unrelated refusal. The bit list shown is the cycle-10 `rw`
+  default; for read-only shares omit `write,delete,append`.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+// ============================================================
+// Finding::SymlinkDrift — Display + severity + guidance (cycle 11 SC4)
+// ============================================================
+//
+// Three SymlinkActual sub-cases (Absent / WrongTarget / NotSymlink)
+// each get their own byte-form pin for Display + guidance.
+
+#[test]
+fn finding_display_symlink_drift_absent() {
+    let f = Finding::SymlinkDrift {
+        tenant: "dev".to_string(),
+        tenant_path: std::path::PathBuf::from("/Users/dev/src"),
+        expected_target: std::path::PathBuf::from("/Users/Shared/src"),
+        actual: SymlinkActual::Absent,
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' share symlink drift \u{2014} \
+         /Users/dev/src is absent (expected symlink to /Users/Shared/src); \
+         run `tenant reload dev` to re-create"
+    );
+}
+
+#[test]
+fn finding_display_symlink_drift_wrong_target() {
+    let f = Finding::SymlinkDrift {
+        tenant: "dev".to_string(),
+        tenant_path: std::path::PathBuf::from("/Users/dev/src"),
+        expected_target: std::path::PathBuf::from("/Users/Shared/src"),
+        actual: SymlinkActual::WrongTarget(std::path::PathBuf::from("/tmp/old")),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' share symlink drift \u{2014} \
+         /Users/dev/src points at /tmp/old (expected /Users/Shared/src); \
+         run `tenant reload dev` to re-link"
+    );
+}
+
+#[test]
+fn finding_display_symlink_drift_not_symlink() {
+    let f = Finding::SymlinkDrift {
+        tenant: "dev".to_string(),
+        tenant_path: std::path::PathBuf::from("/Users/dev/src"),
+        expected_target: std::path::PathBuf::from("/Users/Shared/src"),
+        actual: SymlinkActual::NotSymlink,
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' share symlink drift \u{2014} \
+         /Users/dev/src is occupied by a real file or directory (expected symlink to /Users/Shared/src); \
+         remove it manually, then run `tenant reload dev`"
+    );
+}
+
+#[test]
+fn finding_symlink_drift_severity_is_warning_all_sub_cases() {
+    for actual in [
+        SymlinkActual::Absent,
+        SymlinkActual::WrongTarget(std::path::PathBuf::from("/tmp")),
+        SymlinkActual::NotSymlink,
+    ] {
+        let f = Finding::SymlinkDrift {
+            tenant: "dev".to_string(),
+            tenant_path: std::path::PathBuf::from("/Users/dev/src"),
+            expected_target: std::path::PathBuf::from("/Users/Shared/src"),
+            actual,
+        };
+        assert_eq!(f.severity(), Severity::Warning);
+    }
+}
+
+#[test]
+fn guidance_symlink_drift_absent_byte_form() {
+    let f = Finding::SymlinkDrift {
+        tenant: "dev".to_string(),
+        tenant_path: std::path::PathBuf::from("/Users/dev/src"),
+        expected_target: std::path::PathBuf::from("/Users/Shared/src"),
+        actual: SymlinkActual::Absent,
+    };
+    let expected = "Why this matters
+  The tenant_path /Users/dev/src is declared in tenant 'dev's profile to
+  symlink /Users/Shared/src, but no entry exists at that path \u{2014} the tenant
+  `rm`'d the symlink, or it was never installed. The tenant cannot
+  reach the declared share through this path until the link is
+  restored.
+
+Recommended fix
+  tenant reload dev
+  Re-runs the cycle-10 share-reapply substrate, which calls `sudo -n
+  -u dev /bin/ln -sfn /Users/Shared/src /Users/dev/src`. `ln -sfn` is
+  idempotent — replaces any existing entry at the same path with the
+  declared symlink.
+
+Side-effects to know about
+  \u{2022} Every share in the profile is re-applied, not just this one.
+    If another share has an unrelated pending refusal, reload aborts
+    on it before reaching this entry; address those first.
+  \u{2022} The PF anchor is re-rendered at runtime tier as a side effect.
+    If install-tier widening was active, the narrow drops it; rerun
+    `tenant mode dev install` afterward if still needed.
+
+Alternative
+  sudo -n -u dev /bin/ln -sfn /Users/Shared/src /Users/dev/src
+  Recreates just this one link. Use when `tenant reload` is blocked
+  by an unrelated refusal.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+#[test]
+fn guidance_symlink_drift_wrong_target_byte_form() {
+    let f = Finding::SymlinkDrift {
+        tenant: "dev".to_string(),
+        tenant_path: std::path::PathBuf::from("/Users/dev/src"),
+        expected_target: std::path::PathBuf::from("/Users/Shared/src"),
+        actual: SymlinkActual::WrongTarget(std::path::PathBuf::from("/tmp/old")),
+    };
+    let expected = "Why this matters
+  The tenant_path /Users/dev/src is declared in tenant 'dev's profile to
+  symlink /Users/Shared/src, but the link currently points at /tmp/old. The
+  most common cause is an operator edit to the profile's host_path
+  without a follow-up `tenant reload`. The tenant is still reaching A
+  share through this path, just not the one the profile names.
+
+Recommended fix
+  tenant reload dev
+  Re-runs the cycle-10 share-reapply substrate, which calls `sudo -n
+  -u dev /bin/ln -sfn /Users/Shared/src /Users/dev/src`. `ln -sfn` replaces
+  the existing symlink in place; no manual `rm` needed.
+
+Side-effects to know about
+  \u{2022} The old target /tmp/old stays on the host filesystem \u{2014} reload
+    only updates the link, it doesn't touch what was previously linked.
+    Clean up manually if appropriate.
+  \u{2022} Every share in the profile is re-applied, not just this one.
+    If another share has an unrelated pending refusal, reload aborts
+    before reaching this entry; address those first.
+
+Alternative
+  sudo -n -u dev /bin/ln -sfn /Users/Shared/src /Users/dev/src
+  Updates just this one link. Use when `tenant reload` is blocked by
+  an unrelated refusal.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+#[test]
+fn guidance_symlink_drift_not_symlink_byte_form() {
+    let f = Finding::SymlinkDrift {
+        tenant: "dev".to_string(),
+        tenant_path: std::path::PathBuf::from("/Users/dev/src"),
+        expected_target: std::path::PathBuf::from("/Users/Shared/src"),
+        actual: SymlinkActual::NotSymlink,
+    };
+    let expected = "Why this matters
+  The tenant_path /Users/dev/src is declared in tenant 'dev's profile to
+  symlink /Users/Shared/src, but a real file or directory currently occupies
+  that path \u{2014} not a symlink. `tenant reload` will refuse with
+  `TenantPathOccupied` rather than clobber it (cycle-10 Q12 doctrine
+  \u{2014} substrate never overwrites real operator data). Until the
+  conflict is removed, the declared share isn't reachable through
+  this path.
+
+Recommended fix
+  sudo -n -u dev rm -rf /Users/dev/src && tenant reload dev
+  Removes the conflict from the tenant's perspective, then re-runs
+  the share-reapply substrate to install the declared symlink.
+  Verify the conflict's contents BEFORE running `rm -rf` \u{2014} this
+  step is destructive.
+
+Side-effects to know about
+  \u{2022} `rm -rf` deletes whatever's at /Users/dev/src. If that content matters,
+    copy it elsewhere first.
+  \u{2022} Reload re-applies every declared share, not just this one.
+
+Alternative
+  Edit the profile to point tenant_path elsewhere
+  If the current content at /Users/dev/src should be preserved AND the share
+  is still needed, change tenant_path in the profile to a free path,
+  then run `tenant reload dev`.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
 }

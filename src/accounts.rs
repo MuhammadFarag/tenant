@@ -7,7 +7,8 @@ use std::process::Command;
 use crate::ModeLevel;
 use crate::allocation::TENANT_UID_FLOOR;
 use crate::doctor::{
-    Finding, anchor_body_matches, curated_paths, has_env_delete_for, has_pam_tid, pf_status_enabled,
+    Finding, SymlinkActual, anchor_body_matches, curated_paths, has_env_delete_for,
+    has_group_acl_entry, has_pam_tid, pf_status_enabled,
 };
 use crate::executor::{
     self, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp,
@@ -1423,7 +1424,86 @@ impl<'a> Writer<'a> {
             reporter.doctor_finding(&drift);
             findings.push(drift);
         }
+        for drift in self.check_share_drift(name, reporter)? {
+            findings.push(drift);
+        }
         reporter.doctor_done_summary(name, findings.len());
+        Ok(findings)
+    }
+
+    /// Walk the profile's declared `[[shares]]` and emit drift findings
+    /// for each: cycle 11's `AclDrift` (host_path missing the
+    /// `<tenant>-tenant-share` group's ACL entry) and `SymlinkDrift`
+    /// (tenant_path isn't the declared symlink: Absent / WrongTarget /
+    /// NotSymlink sub-cases via `SymlinkActual`). The two checks are
+    /// independent — a single share entry can fire both findings.
+    /// Q4 (cycle 8) parallel: a profile that can't be read or parsed
+    /// SKIPS the check silently (a future `ProfileMissing` finding
+    /// would surface that case separately). Q5 (cycle 11) parallel: a
+    /// per-path substrate failure on `read_host_acl` or
+    /// `tenant_path_kind` aborts the loop with `DoctorError::Probe`,
+    /// surfacing the error frame; mirrors `read_kernel_pf_rules`'s
+    /// fail-fast posture for the doctor walk.
+    ///
+    /// Findings are emitted via `reporter.doctor_finding` as they fire
+    /// (consistent with the file's stream-emit pattern); the returned
+    /// Vec carries the same findings for the caller to aggregate into
+    /// the `DoctorOutcome`.
+    fn check_share_drift(
+        &self,
+        name: &str,
+        reporter: &mut Reporter,
+    ) -> Result<Vec<Finding>, DoctorError> {
+        let profile_content = match self.executor.read_profile(name) {
+            Ok(c) => c,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let parsed = match parse(&profile_content) {
+            Ok(p) => p,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let group = tenant_share_group_name(name);
+        let mut findings: Vec<Finding> = Vec::new();
+        for share in &parsed.shares {
+            // AclDrift check: read host-side ACL listing and grep for
+            // the expected group's `allow` entry.
+            let listing = self.executor.read_host_acl(&share.host_path)?;
+            if !has_group_acl_entry(&listing, &group) {
+                let finding = Finding::AclDrift {
+                    tenant: name.to_string(),
+                    host_path: share.host_path.clone(),
+                    group: group.clone(),
+                };
+                reporter.doctor_finding(&finding);
+                findings.push(finding);
+            }
+            // SymlinkDrift check: probe tenant_path_kind and compare
+            // against the declared host_path target. Cycle-11 Q3
+            // lock: string-exact comparison (no canonicalize).
+            let tenant_path = expand_tenant_path(name, &share.tenant_path);
+            let kind = self.executor.tenant_path_kind(name, &tenant_path)?;
+            let actual_opt = match kind {
+                PathKind::Absent => Some(SymlinkActual::Absent),
+                PathKind::Other => Some(SymlinkActual::NotSymlink),
+                PathKind::Symlink(target) => {
+                    if target == share.host_path {
+                        None
+                    } else {
+                        Some(SymlinkActual::WrongTarget(target))
+                    }
+                }
+            };
+            if let Some(actual) = actual_opt {
+                let finding = Finding::SymlinkDrift {
+                    tenant: name.to_string(),
+                    tenant_path,
+                    expected_target: share.host_path.clone(),
+                    actual,
+                };
+                reporter.doctor_finding(&finding);
+                findings.push(finding);
+            }
+        }
         Ok(findings)
     }
 

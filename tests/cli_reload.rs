@@ -234,7 +234,7 @@ fn reload_single_tenant_with_existing_symlink_at_tenant_path_succeeds_idempotent
         .with_tenant_path_kind(
             "dev",
             &PathBuf::from("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink,
+            tenant::executor::PathKind::Symlink(PathBuf::from("/tmp")),
         );
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");

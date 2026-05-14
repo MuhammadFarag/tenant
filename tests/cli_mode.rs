@@ -857,7 +857,11 @@ fn mode_runtime_skips_substrate_with_existing_symlink_at_tenant_path() {
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new()
         .with_existing_profile("dev", &toml)
-        .with_tenant_path_kind("dev", &PathBuf::from("/Users/dev/src"), PathKind::Symlink);
+        .with_tenant_path_kind(
+            "dev",
+            &PathBuf::from("/Users/dev/src"),
+            PathKind::Symlink(PathBuf::from("/tmp")),
+        );
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(

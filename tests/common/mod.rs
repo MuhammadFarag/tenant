@@ -83,6 +83,12 @@ impl Executor for NeverExecutor {
     ) -> Result<tenant::executor::PathKind, tenant::executor::ProbeError> {
         panic!("executor unexpectedly invoked (tenant_path_kind): name={name:?} path={path:?}");
     }
+    fn read_host_acl(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, tenant::executor::ProbeError> {
+        panic!("executor unexpectedly invoked (read_host_acl): path={path:?}");
+    }
 }
 
 /// Host identity passed to `tenant::run`. Production reads `$USER`; tests
