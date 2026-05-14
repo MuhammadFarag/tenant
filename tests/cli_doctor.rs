@@ -1083,6 +1083,174 @@ fn doctor_anchor_body_install_tier_match_still_drifts() {
     );
 }
 
+// ============================================================
+// Cycle 9 — enriched finding guidance (verbose-mode surfacing)
+// ============================================================
+//
+// Each non-FilesystemExposure finding grows a multi-section
+// `guidance()` block (Why this matters / Recommended fix /
+// Side-effects / Alternative). Standard mode keeps the one-liner
+// (skim-the-output usage unchanged); verbose mode emits the block
+// indented 2 spaces under each finding line. No new flag, no new
+// substrate — `-v` is the existing "tell me more" knob.
+
+#[test]
+fn doctor_standard_mode_omits_guidance_block() {
+    // Negative pin: a finding fires in standard mode → output is the
+    // one-liner ONLY. The "Why this matters" header (load-bearing
+    // string of the guidance block) must not appear without -v.
+    // Guards skim-the-output usage from sudden multi-screen output.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &edited);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' anchor file drift"),
+        "finding one-liner should fire in standard mode; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Why this matters"),
+        "standard mode must NOT emit guidance block; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_verbose_emits_indented_guidance_below_finding() {
+    // Verbose + one finding → one-liner followed by the indented
+    // guidance block. Pin: the "Why this matters" header appears
+    // AFTER the finding line, with the locked 2-space indent.
+    // AnchorBodyDrift is the style-template variant from cycle-9
+    // Q10 lock; using it here verifies the full pipeline (variant
+    // → guidance() → Reporter prefix → stdout).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &edited);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let finding_pos = stdout
+        .find("warning: tenant 'dev' anchor file drift")
+        .expect("finding line should be present");
+    let guidance_pos = stdout
+        .find("  Why this matters\n")
+        .expect("indented guidance header should appear");
+    assert!(
+        finding_pos < guidance_pos,
+        "guidance must appear BELOW the finding line; stdout={stdout:?}"
+    );
+    // Spot-check the section headers are all present with the locked
+    // 2-space indent — guards against a regression that drops the
+    // Reporter prefix or one of the structured sections.
+    for header in [
+        "  Why this matters\n",
+        "  Recommended fix\n",
+        "  Side-effects to know about\n",
+        "  Alternative\n",
+    ] {
+        assert!(
+            stdout.contains(header),
+            "verbose output should contain `{}`; stdout={:?}",
+            header.trim_end(),
+            stdout
+        );
+    }
+    // Tenant name should appear inside the indented block (e.g. the
+    // recommended fix line) — pins the Q10 lock that per-tenant
+    // variants name the literal tenant in their guidance.
+    assert!(
+        stdout.contains("  tenant mode dev runtime\n"),
+        "guidance should name the literal tenant 'dev' in the fix command; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_verbose_filesystem_exposure_omits_guidance_block() {
+    // Q3 lock pinned at the user-facing surface: FilesystemExposure
+    // has no cycle-9 guidance body, so even in verbose mode the
+    // one-liner emits alone. Pin: the critical finding fires AND the
+    // "Why this matters" guidance header is absent.
+    //
+    // Set the stub to produce ONLY a FilesystemExposure finding (no
+    // env leak, no pf drift, no anchor drift, etc.) so a missing
+    // guidance section is unambiguous. AnchorBodyDrift would
+    // otherwise fire because the default executor's anchor body is
+    // empty; configure a matching profile + body to suppress it.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let target = std::path::PathBuf::from(format!("/Users/{TEST_HOST}/.ssh/id_rsa"));
+    let stub_exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &tenant::firewall::render_anchor("dev", &[]))
+        .with_probe_outcome(
+            "dev",
+            &target,
+            tenant::executor::AccessMode::Read,
+            tenant::executor::AccessOutcome::Allowed,
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let expected_line = format!("critical: tenant 'dev' can read /Users/{TEST_HOST}/.ssh/id_rsa\n");
+    assert!(
+        stdout.contains(&expected_line),
+        "FilesystemExposure one-liner should fire; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Why this matters"),
+        "FilesystemExposure must not emit a cycle-9 guidance block; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_verbose_multiple_findings_each_paired_with_own_guidance() {
+    // Two findings fire — PfDisabled (host-wide, Critical) and
+    // AnchorBodyDrift (per-tenant, Warning). Pin: in verbose mode,
+    // EACH finding's one-liner is immediately followed by ITS OWN
+    // guidance block. The order is host-wide first (PfDisabled
+    // emits before probe_tenant_paths), then per-tenant
+    // (AnchorBodyDrift). Verify by relative position of section
+    // markers unique to each guidance body.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let stub_exec = StubExecutor::new()
+        .with_pf_status_content("Status: Disabled\n")
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &edited);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let pf_disabled_one_liner = stdout
+        .find("critical: pf is globally disabled")
+        .expect("PfDisabled one-liner should be present");
+    // "Enables pf globally" is a unique phrase from PfDisabled's
+    // Recommended fix justification — pins which guidance block
+    // sits below the PfDisabled finding.
+    let pf_disabled_guidance = stdout
+        .find("  Enables pf globally")
+        .expect("PfDisabled guidance body should be present");
+    let anchor_one_liner = stdout
+        .find("warning: tenant 'dev' anchor file drift")
+        .expect("AnchorBodyDrift one-liner should be present");
+    // "Re-renders the anchor body" is unique to AnchorBodyDrift's
+    // recommended-fix justification.
+    let anchor_guidance = stdout
+        .find("  Re-renders the anchor body")
+        .expect("AnchorBodyDrift guidance body should be present");
+    assert!(
+        pf_disabled_one_liner < pf_disabled_guidance,
+        "PfDisabled guidance must follow its one-liner; stdout={stdout:?}"
+    );
+    assert!(
+        pf_disabled_guidance < anchor_one_liner,
+        "PfDisabled guidance must finish before AnchorBodyDrift one-liner; stdout={stdout:?}"
+    );
+    assert!(
+        anchor_one_liner < anchor_guidance,
+        "AnchorBodyDrift guidance must follow its one-liner; stdout={stdout:?}"
+    );
+}
+
 #[test]
 fn doctor_help_text_mentions_sudo_session_and_admin_requirement() {
     // Operator-UX commitment: `tenant doctor --help` documents the two

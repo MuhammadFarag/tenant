@@ -169,6 +169,190 @@ impl Finding {
             Finding::AnchorBodyDrift { .. } => Severity::Warning,
         }
     }
+
+    /// Multi-section operator-facing guidance for a finding. Returned
+    /// text is flat (section headers at column 0; body at column 2;
+    /// no trailing newline). Reporter prefixes each rendered line with
+    /// 2 spaces under the finding line for verbose-mode emission.
+    ///
+    /// `None` for `FilesystemExposure` per the cycle-9 brief Q3 lock:
+    /// per-path-category guidance depends on operator intent (file vs
+    /// directory; intentional-public vs accidental-leak; POSIX vs ACL
+    /// fix) and folds into the eventual filesystem-exposure remediation
+    /// cycle alongside the ACL machinery.
+    ///
+    /// Section structure mirrors the sandbox plugin's
+    /// `home_check.HomeCheck::guidance()` prior art:
+    /// - **Why this matters**: 1-2 paragraphs framing the stake.
+    /// - **Recommended fix**: exact command + one-line justification.
+    /// - **Side-effects to know about**: bullet list of consequences.
+    /// - **Alternative**: when applicable; omitted for variants where
+    ///   no meaningful alternative exists (`TouchIdMissing`,
+    ///   `PfDisabled`).
+    pub fn guidance(&self) -> Option<String> {
+        match self {
+            Finding::FilesystemExposure { .. } => None,
+            Finding::AnchorBodyDrift { tenant } => Some(format!(
+                "Why this matters
+  The on-disk file at /etc/pf.anchors/tenant-{tenant} is the source of
+  truth pf.conf reloads on boot. Its current body diverges from what
+  the profile would render \u{2014} so the next reboot or pfctl reload
+  will switch the in-kernel ruleset to whatever's on disk, not what
+  intent describes. If the divergence is a hand-edit, that edit becomes
+  the enforced policy. If it's install-tier widening left behind from a
+  prior session, the allowlist stays wide indefinitely.
+
+Recommended fix
+  tenant mode {tenant} runtime
+  Re-renders the anchor body from the profile (runtime tier) and
+  reloads pf, bringing the file and the in-kernel state back in sync
+  with intent.
+
+Side-effects to know about
+  \u{2022} The pfctl reload causes a sub-millisecond packet-filter disruption.
+  \u{2022} Any hand-edits to /etc/pf.anchors/tenant-{tenant} are discarded.
+  \u{2022} If install-tier hosts were deliberately on disk, the narrow drops
+    them; rerun `tenant mode {tenant} install` after the narrow if
+    still needed.
+
+Alternative
+  sudo $EDITOR /etc/pf.anchors/tenant-{tenant} && sudo pfctl -f /etc/pf.conf
+  Edits the file directly and reloads pf. Preserves operator edits but
+  leaves profile and file out of sync \u{2014} the next `tenant mode` or
+  `tenant shell` invocation will re-render and overwrite them."
+            )),
+            Finding::PfRuleDrift { tenant, .. } => Some(format!(
+                "Why this matters
+  The kernel's pf anchor for tenant '{tenant}' is missing one of the
+  structural rule classes the runtime requires \u{2014} either the `pass`
+  rule that allows traffic to the allowlist, the `block` rule that
+  drops everything else, or both. Whatever is enforcing right now
+  doesn't match the file or the profile; packets the tenant sends may
+  be flowing through unintended paths until the next reload reinstates
+  the full ruleset.
+
+Recommended fix
+  tenant mode {tenant} runtime
+  Re-renders the anchor file from the profile (runtime tier) and
+  reloads pf, reinstating the full pass + block rule pair in the
+  in-kernel anchor.
+
+Side-effects to know about
+  \u{2022} The pfctl reload causes a sub-millisecond packet-filter disruption.
+  \u{2022} If the on-disk anchor file is also drifted, this fixes both \u{2014}
+    file and kernel sync to the profile in one step.
+  \u{2022} If install-tier widening was previously applied via `tenant mode
+    {tenant} install`, the narrow drops it; rerun mode install
+    afterward if the wider allowlist is still needed.
+
+Alternative
+  sudo pfctl -f /etc/pf.conf
+  Reloads the whole pf.conf, which re-reads the (current) on-disk
+  anchor file. Faster than re-rendering but only fixes the kernel-side
+  drift if the on-disk file itself isn't drifted; otherwise it just
+  reinstalls the drifted body into the kernel."
+            )),
+            Finding::PfDisabled => Some(
+                "Why this matters
+  pf is globally disabled on this host. Every tenant has an anchor
+  installed under /etc/pf.anchors/, every anchor is referenced from
+  /etc/pf.conf, but pf itself doesn't consult any of them while
+  filtering packets \u{2014} so no tenant's egress allowlist is enforcing
+  anything. The isolation guarantee tenants depend on is currently
+  zero. Any `tenant create` or `tenant mode` that ran while pf was
+  disabled installed correct rules into a kernel that's ignoring them.
+
+Recommended fix
+  sudo pfctl -e
+  Enables pf globally. Idempotent at the substrate \u{2014} this is the same
+  command `tenant create` runs on first invocation when pf isn't
+  already on.
+
+Side-effects to know about
+  \u{2022} Re-enabling pf may surface live issues the operator originally
+    disabled it to escape (debugging a flaky rule, working around a
+    misconfigured anchor). Verify with `pfctl -sr` before assuming
+    the prior issue is resolved.
+  \u{2022} Currently-running tenant sessions immediately start being
+    filtered by their anchors; in-flight connections the allowlist
+    would block may drop.
+  \u{2022} System-wide pf rules in /etc/pf.conf also start enforcing again,
+    not just tenant anchors."
+                    .to_string(),
+            ),
+            Finding::EnvLeak { var } => Some(format!(
+                "Why this matters
+  /etc/sudoers (with drop-ins) doesn't carry an unqualified
+  `Defaults env_delete += \"{var}\"` directive, so the operator's
+  session env propagates verbatim into every `sudo -u <tenant>`
+  invocation \u{2014} which is exactly how `tenant shell` enters a tenant.
+  The canonical case is SSH_AUTH_SOCK: macOS's ssh-agent socket gets
+  inherited, and any tenant the operator shells into can `ssh` to
+  every host the operator has cached keys for. The isolation between
+  host and tenant is breached at the SSH layer even though pf, the
+  filesystem, and the UID/GID are all correct.
+
+Recommended fix
+  echo 'Defaults env_delete += \"{var}\"' | sudo tee -a /etc/sudoers.d/tenant >/dev/null
+  Appends to a drop-in file so the main /etc/sudoers stays pristine.
+  The directive must be unqualified (no `Defaults:user`, no
+  `Defaults>runas`); qualified forms restrict scope and don't protect
+  `sudo -u <tenant>` invocations.
+
+Side-effects to know about
+  \u{2022} Future `sudo -u <tenant>` sessions won't see {var} in their env.
+    A tenant can still set the var manually (e.g. explicit agent
+    forwarding) \u{2014} this closes the unintentional leak path, not all
+    paths.
+  \u{2022} Other shells that invoke sudo (`sudo bash`, `sudo make`) also
+    lose {var} from their inherited env, regardless of which user sudo
+    is running as. Usually fine; flag if a host-side workflow depended
+    on the leak.
+  \u{2022} Validate the edit with `sudo visudo -c -f /etc/sudoers.d/tenant`
+    before relying on it \u{2014} a syntax error in a drop-in can break sudo
+    across the host.
+
+Alternative
+  Defaults>tenant env_delete += \"{var}\"
+  A `Defaults>runas` form targets only sudo invocations whose -u arg
+  matches a tenant by name \u{2014} narrower than the unqualified form but
+  doctor will still nag (the parser conservatively rejects qualified
+  Defaults per CLAUDE.md's unqualified-directive doctrine). If you
+  prefer the qualified form, accept the false-positive warning on
+  every doctor run."
+            )),
+            Finding::TouchIdMissing => Some(
+                "Why this matters
+  /etc/pam.d/sudo doesn't enable Touch ID for sudo authentication.
+  This isn't a correctness drift \u{2014} sudo still works via password \u{2014}
+  but it's a recommendation aligned with the project's locked
+  no-NOPASSWD-sudoers stance. Touch ID makes sudo prompts faster (a
+  fingerprint beats typing a password) AND adds a second auth factor
+  (fingerprint plus sudoers membership) instead of just one (sudoers
+  membership). Info-tier because absence doesn't compromise isolation;
+  it's an ergonomics + defense-in-depth gap.
+
+Recommended fix
+  sudo sed -i.bak '/^auth.*pam_opendirectory/i auth       sufficient     pam_tid.so' /etc/pam.d/sudo
+  Inserts an `auth sufficient pam_tid.so` line before the existing
+  pam_opendirectory module. `sufficient` is the control type the
+  threat model expects \u{2014} a Touch ID hit short-circuits the rest of
+  the auth stack; a Touch ID miss falls through to password.
+
+Side-effects to know about
+  \u{2022} Next sudo invocation pops a Touch ID prompt instead of (or
+    before) the password prompt. Touch your sensor on the Touch Bar
+    or Magic Keyboard within ~10 seconds.
+  \u{2022} If Touch ID hardware isn't available or isn't registered (System
+    Settings → Touch ID & Password), pam_tid.so falls through to the
+    next module \u{2014} sudo still works, just without the short-circuit.
+  \u{2022} The /etc/pam.d/sudo.bak backup file is created by sed -i.bak;
+    remove it (`sudo rm /etc/pam.d/sudo.bak`) once the new behavior is
+    verified."
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 impl fmt::Display for Finding {

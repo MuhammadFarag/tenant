@@ -415,8 +415,26 @@ impl<'a> Reporter<'a> {
     /// One operator-facing line per finding, emitted as soon as the
     /// probe that produced it returns. Output goes to stdout; finding
     /// text is the byte-form pinned by `Finding::Display`.
+    ///
+    /// In verbose mode (cycle 9), each finding's one-liner is followed
+    /// by the structured-guidance block from `Finding::guidance()`,
+    /// indented 2 spaces under the finding line. `FilesystemExposure`
+    /// returns `None` for guidance and renders the one-liner alone
+    /// even in verbose mode (Q3 lock — per-path-category guidance
+    /// belongs to the future filesystem-exposure remediation cycle).
     pub fn doctor_finding(&mut self, finding: &Finding) {
         let _ = writeln!(self.stdout, "{finding}");
+        if self.verbose
+            && let Some(guidance) = finding.guidance()
+        {
+            for line in guidance.lines() {
+                if line.is_empty() {
+                    let _ = writeln!(self.stdout);
+                } else {
+                    let _ = writeln!(self.stdout, "  {line}");
+                }
+            }
+        }
     }
 
     /// Post-walk summary. With findings: silent (the finding lines did
