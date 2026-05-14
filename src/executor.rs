@@ -46,6 +46,25 @@ pub enum AccessMode {
     List,
 }
 
+/// Kind of filesystem entry at a tenant-side path, as the tenant sees
+/// it. `Absent` means no entry exists; `Symlink` means an existing
+/// symlink (which the share reapply can safely replace via `ln -sfn`);
+/// `Other` means a real file or directory occupies the path. Q12 lock:
+/// `Other` triggers `ShareError::TenantPathOccupied` so the operator
+/// chooses between editing the profile or removing the conflict
+/// manually — substrate never clobbers real operator data.
+///
+/// Substrate composition: two `sudo -n -u <tenant> /bin/test`
+/// probes (`-L` for symlink, `-e` for existence) collapse into one of
+/// the three kinds. Substrate-machinery failures (sudo prompt cache
+/// expired, fork failed) surface as `ProbeError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    Absent,
+    Symlink,
+    Other,
+}
+
 /// Probe verdict. `Allowed` means the tenant CAN access the path under
 /// the requested mode (the probe's exit code is zero); `Denied` covers
 /// the expected hardened-host case where the kernel refuses (POSIX,
@@ -115,6 +134,33 @@ pub enum AccountOp {
     /// is the child shell's exit code, and stdio must inherit so sudo can
     /// prompt and the login shell can drive the controlling terminal.
     LoginAsUser { name: String },
+
+    /// Ensure a directory exists at `path`, created by the tenant `name`.
+    /// Cycle 10's shares substrate uses this to pre-create
+    /// `parent(tenant_path)` before symlinking — e.g.
+    /// `$HOME/.local/share/` so a downstream `$HOME/.local/share/chezmoi`
+    /// symlink lands. Maps to `sudo -n -u <name> /bin/mkdir -p <path>`
+    /// on macOS; idempotent at the substrate (`mkdir -p` is a noop for
+    /// existing directories). Mode bits come from the tenant's umask
+    /// (default 022 → directories at 755) which is the right default for
+    /// tenant-readable dirs under their home; a future need for explicit
+    /// mode adds a `mode: u32` field at the variant.
+    EnsureDirAsUser { name: String, path: PathBuf },
+
+    /// Ensure a symlink at `link` points at `target`, created by the
+    /// tenant `name`. Cycle 10's shares substrate uses this to install
+    /// the `tenant_path → host_path` symlink that gives the tenant a
+    /// stable filesystem entry point under their home. Maps to
+    /// `sudo -n -u <name> /bin/ln -sfn <target> <link>` — `-sfn` is the
+    /// idempotent shape (force-overwrite-existing-symlink + no-follow-
+    /// existing-dir-target). An existing REAL directory or file at
+    /// `link` is the Q12-lock case the Writer guards against before
+    /// the substrate runs.
+    EnsureSymlinkAsUser {
+        name: String,
+        link: PathBuf,
+        target: PathBuf,
+    },
 }
 
 /// Profile-domain operations. The store-backed `~/.config/tenant/profiles/<name>.toml`
@@ -146,6 +192,69 @@ pub enum ProfileOp {
 /// vocabulary for "named per-tenant firewall ruleset"; `Pf` prefixes drop
 /// from `Reload` / `Enable` because the tool's name (pfctl) lives in
 /// `MacosExecutor`, not here.
+/// Per-share access intent at the substrate level — what bits to grant
+/// or revoke when invoking `chmod +a` / `chmod -a`. `Ro` maps to the
+/// sandbox-plugin `read_exec_inherit_entry` shape (read + execute +
+/// directory/file inheritance — execute is needed for directory
+/// traversal); `Rw` maps to `rw_inherit_entry` (read + write + execute
+/// + delete + append + inheritance — the full operator-writable bundle).
+///
+/// Substrate-vocab type sibling to `profile::ShareMode` (profile-vocab):
+/// the Writer maps `ShareMode → AclMode` at op-construction time. Same
+/// two values today, distinct types so the layer boundary is visible —
+/// if `ShareMode` grows a profile-only flag (e.g. an "exclude-children"
+/// inheritance opt-out), `AclMode` stays binary and the Writer's
+/// mapping absorbs the divergence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AclMode {
+    Ro,
+    Rw,
+}
+
+impl AclMode {
+    /// The bit list embedded in the `chmod +a "group:<g> allow <bits>,..."`
+    /// entry string. Centralized here so both `describe_acl` (operator-
+    /// facing rendering) and `execute_acl` (idempotence pre-check via
+    /// `ls -lde` substring match) reference the same canonical bytes —
+    /// any drift between the rendered command and the substring searched
+    /// would silently break idempotence.
+    pub fn acl_bits(self) -> &'static str {
+        match self {
+            AclMode::Ro => "read,execute,file_inherit,directory_inherit",
+            AclMode::Rw => "read,write,execute,delete,append,file_inherit,directory_inherit",
+        }
+    }
+}
+
+/// ACL-domain operations (cycle 10). `Grant` adds an inheritable ACL entry
+/// granting `group` access to `path` at the requested mode; `Revoke`
+/// removes the same entry. Both are idempotent at the substrate (the
+/// production `execute_acl` pre-checks `ls -lde <path>` for an existing
+/// entry before invoking `chmod +a` / `chmod -a`; sandbox's pattern). No
+/// `sudo` prefix on the argv — the operator (host user) is expected to
+/// own or have ACL-write on `host_path`; if they don't, `chmod` fails
+/// with `AclError::NonZero` and the stderr surfaces under
+/// `Reporter::*_failed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AclOp {
+    /// Grant `group` access to `path` at `mode`. ACL entry is inheritable
+    /// (`file_inherit,directory_inherit`); descendants automatically pick
+    /// up the same grant.
+    Grant {
+        path: PathBuf,
+        group: String,
+        mode: AclMode,
+    },
+
+    /// Remove the inheritable ACL entry that `Grant` installed. Idempotent:
+    /// if the entry isn't present, returns Ok(()) without invoking chmod.
+    Revoke {
+        path: PathBuf,
+        group: String,
+        mode: AclMode,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FirewallOp {
     /// Write the rendered anchor body to `/etc/pf.anchors/tenant-<name>`.
@@ -327,6 +436,34 @@ impl fmt::Display for FirewallError {
     }
 }
 
+/// ACL-domain error (cycle 10). Mirrors `AccountError`'s shape because the
+/// substrate is `chmod` (a tool with the same spawn / non-zero contract as
+/// dseditgroup / sysadminctl). The substrate uses `ls -lde` as the pre-flight
+/// idempotence check; that call's failure surfaces under the same `NonZero`
+/// arm (the operator-facing message names chmod regardless of which sub-step
+/// failed — clear enough for solo-Mac scope).
+#[derive(Debug)]
+pub enum AclError {
+    Spawn(io::Error),
+    NonZero { code: i32, stderr: String },
+}
+
+impl fmt::Display for AclError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AclError::Spawn(e) => write!(f, "failed to spawn chmod: {e}"),
+            AclError::NonZero { code, stderr } => {
+                let trimmed = stderr.trim();
+                if trimmed.is_empty() {
+                    write!(f, "chmod exited with code {code}")
+                } else {
+                    write!(f, "chmod exited with code {code}: {trimmed}")
+                }
+            }
+        }
+    }
+}
+
 /// Host-side substrate. Knows how to render ops as operator-facing display
 /// lines (`describe_*`) and how to execute them on this host (`execute_*` +
 /// `login`). Production wires `MacosExecutor` (knows dseditgroup,
@@ -368,9 +505,37 @@ pub trait Executor {
     fn describe_firewall(&self, op: &FirewallOp) -> String;
     fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError>;
 
+    /// Probe the kind of filesystem entry at `path`, as tenant `name`
+    /// sees it. Substrate composition: `sudo -n -u <name> /bin/test
+    /// -L <path>` (symlink-check) and `-e <path>` (existence-check); the
+    /// pair collapses into one of `PathKind { Absent, Symlink, Other }`.
+    /// Reuses `ProbeError` (same substrate posture as `probe_access_as_tenant`:
+    /// the machinery-failure cases — sudo not on PATH, sudo prompt
+    /// cache expired — are errors; the kind-of-entry outcomes are
+    /// non-error variants). Carve-out method (same posture as the other
+    /// probe-style carve-outs): return type isn't `Result<(), E>` so it
+    /// doesn't fit `WritableOp`.
+    fn tenant_path_kind(&self, name: &str, path: &std::path::Path) -> Result<PathKind, ProbeError>;
+
+    /// Render an `AclOp` as an operator-facing `chmod +a/-a` line. The
+    /// rendered ACL entry string (`"group:<g> allow <bits>"`) is the
+    /// same byte sequence the production substrate uses for its
+    /// idempotence pre-check — `AclMode::acl_bits` is the single source
+    /// of truth for the bit list so any drift between describe and
+    /// execute would break idempotence visibly.
+    fn describe_acl(&self, op: &AclOp) -> String;
+
+    /// Apply an `AclOp` to the host. Production pre-checks `ls -lde
+    /// <path>` for an existing entry before invoking chmod — sandbox's
+    /// idempotence pattern transcribed verbatim. A `Grant` for an
+    /// already-present entry is a noop; a `Revoke` for an absent entry
+    /// is a noop. The Writer doesn't need to track ACL state separately
+    /// — substrate is the source of truth.
+    fn execute_acl(&self, op: &AclOp) -> Result<(), AclError>;
+
     /// Probe whether `name` (a tenant) can access `path` under the
     /// requested `mode`. Implementation invokes `sudo -n -u <name>
-    /// /usr/bin/test -<r|x> <path>` and maps the exit code: `0` →
+    /// /bin/test -<r|x> <path>` and maps the exit code: `0` →
     /// `Allowed`, `1` → `Denied`, anything else → `Unknown`. Probe-
     /// substrate failures (sudo not on PATH, fork failed) surface as
     /// `ProbeError`. Carve-out method (same posture as `read_profile`
@@ -454,17 +619,19 @@ pub enum Op<'a> {
     Account(&'a AccountOp),
     Profile(&'a ProfileOp),
     Firewall(&'a FirewallOp),
+    Acl(&'a AclOp),
 }
 
 impl<'a> Op<'a> {
     /// Render the op as an operator-facing display line. The match here
     /// is the one place in the codebase that has to know the
-    /// account/profile/firewall split for display purposes.
+    /// account/profile/firewall/acl split for display purposes.
     pub fn describe_via(&self, executor: &dyn Executor) -> String {
         match self {
             Op::Account(op) => executor.describe_account(op),
             Op::Profile(op) => executor.describe_profile(op),
             Op::Firewall(op) => executor.describe_firewall(op),
+            Op::Acl(op) => executor.describe_acl(op),
         }
     }
 }
@@ -512,6 +679,16 @@ impl WritableOp for FirewallOp {
     }
 }
 
+impl WritableOp for AclOp {
+    type Error = AclError;
+    fn execute_via(&self, executor: &dyn Executor) -> Result<(), AclError> {
+        executor.execute_acl(self)
+    }
+    fn op_ref(&self) -> Op<'_> {
+        Op::Acl(self)
+    }
+}
+
 /// Production substrate. Knows the macOS tool argv and the XDG-style profile
 /// path convention. The argv-building logic that previously lived in the
 /// `build_*_argv` family (and the synthetic-argv hacks for profile ops) is
@@ -537,6 +714,14 @@ impl Executor for MacosExecutor {
             AccountOp::LookupUserRecord { name } => format!("dscl . -read /Users/{name}"),
             AccountOp::DeleteUserRecord { name } => format!("sudo dscl . -delete /Users/{name}"),
             AccountOp::LoginAsUser { name } => format!("sudo -iu {name}"),
+            AccountOp::EnsureDirAsUser { name, path } => {
+                format!("sudo -n -u {name} /bin/mkdir -p {}", path.display())
+            }
+            AccountOp::EnsureSymlinkAsUser { name, link, target } => format!(
+                "sudo -n -u {name} /bin/ln -sfn {} {}",
+                target.display(),
+                link.display(),
+            ),
         }
     }
 
@@ -663,7 +848,7 @@ impl Executor for MacosExecutor {
         path: &std::path::Path,
         mode: AccessMode,
     ) -> Result<AccessOutcome, ProbeError> {
-        // `/usr/bin/test -<flag> <path>` returns:
+        // `/bin/test -<flag> <path>` returns:
         //   0  → predicate true (Allowed)
         //   1  → predicate false (Denied — includes file-doesn't-exist;
         //        cycle-1 brief Q3 lock accepts the ambiguity, cycle-2
@@ -681,7 +866,7 @@ impl Executor for MacosExecutor {
         };
         let path_str = path.to_string_lossy().into_owned();
         let output = Command::new("sudo")
-            .args(["-n", "-u", name, "/usr/bin/test", flag, &path_str])
+            .args(["-n", "-u", name, "/bin/test", flag, &path_str])
             .output()
             .map_err(ProbeError::Spawn)?;
         match output.status.code() {
@@ -871,6 +1056,123 @@ impl Executor for MacosExecutor {
             message: e.to_string(),
         })
     }
+
+    fn tenant_path_kind(&self, name: &str, path: &std::path::Path) -> Result<PathKind, ProbeError> {
+        // Two probes:
+        //   `sudo -n -u <name> /bin/test -L <path>` → exit 0 = symlink
+        //   `sudo -n -u <name> /bin/test -e <path>` → exit 0 = exists
+        // Combine into PathKind:
+        //   -L 0           → Symlink
+        //   -L 1, -e 0     → Other
+        //   -L 1, -e 1     → Absent
+        // sudo-machinery failures (auth cache miss, fork failed) surface
+        // as `ProbeError`. Substring-match on stderr distinguishes
+        // machinery failure from "kernel says no" (same pattern as
+        // `probe_access_as_tenant`).
+        let path_str = path.to_string_lossy().into_owned();
+        let symlink_out = Command::new("sudo")
+            .args(["-n", "-u", name, "/bin/test", "-L", &path_str])
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        if let Some(code) = symlink_out.status.code() {
+            if code == 0 {
+                return Ok(PathKind::Symlink);
+            }
+            if code != 1 {
+                // Sudo-auth failure surfaces with codes other than 0/1.
+                return Err(ProbeError::NonZero {
+                    code,
+                    stderr: String::from_utf8_lossy(&symlink_out.stderr).into_owned(),
+                });
+            }
+        } else {
+            return Err(ProbeError::NonZero {
+                code: -1,
+                stderr: String::from_utf8_lossy(&symlink_out.stderr).into_owned(),
+            });
+        }
+        let exists_out = Command::new("sudo")
+            .args(["-n", "-u", name, "/bin/test", "-e", &path_str])
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        match exists_out.status.code() {
+            Some(0) => Ok(PathKind::Other),
+            Some(1) => Ok(PathKind::Absent),
+            Some(code) => Err(ProbeError::NonZero {
+                code,
+                stderr: String::from_utf8_lossy(&exists_out.stderr).into_owned(),
+            }),
+            None => Err(ProbeError::NonZero {
+                code: -1,
+                stderr: String::from_utf8_lossy(&exists_out.stderr).into_owned(),
+            }),
+        }
+    }
+
+    fn describe_acl(&self, op: &AclOp) -> String {
+        // Pretend-shell `chmod +a "<entry>" <path>` framing. Quoted
+        // entry preserved with literal double-quotes in the rendered
+        // line — matches the form an operator would type at a prompt;
+        // also lets the test golden assert on the exact shape.
+        let (flag, path, group, mode) = match op {
+            AclOp::Grant {
+                path, group, mode, ..
+            } => ("+a", path, group, mode),
+            AclOp::Revoke {
+                path, group, mode, ..
+            } => ("-a", path, group, mode),
+        };
+        format!(
+            "chmod {flag} \"{}\" {}",
+            acl_entry(group, *mode),
+            path.display(),
+        )
+    }
+
+    fn execute_acl(&self, op: &AclOp) -> Result<(), AclError> {
+        // macOS `chmod +a` is natively idempotent — re-applying the
+        // same ACL entry to a path that already carries it doesn't
+        // add a duplicate and doesn't error. Verified empirically by
+        // cycle 10's smoke (step 8): three sequential `tenant reload`
+        // invocations kept the ACL entry count at 1. So Grant runs
+        // chmod unconditionally; substrate-side dedup is the contract.
+        //
+        // An earlier draft tried a substring-match pre-check against
+        // `ls -lde` output before calling chmod, but macOS canonicalizes
+        // the bit names on storage (we write
+        // `read,write,execute,delete,append` and macOS stores
+        // `list,add_file,search,delete,add_subdirectory`), so the
+        // substring pre-check always failed false-negative and chmod
+        // ran every time anyway. Removed the dead pre-check; the
+        // operator-visible behavior is unchanged.
+        //
+        // Revoke (`chmod -a`) on an absent entry currently surfaces
+        // as `AclError::NonZero` with "No matching ACL entry" stderr.
+        // No cycle-10 path exercises Revoke; cycle 11's doctor
+        // ACL-drift remediation will need to tolerate that case (or
+        // pre-check via ls).
+        let (flag, path, group, mode) = match op {
+            AclOp::Grant {
+                path, group, mode, ..
+            } => ("+a", path, group, mode),
+            AclOp::Revoke {
+                path, group, mode, ..
+            } => ("-a", path, group, mode),
+        };
+        let entry = acl_entry(group, *mode);
+        let path_str = path.display().to_string();
+        let output = Command::new("chmod")
+            .args([flag, &entry, &path_str])
+            .output()
+            .map_err(AclError::Spawn)?;
+        if !output.status.success() {
+            return Err(AclError::NonZero {
+                code: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Read `path` via `sudo -n cat <path>`. Used for privileged-read
@@ -1037,7 +1339,34 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
         AccountOp::LoginAsUser { name } => {
             vec!["sudo".into(), "-iu".into(), name.clone()]
         }
+        AccountOp::EnsureDirAsUser { name, path } => vec![
+            "sudo".into(),
+            "-n".into(),
+            "-u".into(),
+            name.clone(),
+            "/bin/mkdir".into(),
+            "-p".into(),
+            path.display().to_string(),
+        ],
+        AccountOp::EnsureSymlinkAsUser { name, link, target } => vec![
+            "sudo".into(),
+            "-n".into(),
+            "-u".into(),
+            name.clone(),
+            "/bin/ln".into(),
+            "-sfn".into(),
+            target.display().to_string(),
+            link.display().to_string(),
+        ],
     }
+}
+
+/// Compose the ACL entry string for `(group, mode)`. The bytes live in
+/// `AclMode::acl_bits`; this function adds the `group:<g> allow ` prefix.
+/// One source of truth so both `describe_acl` (operator-facing
+/// rendering) and `execute_acl` (chmod argv) use the same form.
+fn acl_entry(group: &str, mode: AclMode) -> String {
+    format!("group:{group} allow {}", mode.acl_bits())
 }
 
 fn spawn_capturing(argv: &[String]) -> Result<(), AccountError> {
@@ -1160,6 +1489,26 @@ impl Executor for DryRunExecutor {
     /// would-do preview.
     fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError> {
         Ok(crate::firewall::render_anchor(name, &[]))
+    }
+
+    fn describe_acl(&self, op: &AclOp) -> String {
+        MacosExecutor.describe_acl(op)
+    }
+
+    fn execute_acl(&self, _op: &AclOp) -> Result<(), AclError> {
+        Ok(())
+    }
+
+    /// Dry-run returns `Absent` so the plan preview never trips the
+    /// `TenantPathOccupied` refusal — the operator's "would-do" view
+    /// shows what tenant intends to install, not surprise refusals
+    /// the real run might encounter on different host state.
+    fn tenant_path_kind(
+        &self,
+        _name: &str,
+        _path: &std::path::Path,
+    ) -> Result<PathKind, ProbeError> {
+        Ok(PathKind::Absent)
     }
 }
 
@@ -1313,6 +1662,31 @@ pub struct StubExecutor {
 
     /// One-shot anchor-body read failure. Mirrors `pam_sudo_failure`.
     anchor_body_failure: RefCell<Option<HostFileError>>,
+
+    /// Recorded `execute_acl` invocations in call order. Tests assert on
+    /// this list to pin the reapply substrate's per-share op sequence
+    /// (grant ops in profile-declared order, paired correctly with
+    /// host_path / group / mode). Mirrors `account_ops` / `firewall_ops`.
+    acl_ops: RefCell<Vec<AclOp>>,
+
+    /// Per-op failure overrides for `execute_acl`. First match (by full
+    /// equality) wins. Mirrors `account_overrides` /
+    /// `firewall_overrides`.
+    acl_overrides: RefCell<Vec<(AclOp, AclError)>>,
+
+    /// One-shot failure for the next `execute_acl` call that doesn't
+    /// match an override. Mirrors `fail_next_firewall`.
+    acl_failure: RefCell<Option<AclError>>,
+
+    /// Per-(name, path) override for `tenant_path_kind`. First match
+    /// wins; unmatched lookups default to `PathKind::Absent` (the
+    /// expected case for an unprovisioned tenant_path — substrate will
+    /// freely install the symlink). Tests use this to exercise the
+    /// Q12 `TenantPathOccupied` refusal path.
+    tenant_path_kinds: RefCell<HashMap<(String, PathBuf), PathKind>>,
+
+    /// One-shot `tenant_path_kind` failure. Mirrors `probe_failure`.
+    tenant_path_kind_failure: RefCell<Option<ProbeError>>,
 }
 
 impl StubExecutor {
@@ -1563,6 +1937,45 @@ impl StubExecutor {
         *self.anchor_body_failure.borrow_mut() = Some(err);
         self
     }
+
+    /// Configure the next `execute_acl` call matching `op` to fail with
+    /// `err`. Matches by full equality on the op value. Mirrors
+    /// `fail_account_op` / `fail_firewall_op`.
+    pub fn fail_acl_op(self, op: AclOp, err: AclError) -> Self {
+        self.acl_overrides.borrow_mut().push((op, err));
+        self
+    }
+
+    /// Configure the next non-matching `execute_acl` call to fail with
+    /// `err`. One-shot — cleared after firing.
+    pub fn fail_next_acl(self, err: AclError) -> Self {
+        *self.acl_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    /// Recorded `execute_acl` invocations in call order.
+    pub fn acl_ops(&self) -> Vec<AclOp> {
+        self.acl_ops.borrow().clone()
+    }
+
+    /// Pre-load the `PathKind` outcome for `(name, path)`. Used by
+    /// cycle-10 share-reapply tests to model "tenant_path is a real
+    /// directory" (triggers `ShareError::TenantPathOccupied`) or
+    /// "tenant_path is an existing symlink" (idempotent re-link) cases.
+    /// Unmatched lookups default to `Absent`.
+    pub fn with_tenant_path_kind(self, name: &str, path: &std::path::Path, kind: PathKind) -> Self {
+        self.tenant_path_kinds
+            .borrow_mut()
+            .insert((name.to_string(), path.to_path_buf()), kind);
+        self
+    }
+
+    /// Configure the next `tenant_path_kind` call to fail with `err`.
+    /// One-shot — cleared after firing.
+    pub fn fail_next_tenant_path_kind(self, err: ProbeError) -> Self {
+        *self.tenant_path_kind_failure.borrow_mut() = Some(err);
+        self
+    }
 }
 
 impl Executor for StubExecutor {
@@ -1729,5 +2142,36 @@ impl Executor for StubExecutor {
             None => Vec::new(),
         };
         Ok(crate::firewall::render_anchor(name, &hosts))
+    }
+
+    fn describe_acl(&self, op: &AclOp) -> String {
+        MacosExecutor.describe_acl(op)
+    }
+
+    fn execute_acl(&self, op: &AclOp) -> Result<(), AclError> {
+        self.acl_ops.borrow_mut().push(op.clone());
+        let mut overrides = self.acl_overrides.borrow_mut();
+        if let Some(idx) = overrides.iter().position(|(target, _)| target == op) {
+            let (_, err) = overrides.remove(idx);
+            return Err(err);
+        }
+        drop(overrides);
+        if let Some(err) = self.acl_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn tenant_path_kind(&self, name: &str, path: &std::path::Path) -> Result<PathKind, ProbeError> {
+        if let Some(err) = self.tenant_path_kind_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        let kind = self
+            .tenant_path_kinds
+            .borrow()
+            .get(&(name.to_string(), path.to_path_buf()))
+            .copied()
+            .unwrap_or(PathKind::Absent);
+        Ok(kind)
     }
 }

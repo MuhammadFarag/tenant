@@ -1,5 +1,9 @@
+use std::path::PathBuf;
+
 use tenant::accounts::StubReader;
-use tenant::executor::{AccountError, AccountOp, FirewallError, ProfileOp, StubExecutor};
+use tenant::executor::{
+    AccountError, AccountOp, AclMode, AclOp, FirewallError, ProfileOp, StubExecutor,
+};
 
 mod common;
 use common::*;
@@ -1082,5 +1086,101 @@ fn create_success_path_does_not_invoke_flush_anchor() {
             .any(|op| matches!(op, tenant::executor::FirewallOp::FlushAnchor { .. })),
         "FlushAnchor must NOT appear in create's success-path firewall_ops; got: {:?}",
         exec.firewall_ops()
+    );
+}
+
+// ================================================================
+// Cycle 10: post-provision share reapply
+// ================================================================
+//
+// On the standard production path the default profile has no
+// `[[shares]]`, so the post-provision substrate is a no-op (covered
+// implicitly by every existing create test). Tests here use
+// `with_create_profile_content` to inject a profile with shares so
+// the post-provision substrate fires.
+
+#[test]
+fn create_with_pre_populated_shares_runs_post_provision_substrate() {
+    // Operator-supplied (test-injected) profile content with a single
+    // `[[shares]]` entry. After user/group/profile/PF land, the
+    // post-provision step grants the ACL and installs the symlink.
+    let with_share = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new().with_create_profile_content("dev", &with_share);
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+
+    let acl_ops = exec.acl_ops();
+    assert_eq!(
+        acl_ops,
+        vec![AclOp::Grant {
+            path: PathBuf::from("/tmp"),
+            group: "dev-tenant-share".to_string(),
+            mode: AclMode::Rw,
+        }],
+        "expected single Grant op from post-provision substrate; got {acl_ops:?}"
+    );
+    let symlink_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureSymlinkAsUser { .. }))
+        .collect();
+    assert_eq!(
+        symlink_ops.len(),
+        1,
+        "expected single symlink op; got {symlink_ops:?}"
+    );
+}
+
+#[test]
+fn create_with_default_profile_emits_no_post_provision_acl_ops() {
+    // Backward-compat: the default profile has no `[[shares]]`, so
+    // create's post-provision substrate is a no-op. Existing create
+    // tests rely on this — explicit pin so a future schema change
+    // can't silently break the contract.
+    let exec = StubExecutor::new();
+    let (code, _stdout, _stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0);
+    assert!(
+        exec.acl_ops().is_empty(),
+        "default profile has no shares; AclOp must NOT fire: {:?}",
+        exec.acl_ops()
+    );
+    let new_account_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| {
+            matches!(
+                op,
+                AccountOp::EnsureDirAsUser { .. } | AccountOp::EnsureSymlinkAsUser { .. }
+            )
+        })
+        .collect();
+    assert!(
+        new_account_ops.is_empty(),
+        "default profile has no shares; EnsureDir/EnsureSymlink must NOT fire: {new_account_ops:?}"
+    );
+}
+
+#[test]
+fn create_post_provision_refusal_carries_recovery_hint() {
+    // Pre-populated profile declares a non-existent host_path; the
+    // post-provision share substrate refuses with HostPathMissing.
+    // Frame names the existing tenant state and points the operator
+    // at `tenant reload` (NOT another `tenant create`).
+    let bad_share = profile_with_shares(
+        &[],
+        &[],
+        &[("/nonexistent/cycle10/create-sentinel", "rw", "$HOME/src")],
+    );
+    let exec = StubExecutor::new().with_create_profile_content("dev", &bad_share);
+    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR on share refusal; stderr={stderr:?}");
+    assert!(
+        stderr.contains("provisioned but share entry is invalid"),
+        "stderr should be framed by refuse_create_post_provision_share: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("tenant reload dev"),
+        "stderr should name the recovery command: {stderr:?}"
     );
 }

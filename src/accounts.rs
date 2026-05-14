@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::io;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::ModeLevel;
@@ -8,11 +10,13 @@ use crate::doctor::{
     Finding, anchor_body_matches, curated_paths, has_env_delete_for, has_pam_tid, pf_status_enabled,
 };
 use crate::executor::{
-    self, AccountError, AccountOp, FirewallError, FirewallOp, HostFileError, Op, ProbeError,
-    ProfileOp, WritableOp,
+    self, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp,
+    HostFileError, Op, PathKind, ProbeError, ProfileOp, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
-use crate::profile::{Profile, ProfileError, display_path_for, parse};
+use crate::profile::{
+    Profile, ProfileError, ShareMode, display_path_for, expand_tenant_path, parse,
+};
 use crate::reporter::Reporter;
 
 pub trait Reader {
@@ -377,6 +381,16 @@ pub(crate) enum CreateError {
     /// as `FirewallError::Fs` (path = the profile path) because the
     /// failure surfaces during the firewall composition step.
     Firewall(FirewallError),
+
+    /// Cycle 10: post-provision share-reapply step failed. The host
+    /// has user + group + profile + PF anchor + enable all installed
+    /// but the per-share substrate (Acl / Account / Probe / Share)
+    /// tripped. Operator's recovery: `tenant reload <name>` (idempotent
+    /// retry) or `tenant destroy <name>` + retry create. Default profile
+    /// has no shares so this arm is unreachable on the production path
+    /// today; tests using `with_create_profile_content` to pre-populate
+    /// a profile with shares exercise it.
+    PostProvision(ModeError),
 }
 
 /// Granular error type for the destroy writers (both `destroy_tenant`
@@ -406,10 +420,54 @@ impl From<AccountError> for DestroyError {
     }
 }
 
-/// Failure surface for the `mode` verb. Read/parse failures on the
-/// tenant's profile surface as `Profile`; anchor-write or pfctl-reload
-/// failures surface as `Firewall`. No `Account` arm — mode doesn't
-/// touch user/group state.
+/// Pre-flight refusals from the share-reapply substrate (cycle 10).
+/// Operator-actionable cases that should be loud before the substrate
+/// runs (Q11 / Q12 locks). Each variant carries the path so the
+/// operator can locate the conflict directly.
+#[derive(Debug)]
+pub(crate) enum ShareError {
+    /// Q11 lock: profile declared a `host_path` that doesn't exist on
+    /// disk at reapply time. Refuse loudly — the profile is a
+    /// declaration of what the operator wants; missing host_path is a
+    /// profile-authoring mistake.
+    HostPathMissing { path: PathBuf },
+
+    /// Q12 lock: profile declared a `tenant_path` that exists as a
+    /// real directory or file (NOT a symlink). Substrate `ln -sfn`
+    /// would silently fail to replace a real-dir tenant_path; we
+    /// pre-check and refuse so the operator chooses between editing
+    /// the profile or removing the conflict.
+    TenantPathOccupied { path: PathBuf },
+}
+
+impl fmt::Display for ShareError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ShareError::HostPathMissing { path } => write!(
+                f,
+                "host_path {} does not exist on disk; edit the profile or create the path",
+                path.display(),
+            ),
+            ShareError::TenantPathOccupied { path } => write!(
+                f,
+                "tenant_path {} exists as a real directory or file; \
+                 remove it or edit the profile to point elsewhere",
+                path.display(),
+            ),
+        }
+    }
+}
+
+/// Failure surface for the `mode` verb and (by reuse) the `shell`
+/// auto-narrow + the `reload` verb + create-side post-provision step.
+/// Read/parse failures on the tenant's profile surface as `Profile`;
+/// anchor-write or pfctl-reload failures surface as `Firewall`. Cycle
+/// 10 adds four arms for the share-reapply substrate:
+/// - `Acl`: chmod +a/-a substrate failure on the host side
+/// - `Account`: sudo-u mkdir/ln substrate failure on the tenant side
+/// - `Probe`: tenant_path_kind machinery failure (sudo-cache, fork)
+/// - `Share`: pre-flight refusal (host_path missing or tenant_path
+///   occupied)
 ///
 /// No automatic recovery on Reload failure. The host state after a
 /// Reload failure is "anchor file written with the new body, kernel
@@ -423,6 +481,10 @@ impl From<AccountError> for DestroyError {
 pub(crate) enum ModeError {
     Profile(ProfileError),
     Firewall(FirewallError),
+    Acl(AclError),
+    Account(AccountError),
+    Probe(ProbeError),
+    Share(ShareError),
 }
 
 /// Failure surface for the `shell` verb. The login spawn itself can
@@ -438,6 +500,64 @@ pub(crate) enum ModeError {
 pub(crate) enum ShellError {
     Account(AccountError),
     Mode(ModeError),
+}
+
+/// Pre-built op list for a profile-to-tenant reapply. Construction
+/// (`Writer::build_reapply_plan`) parses the profile + pre-flights
+/// shares; execution (`Writer::execute_reapply_plan`) fires the ops
+/// against the substrate. Separating the two lets the verb methods
+/// render the upfront plan over the same ops the substrate will run,
+/// preserving the plan-vs-echo asymmetry contract for share ops.
+pub(crate) struct ReapplyPlan {
+    pub(crate) install_anchor: FirewallOp,
+    pub(crate) reload: FirewallOp,
+    pub(crate) share_ops: Vec<ShareOps>,
+}
+
+impl ReapplyPlan {
+    /// Flatten the plan into a borrowed `Op` slice for the Reporter's
+    /// plan-rendering helper. The slice borrows from `self` so the
+    /// caller must keep the plan alive until the reporter has emitted
+    /// its plan block.
+    pub(crate) fn as_plan_entries(&self) -> Vec<(Op<'_>, Option<&'static str>)> {
+        let mut entries: Vec<(Op<'_>, Option<&'static str>)> =
+            Vec::with_capacity(2 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
+        entries.push((Op::Firewall(&self.install_anchor), None));
+        entries.push((Op::Firewall(&self.reload), None));
+        for share in &self.share_ops {
+            entries.push((Op::Acl(&share.grant), None));
+            if let Some(ensure_dir) = &share.ensure_dir {
+                entries.push((Op::Account(ensure_dir), None));
+            }
+            entries.push((Op::Account(&share.ensure_link), None));
+        }
+        entries
+    }
+}
+
+/// One per-share entry's op triple. `ensure_dir` is `None` when the
+/// tenant_path's parent is the tenant's home dir itself (always
+/// exists; mkdir would be a no-op).
+pub(crate) struct ShareOps {
+    pub(crate) grant: AclOp,
+    pub(crate) ensure_dir: Option<AccountOp>,
+    pub(crate) ensure_link: AccountOp,
+}
+
+impl ShareOps {
+    fn op_count(&self) -> usize {
+        2 + if self.ensure_dir.is_some() { 1 } else { 0 }
+    }
+}
+
+/// Outcome of `Writer::reload_all_tenants`. Carries the per-tenant
+/// failure count; the dispatcher maps `failed > 0 → EX_IOERR (74)`,
+/// `failed == 0 → 0` (Q15 lock). Tenant count and success count are
+/// implicit (the count comes from `Reader::tenant_names().len()`;
+/// success = total - failed).
+#[derive(Debug)]
+pub(crate) struct ReloadAllOutcome {
+    pub(crate) failed: u32,
 }
 
 /// Side-effecting half of the accounts API. Verbs ask in domain terms
@@ -609,6 +729,20 @@ impl<'a> Writer<'a> {
                     return Err(CreateError::Firewall(reload_err));
                 }
                 self.run(&enable, reporter).map_err(CreateError::Firewall)?;
+                // Cycle 10: post-provision share reapply on the
+                // freshly-written profile. Default profile has no
+                // `[[shares]]`, so the share substrate is a no-op on
+                // the production path. Tests using
+                // `with_create_profile_content` to pre-populate a
+                // profile with shares exercise this path. The PF
+                // reapply already ran via the create-time firewall
+                // sequence (BackupConfig → InstallAnchor →
+                // UpdateConfig → Reload → Enable), so we use
+                // `reapply_shares_post_provision` directly rather
+                // than `build_reapply_plan` + `execute_reapply_plan`
+                // (which would redo InstallAnchor + Reload).
+                self.reapply_shares_post_provision(name, &parsed_profile, reporter)
+                    .map_err(CreateError::PostProvision)?;
                 reporter.create_done(name, uid, gid);
                 Ok(())
             }
@@ -826,52 +960,32 @@ impl<'a> Writer<'a> {
         level: ModeLevel,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
-        // Two-op composition (delegated to `reapply_anchor_for_level`):
-        //   1. InstallAnchor — rewrite /etc/pf.anchors/tenant-<name>
-        //                      with the new body
-        //   2. Reload         — pfctl -f /etc/pf.conf
-        // The mode-verb owns the intent/done emit; the helper owns the
-        // substrate calls. `shell_into_tenant` (cycle 4) calls the same
-        // helper to narrow-on-shell-entry without the mode-verb's
-        // "Applying mode '<level>' to tenant '<name>'." framing.
-        let reload = FirewallOp::Reload;
-        // Plan-time placeholder InstallAnchor — describe ignores the
-        // `body` field, so the empty-string body still renders the
-        // same line as the real-body op constructed below.
-        let install_anchor_plan = FirewallOp::InstallAnchor {
-            name: name.into(),
-            body: String::new(),
-        };
-
-        reporter.mode_starting(
-            name,
-            level,
-            &[
-                (Op::Firewall(&install_anchor_plan), None),
-                (Op::Firewall(&reload), None),
-            ],
-        );
-
-        self.reapply_anchor_for_level(name, level, reporter)?;
-
+        // Intent emitted BEFORE plan-build so the operator sees verb
+        // context even if the profile-read fails (parity with shell's
+        // `shell_intent` + `shell_plan` split). Plan rendering
+        // happens after build so share ops appear in the plan block
+        // alongside the PF ops, matching what fires via `$` echo.
+        reporter.mode_intent(name, level);
+        let plan = self.build_reapply_plan(name, level)?;
+        reporter.mode_plan(&plan.as_plan_entries());
+        self.execute_reapply_plan(&plan, reporter)?;
         reporter.mode_done(name, level);
         Ok(())
     }
 
-    /// Read the on-disk profile, render the anchor body at `level`,
-    /// and run the `InstallAnchor → Reload` sequence. The verb-level
-    /// intent/done emit lives at the call site (`mode_starting` /
-    /// `mode_done` for the `mode` verb; `shell_starting` for the
-    /// shell-entry narrow). No auto-recovery on Reload failure — the
-    /// op sequence is idempotent at the substrate; rerun to retry.
-    /// Same shape as cycle-3's `apply_tenant_mode` minus the
-    /// intent/done emit so it's shareable.
-    fn reapply_anchor_for_level(
-        &self,
-        name: &str,
-        level: ModeLevel,
-        reporter: &mut Reporter,
-    ) -> Result<(), ModeError> {
+    /// Build the full op list for a profile-to-tenant reapply at
+    /// `level`. Reads the profile, parses it, pre-flights every share
+    /// entry (Q11 host_path existence; Q12 tenant_path occupancy),
+    /// and constructs the op sequence: `InstallAnchor → Reload →
+    /// (per share: Grant, optionally EnsureDir, EnsureSymlink)` in
+    /// profile-declared order (Q13 lock). Pre-flight refusals surface
+    /// before any op fires so the caller's plan emission stays clean.
+    ///
+    /// Owning the parsed profile + the constructed ops in a single
+    /// struct lets the verb methods render the upfront plan
+    /// (`mode_starting` / `shell_starting` / `reload_starting`) and
+    /// then execute the same ops — plan/echo asymmetry-free.
+    fn build_reapply_plan(&self, name: &str, level: ModeLevel) -> Result<ReapplyPlan, ModeError> {
         let profile_content = self
             .executor
             .read_profile(name)
@@ -883,9 +997,135 @@ impl<'a> Writer<'a> {
             body: render_anchor(name, &hosts),
         };
         let reload = FirewallOp::Reload;
-        self.run(&install_anchor, reporter)
+        let share_ops = self.build_share_ops(name, &parsed_profile)?;
+        Ok(ReapplyPlan {
+            install_anchor,
+            reload,
+            share_ops,
+        })
+    }
+
+    /// Per-share op construction. Walks the profile's `[[shares]]`
+    /// array in declared order; for each entry: pre-flight host_path
+    /// existence (Q11) + tenant_path occupancy (Q12), then emit the
+    /// `AclOp::Grant`, optional `EnsureDirAsUser` (parent), and
+    /// `EnsureSymlinkAsUser` ops as `ShareOps`. The actual substrate
+    /// firing happens later in `execute_reapply_plan` — separating
+    /// construction from execution lets the verb method render the
+    /// plan over the constructed ops first.
+    fn build_share_ops(
+        &self,
+        name: &str,
+        parsed_profile: &Profile,
+    ) -> Result<Vec<ShareOps>, ModeError> {
+        if parsed_profile.shares.is_empty() {
+            return Ok(Vec::new());
+        }
+        let group = tenant_share_group_name(name);
+        let home_dir = PathBuf::from(format!("/Users/{name}"));
+        let mut out = Vec::with_capacity(parsed_profile.shares.len());
+        for share in &parsed_profile.shares {
+            // Q11: host_path must exist on disk (operator-process check).
+            if !share.host_path.exists() {
+                return Err(ModeError::Share(ShareError::HostPathMissing {
+                    path: share.host_path.clone(),
+                }));
+            }
+            let tenant_path = expand_tenant_path(name, &share.tenant_path);
+            // Q12: tenant_path must be absent or an existing symlink.
+            let kind = self
+                .executor
+                .tenant_path_kind(name, &tenant_path)
+                .map_err(ModeError::Probe)?;
+            if matches!(kind, PathKind::Other) {
+                return Err(ModeError::Share(ShareError::TenantPathOccupied {
+                    path: tenant_path,
+                }));
+            }
+            let acl_mode = match share.mode {
+                ShareMode::Ro => AclMode::Ro,
+                ShareMode::Rw => AclMode::Rw,
+            };
+            let grant = AclOp::Grant {
+                path: share.host_path.clone(),
+                group: group.clone(),
+                mode: acl_mode,
+            };
+            // Parent dir ensure: only if not the tenant home itself
+            // (home always exists).
+            let ensure_dir = tenant_path.parent().and_then(|parent| {
+                if parent == home_dir.as_path() {
+                    None
+                } else {
+                    Some(AccountOp::EnsureDirAsUser {
+                        name: name.into(),
+                        path: parent.to_path_buf(),
+                    })
+                }
+            });
+            let ensure_link = AccountOp::EnsureSymlinkAsUser {
+                name: name.into(),
+                link: tenant_path,
+                target: share.host_path.clone(),
+            };
+            out.push(ShareOps {
+                grant,
+                ensure_dir,
+                ensure_link,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Execute a pre-built `ReapplyPlan` against the substrate.
+    /// PF reapply first (`InstallAnchor → Reload`); a Reload failure
+    /// aborts before any share-substrate mutation.
+    fn execute_reapply_plan(
+        &self,
+        plan: &ReapplyPlan,
+        reporter: &mut Reporter,
+    ) -> Result<(), ModeError> {
+        self.run(&plan.install_anchor, reporter)
             .map_err(ModeError::Firewall)?;
-        self.run(&reload, reporter).map_err(ModeError::Firewall)?;
+        self.run(&plan.reload, reporter)
+            .map_err(ModeError::Firewall)?;
+        self.execute_share_ops(&plan.share_ops, reporter)
+    }
+
+    /// Apply the just-written default profile's share entries at
+    /// create-time (post-provision step). Default profile has no
+    /// `[[shares]]` so this is a no-op on the production path; tests
+    /// using `with_create_profile_content` to pre-populate shares
+    /// exercise it. Skips the PF reapply already done by the
+    /// create-time firewall sequence.
+    fn reapply_shares_post_provision(
+        &self,
+        name: &str,
+        parsed_profile: &Profile,
+        reporter: &mut Reporter,
+    ) -> Result<(), ModeError> {
+        let share_ops = self.build_share_ops(name, parsed_profile)?;
+        self.execute_share_ops(&share_ops, reporter)
+    }
+
+    /// Fire each `ShareOps` triple against the substrate in declared
+    /// order: `Grant → (optional EnsureDir) → EnsureSymlink`.
+    /// Centralized so `execute_reapply_plan` and
+    /// `reapply_shares_post_provision` share one loop body —
+    /// substrate-failure error routing stays consistent across both.
+    fn execute_share_ops(
+        &self,
+        share_ops: &[ShareOps],
+        reporter: &mut Reporter,
+    ) -> Result<(), ModeError> {
+        for share in share_ops {
+            self.run(&share.grant, reporter).map_err(ModeError::Acl)?;
+            if let Some(ensure_dir) = &share.ensure_dir {
+                self.run(ensure_dir, reporter).map_err(ModeError::Account)?;
+            }
+            self.run(&share.ensure_link, reporter)
+                .map_err(ModeError::Account)?;
+        }
         Ok(())
     }
 
@@ -895,11 +1135,12 @@ impl<'a> Writer<'a> {
     /// (2) emit the verb's pre-exec intent + echo for the login op,
     /// (3) hand off to the substrate's `login` method.
     ///
-    /// The narrow uses `reapply_anchor_for_level` (shared with
-    /// `apply_tenant_mode`) — same data flow, no mode-verb intent/done
-    /// emit. If the narrow fails, the login is NOT launched (Q2 lock,
-    /// abort posture); the operator's recovery is `tenant mode <name>
-    /// runtime` to narrow manually, then retry.
+    /// The narrow uses `build_reapply_plan` + `execute_reapply_plan`
+    /// (shared with `apply_tenant_mode` and `reload_tenant`) — same
+    /// data flow, no mode-verb intent/done emit. If the narrow
+    /// fails, the login is NOT launched (Q2 lock, abort posture); the
+    /// operator's recovery is `tenant mode <name> runtime` to narrow
+    /// manually, then retry.
     ///
     /// The LoginAsUser op is built only to feed `describe_account` for
     /// the plan and echo lines; execution goes through the substrate's
@@ -914,25 +1155,20 @@ impl<'a> Writer<'a> {
         name: &str,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
-        // Plan-time placeholder InstallAnchor — describe ignores the
-        // `body` field, so the empty-string body renders the same line
-        // as the real-body op the helper constructs at execute time.
-        // Same pattern as `apply_tenant_mode`'s plan placeholder.
-        let install_anchor_plan = FirewallOp::InstallAnchor {
-            name: name.into(),
-            body: String::new(),
-        };
-        let reload_plan = FirewallOp::Reload;
+        // Cycle-4 invariant: intent emitted BEFORE the narrow tries,
+        // so the operator sees the verb context even if the
+        // pre-flight profile read fails. Plan rendering happens AFTER
+        // the plan is built (post-profile-read) so share ops appear
+        // in the plan block alongside the PF + login ops.
+        reporter.shell_intent(name);
+        let reapply_plan = self
+            .build_reapply_plan(name, ModeLevel::Runtime)
+            .map_err(ShellError::Mode)?;
         let login = AccountOp::LoginAsUser { name: name.into() };
-        reporter.shell_starting(
-            name,
-            &[
-                (Op::Firewall(&install_anchor_plan), None),
-                (Op::Firewall(&reload_plan), None),
-                (Op::Account(&login), None),
-            ],
-        );
-        self.reapply_anchor_for_level(name, ModeLevel::Runtime, reporter)
+        let mut plan_entries = reapply_plan.as_plan_entries();
+        plan_entries.push((Op::Account(&login), None));
+        reporter.shell_plan(&plan_entries);
+        self.execute_reapply_plan(&reapply_plan, reporter)
             .map_err(ShellError::Mode)?;
         reporter.step(Op::Account(&login));
         self.executor.login(name).map_err(ShellError::Account)
@@ -947,6 +1183,72 @@ impl<'a> Writer<'a> {
     fn run<O: WritableOp>(&self, op: &O, reporter: &mut Reporter) -> Result<(), O::Error> {
         reporter.step(op.op_ref());
         op.execute_via(self.executor)
+    }
+
+    /// Reload a single tenant — runtime-tier PF reapply + share
+    /// substrate. Cycle 10's headline verb's per-tenant arm. Reuses
+    /// `build_reapply_plan` + `execute_reapply_plan` under runtime
+    /// tier; the verb's distinct framing lives on the Reporter.
+    pub(crate) fn reload_tenant(
+        &self,
+        name: &str,
+        reporter: &mut Reporter,
+    ) -> Result<(), ModeError> {
+        // Intent emitted BEFORE plan-build so the operator sees verb
+        // context even if the profile-read fails (parity with shell's
+        // `shell_intent` + `shell_plan` split). Plan rendering
+        // happens after the plan is built so share ops appear in the
+        // plan block alongside the PF ops.
+        reporter.reload_intent(name);
+        let plan = self.build_reapply_plan(name, ModeLevel::Runtime)?;
+        reporter.reload_plan(&plan.as_plan_entries());
+        self.execute_reapply_plan(&plan, reporter)?;
+        reporter.reload_done(name);
+        Ok(())
+    }
+
+    /// Reload every tenant on the host. Q15 lock: continue on
+    /// per-tenant failure, accumulate, surface a single end-of-run
+    /// summary. The exit code at the dispatcher reflects the worst
+    /// outcome (0 if all clean; 74 if any tripped). Tenants are
+    /// walked in `Reader::tenant_names()` order (alphabetical) for
+    /// deterministic output across runs.
+    pub(crate) fn reload_all_tenants(
+        &self,
+        accounts: &dyn Reader,
+        reporter: &mut Reporter,
+    ) -> ReloadAllOutcome {
+        let names = accounts.tenant_names();
+        reporter.reload_all_starting(names.len());
+        if names.is_empty() {
+            reporter.reload_all_done_summary(0, 0);
+            return ReloadAllOutcome { failed: 0 };
+        }
+        let mut failed = 0;
+        for name in &names {
+            match self.reload_tenant(name, reporter) {
+                Ok(()) => {}
+                Err(err) => {
+                    failed += 1;
+                    // Per-tenant failure routes through the same
+                    // Reporter methods the verb-level dispatch uses
+                    // (mirror of `surface_reload_error` in
+                    // commands.rs). The operator sees inline failure
+                    // framing during the walk; the end-of-walk
+                    // summary counts how many tripped.
+                    match &err {
+                        ModeError::Profile(e) => reporter.reload_profile_failed(name, e),
+                        ModeError::Firewall(e) => reporter.reload_firewall_failed(name, e),
+                        ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
+                        ModeError::Account(e) => reporter.mode_account_failed(name, e),
+                        ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
+                        ModeError::Share(e) => reporter.refuse_reload_share(name, e),
+                    }
+                }
+            }
+        }
+        reporter.reload_all_done_summary(names.len() - failed as usize, failed as usize);
+        ReloadAllOutcome { failed }
     }
 
     /// Doctor's single-tenant audit. Runs in two phases:

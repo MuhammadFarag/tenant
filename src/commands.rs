@@ -76,6 +76,10 @@ pub(crate) fn dispatch(
                     reporter.create_firewall_failed(&name, &e);
                     EX_IOERR
                 }
+                Err(accounts::CreateError::PostProvision(e)) => {
+                    surface_create_post_provision_error(reporter, &name, &e);
+                    EX_IOERR
+                }
             }
         }
         Verb::Shell { name } => {
@@ -109,12 +113,8 @@ pub(crate) fn dispatch(
                             reporter.shell_failed(&name, &e);
                             EX_IOERR
                         }
-                        Err(accounts::ShellError::Mode(accounts::ModeError::Profile(e))) => {
-                            reporter.shell_narrow_profile_failed(&name, &e);
-                            EX_IOERR
-                        }
-                        Err(accounts::ShellError::Mode(accounts::ModeError::Firewall(e))) => {
-                            reporter.shell_narrow_failed(&name, &e);
+                        Err(accounts::ShellError::Mode(e)) => {
+                            surface_shell_mode_error(reporter, &name, &e);
                             EX_IOERR
                         }
                     }
@@ -147,12 +147,8 @@ pub(crate) fn dispatch(
                 accounts::Eligibility::Destroyable => {
                     match writer.apply_tenant_mode(&name, level, reporter) {
                         Ok(()) => 0,
-                        Err(accounts::ModeError::Profile(e)) => {
-                            reporter.mode_profile_failed(&name, &e);
-                            EX_IOERR
-                        }
-                        Err(accounts::ModeError::Firewall(e)) => {
-                            reporter.mode_failed(&name, &e);
+                        Err(e) => {
+                            surface_mode_error(reporter, &name, &e);
                             EX_IOERR
                         }
                     }
@@ -206,6 +202,41 @@ pub(crate) fn dispatch(
                 },
             }
         }
+        Verb::Reload { name } => match name {
+            Some(n) => {
+                if let Err(e) = accounts::validate_name(&n) {
+                    reporter.refuse_invalid_name(&n, &e);
+                    return EX_USAGE;
+                }
+                match accounts::destroy_eligibility(accounts, &n) {
+                    accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+                        reporter.refuse_reload_absent(&n);
+                        EX_USAGE
+                    }
+                    accounts::Eligibility::NotATenant { uid } => {
+                        reporter.refuse_reload_not_a_tenant(&n, uid, TENANT_UID_FLOOR);
+                        EX_USAGE
+                    }
+                    accounts::Eligibility::SystemAccount => {
+                        reporter.refuse_reload_system_account(&n);
+                        EX_USAGE
+                    }
+                    accounts::Eligibility::Destroyable => {
+                        match writer.reload_tenant(&n, reporter) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                surface_reload_error(reporter, &n, &e);
+                                EX_IOERR
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                let outcome = writer.reload_all_tenants(accounts, reporter);
+                if outcome.failed == 0 { 0 } else { EX_IOERR }
+            }
+        },
         Verb::Destroy { name } => {
             if let Err(e) = accounts::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
@@ -269,5 +300,77 @@ fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) 
         accounts::DoctorError::Probe(e) => reporter.doctor_failed(e),
         accounts::DoctorError::HostFile(e) => reporter.doctor_host_file_failed(e),
         accounts::DoctorError::Firewall(e) => reporter.doctor_firewall_failed(e),
+    }
+}
+
+/// Route a `ModeError` (mode verb) to the right Reporter framing.
+/// Cycle 10's share-reapply substrate adds four new arms beyond the
+/// existing Profile + Firewall pair; centralizing the dispatch keeps
+/// the verb arm in `dispatch` thin.
+fn surface_mode_error(reporter: &mut Reporter, name: &str, error: &accounts::ModeError) {
+    match error {
+        accounts::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
+        accounts::ModeError::Firewall(e) => reporter.mode_failed(name, e),
+        accounts::ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
+        accounts::ModeError::Account(e) => reporter.mode_account_failed(name, e),
+        accounts::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
+        accounts::ModeError::Share(e) => reporter.refuse_mode_share(name, e),
+    }
+}
+
+/// Route a `ShellError::Mode(_)` to the right Reporter framing.
+/// Parallel to `surface_mode_error` with shell-entry context phrasing
+/// on each arm — operator typed `tenant shell`, not `tenant mode`, so
+/// the failure frame names the narrow as a step within the shell verb.
+fn surface_shell_mode_error(reporter: &mut Reporter, name: &str, error: &accounts::ModeError) {
+    match error {
+        accounts::ModeError::Profile(e) => reporter.shell_narrow_profile_failed(name, e),
+        accounts::ModeError::Firewall(e) => reporter.shell_narrow_failed(name, e),
+        accounts::ModeError::Acl(e) => reporter.shell_narrow_acl_failed(name, e),
+        accounts::ModeError::Account(e) => reporter.shell_narrow_account_failed(name, e),
+        accounts::ModeError::Probe(e) => reporter.shell_narrow_probe_failed(name, e),
+        accounts::ModeError::Share(e) => reporter.refuse_shell_share(name, e),
+    }
+}
+
+/// Route a `ModeError` to the right Reporter framing for the reload
+/// verb. Parallel to `surface_mode_error` with reload-specific wording
+/// on Firewall + Share arms ("reload firewall" / "cannot reload");
+/// substrate arms (Acl / Account / Probe / Profile) reuse the
+/// mode-named methods whose wording is verb-agnostic.
+fn surface_reload_error(reporter: &mut Reporter, name: &str, error: &accounts::ModeError) {
+    match error {
+        accounts::ModeError::Profile(e) => reporter.reload_profile_failed(name, e),
+        accounts::ModeError::Firewall(e) => reporter.reload_firewall_failed(name, e),
+        accounts::ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
+        accounts::ModeError::Account(e) => reporter.mode_account_failed(name, e),
+        accounts::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
+        accounts::ModeError::Share(e) => reporter.refuse_reload_share(name, e),
+    }
+}
+
+/// Route a `CreateError::PostProvision(ModeError)` to the right
+/// Reporter framing. Post-provision is the cycle 10 arm where the
+/// tenant has already been provisioned (user + group + profile + PF +
+/// enable all succeeded) but the share-reapply substrate failed —
+/// the per-arm framing names the existing-tenant-state explicitly so
+/// the operator's recovery is `tenant reload`, not `tenant create`
+/// (which would refuse on name-conflict). Profile/Firewall arms are
+/// unreachable on the create path because `reapply_shares_post_provision`
+/// is called with a pre-parsed Profile and doesn't touch firewall
+/// ops; the two arms are wired through the mode-failure family for
+/// completeness.
+fn surface_create_post_provision_error(
+    reporter: &mut Reporter,
+    name: &str,
+    error: &accounts::ModeError,
+) {
+    match error {
+        accounts::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
+        accounts::ModeError::Firewall(e) => reporter.mode_failed(name, e),
+        accounts::ModeError::Acl(e) => reporter.create_post_provision_acl_failed(name, e),
+        accounts::ModeError::Account(e) => reporter.create_post_provision_account_failed(name, e),
+        accounts::ModeError::Probe(e) => reporter.create_post_provision_probe_failed(name, e),
+        accounts::ModeError::Share(e) => reporter.refuse_create_post_provision_share(name, e),
     }
 }

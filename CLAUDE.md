@@ -16,12 +16,19 @@ anchor's in-kernel rules. `tenant mode <name> install|runtime` re-renders
 the per-tenant PF anchor with the requested allowlist tier (`runtime`
 only, or `runtime + install`) and reloads pf — used to widen the tenant's
 egress allowlist for install-tier work and narrow back when done.
-`tenant shell <name>` auto-narrows back to runtime tier before launching
-the login shell, so any leftover install-tier widening becomes truly
-session-scoped — the next shell entry resets the allowlist. `tenant
+`tenant shell <name>` auto-narrows back to runtime tier AND reapplies
+the profile's `[[shares]]` entries before launching the login shell, so
+any leftover install-tier widening becomes truly session-scoped — the
+next shell entry resets the allowlist AND restores any ACL/symlink the
+operator manually clobbered. `tenant reload [<name>]` is the
+config-driven "I edited the profile, apply it" verb: rewrites the PF
+anchor at runtime tier and reapplies each declared share (host-side
+`chmod +a` ACL grant + tenant-side symlink at the expanded
+`tenant_path`). No-arg form walks every tenant on the host, continues
+on per-tenant failure, exits 0 clean / 74 on any failure. `tenant
 doctor [<name>]` is the read-only audit verb: it walks a curated list
 of sensitive host paths and probes each AS the tenant (via `sudo -n -u
-<name> /usr/bin/test -r|x`); reads the host's `/etc/sudoers` + drop-ins
+<name> /bin/test -r|x`); reads the host's `/etc/sudoers` + drop-ins
 to detect SSH_AUTH_SOCK env propagation; reads `/etc/pam.d/sudo` for an
 active `pam_tid.so` directive (Touch-ID-for-sudo, Info-tier);
 structural-checks each tenant's kernel pf anchor against `pfctl -a
@@ -51,15 +58,15 @@ walks the commits.
 ## File map
 
 ```
-src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`; mode swap to `DryRunExecutor` when `--dry-run`; constructs Reporter with the active Executor. `run` takes `host: &str` (operator's login name) for doctor's curated-path expansion.
-src/commands.rs   — verb dispatch (the `match` on `Verb`). No I/O, no mode/verbosity branching; routes to Reporter methods. `doctor_exit_code(severity, strict)` maps doctor's outcome to 0/1/2.
-src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`, `doctor_tenant`, `doctor_all_tenants`); shared private `reapply_anchor_for_level` helper drives both `apply_tenant_mode` and the shell's auto-narrow; private doctor helpers: `check_env_leak` + `check_touch_id_for_sudo` + `check_pf_status` (each host-wide, single-emit) and `probe_tenant_paths` (per-tenant; runs the curated-path probes, the pf-rule structural check on the kernel anchor, and the byte-exact anchor-body comparison on the on-disk file via `check_anchor_body_drift`). `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute. `DoctorOutcome` + `DoctorError { Probe, HostFile, Firewall }` aggregate doctor's results.
+src/lib.rs        — public API (`run`); `Cli` + `Verb` (Create / Destroy / Shell / Mode / Doctor / Reload) + `ModeLevel`; mode swap to `DryRunExecutor` when `--dry-run`; constructs Reporter with the active Executor. `run` takes `host: &str` (operator's login name) for doctor's curated-path expansion.
+src/commands.rs   — verb dispatch (the `match` on `Verb`). No I/O, no mode/verbosity branching; routes to Reporter methods. `doctor_exit_code(severity, strict)` maps doctor's outcome to 0/1/2. Helpers `surface_destroy_error` / `surface_doctor_error` / `surface_mode_error` / `surface_shell_mode_error` / `surface_reload_error` / `surface_create_post_provision_error` centralize per-error-arm Reporter routing for verbs with multi-arm error types.
+src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`, `reload_tenant`, `reload_all_tenants`, `doctor_tenant`, `doctor_all_tenants`); shared private `build_reapply_plan` (read profile + parse + pre-flight shares + construct PF + per-share ops) and `execute_reapply_plan` (fires the constructed ops) drive `apply_tenant_mode` / `shell_into_tenant` / `reload_tenant`; `reapply_shares_post_provision` skips PF for `create_tenant`'s post-Enable share pass; `execute_share_ops` is the per-share loop shared by both execute paths; private doctor helpers: `check_env_leak` + `check_touch_id_for_sudo` + `check_pf_status` (each host-wide, single-emit) and `probe_tenant_paths` (per-tenant; runs the curated-path probes, the pf-rule structural check on the kernel anchor, and the byte-exact anchor-body comparison on the on-disk file via `check_anchor_body_drift`). `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute. `ReapplyPlan { install_anchor, reload, share_ops }` + `ShareOps { grant, ensure_dir, ensure_link }` carry the pre-built op list so plan rendering and execution see the same ops. `ShareError { HostPathMissing, TenantPathOccupied }`, extended `ModeError { Profile, Firewall, Acl, Account, Probe, Share }`, and `CreateError::PostProvision(ModeError)` aggregate share-substrate failures. `ReloadAllOutcome { failed }` carries the no-arg-form aggregate. `DoctorOutcome` + `DoctorError { Probe, HostFile, Firewall }` aggregate doctor's results.
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both iterate from `TENANT_UID_FLOOR = 600`.
-src/executor.rs   — `Op` ADT root wrapping `AccountOp` / `ProfileOp` / `FirewallOp` leaves; `WritableOp` trait bridging leaves to typed execution; `Executor` trait (per-domain `describe_*` / `execute_*` pairs + non-unit carve-outs: `login` / `read_profile` / `read_pf_conf` / `probe_access_as_tenant` / `read_env_policy` / `read_kernel_pf_rules` / `read_pam_sudo` / `read_pf_status` / `read_anchor_body`); `MacosExecutor` / `StubExecutor` / `DryRunExecutor` impls; `AccountError` / `ProfileError` / `FirewallError` / `ProbeError` / `HostFileError` types (HostFileError covers any privileged-or-cheap host-config-file read: sudoers + drop-ins, pam.d/sudo, on-disk anchor file); `AccessMode` (Read / List) + `AccessOutcome` (Allowed / Denied / Unknown) for doctor's probe vocabulary.
-src/profile.rs    — `Profile` / `Allowlist` / `Tier` serde shapes; `parse` (schema-version-checked); `default_profile_toml`; `display_path_for` (`~`-rendered form used in plan / echo / error frames).
+src/executor.rs   — `Op` ADT root wrapping `AccountOp` / `ProfileOp` / `FirewallOp` / `AclOp` leaves; `WritableOp` trait bridging leaves to typed execution; `Executor` trait (per-domain `describe_*` / `execute_*` pairs + non-unit carve-outs: `login` / `read_profile` / `read_pf_conf` / `probe_access_as_tenant` / `read_env_policy` / `read_kernel_pf_rules` / `read_pam_sudo` / `read_pf_status` / `read_anchor_body` / `tenant_path_kind`); `MacosExecutor` / `StubExecutor` / `DryRunExecutor` impls; `AccountError` / `ProfileError` / `FirewallError` / `ProbeError` / `HostFileError` / `AclError` types (HostFileError covers any privileged-or-cheap host-config-file read: sudoers + drop-ins, pam.d/sudo, on-disk anchor file); `AccessMode` (Read / List) + `AccessOutcome` (Allowed / Denied / Unknown) for doctor's probe vocabulary; `PathKind` (Absent / Symlink / Other) for `tenant_path_kind`'s pre-flight; `AclMode` (Ro / Rw) is the substrate-vocab sibling of profile.rs's `ShareMode`. `AccountOp::LoginAsUser` / `EnsureDirAsUser` / `EnsureSymlinkAsUser` substrate-group the `sudo -n -u <tenant>` mechanism under a single sub-domain.
+src/profile.rs    — `Profile` / `Allowlist` / `Tier` / `Share` / `ShareMode` serde shapes; `parse` (schema-version-checked, validates the `$HOME` prefix-only contract on every `tenant_path`); `expand_tenant_path(name, template) -> PathBuf` resolves the `$HOME` template at the Writer boundary; `default_profile_toml`; `display_path_for` (`~`-rendered form used in plan / echo / error frames).
 src/firewall.rs   — pure functions for PF anchor + `/etc/pf.conf` line ops: `render_anchor`, `ensure_anchor_ref`, `remove_anchor_ref`, `is_anchor_referenced`; `tenant_anchor_name` / `_path` centralizers; `ANCHOR_DIR` / `PF_CONF` / `PF_CONF_BACKUP` constants.
 src/doctor.rs     — pure functions for the doctor verb: `curated_paths(host, tenant, others)` returns the (Category, AccessMode, PathBuf) probe list; `classify(category, outcome) -> Option<Severity>` maps probe results to finding severity; `has_env_delete_for(policy, var)` parses sudoers for the env_delete directive; `pf_rule_presence_check(rules, tenant)` returns up to two `PfRuleDrift` findings for missing `pass` / `block` rules in a kernel anchor; `has_pam_tid(pam_config)` parses `/etc/pam.d/sudo` for an active `auth sufficient pam_tid.so` directive; `pf_status_enabled(status)` checks pfctl -si output for "Status: Enabled"; `anchor_body_matches(actual, expected)` byte-exact equality on the on-disk anchor body vs the profile-derived render. `Finding { FilesystemExposure, EnvLeak, PfRuleDrift, TouchIdMissing, PfDisabled, AnchorBodyDrift }` + `Severity { Info, Warning, Critical }` + `Category` types. `Finding::guidance(&self) -> Option<String>` returns the 4-section operator-facing block per variant (Why this matters / Recommended fix / Side-effects / Alternative); `None` for `FilesystemExposure` (per-path guidance folds into the future remediation cycle). All I/O lives in `Writer::doctor_*` orchestration on the executor; this module is grep-and-classify only.
-src/reporter.rs   — operator-facing output. Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); `refuse_*` and `*_failed` methods to stderr; `step(op)` echoes per substrate call in real+verbose; plan rendering flows through `Op::describe_via`. Doctor uses `doctor_starting` (verbose curated-list block + dry-run intent), `doctor_finding` (one-liner; emits the 4-section guidance block indented 2 spaces under the finding when verbose), `doctor_done_summary`, `doctor_failed` (probe substrate), `doctor_host_file_failed` (sudoers / pam.d/sudo substrate), `doctor_firewall_failed` (pfctl substrate), `doctor_all_tenants_noop`, and `refuse_doctor_*` family.
+src/reporter.rs   — operator-facing output. Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); `refuse_*` and `*_failed` methods to stderr; `step(op)` echoes per substrate call in real+verbose; plan rendering flows through `Op::describe_via`. Verbs with a profile-driven plan (mode / shell / reload) split into `_intent` (emits the intent line before the profile read) + `_plan` (renders the plan block after the plan is built) so the operator sees verb context even when read fails. Share-substrate failure framing per arm: `mode_acl_failed` / `mode_account_failed` / `mode_probe_failed` / `refuse_mode_share`; shell variants add "before shell entry"; reload has its own `reload_firewall_failed` / `refuse_reload_share` for verb-specific wording. Reload no-arg form uses `reload_all_starting` / `reload_all_done_summary` to bracket the walk. Create's post-provision arm uses `create_post_provision_*_failed` family that points operator at `tenant reload <name>` for recovery. Doctor uses `doctor_starting` (verbose curated-list block + dry-run intent), `doctor_finding` (one-liner; emits the 4-section guidance block indented 2 spaces under the finding when verbose), `doctor_done_summary`, `doctor_failed` (probe substrate), `doctor_host_file_failed` (sudoers / pam.d/sudo substrate), `doctor_firewall_failed` (pfctl substrate), `doctor_all_tenants_noop`, and `refuse_doctor_*` family.
 src/main.rs       — composition root: prod impls + `tenant::run`. Reads `$USER` for the host identity passed to doctor.
 
 tests/cli*.rs            — E2E tests, one binary per verb (`tests/cli_<verb>.rs`) plus `tests/cli.rs` for cross-cutting CLI parser tests. Shared helpers (`NeverExecutor`, `run_with` / `run_with_exec`, `TEST_HOST`, stub builders) live in `tests/common/mod.rs`. Each per-verb file's top-of-file comment describes its scope.
@@ -69,7 +76,7 @@ tests/doctor.rs          — combinatorial coverage on `doctor::curated_paths` s
 tests/env_policy_parse.rs — combinatorial coverage on `doctor::has_env_delete_for` (directive shape variants: quoted/unquoted, `+=` vs `=`, single-var vs multi-var list, `Defaults` qualifiers).
 tests/pf_rule_parse.rs   — combinatorial coverage on `doctor::pf_rule_presence_check` (empty / pass-only / block-only / both-present, comment / substring / whitespace tolerance, per-tenant naming).
 tests/pam_parse.rs       — combinatorial coverage on `doctor::has_pam_tid` (active / commented / wrong-control / wrong-kind / wrong-module / leading-whitespace / truncated-line).
-tests/profile_parse.rs   — combinatorial coverage on `profile::parse`.
+tests/profile_parse.rs   — combinatorial coverage on `profile::parse` (incl. `[[shares]]` table-array shape variants + `$HOME` prefix-only validation) and `profile::expand_tenant_path` (template resolution at the Writer boundary).
 tests/firewall_render.rs — combinatorial coverage on `firewall::render_anchor`.
 tests/firewall_conf.rs   — combinatorial coverage on `ensure_anchor_ref` / `remove_anchor_ref` / `is_anchor_referenced`.
 ```
@@ -109,17 +116,20 @@ Things that are easy to violate and would matter:
   and adds a leaf variant — no new trait. The single `Executor` is
   the one test seam at the host boundary.
 
-- **Carve-out methods for non-unit returns** — three Executor methods
-  don't fit the `Result<(), E>` shape and are called directly by the
-  Writer rather than routed through `WritableOp`: `login(name) ->
-  Result<i32, AccountError>` (interactive — inherits stdio so sudo
-  can prompt; returns child exit code), `read_profile(name) ->
-  Result<String, ProfileError>`, `read_pf_conf() ->
-  Result<String, FirewallError>`. The `LoginAsUser` variant exists
-  in `AccountOp` only for plan/echo rendering via `Op::describe_via`
-  — it's intentionally NOT a `WritableOp` impl. When adding a future
-  executor method, ask "does the return fit `Result<(), E>`?" — if
-  yes, ADT variant; if no, carve-out.
+- **Carve-out methods for non-unit returns** — several Executor
+  methods don't fit the `Result<(), E>` shape and are called directly
+  by the Writer rather than routed through `WritableOp`: `login(name)
+  -> Result<i32, AccountError>` (interactive — inherits stdio so sudo
+  can prompt; returns child exit code), `read_profile` /
+  `read_pf_conf` / `read_env_policy` / `read_kernel_pf_rules` /
+  `read_pam_sudo` / `read_pf_status` / `read_anchor_body` (content
+  reads — return type is `String`, not unit); `probe_access_as_tenant`
+  / `tenant_path_kind` (probe verdicts — return type is the verdict
+  enum, not unit). The `LoginAsUser` variant exists in `AccountOp`
+  only for plan/echo rendering via `Op::describe_via` — it's
+  intentionally NOT a `WritableOp` impl (`execute_account` panics on
+  it). When adding a future executor method, ask "does the return
+  fit `Result<(), E>`?" — if yes, ADT variant; if no, carve-out.
 
 - **Interactive verbs use `login`, not `execute_account`** —
   `execute_account` captures stdout/stderr (suppresses sysadminctl
@@ -207,46 +217,62 @@ Things that are easy to violate and would matter:
   is specific to the "parent directive removed" case; a defensive-
   flush habit would blur the principle.
 
-- **Mode-reapply is `InstallAnchor → Reload` with no flush and no
-  recovery** — `tenant mode <name> {install|runtime}` re-renders
-  the anchor body and reloads pf. The parent `load anchor`
-  directive stays in place across mode reapply, so `pfctl -f`
-  re-reads the anchor file and replaces the in-kernel ruleset on
-  every reload — no orphan-anchor case, no `FlushAnchor` needed.
-  Verified empirically by manual smoke testing (kernel `<allowed>`
-  table shrinks back to runtime-tier size on narrow); if that ever
-  flips, the fix is one line — insert `FlushAnchor` before
-  `InstallAnchor` in `Writer::apply_tenant_mode`.
-  On Reload failure, mode does NOT attempt a
-  `RestoreConfigFromBackup`-style recovery — the operator reruns
-  the verb (idempotent at the substrate). Negative pin in tests:
-  mode flow records exactly `[InstallAnchor, Reload]` — no
-  `FlushAnchor` / `BackupConfig` / `RestoreConfigFromBackup` /
-  `RemoveAnchor` / `UpdateConfig` / `Enable`.
+- **Mode-reapply is `InstallAnchor → Reload` + per-share substrate,
+  with no flush and no recovery** — `tenant mode <name>
+  {install|runtime}` re-renders the anchor body, reloads pf, then
+  walks the profile's `[[shares]]` entries (each: `AclOp::Grant` +
+  optional `EnsureDirAsUser` parent + `EnsureSymlinkAsUser`). The
+  parent `load anchor` directive stays in place across mode reapply,
+  so `pfctl -f` re-reads the anchor file and replaces the in-kernel
+  ruleset on every reload — no orphan-anchor case, no `FlushAnchor`
+  needed. Verified empirically by manual smoke testing (kernel
+  `<allowed>` table shrinks back to runtime-tier size on narrow); if
+  that ever flips, the fix is one line — insert `FlushAnchor` before
+  `InstallAnchor` in `Writer::execute_reapply_plan`. On Reload
+  failure, mode does NOT attempt a `RestoreConfigFromBackup`-style
+  recovery — the operator reruns the verb (idempotent at the
+  substrate). The share pass runs AFTER the PF reapply lands so a
+  Reload failure aborts before any ACL/symlink mutation. Negative
+  pin in tests: mode flow on a no-shares profile records exactly
+  `[InstallAnchor, Reload]` firewall ops — no `FlushAnchor` /
+  `BackupConfig` / `RestoreConfigFromBackup` / `RemoveAnchor` /
+  `UpdateConfig` / `Enable`. Cycle 10 factored the substrate into
+  `Writer::build_reapply_plan` (read profile + parse + pre-flight
+  shares + construct the op list) and `Writer::execute_reapply_plan`
+  (fires the constructed ops). The verb methods call
+  `mode_intent` / `shell_intent` / `reload_intent` BEFORE
+  `build_reapply_plan` so the operator sees verb context even when
+  the profile read fails, then `mode_plan` / `shell_plan` /
+  `reload_plan` to render the upfront plan block over the
+  just-constructed ops — every `$` echo line matches a plan line.
 
-- **Shell auto-narrows on entry, unconditionally, abort-on-failure**
-  — every `tenant shell <name>` reapplies the runtime-tier anchor
-  body via the shared `reapply_anchor_for_level(name,
-  ModeLevel::Runtime, reporter)` helper BEFORE handing off to
-  `Executor::login`. The narrow is unconditional (no "are we
+- **Shell auto-narrows AND reapplies shares on entry, unconditionally,
+  abort-on-failure** — every `tenant shell <name>` runs the full
+  profile reapply (PF anchor at runtime tier + per-share Grant +
+  EnsureDir + EnsureSymlink) via the shared `build_reapply_plan` +
+  `execute_reapply_plan` helpers BEFORE handing off to
+  `Executor::login`. The reapply is unconditional (no "are we
   already in runtime?" check) — same structural reasoning as Q2's
-  "on-disk anchor is the source of truth" lock; reapply is
-  idempotent at the substrate. The narrow is also load-bearing: if
-  it fails, the login is NOT launched. New `ShellError { Account,
-  Mode }` carries the abort posture through to `commands::dispatch`,
-  which routes Mode failures through `Reporter::shell_narrow_failed`
-  (firewall) and `Reporter::shell_narrow_profile_failed` (profile
-  read/parse). Both methods frame the failure as "before shell
-  entry" so the operator sees verb context, not mode-verb framing.
-  Operator recovery: `tenant mode <name> runtime` to narrow
-  manually, then retry `tenant shell <name>`. Cycle 4's shell plan
-  grows from 1 op (`LoginAsUser`) to 3 (`InstallAnchor` + `Reload`
-  + `LoginAsUser`); `shell_starting` takes a `plan` slice matching
-  create/destroy/mode's signature. Same no-defensive-flush /
+  "on-disk anchor is the source of truth" lock; both PF reload and
+  every share op (chmod +a, mkdir -p, ln -sfn) are idempotent at
+  the substrate. The reapply is also load-bearing: if any step
+  fails, the login is NOT launched. `ShellError { Account, Mode }`
+  carries the abort posture through to `commands::dispatch`, which
+  routes Mode failures through `surface_shell_mode_error` — six
+  arms (Profile / Firewall / Acl / Account / Probe / Share) all
+  framed as "before shell entry" so the operator sees verb context,
+  not mode-verb framing. Operator recovery on a share-substrate
+  failure: `tenant reload <name>` (idempotent) or address the
+  conflict the Q11/Q12 refusal named. Cycle 10's shell plan grows
+  from 3 ops (cycle 4's `InstallAnchor + Reload + LoginAsUser`) to
+  3 + per-share ops + LoginAsUser; `shell_intent` emits the intent
+  line first (so an operator running against a missing profile still
+  sees "Shelling into 'X'." before the read failure), then
+  `shell_plan` renders the full op list. Same no-defensive-flush /
   no-auto-recovery posture as the mode verb (the helper is shared);
   negative pin in tests confirms no `FlushAnchor` / `BackupConfig`
   / `RestoreConfigFromBackup` / `RemoveAnchor` ever fires on the
-  shell path.
+  shell path even when shares are present.
 
 - **Auto-narrow only protects the `tenant shell` entry path** —
   an operator who runs `sudo -iu tenant` directly bypasses the
@@ -305,14 +331,19 @@ Things that are easy to violate and would matter:
 
 - **Probe-as-tenant subsumes ACL semantics at the kernel level** —
   doctor's filesystem-exposure detection invokes `sudo -n -u
-  <tenant> /usr/bin/test -<r|x> <path>` and treats the kernel's
-  exit code as ground truth: 0 → `AccessOutcome::Allowed`, 1 →
-  `Denied`, anything else → `Unknown`. The kernel composes POSIX
-  permissions + ACLs + sandbox + TCC into the answer, so doctor
-  doesn't need an `effective_access(...)` pure function that
-  models macOS ACL semantics (including the macOS-specific `read`
-  → `list` / `execute` → `search` ACL-rewrite-on-re-read quirk
-  the sandbox plugin had to handle). Cycle-1 design Q3 lock:
+  <tenant> /bin/test -<r|x> <path>` and treats the kernel's exit
+  code as ground truth: 0 → `AccessOutcome::Allowed`, 1 → `Denied`,
+  anything else → `Unknown`. The kernel composes POSIX permissions
+  + ACLs + sandbox + TCC into the answer, so doctor doesn't need an
+  `effective_access(...)` pure function that models macOS ACL
+  semantics (including the macOS-specific `read` → `list` /
+  `execute` → `search` ACL-rewrite-on-re-read quirk the sandbox
+  plugin had to handle). `/bin/test` (not `/usr/bin/test`) is
+  load-bearing: macOS Tahoe (Darwin 25.x) and earlier all carry
+  `/bin/test`, but `/usr/bin/test` is absent on Darwin 25.x —
+  cycle 10's smoke surfaced this as a latent cycle-1 substrate
+  bug. Same path applies to cycle 10's `tenant_path_kind` probe.
+  Cycle-1 design Q3 lock:
   `Denied` doesn't tell the operator WHY (POSIX vs ACL vs
   sandbox); that mechanism reporting is parked for the cycle-2
   remediation surface. Curated list collapses path-not-present
@@ -484,6 +515,133 @@ Things that are easy to violate and would matter:
   `tests/doctor.rs` — these two together are the contract that the
   operator-facing surface stays educational, not just diagnostic.
 
+- **Per-tenant `[[shares]]` are profile-driven, not CLI-driven** —
+  cycle 10's filesystem-share substrate: the per-tenant profile
+  TOML grows an optional `[[shares]]` table-array, each entry a
+  `(host_path, mode {ro|rw}, tenant_path)` triple. Source of truth
+  is the profile; the operator hand-edits it and runs `tenant
+  reload <name>` to reconcile (matches sandbox-plugin posture and
+  the existing PF-allowlist doctrine). Per-tenant, not host-wide
+  (matches the isolation model: different tenants get different
+  group ACLs, hence different reachable paths). `host_path` is
+  literal absolute; `tenant_path` is a template with `$HOME`
+  prefix-only resolution (Q3 lock — `$HOME` expands to
+  `/Users/<tenant>` only when at position 0; mid-string `$HOME`
+  refuses at parse with `tenant_path "..." contains \`$HOME\` not
+  at the start`). Mode values `"ro"` / `"rw"` (Q1 lock — string
+  discriminator; POSIX bit-string forms rejected because file vs
+  directory POSIX semantics diverge). Q11 + Q12 pre-flights run
+  BEFORE any substrate op: `host_path.exists()` (operator-process
+  check) + `tenant_path_kind` (sudo-u probe) reject
+  `ShareError::HostPathMissing { path }` and
+  `ShareError::TenantPathOccupied { path }` respectively — the
+  substrate NEVER clobbers operator data at a `tenant_path` that
+  exists as a real directory or file. Cycle 10 deliberately does
+  NOT auto-revoke ACLs from removed share entries (Q14 lock); a
+  future cycle 11 doctor extension surfaces orphans.
+
+- **`AclOp` sub-domain — mechanism-named, chmod-+a-natively-idempotent**
+  — `AclOp::Grant { path, group, mode }` and `AclOp::Revoke { ...
+  }` map to `chmod +a/-a "group:<g> allow <bits>" <path>` (no
+  sudo prefix — operator owns or has ACL-write on host_path).
+  `AclMode { Ro, Rw }` (executor-vocab) is the substrate sibling
+  of `profile::ShareMode { Ro, Rw }` — the Writer translates at
+  the layer boundary. The bit lists are ported verbatim from
+  sandbox's `acl.py`: ro = `read,execute,file_inherit,directory_inherit`;
+  rw = `read,write,execute,delete,append,file_inherit,directory_inherit`.
+  macOS chmod +a is NATIVELY idempotent: re-applying the same
+  entry to a path that already carries it neither errors nor
+  duplicates — verified by cycle-10 smoke (count stays at 1 across
+  sequential reloads). An earlier draft of `execute_acl` tried a
+  substring-match pre-check against `ls -lde` output, but macOS
+  canonicalizes the bit names on storage (`read,write,execute,delete,append`
+  → `list,add_file,search,delete,add_subdirectory`), so the
+  pre-check always failed false-negative. Removed the dead
+  pre-check; the operator-visible behavior is unchanged.
+  `AclError { Spawn, NonZero }` is the domain error type. Revoke
+  (`chmod -a`) on an absent entry currently surfaces as
+  `AclError::NonZero` ("No matching ACL entry"); no cycle-10 path
+  exercises Revoke, so cycle 11's doctor ACL-drift remediation
+  will need to tolerate that case if/when it ships.
+
+- **`EnsureDirAsUser` and `EnsureSymlinkAsUser` substrate-group
+  with `LoginAsUser`** — three `AccountOp` variants share the
+  `sudo -n -u <tenant> <cmd>` mechanism (run AS the tenant, not
+  as the operator). Mapped to `sudo -n -u <name> /bin/mkdir -p
+  <path>` and `sudo -n -u <name> /bin/ln -sfn <target> <link>`
+  respectively. Both reuse `AccountError` (same shape as
+  sysadminctl / dseditgroup failures). Grouping under `AccountOp`
+  rather than introducing a `FilesystemAccessOp` is doctrinal:
+  the substrate mechanism (sudo-u) is what's shared. The Writer
+  skips the `EnsureDirAsUser` op when the tenant_path's parent
+  IS the tenant home dir itself (`/Users/<name>` — always
+  exists, mkdir would be a no-op).
+
+- **`tenant_path_kind` carve-out** — cycle 10's pre-flight probe
+  for Q12. `sudo -n -u <tenant> /bin/test -L <path>` (symlink
+  check) + `-e` (existence check) collapse into one of `PathKind {
+  Absent, Symlink, Other }`. Substrate-machinery failures (sudo
+  auth cache miss, fork failed) surface as `ProbeError` (same type
+  as `probe_access_as_tenant` — the carve-out posture mirrors
+  doctor's probe machinery). Used by `Writer::build_share_ops` to
+  refuse `TenantPathOccupied` when kind is `Other`; `Symlink` is
+  the idempotent re-link case the substrate proceeds through.
+  Like `probe_access_as_tenant`, this is a CARVE-OUT method (return
+  type isn't `Result<(), E>` so it doesn't fit `WritableOp`).
+
+- **`ReapplyPlan` + `ShareOps` are the pre-built op list** —
+  cycle 10's plan/echo asymmetry fix: profile-driven plans
+  construct the full op list FIRST (`Writer::build_reapply_plan`:
+  read + parse + pre-flight shares + build PF and per-share ops),
+  emit the plan over the constructed ops, THEN execute the same
+  ops (`Writer::execute_reapply_plan`). `ReapplyPlan {
+  install_anchor, reload, share_ops }` + `ShareOps { grant,
+  ensure_dir, ensure_link }` own the constructed values so the
+  borrowed `Op<'_>` slice the Reporter renders survives the
+  execution phase. `execute_share_ops` is the per-share loop
+  body shared by `execute_reapply_plan` (mode/shell/reload) and
+  `reapply_shares_post_provision` (create's post-Enable step,
+  which skips PF because the create-time firewall sequence
+  already ran it). The intent line (`mode_intent` /
+  `shell_intent` / `reload_intent`) is emitted BEFORE the
+  profile read so the operator sees verb context even on
+  profile-read failure (cycle-4 invariant extended to mode +
+  reload in cycle 10 round 2).
+
+- **`tenant reload [<name>]` — the operator-facing "I edited
+  config, apply it" verb** — cycle 10's headline verb. Single-
+  tenant form runs the full reapply (PF + shares) at runtime
+  tier; no tier-swap (the operator uses `tenant mode <name>
+  install` for that). No-arg form walks every tenant from
+  `Reader::tenant_names()` in alphabetical order; per-tenant
+  failures don't abort the walk — the verb continues,
+  accumulates, and surfaces a single end-of-walk summary line
+  (`Reloaded N of M tenant(s); F failed.`). Exit 0 on a clean
+  walk, EX_IOERR (74) on any per-tenant failure (Q15 lock).
+  Empty-host case emits "No tenants on this host to reload."
+  `Verb::Reload { name: Option<String> }`; dispatch parallels
+  `Doctor`'s no-arg form. The verb-name was locked via
+  `naming:naming-things` in the design conversation — `reload`
+  wins over `apply` / `refresh` / `reconcile` / `sync` /
+  `converge` on operator-familiarity + accurate intent-mapping.
+
+- **`CreateError::PostProvision(ModeError)` — share-substrate
+  failure after PF + Enable lands** — cycle 10's create-time
+  share reapply runs after user + group + profile + PF + Enable
+  all succeed. Default profile has no `[[shares]]` so this is a
+  no-op on the production path; tests using
+  `with_create_profile_content` to pre-populate a profile with
+  shares exercise the arm. When it fires, the host has a fully-
+  provisioned tenant but a substrate failure on Acl/Account/Probe/
+  Share. Recovery is `tenant reload <name>` (idempotent retry),
+  NOT another `tenant create` (which would refuse on
+  name-conflict). The Reporter framing names this explicitly:
+  `'<name>' provisioned but ... ; recover with \`tenant reload
+  <name>\``. The post-provision step uses
+  `reapply_shares_post_provision` (skips PF; the create-time
+  firewall sequence already ran it) rather than the full
+  `build_reapply_plan` + `execute_reapply_plan`.
+
 - **Acronym casing** — Rust convention treats acronyms as words:
   `Uid` not `UID`, `Macos` not `MacOS`. Methods are
   `lowest_free_uid`, struct is `UidAllocator`, `MacosReader`.
@@ -506,16 +664,19 @@ project; standalone unit-test files need explicit justification —
 canonical precedents for per-substrate boundary pins (argv contract
 for the executor; dscl-translation smoke for the reader).
 `tests/profile_parse.rs`, `tests/firewall_render.rs`,
-`tests/firewall_conf.rs`, `tests/doctor.rs`, and
-`tests/env_policy_parse.rs` each carry the same justification:
-combinatorial coverage on a pure function (`parse`, `render_anchor`,
+`tests/firewall_conf.rs`, `tests/doctor.rs`,
+`tests/env_policy_parse.rs`, `tests/pf_rule_parse.rs`, and
+`tests/pam_parse.rs` each carry the same justification:
+combinatorial coverage on a pure function (`parse` +
+`expand_tenant_path`, `render_anchor`,
 `ensure_anchor_ref` / `remove_anchor_ref` / `is_anchor_referenced`,
-`curated_paths` / `classify` / `Finding::Display`,
-`has_env_delete_for`) whose call sites are inside the writer and
-would otherwise need many overlapping E2E tests. Per-variant or
-per-shape unit testing is the right tool when the function's state
-space is combinatorial; CLI E2E remains the default for verb-level
-behavior.
+`curated_paths` / `classify` / `Finding::Display` /
+`anchor_body_matches`, `has_env_delete_for`,
+`pf_rule_presence_check`, `has_pam_tid`) whose call sites are
+inside the writer and would otherwise need many overlapping E2E
+tests. Per-variant or per-shape unit testing is the right tool
+when the function's state space is combinatorial; CLI E2E remains
+the default for verb-level behavior.
 
 Two helpers in `tests/common/mod.rs`: `run_with(stub, args) -> (u8,
 String, String)` wires a `NeverExecutor` (panics if any substrate

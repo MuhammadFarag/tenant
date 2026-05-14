@@ -16,7 +16,9 @@
 //! larger stdout block. A focused per-variant test reads cleaner and
 //! catches drift more precisely.
 
-use tenant::executor::{AccountOp, Executor, FirewallOp, MacosExecutor, ProfileOp};
+use std::path::PathBuf;
+
+use tenant::executor::{AccountOp, AclMode, AclOp, Executor, FirewallOp, MacosExecutor, ProfileOp};
 
 #[test]
 fn macos_describes_create_share_group() {
@@ -86,6 +88,46 @@ fn macos_describes_login_as_user() {
     assert_eq!(
         s.describe_account(&AccountOp::LoginAsUser { name: "dev".into() }),
         "sudo -iu dev",
+    );
+}
+
+#[test]
+fn macos_describes_ensure_dir_as_user() {
+    // Run-as-tenant `sudo -n -u <name> /bin/mkdir -p <path>`. Mirror
+    // of the `LoginAsUser` "run as the tenant" mechanism — Account
+    // sub-domain because the substrate is sudo-u (tenant identity),
+    // not chmod-on-host (operator identity). Mode bits come from the
+    // tenant's umask (default 022 → directories at 755); no explicit
+    // mode arg until a real need surfaces.
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_account(&AccountOp::EnsureDirAsUser {
+            name: "dev".into(),
+            path: PathBuf::from("/Users/dev/.local/share"),
+        }),
+        "sudo -n -u dev /bin/mkdir -p /Users/dev/.local/share",
+    );
+}
+
+#[test]
+fn macos_describes_ensure_symlink_as_user() {
+    // Run-as-tenant `sudo -n -u <name> /bin/ln -sfn <target> <link>`.
+    // `-sfn`: symlink (s) + force-overwrite-existing-symlink (f) +
+    // no-follow-existing-dir-target (n). Idempotent at the substrate:
+    // an existing symlink with the same target re-links to the same
+    // place (no-op effect); an existing symlink to a different target
+    // gets replaced; an existing REAL dir or file at `link` is the
+    // Q12-lock case the Writer pre-checks for (substrate would error
+    // here without that guard; Writer surfaces `ShareError::TenantPathOccupied`
+    // before the substrate runs).
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_account(&AccountOp::EnsureSymlinkAsUser {
+            name: "dev".into(),
+            link: PathBuf::from("/Users/dev/src"),
+            target: PathBuf::from("/Users/Shared/sandbox/dev"),
+        }),
+        "sudo -n -u dev /bin/ln -sfn /Users/Shared/sandbox/dev /Users/dev/src",
     );
 }
 
@@ -181,5 +223,81 @@ fn macos_describes_flush_anchor() {
     assert_eq!(
         s.describe_firewall(&FirewallOp::FlushAnchor { name: "dev".into() }),
         "sudo pfctl -a tenant-dev -F all",
+    );
+}
+
+// --- AclOp (cycle 10) -------------------------------------------------
+//
+// ACL strings ported verbatim from the sandbox plugin's
+// `scripts/lib/acl.py` (read_exec_inherit_entry / rw_inherit_entry):
+//
+// - ro: `read,execute,file_inherit,directory_inherit`
+// - rw: `read,write,execute,delete,append,file_inherit,directory_inherit`
+//
+// No `sudo` prefix — `chmod +a` runs as the operator (host user) who
+// is expected to own (or have ACL write on) `host_path`. Mirrors the
+// plugin's posture exactly. Paths the host can't write to surface as
+// `AclError::NonZero` with the chmod stderr embedded; the operator
+// frame names the host_path so the cause is locatable.
+//
+// EntryEnsureKind (Grant/Revoke) maps to the `+a` / `-a` chmod arg.
+// The substrate is idempotent: production checks ACL presence via
+// `ls -lde <path>` before invoking chmod — sandbox's pattern.
+
+#[test]
+fn macos_describes_acl_grant_ro() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_acl(&AclOp::Grant {
+            path: PathBuf::from("/Users/Shared/sandbox/dev"),
+            group: "dev-tenant-share".into(),
+            mode: AclMode::Ro,
+        }),
+        "chmod +a \"group:dev-tenant-share allow read,execute,file_inherit,directory_inherit\" \
+         /Users/Shared/sandbox/dev",
+    );
+}
+
+#[test]
+fn macos_describes_acl_grant_rw() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_acl(&AclOp::Grant {
+            path: PathBuf::from("/Users/Shared/sandbox/dev"),
+            group: "dev-tenant-share".into(),
+            mode: AclMode::Rw,
+        }),
+        "chmod +a \"group:dev-tenant-share allow \
+         read,write,execute,delete,append,file_inherit,directory_inherit\" \
+         /Users/Shared/sandbox/dev",
+    );
+}
+
+#[test]
+fn macos_describes_acl_revoke_ro() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_acl(&AclOp::Revoke {
+            path: PathBuf::from("/Users/Shared/sandbox/dev"),
+            group: "dev-tenant-share".into(),
+            mode: AclMode::Ro,
+        }),
+        "chmod -a \"group:dev-tenant-share allow read,execute,file_inherit,directory_inherit\" \
+         /Users/Shared/sandbox/dev",
+    );
+}
+
+#[test]
+fn macos_describes_acl_revoke_rw() {
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_acl(&AclOp::Revoke {
+            path: PathBuf::from("/Users/Shared/sandbox/dev"),
+            group: "dev-tenant-share".into(),
+            mode: AclMode::Rw,
+        }),
+        "chmod -a \"group:dev-tenant-share allow \
+         read,write,execute,delete,append,file_inherit,directory_inherit\" \
+         /Users/Shared/sandbox/dev",
     );
 }

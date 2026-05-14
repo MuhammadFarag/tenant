@@ -11,6 +11,7 @@
 
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -83,6 +84,14 @@ impl From<io::Error> for ProfileError {
 pub struct Profile {
     pub schema_version: u32,
     pub allowlist: Allowlist,
+    /// Per-tenant filesystem shares (cycle 10). Each entry declares a
+    /// host_path the tenant should be able to access (via `<name>-tenant-share`
+    /// ACL grant) and a tenant-side `tenant_path` symlink that points at
+    /// it. Absent `[[shares]]` array deserializes to an empty Vec via
+    /// `#[serde(default)]`, preserving backward-compat for cycle-9-era
+    /// profiles that have no shares section.
+    #[serde(default)]
+    pub shares: Vec<Share>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -96,12 +105,66 @@ pub struct Tier {
     pub hosts: Vec<String>,
 }
 
+/// One per-tenant filesystem share entry. The Writer expands `tenant_path`'s
+/// `$HOME` token at op-construction time; the substrate sees a fully
+/// absolute path. `host_path` is parsed as `PathBuf` directly (literal
+/// absolute path on the host); `tenant_path` stays as `String` because
+/// it's a template (`$HOME/...`) that the parser doesn't resolve — keeping
+/// the type distinction signals "not yet resolved" at the type level.
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
+pub struct Share {
+    pub host_path: PathBuf,
+    pub mode: ShareMode,
+    pub tenant_path: String,
+}
+
+/// Per-share access intent. Two values, intent-named (`ro` / `rw`) per
+/// Q1 lock — POSIX bit-string forms rejected because POSIX bit semantics
+/// differ for files vs directories (`r` alone on a directory means "list
+/// names but can't open any" which is almost never the operator intent).
+/// String discriminator via serde: `mode = "ro"` and `mode = "rw"` are
+/// the only accepted TOML forms; anything else is a parse error.
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareMode {
+    Ro,
+    Rw,
+}
+
+/// Expand a `tenant_path` template into an absolute `PathBuf` for tenant
+/// `name`. Q3-locked: `$HOME` is the only supported template variable; it
+/// expands to `/Users/<name>` (the macOS tenant home convention) and only
+/// when it appears as the prefix. A `tenant_path` like `/etc/$HOME/foo`
+/// stays literal so an operator typo doesn't silently become a different
+/// path. Literal absolute paths (`/opt/shared`) flow through unchanged.
+///
+/// Called by `Writer::build_share_ops` at op-construction time so the
+/// substrate sees fully-resolved paths; the parser stores the raw
+/// template so the type signals "not yet resolved" at the layer
+/// boundary.
+pub fn expand_tenant_path(name: &str, template: &str) -> PathBuf {
+    if template == "$HOME" {
+        PathBuf::from(format!("/Users/{name}"))
+    } else if let Some(rest) = template.strip_prefix("$HOME/") {
+        PathBuf::from(format!("/Users/{name}/{rest}"))
+    } else {
+        PathBuf::from(template)
+    }
+}
+
 /// Parse profile TOML content into a typed `Profile`. Pre-checks
 /// `schema_version` against the supported set (currently just `1`) so a
 /// version bump produces a refusal message that names the version
 /// explicitly; structural failures (missing sections, wrong types) fall
 /// through to serde's error frame, which the dispatcher rewraps in the
 /// path-naming Reporter frame.
+///
+/// Post-parse, validates each `[[shares]]` entry's `tenant_path` for the
+/// `$HOME` template's prefix-only contract: the token only expands when
+/// it appears at the start of the path. A `tenant_path` that contains
+/// `$HOME` anywhere else (`$HOME$HOME/src`, `/etc/$HOME/foo`) is a
+/// profile-authoring mistake — refuse rather than silently produce a
+/// surprising literal path.
 pub fn parse(content: &str) -> Result<Profile, ProfileError> {
     // Pre-check schema_version separately so the refusal phrasing
     // doesn't depend on serde's error formatting. Falls through silently
@@ -117,7 +180,33 @@ pub fn parse(content: &str) -> Result<Profile, ProfileError> {
             message: format!("schema_version {schema} not understood (this tenant supports 1)"),
         });
     }
-    toml::from_str(content).map_err(|e| ProfileError {
+    let profile: Profile = toml::from_str(content).map_err(|e| ProfileError {
         message: e.to_string(),
-    })
+    })?;
+    for share in &profile.shares {
+        validate_tenant_path_template(&share.tenant_path)?;
+    }
+    Ok(profile)
+}
+
+/// Q3 prefix-only `$HOME` contract: token expands only when it appears
+/// at position 0 followed by `/` (or as the whole path on its own).
+/// Any other occurrence of `$HOME` in `tenant_path` is a likely typo
+/// and refused at parse time. Examples refused: `$HOME$HOME/src` (would
+/// expand to `/Users/<name>$HOME/src` — confusing literal); `/etc/$HOME/x`
+/// (would pass through unchanged, but the operator's intent was almost
+/// certainly to use a tenant home subpath).
+fn validate_tenant_path_template(template: &str) -> Result<(), ProfileError> {
+    if template == "$HOME" || template.starts_with("$HOME/") {
+        return Ok(());
+    }
+    if template.contains("$HOME") {
+        return Err(ProfileError {
+            message: format!(
+                "tenant_path {template:?} contains `$HOME` not at the start; \
+                 `$HOME` expands only as a path prefix"
+            ),
+        });
+    }
+    Ok(())
 }

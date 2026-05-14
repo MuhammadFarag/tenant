@@ -68,6 +68,23 @@ pub(crate) enum Verb {
         #[arg(long)]
         strict: bool,
     },
+    /// Reapply the tenant's profile to host state: rewrite the PF
+    /// anchor at runtime tier, then apply each declared share entry
+    /// (host-side ACL grant + tenant-side parent dir + tenant-side
+    /// symlink). The operator-facing "I edited the profile, apply
+    /// it" verb. Idempotent at the substrate.
+    ///
+    /// Bare `tenant reload` walks every tenant on the host (parallel
+    /// to `tenant doctor`'s no-arg shape). Per-tenant failures don't
+    /// abort the walk; the verb continues and surfaces a summary at
+    /// the end (Q15 lock). Exit code is 0 on full success or 74 if
+    /// any tenant tripped.
+    ///
+    /// Always lands at runtime tier — install-tier widening stays the
+    /// explicit `tenant mode <name> install` operator action.
+    Reload {
+        name: Option<String>,
+    },
 }
 
 /// Which tier of the profile's allowlist the rendered PF anchor body

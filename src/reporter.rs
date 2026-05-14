@@ -19,9 +19,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::ModeLevel;
-use crate::accounts::{ConflictError, NameError, tenant_share_group_name};
+use crate::accounts::{ConflictError, NameError, ShareError, tenant_share_group_name};
 use crate::doctor::{Category, Finding};
-use crate::executor::{AccessMode, AccountError, Executor, FirewallError, Op, ProbeError};
+use crate::executor::{
+    AccessMode, AccountError, AclError, Executor, FirewallError, Op, ProbeError,
+};
 use crate::profile::{ProfileError, display_path_for};
 
 pub(crate) struct Reporter<'a> {
@@ -186,13 +188,24 @@ impl<'a> Reporter<'a> {
     /// `InstallAnchor → Reload` runs before `LoginAsUser`. The plan
     /// shows all three; echo (via `step`) emits each `$ <line>` as
     /// the writer drives the ops.
-    pub fn shell_starting(&mut self, name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
+    /// Emit just the shell intent line (no plan). Called BEFORE the
+    /// reapply plan is built so the operator sees the verb context
+    /// even if the pre-flight profile read fails (cycle-4 invariant:
+    /// "intent emitted before narrow"). The plan-render half lives
+    /// in `shell_plan`, called after the plan is built.
+    pub fn shell_intent(&mut self, name: &str) {
         let summary = if self.dry_run {
             format!("Would shell into '{name}'.")
         } else {
             format!("Shelling into '{name}'.")
         };
         let _ = writeln!(self.stdout, "{summary}");
+    }
+
+    /// Render the shell verb's plan block in real+verbose mode.
+    /// Called after `shell_intent` and after the plan has been built
+    /// from the profile + share entries.
+    pub fn shell_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         if self.verbose {
             self.render_plan(plan);
         }
@@ -207,12 +220,13 @@ impl<'a> Reporter<'a> {
     /// silent (the post-exec `mode_done` does the talking); real+verbose
     /// emits the "Applying" intent + indented plan; dry-run (any
     /// verbosity) emits "Would apply" + (verbose: plan).
-    pub fn mode_starting(
-        &mut self,
-        name: &str,
-        level: ModeLevel,
-        plan: &[(Op<'_>, Option<&'static str>)],
-    ) {
+    /// Emit just the mode intent line (no plan). Called BEFORE
+    /// `build_reapply_plan` so the operator sees verb context even
+    /// if the pre-flight profile read fails (parity with
+    /// `shell_intent` and `reload_intent`). The plan-render half
+    /// lives in `mode_plan`. Standard real is silent; dry-run and
+    /// real+verbose emit the "Would apply" / "Applying" line.
+    pub fn mode_intent(&mut self, name: &str, level: ModeLevel) {
         let level_str = level.as_str();
         let summary = match (self.dry_run, self.verbose) {
             (true, _) => Some(format!(
@@ -224,6 +238,10 @@ impl<'a> Reporter<'a> {
         if let Some(s) = summary {
             let _ = writeln!(self.stdout, "{s}");
         }
+    }
+
+    /// Render the mode verb's plan block in verbose mode.
+    pub fn mode_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         if self.verbose {
             self.render_plan(plan);
         }
@@ -621,6 +639,273 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(
             self.stderr,
             "tenant: failed to apply firewall mode for '{name}': {err}"
+        );
+    }
+
+    // ============================================================
+    // Cycle 10: share-reapply failure framing
+    // ============================================================
+    //
+    // The share substrate fires from `mode` / `shell` / `reload` /
+    // `create`'s post-provision step. Each verb gets its own context
+    // phrase ("while applying mode", "before shell entry", "during
+    // reload", "after provisioning") so the operator's recovery
+    // guidance reads in context. Per-arm Reporter methods rather than
+    // a single switch — mirrors the existing destroy_*_failed
+    // pattern; the dispatch helper in commands.rs picks the right one.
+
+    /// `mode` verb — ACL grant/revoke substrate failed (chmod +a/-a).
+    pub fn mode_acl_failed(&mut self, name: &str, err: &AclError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to apply ACL for '{name}': {err}"
+        );
+    }
+
+    /// `mode` verb — tenant-side filesystem state failed (sudo-u
+    /// mkdir/ln). Frame names tenant-side state so the operator
+    /// distinguishes from the host-side ACL substrate.
+    pub fn mode_account_failed(&mut self, name: &str, err: &AccountError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to install tenant-side filesystem state for '{name}': {err}"
+        );
+    }
+
+    /// `mode` verb — tenant_path_kind probe machinery failed (sudo
+    /// auth cache miss, fork). Operator's recovery is `sudo -v` to
+    /// refresh the cache, then retry.
+    pub fn mode_probe_failed(&mut self, name: &str, err: &ProbeError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to probe tenant filesystem state for '{name}': {err}"
+        );
+    }
+
+    /// `mode` verb — pre-flight share refusal (HostPathMissing /
+    /// TenantPathOccupied). `refuse_*` framing because the operator
+    /// authored the conflict (Q11/Q12 locks); the substrate never
+    /// ran. ShareError's Display surfaces the specific case.
+    pub fn refuse_mode_share(&mut self, name: &str, err: &ShareError) {
+        let _ = writeln!(self.stderr, "tenant: cannot apply mode for '{name}': {err}");
+    }
+
+    /// `shell` verb — ACL grant substrate failed during auto-reapply.
+    pub fn shell_narrow_acl_failed(&mut self, name: &str, err: &AclError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to apply ACL for '{name}' before shell entry: {err}"
+        );
+    }
+
+    /// `shell` verb — sudo-u mkdir/ln substrate failed during
+    /// auto-reapply.
+    pub fn shell_narrow_account_failed(&mut self, name: &str, err: &AccountError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to install tenant-side filesystem state for '{name}' before shell entry: {err}"
+        );
+    }
+
+    /// `shell` verb — tenant_path_kind probe failed during
+    /// auto-reapply.
+    pub fn shell_narrow_probe_failed(&mut self, name: &str, err: &ProbeError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to probe tenant filesystem state for '{name}' before shell entry: {err}"
+        );
+    }
+
+    /// `shell` verb — pre-flight share refusal during auto-reapply.
+    pub fn refuse_shell_share(&mut self, name: &str, err: &ShareError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: cannot enter shell for '{name}': {err}"
+        );
+    }
+
+    // ----- create verb's post-provision arms -----
+    //
+    // Production: default profile has no `[[shares]]` so these never
+    // fire. Tests using `with_create_profile_content` with shares
+    // exercise them. Framing emphasizes "tenant was provisioned, but
+    // the post-provision share step failed" so the operator knows the
+    // user/group/profile/PF are already in place — recovery is
+    // `tenant reload <name>` (idempotent retry) rather than `tenant
+    // create` again (which would refuse on name-conflict).
+
+    /// `create` verb — ACL substrate failed during post-provision.
+    pub fn create_post_provision_acl_failed(&mut self, name: &str, err: &AclError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: '{name}' provisioned but ACL reapply failed: {err}; \
+             recover with `tenant reload {name}`"
+        );
+    }
+
+    /// `create` verb — sudo-u mkdir/ln substrate failed during
+    /// post-provision.
+    pub fn create_post_provision_account_failed(&mut self, name: &str, err: &AccountError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: '{name}' provisioned but tenant-side filesystem state failed: {err}; \
+             recover with `tenant reload {name}`"
+        );
+    }
+
+    /// `create` verb — tenant_path_kind probe failed during
+    /// post-provision.
+    pub fn create_post_provision_probe_failed(&mut self, name: &str, err: &ProbeError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: '{name}' provisioned but tenant-path probe failed: {err}; \
+             recover with `tenant reload {name}`"
+        );
+    }
+
+    /// `create` verb — pre-flight share refusal during post-provision.
+    pub fn refuse_create_post_provision_share(&mut self, name: &str, err: &ShareError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: '{name}' provisioned but share entry is invalid: {err}; \
+             edit the profile and rerun `tenant reload {name}`"
+        );
+    }
+
+    // ============================================================
+    // Reload verb (cycle 10)
+    // ============================================================
+    //
+    // The operator-facing "I edited the profile, apply it" verb.
+    // Per-tenant: emit intent + plan + per-share echo + done.
+    // No-arg form: emit all-starting + per-tenant inline failure
+    // framing + all-done-summary. The single-tenant arms are
+    // identical to the mode-verb arms in shape; the firewall + share
+    // arms get reload-specific wording where "mode" would mislead.
+
+    /// Emit just the reload intent line (no plan). Called BEFORE
+    /// `build_reapply_plan` so the operator sees verb context even
+    /// if the pre-flight profile read fails (parity with
+    /// `shell_intent` and `mode_intent`). The plan-render half lives
+    /// in `reload_plan`.
+    pub fn reload_intent(&mut self, name: &str) {
+        let summary = match (self.dry_run, self.verbose) {
+            (true, _) => Some(format!("Would reload tenant '{name}'.")),
+            (false, true) => Some(format!("Reloading tenant '{name}'.")),
+            (false, false) => None,
+        };
+        if let Some(s) = summary {
+            let _ = writeln!(self.stdout, "{s}");
+        }
+    }
+
+    /// Render the reload verb's plan block in verbose mode.
+    pub fn reload_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
+        if self.verbose {
+            self.render_plan(plan);
+        }
+    }
+
+    /// Post-exec confirmation for `reload <name>`. Silent in dry-run.
+    pub fn reload_done(&mut self, name: &str) {
+        if self.dry_run {
+            return;
+        }
+        let _ = writeln!(self.stdout, "Reloaded tenant '{name}'.");
+    }
+
+    /// Pre-exec disclosure for the no-arg `tenant reload` walk.
+    /// Names the walk scope so the operator's output framing matches
+    /// what they typed. Silent when `count == 0` (no tenants on the
+    /// host); the `reload_all_done_summary` arm covers that case too.
+    pub fn reload_all_starting(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let summary = match (self.dry_run, self.verbose) {
+            (true, _) => Some(format!("Would reload {count} tenant(s).")),
+            (false, true) => Some(format!("Reloading {count} tenant(s).")),
+            (false, false) => None,
+        };
+        if let Some(s) = summary {
+            let _ = writeln!(self.stdout, "{s}");
+        }
+    }
+
+    /// End-of-walk summary for `tenant reload` no-arg form. Emits a
+    /// single line so an operator scanning the tail of the output sees
+    /// the aggregate result. The no-tenant case ("nothing on this
+    /// host to reload") emits a distinct line so the operator gets
+    /// feedback instead of empty output.
+    pub fn reload_all_done_summary(&mut self, succeeded: usize, failed: usize) {
+        if self.dry_run {
+            return;
+        }
+        if succeeded == 0 && failed == 0 {
+            let _ = writeln!(self.stdout, "No tenants on this host to reload.");
+            return;
+        }
+        let total = succeeded + failed;
+        let line = if failed == 0 {
+            format!("Reloaded {total} tenant(s).")
+        } else {
+            format!("Reloaded {succeeded} of {total} tenant(s); {failed} failed.")
+        };
+        let _ = writeln!(self.stdout, "{line}");
+    }
+
+    /// `reload` verb — profile read/parse failure. Same path-naming
+    /// frame as the other *_profile_failed methods.
+    pub fn reload_profile_failed(&mut self, name: &str, err: &ProfileError) {
+        let path = display_path_for(name);
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to read profile '{path}' for '{name}': {err}"
+        );
+    }
+
+    /// `reload` verb — InstallAnchor or Reload pfctl failure.
+    /// Distinct from `mode_failed` which has "firewall mode" wording
+    /// implying a tier-swap — reload doesn't swap tiers.
+    pub fn reload_firewall_failed(&mut self, name: &str, err: &FirewallError) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to reload firewall for '{name}': {err}"
+        );
+    }
+
+    /// `reload` verb — pre-flight share refusal. Distinct from
+    /// `refuse_mode_share` whose wording mentions "mode".
+    pub fn refuse_reload_share(&mut self, name: &str, err: &ShareError) {
+        let _ = writeln!(self.stderr, "tenant: cannot reload '{name}': {err}");
+    }
+
+    /// Eligibility-refusal framing for `reload <name>` (mirrors the
+    /// mode / shell / doctor patterns). NotPresent / OrphanGroup
+    /// collapse to "does not exist" — a lingering group with no user
+    /// can't have its profile reapplied.
+    pub fn refuse_reload_absent(&mut self, name: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: cannot reload '{name}': does not exist"
+        );
+    }
+
+    /// Eligibility-refusal framing — UID exists but is below the
+    /// tenant floor. Mirrors `refuse_mode_not_a_tenant`.
+    pub fn refuse_reload_not_a_tenant(&mut self, name: &str, uid: u32, floor: u32) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: refusing to reload '{name}': UID {uid} is below tenant floor {floor}"
+        );
+    }
+
+    /// Eligibility-refusal framing — system account (no positive
+    /// UID, e.g. `nobody`). Mirrors `refuse_mode_system_account`.
+    pub fn refuse_reload_system_account(&mut self, name: &str) {
+        let _ = writeln!(
+            self.stderr,
+            "tenant: refusing to reload '{name}': system account (no tenant-range UID)"
         );
     }
 

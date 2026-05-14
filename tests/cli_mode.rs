@@ -1,5 +1,9 @@
+use std::path::PathBuf;
+
 use tenant::accounts::StubReader;
-use tenant::executor::{FirewallError, FirewallOp, StubExecutor};
+use tenant::executor::{
+    AccountOp, AclMode, AclOp, FirewallError, FirewallOp, PathKind, StubExecutor,
+};
 
 mod common;
 use common::*;
@@ -627,4 +631,264 @@ fn mode_reload_failure_surfaces_without_recovery() {
             "mode should not emit recovery firewall ops on reload failure, saw: {op:?}"
         );
     }
+}
+
+// ================================================================
+// Cycle 10: share reapply integration with mode verb
+// ================================================================
+//
+// `tenant mode <name> <tier>` reapplies PF anchor AT THE TIER + per-
+// share substrate (ACL grant + parent dir ensure + symlink ensure).
+// Tests pin op sequences, refusal paths (Q11 host_path missing, Q12
+// tenant_path occupied), Q13 declared-order, and $HOME expansion at
+// the layer boundary.
+
+#[test]
+fn mode_verbose_emits_intent_before_profile_read_failure() {
+    // Round-2 review parity fix: `mode dev runtime -v` against a
+    // missing profile should emit the "Applying mode 'runtime' to
+    // tenant 'dev'." intent line BEFORE the read failure surfaces.
+    // Mirrors `shell`'s `shell_intent` posture; `mode_intent` runs
+    // first, then `build_reapply_plan` attempts the read.
+    let exec = StubExecutor::new(); // no profile preloaded
+    let (code, stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "--verbose"],
+    );
+    assert_eq!(code, 74, "EX_IOERR expected");
+    assert!(
+        stdout.starts_with("Applying mode 'runtime' to tenant 'dev'.\n"),
+        "intent should emit before the profile-read failure surfaces: {stdout:?}"
+    );
+}
+
+#[test]
+fn mode_runtime_with_shares_emits_per_share_substrate_ops() {
+    // Single rw share: `/tmp` (real host_path; always exists) →
+    // `$HOME/src` (tenant-side). Mode reapply runs:
+    //   PF: InstallAnchor + Reload
+    //   Shares: AclOp::Grant + AccountOp::EnsureDirAsUser(parent) +
+    //           AccountOp::EnsureSymlinkAsUser
+    // EnsureDir's parent is `/Users/dev/` (the tenant home dir
+    // itself), which the substrate skips per the "home always exists"
+    // optimization — so no EnsureDirAsUser fires for `$HOME/src`.
+    // Verifies: AclOp recorded with literal group + path; symlink
+    // op recorded with expanded tenant_path.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+
+    let acl_ops = exec.acl_ops();
+    assert_eq!(
+        acl_ops,
+        vec![AclOp::Grant {
+            path: PathBuf::from("/tmp"),
+            group: "dev-tenant-share".to_string(),
+            mode: AclMode::Rw,
+        }],
+        "expected single Grant op for /tmp at rw; got {acl_ops:?}"
+    );
+
+    // No EnsureDir (parent is /Users/dev, the tenant home).
+    let account_ops = exec.account_ops();
+    let ensure_dirs: Vec<_> = account_ops
+        .iter()
+        .filter(|op| matches!(op, AccountOp::EnsureDirAsUser { .. }))
+        .collect();
+    assert!(
+        ensure_dirs.is_empty(),
+        "EnsureDir should NOT fire when parent is /Users/<name>: {ensure_dirs:?}"
+    );
+
+    let ensure_links: Vec<_> = account_ops
+        .iter()
+        .filter(|op| matches!(op, AccountOp::EnsureSymlinkAsUser { .. }))
+        .collect();
+    assert_eq!(
+        ensure_links.len(),
+        1,
+        "expected single EnsureSymlinkAsUser; got {ensure_links:?}"
+    );
+    let AccountOp::EnsureSymlinkAsUser {
+        name: link_name,
+        link,
+        target,
+    } = ensure_links[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(link_name, "dev");
+    assert_eq!(link, &PathBuf::from("/Users/dev/src"));
+    assert_eq!(target, &PathBuf::from("/tmp"));
+}
+
+#[test]
+fn mode_runtime_with_nested_tenant_path_emits_ensure_dir_for_parent() {
+    // tenant_path under a subdirectory of $HOME: `$HOME/.local/share/chezmoi`.
+    // Parent `/Users/dev/.local/share` is NOT the home itself, so
+    // EnsureDirAsUser must fire on it (substrate is responsible for
+    // mkdir -p). Symlink then points the leaf at host_path.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "ro", "$HOME/.local/share/chezmoi")]);
+    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+
+    let account_ops = exec.account_ops();
+    let ensure_dirs: Vec<_> = account_ops
+        .iter()
+        .filter_map(|op| match op {
+            AccountOp::EnsureDirAsUser { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ensure_dirs,
+        vec![PathBuf::from("/Users/dev/.local/share")],
+        "expected EnsureDir for the symlink parent"
+    );
+}
+
+#[test]
+fn mode_runtime_preserves_profile_declared_share_order() {
+    // Q13 lock: shares apply in profile-declared order. Verify by
+    // recording the AclOp sequence: zeta first, alpha second.
+    let toml = profile_with_shares(
+        &[],
+        &[],
+        &[("/tmp", "rw", "$HOME/zeta"), ("/var", "ro", "$HOME/alpha")],
+    );
+    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    let host_paths: Vec<PathBuf> = exec
+        .acl_ops()
+        .into_iter()
+        .filter_map(|op| match op {
+            AclOp::Grant { path, .. } => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        host_paths,
+        vec![PathBuf::from("/tmp"), PathBuf::from("/var")],
+        "expected declared order [zeta=/tmp, alpha=/var]"
+    );
+}
+
+#[test]
+fn mode_refuses_when_host_path_does_not_exist() {
+    // Q11 lock: HostPathMissing surfaces as refuse_mode_share before
+    // any share substrate op runs. The PF reapply ops still fire
+    // (they precede the share pass) — but no AclOp / AccountOp
+    // EnsureDir / EnsureSymlink should be recorded.
+    let toml = profile_with_shares(
+        &[],
+        &[],
+        &[("/nonexistent/cycle10/sentinel", "rw", "$HOME/src")],
+    );
+    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(
+        code, 74,
+        "expected EX_IOERR on share refusal; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("cannot apply mode for 'dev'"),
+        "stderr should be framed by refuse_mode_share: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("/nonexistent/cycle10/sentinel"),
+        "stderr should name the missing host_path: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("does not exist on disk"),
+        "stderr should name the cause: {stderr:?}"
+    );
+    // PF reapply ran (precedes share pass); share substrate didn't.
+    assert!(
+        exec.acl_ops().is_empty(),
+        "AclOp should NOT have fired: {:?}",
+        exec.acl_ops()
+    );
+}
+
+#[test]
+fn mode_refuses_when_tenant_path_is_real_directory() {
+    // Q12 lock: TenantPathOccupied surfaces as refuse_mode_share
+    // when probe returns PathKind::Other. Stub returns Other for
+    // the expanded tenant_path; no substrate op fires after refusal.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &toml)
+        .with_tenant_path_kind("dev", &PathBuf::from("/Users/dev/src"), PathKind::Other);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(
+        code, 74,
+        "expected EX_IOERR on share refusal; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("cannot apply mode for 'dev'"),
+        "stderr should be framed by refuse_mode_share: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("/Users/dev/src"),
+        "stderr should name the occupied tenant_path: {stderr:?}"
+    );
+    assert!(
+        exec.acl_ops().is_empty(),
+        "AclOp should NOT have fired: {:?}",
+        exec.acl_ops()
+    );
+}
+
+#[test]
+fn mode_runtime_skips_substrate_with_existing_symlink_at_tenant_path() {
+    // PathKind::Symlink is the idempotent re-link case: substrate
+    // proceeds (chmod-pre-check is idempotent; ln -sfn replaces an
+    // existing symlink). No refusal — share substrate fires
+    // normally.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &toml)
+        .with_tenant_path_kind("dev", &PathBuf::from("/Users/dev/src"), PathKind::Symlink);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(
+        code, 0,
+        "expected success on existing symlink; stderr={stderr:?}"
+    );
+    assert_eq!(
+        exec.acl_ops().len(),
+        1,
+        "expected single Grant despite existing symlink (idempotent reapply)"
+    );
+}
+
+#[test]
+fn mode_install_tier_does_not_change_share_substrate() {
+    // Shares are tier-independent: the same host_path/mode/tenant_path
+    // applies whether the operator widened the firewall for an install
+    // step or narrowed back. Verify by running `mode dev install` on a
+    // profile with a share — share substrate fires with the same shape.
+    let toml = profile_with_shares(
+        &["github.com"],
+        &["nodejs.org"],
+        &[("/tmp", "rw", "$HOME/src")],
+    );
+    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "install"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    assert_eq!(
+        exec.acl_ops().len(),
+        1,
+        "share substrate should fire at install tier same as runtime"
+    );
 }

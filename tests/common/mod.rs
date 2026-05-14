@@ -70,6 +70,19 @@ impl Executor for NeverExecutor {
     fn read_anchor_body(&self, name: &str) -> Result<String, tenant::executor::HostFileError> {
         panic!("executor unexpectedly invoked (read_anchor_body): name={name:?}");
     }
+    fn describe_acl(&self, op: &tenant::executor::AclOp) -> String {
+        panic!("executor unexpectedly invoked (describe_acl) with op: {op:?}");
+    }
+    fn execute_acl(&self, op: &tenant::executor::AclOp) -> Result<(), tenant::executor::AclError> {
+        panic!("executor unexpectedly invoked (execute_acl) with op: {op:?}");
+    }
+    fn tenant_path_kind(
+        &self,
+        name: &str,
+        path: &std::path::Path,
+    ) -> Result<tenant::executor::PathKind, tenant::executor::ProbeError> {
+        panic!("executor unexpectedly invoked (tenant_path_kind): name={name:?} path={path:?}");
+    }
 }
 
 /// Host identity passed to `tenant::run`. Production reads `$USER`; tests
@@ -112,6 +125,31 @@ pub fn stub_with_tenant(name: &str) -> StubReader {
         uid_by_name: [(name.to_string(), 600)].into_iter().collect(),
         ..Default::default()
     }
+}
+
+/// Helper: profile TOML with the given runtime + install host lists
+/// AND a `[[shares]]` block for cycle-10 share-reapply tests. Each
+/// share triple is `(host_path, mode, tenant_path)`; mode is "ro" or
+/// "rw" verbatim from the schema. Empty `shares` slice produces no
+/// `[[shares]]` blocks (backward-compat with cycle-9-era profiles).
+pub fn profile_with_shares(
+    runtime: &[&str],
+    install: &[&str],
+    shares: &[(&str, &str, &str)],
+) -> String {
+    let base = profile_with_hosts(runtime, install);
+    if shares.is_empty() {
+        return base;
+    }
+    let share_blocks: String = shares
+        .iter()
+        .map(|(host_path, mode, tenant_path)| {
+            format!(
+                "\n[[shares]]\nhost_path = \"{host_path}\"\nmode = \"{mode}\"\ntenant_path = \"{tenant_path}\"\n"
+            )
+        })
+        .collect();
+    format!("{base}{share_blocks}")
 }
 
 /// Helper: profile TOML with the given runtime + install host lists.

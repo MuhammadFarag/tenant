@@ -1,5 +1,9 @@
+use std::path::PathBuf;
+
 use tenant::accounts::StubReader;
-use tenant::executor::{FirewallError, FirewallOp, StubExecutor};
+use tenant::executor::{
+    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, StubExecutor,
+};
 
 mod common;
 use common::*;
@@ -542,5 +546,202 @@ fn shell_install_anchor_body_excludes_install_hosts() {
             );
         }
         other => panic!("expected InstallAnchor as first firewall op, got {other:?}"),
+    }
+}
+
+// ================================================================
+// Cycle 10: shell auto-reapply includes shares
+// ================================================================
+//
+// `tenant shell <name>` extends cycle-4's PF narrow to also reapply
+// shares before handing off to login. Tests pin the substrate fires
+// in the right order, that share refusals abort login, and that
+// substrate failures on the share pass route through the
+// `shell_narrow_*_failed` family (distinct from `mode_*_failed`).
+
+#[test]
+fn shell_auto_reapply_includes_share_substrate() {
+    // Same op shape as mode-share happy-path, but exercised through
+    // the shell verb. Login must still fire after the share substrate
+    // succeeds.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &toml)
+        .login_exit_code(0);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 0, "exit = {code}; stderr={stderr:?}");
+
+    assert_eq!(exec.acl_ops().len(), 1, "expected single Grant op");
+    let symlink_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureSymlinkAsUser { .. }))
+        .collect();
+    assert_eq!(symlink_ops.len(), 1, "expected single symlink op");
+    assert_eq!(
+        exec.logins(),
+        vec!["dev".to_string()],
+        "login must fire after successful share reapply"
+    );
+}
+
+#[test]
+fn shell_refuses_when_host_path_missing_does_not_launch_login() {
+    // Q11 lock applied through shell: HostPathMissing refusal aborts
+    // BEFORE login launches. Frame names "before shell entry" so the
+    // operator sees the shell-verb context.
+    let toml = profile_with_shares(
+        &[],
+        &[],
+        &[("/nonexistent/cycle10/shell-sentinel", "rw", "$HOME/src")],
+    );
+    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
+    assert!(
+        stderr.contains("cannot enter shell for 'dev'"),
+        "stderr should be framed by refuse_shell_share: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("does not exist on disk"),
+        "stderr should name the cause: {stderr:?}"
+    );
+    assert!(
+        exec.logins().is_empty(),
+        "login must NOT fire when share refusal aborts before entry"
+    );
+}
+
+#[test]
+fn shell_routes_acl_substrate_failure_via_shell_narrow_acl_frame() {
+    // Substrate failure on the host-side ACL grant during shell
+    // auto-reapply surfaces with shell-contextual framing (distinct
+    // from mode_acl_failed). Login MUST NOT launch.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &toml)
+        .fail_acl_op(
+            AclOp::Grant {
+                path: PathBuf::from("/tmp"),
+                group: "dev-tenant-share".into(),
+                mode: tenant::executor::AclMode::Rw,
+            },
+            AclError::NonZero {
+                code: 1,
+                stderr: "chmod: Permission denied".into(),
+            },
+        );
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
+    assert!(
+        stderr.contains("failed to apply ACL for 'dev' before shell entry"),
+        "stderr should be framed by shell_narrow_acl_failed: {stderr:?}"
+    );
+    assert!(
+        exec.logins().is_empty(),
+        "login must NOT fire on share-substrate failure"
+    );
+}
+
+#[test]
+fn shell_routes_sudo_u_substrate_failure_via_shell_narrow_account_frame() {
+    // Substrate failure on the tenant-side `sudo -u <name> ln -sfn`
+    // step during shell auto-reapply surfaces with shell-contextual
+    // framing (distinct from mode_account_failed). Login MUST NOT launch.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &toml)
+        .fail_account_op(
+            AccountOp::EnsureSymlinkAsUser {
+                name: "dev".into(),
+                link: PathBuf::from("/Users/dev/src"),
+                target: PathBuf::from("/tmp"),
+            },
+            AccountError::NonZero {
+                code: 1,
+                stderr: "ln: cannot create symbolic link".into(),
+            },
+        );
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
+    assert!(
+        stderr.contains(
+            "failed to install tenant-side filesystem state for 'dev' before shell entry"
+        ),
+        "stderr should be framed by shell_narrow_account_failed: {stderr:?}"
+    );
+    assert!(
+        exec.logins().is_empty(),
+        "login must NOT fire on share-substrate failure"
+    );
+}
+
+#[test]
+fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
+    // Round-1 review fix: the upfront plan block must list every op
+    // that will fire (PF + per-share + LoginAsUser), so the
+    // operator's plan/echo asymmetry contract holds when shares are
+    // declared. Before the fix, share ops echoed without appearing
+    // in the plan.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &toml)
+        .login_exit_code(0);
+    let (code, stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--verbose"],
+    );
+    assert_eq!(code, 0);
+    // Plan block must contain InstallAnchor, Reload, AclOp::Grant,
+    // EnsureSymlinkAsUser, and LoginAsUser — same lines that fire
+    // via `$` echo. Two-space indent identifies the plan block.
+    assert!(
+        stdout.contains("  sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
+        "plan must list InstallAnchor: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("  sudo pfctl -f /etc/pf.conf\n"),
+        "plan must list Reload: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("  chmod +a \"group:dev-tenant-share allow"),
+        "plan must list Grant: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("  sudo -n -u dev /bin/ln -sfn /tmp /Users/dev/src\n"),
+        "plan must list EnsureSymlinkAsUser: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("  sudo -iu dev\n"),
+        "plan must list LoginAsUser: {stdout:?}"
+    );
+}
+
+#[test]
+fn shell_negative_pin_share_substrate_does_not_emit_firewall_recovery_ops() {
+    // The existing cycle-4 negative pin still holds with cycle 10
+    // wired in: shell never emits FlushAnchor / BackupConfig /
+    // RestoreConfigFromBackup / RemoveAnchor / UpdateConfig / Enable
+    // even when the share substrate is exercising.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &toml)
+        .login_exit_code(0);
+    let (code, _stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 0);
+    for op in exec.firewall_ops() {
+        assert!(
+            !matches!(
+                op,
+                FirewallOp::FlushAnchor { .. }
+                    | FirewallOp::RestoreConfigFromBackup
+                    | FirewallOp::BackupConfig
+                    | FirewallOp::RemoveAnchor { .. }
+                    | FirewallOp::UpdateConfig { .. }
+                    | FirewallOp::Enable
+            ),
+            "shell narrow with shares should not emit firewall recovery / setup ops; saw {op:?}"
+        );
     }
 }
