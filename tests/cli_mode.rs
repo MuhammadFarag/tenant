@@ -42,7 +42,7 @@ fn mode_runtime_dry_run_default_shows_intent() {
         &["mode", "dev", "runtime", "--dry-run"],
     );
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, "Would apply mode 'runtime' to tenant 'dev'.\n");
+    assert_eq!(stdout, mode_dry_run_block("dev", "runtime"));
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn mode_install_dry_run_default_shows_intent() {
         &["mode", "dev", "install", "--dry-run"],
     );
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, "Would apply mode 'install' to tenant 'dev'.\n");
+    assert_eq!(stdout, mode_dry_run_block("dev", "install"));
 }
 
 #[test]
@@ -213,7 +213,17 @@ fn mode_runtime_real_mode_op_shape() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Applied mode 'runtime' to tenant 'dev'.\n");
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Applying mode 'runtime' to tenant 'dev'",
+            &[
+                "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
+                "Firewall ruleset reloaded",
+            ],
+            "Tenant 'dev' is at runtime tier.",
+        ),
+    );
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     let expected_body = tenant::firewall::render_anchor("dev", &[]);
     assert_eq!(
@@ -418,7 +428,17 @@ fn mode_real_standard_emits_only_post_exec_confirmation() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Applied mode 'runtime' to tenant 'dev'.\n");
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Applying mode 'runtime' to tenant 'dev'",
+            &[
+                "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
+                "Firewall ruleset reloaded",
+            ],
+            "Tenant 'dev' is at runtime tier.",
+        ),
+    );
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
 }
 
@@ -436,12 +456,19 @@ fn mode_real_verbose_shows_plan_and_echo() {
         &["mode", "dev", "runtime", "-v"],
     );
     assert_eq!(code, 0);
-    let want = "Applying mode 'runtime' to tenant 'dev'.\n  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo pfctl -f /etc/pf.conf\n\
-                $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
-                $ sudo pfctl -f /etc/pf.conf\n\
-                Applied mode 'runtime' to tenant 'dev'.\n";
+    let want = format!(
+        "{}\n  \
+         sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+         sudo pfctl -f /etc/pf.conf\n\
+         $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         $ sudo pfctl -f /etc/pf.conf\n\
+         ✓ Firewall ruleset reloaded\n\
+         {}\n\
+         Tenant 'dev' is at runtime tier.\n",
+        section_line("Applying mode 'runtime' to tenant 'dev'"),
+        section_line("Done"),
+    );
     assert_eq!(stdout, want);
 }
 
@@ -458,12 +485,19 @@ fn mode_install_real_verbose_shows_install_level_text() {
         &["mode", "dev", "install", "-v"],
     );
     assert_eq!(code, 0);
-    let want = "Applying mode 'install' to tenant 'dev'.\n  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo pfctl -f /etc/pf.conf\n\
-                $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
-                $ sudo pfctl -f /etc/pf.conf\n\
-                Applied mode 'install' to tenant 'dev'.\n";
+    let want = format!(
+        "{}\n  \
+         sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+         sudo pfctl -f /etc/pf.conf\n\
+         $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         $ sudo pfctl -f /etc/pf.conf\n\
+         ✓ Firewall ruleset reloaded\n\
+         {}\n\
+         Tenant 'dev' is at install tier.\n",
+        section_line("Applying mode 'install' to tenant 'dev'"),
+        section_line("Done"),
+    );
     assert_eq!(stdout, want);
 }
 
@@ -476,10 +510,10 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
         &["mode", "dev", "runtime", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    let want = "Would apply mode 'runtime' to tenant 'dev'.\n  \
+    let plan = "  \
                 sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
                 sudo pfctl -f /etc/pf.conf\n";
-    assert_eq!(stdout, want);
+    assert_eq!(stdout, mode_dry_run_block("dev", "runtime") + plan);
 }
 
 #[test]
@@ -494,7 +528,7 @@ fn mode_dry_run_bypasses_injected_executor() {
         &["mode", "dev", "runtime", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Would apply mode 'runtime' to tenant 'dev'.\n");
+    assert_eq!(stdout, mode_dry_run_block("dev", "runtime"));
     assert!(
         exec.firewall_ops().is_empty()
             && exec.account_ops().is_empty()
@@ -519,7 +553,15 @@ fn mode_read_profile_failure_surfaces() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    // Cycle 12: intent section divider lands BEFORE the profile read;
+    // verb-context visible even on profile-read failure.
+    assert_eq!(
+        stdout,
+        format!(
+            "{}\n",
+            section_line("Applying mode 'runtime' to tenant 'dev'")
+        ),
+    );
     assert_eq!(
         stderr,
         "tenant: failed to read profile '~/.config/tenant/profiles/dev.toml' for 'dev': profile 'dev' not found\n"
@@ -574,7 +616,15 @@ fn mode_install_anchor_failure_surfaces() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    // Cycle 12: section divider lands; first substrate (InstallAnchor)
+    // fails — no ✓, no Done section.
+    assert_eq!(
+        stdout,
+        format!(
+            "{}\n",
+            section_line("Applying mode 'runtime' to tenant 'dev'")
+        ),
+    );
     assert_eq!(
         stderr,
         "tenant: failed to apply firewall mode for 'dev': \
@@ -606,7 +656,15 @@ fn mode_reload_failure_surfaces_without_recovery() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    // Cycle 12: section + ✓ for InstallAnchor (succeeded), no ✓ for
+    // Reload (the failure), no Done section.
+    assert_eq!(
+        stdout,
+        real_failure_stdout(
+            "Applying mode 'runtime' to tenant 'dev'",
+            &["Firewall anchor installed at /etc/pf.anchors/tenant-dev"],
+        ),
+    );
     assert!(
         stderr.contains("failed to apply firewall mode for 'dev'"),
         "stderr should be framed by mode_failed: {stderr:?}"
@@ -658,7 +716,10 @@ fn mode_verbose_emits_intent_before_profile_read_failure() {
     );
     assert_eq!(code, 74, "EX_IOERR expected");
     assert!(
-        stdout.starts_with("Applying mode 'runtime' to tenant 'dev'.\n"),
+        stdout.starts_with(&format!(
+            "{}\n",
+            section_line("Applying mode 'runtime' to tenant 'dev'")
+        )),
         "intent should emit before the profile-read failure surfaces: {stdout:?}"
     );
 }

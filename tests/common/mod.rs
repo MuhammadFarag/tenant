@@ -96,12 +96,163 @@ impl Executor for NeverExecutor {
 /// (`/Users/<host>/...`) is deterministic across test runs.
 pub const TEST_HOST: &str = "operator";
 
+/// Expected `─── <title> ───...` section divider line emitted by
+/// `Reporter::section` under colors=off, width 80. Centralized so tests
+/// pin the cycle-12 wireframe without re-encoding the padding math at
+/// every call site; if Reporter's section width or dash count ever
+/// changes, both sides move together via `tenant::ansi::rule`.
+pub fn section_line(title: &str) -> String {
+    tenant::ansi::rule(title, 80)
+}
+
+/// Build the full cycle-12 real-mode-success stdout block: section
+/// divider opening, `✓ <label>` for each step, `─── Done ───` section,
+/// closing line. Tests pass the ordered list of business labels they
+/// expect to see; the helper handles framing. Trailing newline included.
+pub fn real_success_stdout(opening_title: &str, checks: &[&str], closing: &str) -> String {
+    let mut out = section_line(opening_title);
+    out.push('\n');
+    for check in checks {
+        out.push_str("✓ ");
+        out.push_str(check);
+        out.push('\n');
+    }
+    out.push_str(&section_line("Done"));
+    out.push('\n');
+    out.push_str(closing);
+    out.push('\n');
+    out
+}
+
+/// Cycle-12 real-mode-failure stdout block (no Done section, no closing
+/// line — the verb didn't complete). Only the section opening + ✓
+/// lines for steps that actually succeeded before the failure.
+pub fn real_failure_stdout(opening_title: &str, checks: &[&str]) -> String {
+    let mut out = section_line(opening_title);
+    out.push('\n');
+    for check in checks {
+        out.push_str("✓ ");
+        out.push_str(check);
+        out.push('\n');
+    }
+    out
+}
+
+/// Cycle-12 dry-run summary block for `tenant create <name> --dry-run`.
+/// Matches `Reporter::create_summary` byte-for-byte, then appends the
+/// "(Real run would prompt: Proceed? [Y/n])" preview line that
+/// `Reporter::confirm` emits in dry-run mode (Q13 lock).
+pub fn create_dry_run_block(name: &str, uid: u32, gid: u32) -> String {
+    format!(
+        "About to create tenant '{name}' \u{2014} an isolated macOS account with restricted network egress.\n\
+         \n\
+         This will:\n  \
+         \u{2022} create user account '{name}' (UID {uid}) and group '{name}-tenant-share' (GID {gid})\n  \
+         \u{2022} install a per-tenant firewall anchor (egress blocked by default; allowlist hosts declared in the profile)\n  \
+         \u{2022} write profile config at ~/.config/tenant/profiles/{name}.toml\n  \
+         \u{2022} enable pf host-wide if not already enabled\n\
+         \n\
+         Sudo needed for: user provisioning, firewall install.\n\
+         \n\
+         (Real run would prompt: Proceed? [Y/n])\n",
+    )
+}
+
+/// Dry-run summary block for `tenant destroy <name> --dry-run` (full
+/// destroy path, default-N prompt preview).
+pub fn destroy_dry_run_block(name: &str, uid: u32) -> String {
+    format!(
+        "About to destroy tenant '{name}' (UID {uid}).\n\
+         \n\
+         This will:\n  \
+         \u{2022} remove the user account\n  \
+         \u{2022} move /Users/{name} \u{2192} /Users/Deleted Users/{name} (recoverable until /Users/Deleted Users is emptied or the host is rebuilt)\n  \
+         \u{2022} remove group '{name}-tenant-share'\n  \
+         \u{2022} remove the firewall anchor and flush its kernel rules\n  \
+         \u{2022} remove profile config at ~/.config/tenant/profiles/{name}.toml\n\
+         \n\
+         Sudo needed for: user removal, firewall teardown.\n\
+         \n\
+         (Real run would prompt: Proceed? [y/N])\n",
+    )
+}
+
+/// Dry-run summary block for the orphan-group convergence path.
+pub fn destroy_orphan_dry_run_block(name: &str) -> String {
+    format!(
+        "About to destroy orphan group '{name}-tenant-share' for tenant '{name}'.\n\
+         \n\
+         This will:\n  \
+         \u{2022} remove group '{name}-tenant-share'\n  \
+         \u{2022} remove the firewall anchor and flush its kernel rules\n  \
+         \u{2022} remove profile config at ~/.config/tenant/profiles/{name}.toml\n\
+         \n\
+         Sudo needed for: group removal, firewall teardown.\n\
+         \n\
+         (Real run would prompt: Proceed? [y/N])\n",
+    )
+}
+
+/// Dry-run summary block for `tenant mode <name> <level> --dry-run`.
+pub fn mode_dry_run_block(name: &str, level: &str) -> String {
+    let re_render = if level == "install" {
+        "re-render the firewall anchor with install-tier hosts added to the allowlist"
+    } else {
+        "re-render the firewall anchor at runtime tier"
+    };
+    let install_tail = if level == "install" {
+        format!(
+            "\nThe widened allowlist persists until 'tenant mode {name} runtime' (narrow) or 'tenant shell {name}' (auto-narrow on entry).\n",
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "About to apply mode '{level}' to tenant '{name}'.\n\
+         \n\
+         This will:\n  \
+         \u{2022} {re_render}\n  \
+         \u{2022} reload pf\n  \
+         \u{2022} re-apply declared shares from the profile (idempotent)\n{install_tail}\
+         \n\
+         Sudo needed for: firewall install.\n\
+         \n\
+         (Real run would prompt: Proceed? [Y/n])\n",
+    )
+}
+
+/// Dry-run summary block for single-tenant `tenant reload <name>`.
+pub fn reload_dry_run_block(name: &str) -> String {
+    format!(
+        "About to reload tenant '{name}' from profile.\n\
+         \n\
+         This will:\n  \
+         \u{2022} re-render and reload the firewall anchor (runtime tier)\n  \
+         \u{2022} re-apply each declared share from [[shares]] in the profile\n\
+         \n\
+         Sudo needed for: firewall install.\n\
+         \n\
+         (Real run would prompt: Proceed? [Y/n])\n",
+    )
+}
+
 pub fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
     let exec = NeverExecutor;
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
+    let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let code = tenant::run(&args, &stub, &exec, TEST_HOST, &mut stdout, &mut stderr);
+    let code = tenant::run(
+        &args,
+        &stub,
+        &exec,
+        TEST_HOST,
+        &mut stdout,
+        &mut stderr,
+        &mut stdin,
+        false, // stdin not a TTY → confirm auto-proceeds (cycle 12 Q3 lock)
+        tenant::ansi::Colors::default(),
+    );
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -112,8 +263,54 @@ pub fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
 pub fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u8, String, String) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
+    let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let code = tenant::run(&args, &stub, exec, TEST_HOST, &mut stdout, &mut stderr);
+    let code = tenant::run(
+        &args,
+        &stub,
+        exec,
+        TEST_HOST,
+        &mut stdout,
+        &mut stderr,
+        &mut stdin,
+        false,
+        tenant::ansi::Colors::default(),
+    );
+    (
+        code,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
+
+/// Cycle-12 confirm-aware test runner. Simulates a TTY stdin so the
+/// confirmation prompt fires, with `stdin_content` as the operator's
+/// keystrokes (one or more lines, `\n`-terminated). Use for tests that
+/// exercise y/N parsing, default-Y vs default-N, and reprompt-on-bad-
+/// input behavior. `run_with` / `run_with_exec` keep their auto-proceed
+/// posture (stdin=empty, tty=false) so the existing test bank is
+/// unaffected.
+pub fn run_with_stdin(
+    stub: StubReader,
+    exec: &StubExecutor,
+    args: &[&str],
+    stdin_content: &[u8],
+) -> (u8, String, String) {
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let mut stdin = std::io::Cursor::new(stdin_content.to_vec());
+    let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let code = tenant::run(
+        &args,
+        &stub,
+        exec,
+        TEST_HOST,
+        &mut stdout,
+        &mut stderr,
+        &mut stdin,
+        true, // simulate TTY so confirm prompts fire
+        tenant::ansi::Colors::default(),
+    );
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),

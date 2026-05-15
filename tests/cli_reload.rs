@@ -35,7 +35,7 @@ fn reload_single_tenant_dry_run_default_emits_intent_only() {
     // dry-run emits the intent line only (no plan).
     let (code, stdout, stderr) = run_with(stub_with_tenant("dev"), &["reload", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, "Would reload tenant 'dev'.\n");
+    assert_eq!(stdout, reload_dry_run_block("dev"));
 }
 
 #[test]
@@ -138,7 +138,19 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
     let exec = StubExecutor::new().with_existing_profile("dev", &toml);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, "Reloaded tenant 'dev'.\n");
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Reloading tenant 'dev'",
+            &[
+                "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
+                "Firewall ruleset reloaded",
+                "ACL granted to group 'dev-tenant-share' on /tmp",
+                "Symlink /Users/dev/src → /tmp installed",
+            ],
+            "Tenant 'dev' reloaded.",
+        ),
+    );
 
     // PF: exactly InstallAnchor + Reload (no recovery / setup ops).
     let fw_ops = exec.firewall_ops();
@@ -193,7 +205,7 @@ fn reload_verbose_emits_intent_before_profile_read_failure() {
     );
     assert_eq!(code, 74);
     assert!(
-        stdout.starts_with("Reloading tenant 'dev'.\n"),
+        stdout.starts_with(&format!("{}\n", section_line("Reloading tenant 'dev'"))),
         "intent should emit before the profile-read failure: {stdout:?}"
     );
 }
@@ -254,7 +266,7 @@ fn reload_single_tenant_verbose_emits_plan_and_per_op_echo() {
     );
     assert_eq!(code, 0);
     assert!(
-        stdout.starts_with("Reloading tenant 'dev'.\n"),
+        stdout.starts_with(&format!("{}\n", section_line("Reloading tenant 'dev'"))),
         "verbose intent first: {stdout:?}"
     );
     // Plan lists InstallAnchor + Reload.
@@ -276,7 +288,7 @@ fn reload_single_tenant_verbose_emits_plan_and_per_op_echo() {
         "echo should show symlink op: {stdout:?}"
     );
     assert!(
-        stdout.ends_with("Reloaded tenant 'dev'.\n"),
+        stdout.ends_with("Tenant 'dev' reloaded.\n"),
         "post-exec done line last: {stdout:?}"
     );
 }

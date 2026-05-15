@@ -1175,15 +1175,18 @@ impl<'a> Writer<'a> {
         self.executor.login(name).map_err(ShellError::Account)
     }
 
-    /// Run a single op: emit the `$` echo line (in real+verbose) and
-    /// execute the op against the substrate. Generic over `WritableOp`
-    /// so `AccountOp` and `ProfileOp` both flow through one method, each
-    /// preserving its domain-specific error type. The echo + execute
-    /// coupling means a Writer caller can't accidentally execute without
-    /// echoing or echo without executing.
+    /// Run a single op: emit the `$` echo line (in real+verbose),
+    /// execute the op against the substrate, then emit the `✓
+    /// <business>` progress line in real mode (cycle 12). Generic over
+    /// `WritableOp` so `AccountOp` and `ProfileOp` both flow through one
+    /// method, each preserving its domain-specific error type. The
+    /// echo + execute + progress coupling means a Writer caller can't
+    /// accidentally execute without narrating either before or after.
     fn run<O: WritableOp>(&self, op: &O, reporter: &mut Reporter) -> Result<(), O::Error> {
         reporter.step(op.op_ref());
-        op.execute_via(self.executor)
+        op.execute_via(self.executor)?;
+        reporter.progress(op.op_ref());
+        Ok(())
     }
 
     /// Reload a single tenant — runtime-tier PF reapply + share

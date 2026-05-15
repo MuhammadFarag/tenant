@@ -1,10 +1,11 @@
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{BufRead, Write};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
 pub mod accounts;
 pub mod allocation;
+pub mod ansi;
 mod commands;
 pub mod doctor;
 pub mod executor;
@@ -22,6 +23,12 @@ pub(crate) struct Cli {
 
     #[arg(long, global = true)]
     pub(crate) dry_run: bool,
+
+    /// Skip the interactive confirmation prompt that mutating verbs
+    /// (create / destroy / mode / reload) emit before executing.
+    /// Equivalent to typing 'y' at the prompt. Cycle 12.
+    #[arg(short = 'y', long, global = true)]
+    pub(crate) yes: bool,
 
     #[command(subcommand)]
     pub(crate) verb: Verb,
@@ -110,6 +117,12 @@ impl ModeLevel {
     }
 }
 
+// 9 params at the composition root — accounts + executor +
+// stdout/stderr/stdin/tty + colors — each is a discrete I/O capability
+// the harness needs to inject for testability. Bundling into a struct
+// would add a layer without removing parameters. clippy allow scoped
+// to this single function.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     args: &[String],
     accounts: &dyn accounts::Reader,
@@ -117,6 +130,9 @@ pub fn run(
     host: &str,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
+    stdin: &mut dyn BufRead,
+    stdin_is_tty: bool,
+    colors: ansi::Colors,
 ) -> u8 {
     let cli = match parse(args, stdout, stderr) {
         Ok(cli) => cli,
@@ -132,8 +148,25 @@ pub fn run(
         executor
     };
     let writer = accounts::Writer::new(active_executor);
-    let mut reporter = Reporter::new(stdout, stderr, cli.verbose, cli.dry_run, active_executor);
-    commands::dispatch(cli, accounts, &writer, host, &mut reporter)
+    let yes = cli.yes;
+    let mut reporter = Reporter::new(
+        stdout,
+        stderr,
+        cli.verbose,
+        cli.dry_run,
+        active_executor,
+        colors,
+    );
+    commands::dispatch(
+        cli,
+        accounts,
+        &writer,
+        host,
+        &mut reporter,
+        stdin,
+        stdin_is_tty,
+        yes,
+    )
 }
 
 fn parse(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<Cli, u8> {

@@ -15,7 +15,25 @@ fn destroy_removes_profile_file_from_store() {
     assert!(exec.has_profile("dev"), "pre-condition: profile present");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Destroying tenant 'dev'",
+            &[
+                "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
+                "Residual user record check for 'dev'",
+                "Residual user record 'dev' cleaned up",
+                "Share group 'dev-tenant-share' removed",
+                "Profile removed at ~/.config/tenant/profiles/dev.toml",
+                "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
+                "Firewall anchor removed at /etc/pf.anchors/tenant-dev",
+                "Updated /etc/pf.conf",
+                "Firewall ruleset reloaded",
+                "Kernel rules under anchor 'tenant-dev' flushed",
+            ],
+            "Tenant 'dev' destroyed.",
+        ),
+    );
     assert!(
         !exec.has_profile("dev"),
         "profile should be removed after destroy"
@@ -33,7 +51,28 @@ fn destroy_succeeds_when_profile_already_absent() {
     let exec = StubExecutor::new(); // empty; no profile loaded
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
+    // Same wireframe as the profile-present case — the profile-rm
+    // step is `NotFound → Ok(())` (idempotent rm), so its ✓ still
+    // emits.
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Destroying tenant 'dev'",
+            &[
+                "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
+                "Residual user record check for 'dev'",
+                "Residual user record 'dev' cleaned up",
+                "Share group 'dev-tenant-share' removed",
+                "Profile removed at ~/.config/tenant/profiles/dev.toml",
+                "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
+                "Firewall anchor removed at /etc/pf.anchors/tenant-dev",
+                "Updated /etc/pf.conf",
+                "Firewall ruleset reloaded",
+                "Kernel rules under anchor 'tenant-dev' flushed",
+            ],
+            "Tenant 'dev' destroyed.",
+        ),
+    );
 }
 
 #[test]
@@ -41,7 +80,7 @@ fn destroy_dry_run_default_shows_intent() {
     let (code, stdout, stderr) =
         run_with(stub_with_tenant("dev"), &["destroy", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, "Would destroy tenant 'dev'.\n");
+    assert_eq!(stdout, destroy_dry_run_block("dev", 600));
 }
 
 #[test]
@@ -59,7 +98,7 @@ fn destroy_dry_run_verbose_shows_mechanism() {
         &["destroy", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    let want = "Would destroy tenant 'dev'.\n  \
+    let plan = "  \
                 sudo sysadminctl -deleteUser dev\n  \
                 dscl . -read /Users/dev\n  \
                 sudo dscl . -delete /Users/dev\n  \
@@ -70,7 +109,7 @@ fn destroy_dry_run_verbose_shows_mechanism() {
                 sudo tee /etc/pf.conf < updated.conf\n  \
                 sudo pfctl -f /etc/pf.conf\n  \
                 sudo pfctl -a tenant-dev -F all\n";
-    assert_eq!(stdout, want);
+    assert_eq!(stdout, destroy_dry_run_block("dev", 600) + plan);
 }
 
 #[test]
@@ -83,7 +122,25 @@ fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Destroying tenant 'dev'",
+            &[
+                "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
+                "Residual user record check for 'dev'",
+                "Residual user record 'dev' cleaned up",
+                "Share group 'dev-tenant-share' removed",
+                "Profile removed at ~/.config/tenant/profiles/dev.toml",
+                "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
+                "Firewall anchor removed at /etc/pf.anchors/tenant-dev",
+                "Updated /etc/pf.conf",
+                "Firewall ruleset reloaded",
+                "Kernel rules under anchor 'tenant-dev' flushed",
+            ],
+            "Tenant 'dev' destroyed.",
+        ),
+    );
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     assert_eq!(
         exec.account_ops(),
@@ -113,28 +170,43 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
-    let want = "Destroying tenant 'dev'.\n  \
-                sudo sysadminctl -deleteUser dev\n  \
-                dscl . -read /Users/dev\n  \
-                sudo dscl . -delete /Users/dev\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo pfctl -a tenant-dev -F all\n\
-                $ sudo sysadminctl -deleteUser dev\n\
-                $ dscl . -read /Users/dev\n\
-                $ sudo dscl . -delete /Users/dev\n\
-                $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
-                $ rm -f ~/.config/tenant/profiles/dev.toml\n\
-                $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
-                $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
-                $ sudo tee /etc/pf.conf < updated.conf\n\
-                $ sudo pfctl -f /etc/pf.conf\n\
-                $ sudo pfctl -a tenant-dev -F all\n\
-                Destroyed tenant 'dev'.\n";
+    let want = format!(
+        "{}\n  \
+         sudo sysadminctl -deleteUser dev\n  \
+         dscl . -read /Users/dev\n  \
+         sudo dscl . -delete /Users/dev\n  \
+         sudo dseditgroup -o delete -n . dev-tenant-share\n  \
+         rm -f ~/.config/tenant/profiles/dev.toml\n  \
+         sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+         sudo rm -f /etc/pf.anchors/tenant-dev\n  \
+         sudo tee /etc/pf.conf < updated.conf\n  \
+         sudo pfctl -f /etc/pf.conf\n  \
+         sudo pfctl -a tenant-dev -F all\n\
+         $ sudo sysadminctl -deleteUser dev\n\
+         ✓ User account 'dev' removed (home moved to /Users/Deleted Users/dev)\n\
+         $ dscl . -read /Users/dev\n\
+         ✓ Residual user record check for 'dev'\n\
+         $ sudo dscl . -delete /Users/dev\n\
+         ✓ Residual user record 'dev' cleaned up\n\
+         $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
+         ✓ Share group 'dev-tenant-share' removed\n\
+         $ rm -f ~/.config/tenant/profiles/dev.toml\n\
+         ✓ Profile removed at ~/.config/tenant/profiles/dev.toml\n\
+         $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
+         ✓ Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup\n\
+         $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall anchor removed at /etc/pf.anchors/tenant-dev\n\
+         $ sudo tee /etc/pf.conf < updated.conf\n\
+         ✓ Updated /etc/pf.conf\n\
+         $ sudo pfctl -f /etc/pf.conf\n\
+         ✓ Firewall ruleset reloaded\n\
+         $ sudo pfctl -a tenant-dev -F all\n\
+         ✓ Kernel rules under anchor 'tenant-dev' flushed\n\
+         {}\n\
+         Tenant 'dev' destroyed.\n",
+        section_line("Destroying tenant 'dev'"),
+        section_line("Done"),
+    );
     assert_eq!(stdout, want);
 }
 
@@ -158,7 +230,25 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
     );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Destroyed tenant 'dev'.\n");
+    // Cycle 12: no ✓ for `LookupUserRecord` (probe Err == "no
+    // residue") and consequently no DeleteUserRecord step at all.
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Destroying tenant 'dev'",
+            &[
+                "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
+                "Share group 'dev-tenant-share' removed",
+                "Profile removed at ~/.config/tenant/profiles/dev.toml",
+                "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
+                "Firewall anchor removed at /etc/pf.anchors/tenant-dev",
+                "Updated /etc/pf.conf",
+                "Firewall ruleset reloaded",
+                "Kernel rules under anchor 'tenant-dev' flushed",
+            ],
+            "Tenant 'dev' destroyed.",
+        ),
+    );
     assert_eq!(
         exec.account_ops(),
         vec![
@@ -190,7 +280,20 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
     );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    // Cycle 12: pre-failure ✓ stream is visible (Delete user, residue
+    // probe + cleanup all succeeded). DeleteShareGroup failed — no
+    // ✓ for it, no Done section.
+    assert_eq!(
+        stdout,
+        real_failure_stdout(
+            "Destroying tenant 'dev'",
+            &[
+                "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
+                "Residual user record check for 'dev'",
+                "Residual user record 'dev' cleaned up",
+            ],
+        ),
+    );
     assert_eq!(
         stderr,
         "tenant: failed to destroy 'dev': process exited with code 78: \
@@ -246,27 +349,40 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
-    let want = "Destroying tenant 'dev'.\n  \
-                sudo sysadminctl -deleteUser dev\n  \
-                dscl . -read /Users/dev\n  \
-                sudo dscl . -delete /Users/dev\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo pfctl -a tenant-dev -F all\n\
-                $ sudo sysadminctl -deleteUser dev\n\
-                $ dscl . -read /Users/dev\n\
-                $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
-                $ rm -f ~/.config/tenant/profiles/dev.toml\n\
-                $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
-                $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
-                $ sudo tee /etc/pf.conf < updated.conf\n\
-                $ sudo pfctl -f /etc/pf.conf\n\
-                $ sudo pfctl -a tenant-dev -F all\n\
-                Destroyed tenant 'dev'.\n";
+    let want = format!(
+        "{}\n  \
+         sudo sysadminctl -deleteUser dev\n  \
+         dscl . -read /Users/dev\n  \
+         sudo dscl . -delete /Users/dev\n  \
+         sudo dseditgroup -o delete -n . dev-tenant-share\n  \
+         rm -f ~/.config/tenant/profiles/dev.toml\n  \
+         sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+         sudo rm -f /etc/pf.anchors/tenant-dev\n  \
+         sudo tee /etc/pf.conf < updated.conf\n  \
+         sudo pfctl -f /etc/pf.conf\n  \
+         sudo pfctl -a tenant-dev -F all\n\
+         $ sudo sysadminctl -deleteUser dev\n\
+         ✓ User account 'dev' removed (home moved to /Users/Deleted Users/dev)\n\
+         $ dscl . -read /Users/dev\n\
+         $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
+         ✓ Share group 'dev-tenant-share' removed\n\
+         $ rm -f ~/.config/tenant/profiles/dev.toml\n\
+         ✓ Profile removed at ~/.config/tenant/profiles/dev.toml\n\
+         $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
+         ✓ Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup\n\
+         $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall anchor removed at /etc/pf.anchors/tenant-dev\n\
+         $ sudo tee /etc/pf.conf < updated.conf\n\
+         ✓ Updated /etc/pf.conf\n\
+         $ sudo pfctl -f /etc/pf.conf\n\
+         ✓ Firewall ruleset reloaded\n\
+         $ sudo pfctl -a tenant-dev -F all\n\
+         ✓ Kernel rules under anchor 'tenant-dev' flushed\n\
+         {}\n\
+         Tenant 'dev' destroyed.\n",
+        section_line("Destroying tenant 'dev'"),
+        section_line("Done"),
+    );
     assert_eq!(stdout, want);
 }
 
@@ -375,7 +491,25 @@ fn destroy_accepts_at_floor() {
     };
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "edge"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Destroyed tenant 'edge'.\n");
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Destroying tenant 'edge'",
+            &[
+                "User account 'edge' removed (home moved to /Users/Deleted Users/edge)",
+                "Residual user record check for 'edge'",
+                "Residual user record 'edge' cleaned up",
+                "Share group 'edge-tenant-share' removed",
+                "Profile removed at ~/.config/tenant/profiles/edge.toml",
+                "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
+                "Firewall anchor removed at /etc/pf.anchors/tenant-edge",
+                "Updated /etc/pf.conf",
+                "Firewall ruleset reloaded",
+                "Kernel rules under anchor 'tenant-edge' flushed",
+            ],
+            "Tenant 'edge' destroyed.",
+        ),
+    );
     // Four account ops: DeleteTenantUser + LookupUserRecord (probe
     // defaults to Ok) + DeleteUserRecord cleanup + DeleteShareGroup.
     assert_eq!(
@@ -491,7 +625,12 @@ fn destroy_real_mode_propagates_exec_failure() {
     let exec = StubExecutor::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    // Cycle 12: section divider lands; the first substrate op
+    // (DeleteTenantUser) fails so no ✓ emits.
+    assert_eq!(
+        stdout,
+        format!("{}\n", section_line("Destroying tenant 'dev'")),
+    );
     assert_eq!(
         stderr,
         "tenant: failed to destroy 'dev': process exited with code 78\n"
@@ -505,7 +644,11 @@ fn destroy_real_mode_failure_surfaces_executor_stderr() {
         .fail_account_blanket(78, "sysadminctl: -deleteUser failed: not authorized\n");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    // Cycle 12: section + no ✓ — first substrate op failed.
+    assert_eq!(
+        stdout,
+        format!("{}\n", section_line("Destroying tenant 'dev'")),
+    );
     assert_eq!(
         stderr,
         "tenant: failed to destroy 'dev': process exited with code 78: \
@@ -522,7 +665,7 @@ fn destroy_dry_run_bypasses_injected_executor() {
         &["destroy", "dev", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Would destroy tenant 'dev'.\n");
+    assert_eq!(stdout, destroy_dry_run_block("dev", 600));
     assert!(
         exec.account_ops().is_empty() && exec.profile_ops().is_empty(),
         "executor should not be invoked in dry-run mode; account_ops={:?}, profile_ops={:?}",
@@ -548,7 +691,22 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Destroyed orphan group for tenant 'dev'.\n");
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Destroying orphan group 'dev-tenant-share' for tenant 'dev'",
+            &[
+                "Share group 'dev-tenant-share' removed",
+                "Profile removed at ~/.config/tenant/profiles/dev.toml",
+                "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
+                "Firewall anchor removed at /etc/pf.anchors/tenant-dev",
+                "Updated /etc/pf.conf",
+                "Firewall ruleset reloaded",
+                "Kernel rules under anchor 'tenant-dev' flushed",
+            ],
+            "Orphan group 'dev-tenant-share' for tenant 'dev' destroyed.",
+        ),
+    );
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     assert_eq!(
         exec.account_ops(),
@@ -573,7 +731,22 @@ fn destroy_orphan_group_also_removes_profile_if_present() {
     assert!(exec.has_profile("dev"), "pre-condition: profile present");
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Destroyed orphan group for tenant 'dev'.\n");
+    assert_eq!(
+        stdout,
+        real_success_stdout(
+            "Destroying orphan group 'dev-tenant-share' for tenant 'dev'",
+            &[
+                "Share group 'dev-tenant-share' removed",
+                "Profile removed at ~/.config/tenant/profiles/dev.toml",
+                "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
+                "Firewall anchor removed at /etc/pf.anchors/tenant-dev",
+                "Updated /etc/pf.conf",
+                "Firewall ruleset reloaded",
+                "Kernel rules under anchor 'tenant-dev' flushed",
+            ],
+            "Orphan group 'dev-tenant-share' for tenant 'dev' destroyed.",
+        ),
+    );
     assert!(
         !exec.has_profile("dev"),
         "profile should be removed by orphan-group convergence"
@@ -590,7 +763,7 @@ fn destroy_dry_run_for_orphan_group() {
     };
     let (code, stdout, stderr) = run_with(stub, &["destroy", "dev", "--dry-run"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Would destroy orphan group for tenant 'dev'.\n");
+    assert_eq!(stdout, destroy_orphan_dry_run_block("dev"));
 }
 
 #[test]
@@ -606,7 +779,7 @@ fn destroy_dry_run_verbose_for_orphan_group() {
     };
     let (code, stdout, _stderr) = run_with(stub, &["destroy", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    let want = "Would destroy orphan group 'dev-tenant-share' for tenant 'dev'.\n  \
+    let plan = "  \
                 sudo dseditgroup -o delete -n . dev-tenant-share\n  \
                 rm -f ~/.config/tenant/profiles/dev.toml\n  \
                 sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
@@ -614,7 +787,7 @@ fn destroy_dry_run_verbose_for_orphan_group() {
                 sudo tee /etc/pf.conf < updated.conf\n  \
                 sudo pfctl -f /etc/pf.conf\n  \
                 sudo pfctl -a tenant-dev -F all\n";
-    assert_eq!(stdout, want);
+    assert_eq!(stdout, destroy_orphan_dry_run_block("dev") + plan);
 }
 
 #[test]
@@ -629,22 +802,34 @@ fn destroy_real_mode_verbose_for_orphan_group() {
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) = run_with_exec(stub, &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
-    let want = "Destroying orphan group 'dev-tenant-share' for tenant 'dev'.\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo pfctl -a tenant-dev -F all\n\
-                $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
-                $ rm -f ~/.config/tenant/profiles/dev.toml\n\
-                $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
-                $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
-                $ sudo tee /etc/pf.conf < updated.conf\n\
-                $ sudo pfctl -f /etc/pf.conf\n\
-                $ sudo pfctl -a tenant-dev -F all\n\
-                Destroyed orphan group 'dev-tenant-share' for tenant 'dev'.\n";
+    let want = format!(
+        "{}\n  \
+         sudo dseditgroup -o delete -n . dev-tenant-share\n  \
+         rm -f ~/.config/tenant/profiles/dev.toml\n  \
+         sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
+         sudo rm -f /etc/pf.anchors/tenant-dev\n  \
+         sudo tee /etc/pf.conf < updated.conf\n  \
+         sudo pfctl -f /etc/pf.conf\n  \
+         sudo pfctl -a tenant-dev -F all\n\
+         $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
+         ✓ Share group 'dev-tenant-share' removed\n\
+         $ rm -f ~/.config/tenant/profiles/dev.toml\n\
+         ✓ Profile removed at ~/.config/tenant/profiles/dev.toml\n\
+         $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
+         ✓ Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup\n\
+         $ sudo rm -f /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall anchor removed at /etc/pf.anchors/tenant-dev\n\
+         $ sudo tee /etc/pf.conf < updated.conf\n\
+         ✓ Updated /etc/pf.conf\n\
+         $ sudo pfctl -f /etc/pf.conf\n\
+         ✓ Firewall ruleset reloaded\n\
+         $ sudo pfctl -a tenant-dev -F all\n\
+         ✓ Kernel rules under anchor 'tenant-dev' flushed\n\
+         {}\n\
+         Orphan group 'dev-tenant-share' for tenant 'dev' destroyed.\n",
+        section_line("Destroying orphan group 'dev-tenant-share' for tenant 'dev'"),
+        section_line("Done"),
+    );
     assert_eq!(stdout, want);
 }
 
@@ -680,7 +865,15 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
     let exec = StubExecutor::new().fail_account_blanket(78, "dseditgroup: not authorized\n");
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    // Cycle 12: section divider lands; the orphan-group's first
+    // substrate op (DeleteShareGroup) fails — no ✓, no Done section.
+    assert_eq!(
+        stdout,
+        format!(
+            "{}\n",
+            section_line("Destroying orphan group 'dev-tenant-share' for tenant 'dev'"),
+        ),
+    );
     assert_eq!(
         stderr,
         "tenant: failed to destroy 'dev': process exited with code 78: \
@@ -876,4 +1069,62 @@ fn destroy_orphan_group_invokes_flush_anchor_as_final_firewall_step() {
         tenant::executor::FirewallOp::FlushAnchor { name: "dev".into() },
         "FlushAnchor must be the final firewall op on orphan-group destroy"
     );
+}
+
+// ================================================================
+// Cycle 12: pre-execution confirmation prompt (SC5)
+// ================================================================
+
+#[test]
+fn destroy_with_tty_default_n_aborts_on_empty_input() {
+    // Destructive verb: default is N (Q2 lock). Operator hits ENTER
+    // without typing → Abort. Substrate must NOT fire. Exit 0.
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["destroy", "dev"], b"\n");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("Proceed? [y/N] "),
+        "default-N hint should appear: {stdout:?}",
+    );
+    assert!(
+        stdout.contains("Aborted by operator. No changes made."),
+        "aborted line should emit: {stdout:?}",
+    );
+    assert!(
+        exec.account_ops().is_empty(),
+        "substrate must not fire: {:?}",
+        exec.account_ops()
+    );
+}
+
+#[test]
+fn destroy_with_tty_proceeds_on_explicit_y() {
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["destroy", "dev"], b"y\n");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("About to destroy tenant 'dev' (UID 600)"),
+        "summary should emit: {stdout:?}",
+    );
+    assert!(stdout.ends_with("Tenant 'dev' destroyed.\n"));
+    assert!(!exec.account_ops().is_empty(), "substrate should fire");
+}
+
+#[test]
+fn destroy_with_yes_flag_skips_prompt() {
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["destroy", "dev", "--yes"],
+        b"",
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("Proceed?"),
+        "prompt must NOT emit with --yes: {stdout:?}",
+    );
+    assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }

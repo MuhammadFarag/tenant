@@ -49,7 +49,15 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
         StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Shelling into 'dev'.\n");
+    // Cycle 12: section + ✓ for each substrate step before login.
+    // No closing line — login transfers control to the shell.
+    let want = format!(
+        "{}\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall ruleset reloaded\n",
+        section_line("Entering tenant 'dev'"),
+    );
+    assert_eq!(stdout, want);
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     assert_eq!(exec.logins(), vec!["dev".to_string()]);
     assert!(
@@ -68,13 +76,18 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"]);
     assert_eq!(code, 0);
-    let want = "Shelling into 'dev'.\n  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo -iu dev\n\
-                $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
-                $ sudo pfctl -f /etc/pf.conf\n\
-                $ sudo -iu dev\n";
+    let want = format!(
+        "{}\n  \
+         sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
+         sudo pfctl -f /etc/pf.conf\n  \
+         sudo -iu dev\n\
+         $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         $ sudo pfctl -f /etc/pf.conf\n\
+         ✓ Firewall ruleset reloaded\n\
+         $ sudo -iu dev\n",
+        section_line("Entering tenant 'dev'"),
+    );
     assert_eq!(stdout, want);
 }
 
@@ -241,7 +254,15 @@ fn shell_propagates_child_exit_code() {
         .login_exit_code(5);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 5, "stderr={stderr:?}");
-    assert_eq!(stdout, "Shelling into 'dev'.\n");
+    // Cycle 12: section + ✓ stream from the narrow reapply land
+    // before login fires.
+    let want = format!(
+        "{}\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall ruleset reloaded\n",
+        section_line("Entering tenant 'dev'"),
+    );
+    assert_eq!(stdout, want);
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     assert_eq!(exec.logins().len(), 1);
 }
@@ -394,7 +415,8 @@ fn shell_aborts_when_read_profile_fails() {
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
     assert_eq!(
-        stdout, "Shelling into 'dev'.\n",
+        stdout,
+        format!("{}\n", section_line("Entering tenant 'dev'")),
         "intent emitted before narrow"
     );
     assert_eq!(
@@ -458,7 +480,12 @@ fn shell_aborts_when_install_anchor_fails() {
         );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    assert_eq!(stdout, "Shelling into 'dev'.\n");
+    // Cycle 12: section divider lands; InstallAnchor (first substrate)
+    // fails — no ✓.
+    assert_eq!(
+        stdout,
+        format!("{}\n", section_line("Entering tenant 'dev'")),
+    );
     assert_eq!(
         stderr,
         "tenant: failed to narrow firewall for 'dev' before shell entry: \
@@ -494,7 +521,15 @@ fn shell_aborts_when_reload_fails() {
         );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    assert_eq!(stdout, "Shelling into 'dev'.\n");
+    // Cycle 12: section + ✓ for InstallAnchor (succeeded), no ✓ for
+    // Reload (failed).
+    assert_eq!(
+        stdout,
+        real_failure_stdout(
+            "Entering tenant 'dev'",
+            &["Firewall anchor installed at /etc/pf.anchors/tenant-dev"],
+        ),
+    );
     assert!(
         stderr.contains("failed to narrow firewall for 'dev' before shell entry"),
         "stderr should be framed by shell_narrow_failed: {stderr:?}"

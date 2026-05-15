@@ -1,4 +1,7 @@
+use std::io::BufRead;
+
 use crate::doctor::Severity;
+use crate::reporter::ConfirmOutcome;
 use crate::{Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, reporter::Reporter};
 
 const EX_USAGE: u8 = 64;
@@ -24,13 +27,27 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
     }
 }
 
+// Mirror of `tenant::run`'s param-count clippy allow — dispatch needs
+// every capability `run` threaded through to make per-verb routing
+// decisions. Bundling adds a layer without reducing real arguments.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch(
     cli: Cli,
     accounts: &dyn accounts::Reader,
     writer: &accounts::Writer<'_>,
     host: &str,
     reporter: &mut Reporter,
+    stdin: &mut dyn BufRead,
+    stdin_is_tty: bool,
+    yes_flag: bool,
 ) -> u8 {
+    // Cycle 12: pre-execution summary emits ONLY when the operator
+    // is interactive OR running dry-run. Non-TTY real-mode invocation
+    // (scripted callers) stays silent before the substrate, preserving
+    // today's scripted-caller contract (Q3 lock). `--yes` doesn't
+    // suppress the summary on a TTY — operator opted out of the
+    // PROMPT, not the context.
+    let show_summary = cli.dry_run || stdin_is_tty;
     match cli.verb {
         Verb::Create { name } => {
             if let Err(e) = accounts::validate_name(&name) {
@@ -48,6 +65,17 @@ pub(crate) fn dispatch(
             // diverge.
             let uid = allocation::UidAllocator::new(accounts).lowest_free_uid();
             let gid = allocation::GidAllocator::new(accounts).lowest_free_gid();
+            // Cycle 12 pre-execution confirmation: summary + prompt
+            // BEFORE any substrate fires. Default Y for create (the
+            // operator typed the verb; abort is cheap; idempotent
+            // on re-run).
+            if show_summary {
+                reporter.create_summary(&name, uid, gid);
+            }
+            if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
+                reporter.aborted();
+                return 0;
+            }
             match writer.create_tenant(&name, uid, gid, reporter) {
                 Ok(()) => 0,
                 Err(accounts::CreateError::Group(e)) => {
@@ -145,6 +173,17 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
+                    // Cycle 12 confirm prompt; default Y (convergent
+                    // reapply, reversible via the other mode).
+                    if show_summary {
+                        reporter.mode_summary(&name, level);
+                    }
+                    if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
+                        == ConfirmOutcome::Abort
+                    {
+                        reporter.aborted();
+                        return 0;
+                    }
                     match writer.apply_tenant_mode(&name, level, reporter) {
                         Ok(()) => 0,
                         Err(e) => {
@@ -222,6 +261,17 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     accounts::Eligibility::Destroyable => {
+                        // Cycle 12 confirm; default Y (convergent,
+                        // idempotent).
+                        if show_summary {
+                            reporter.reload_summary(&n);
+                        }
+                        if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
+                            == ConfirmOutcome::Abort
+                        {
+                            reporter.aborted();
+                            return 0;
+                        }
                         match writer.reload_tenant(&n, reporter) {
                             Ok(()) => 0,
                             Err(e) => {
@@ -233,6 +283,23 @@ pub(crate) fn dispatch(
                 }
             }
             None => {
+                // Cycle 12: list the tenants up-front so the operator
+                // confirms the scope before any substrate fires. Empty
+                // host short-circuits via reload_all_done_summary
+                // (which prints "No tenants…"), so we skip the prompt
+                // there.
+                let names = accounts.tenant_names();
+                if names.is_empty() {
+                    let outcome = writer.reload_all_tenants(accounts, reporter);
+                    return if outcome.failed == 0 { 0 } else { EX_IOERR };
+                }
+                if show_summary {
+                    reporter.reload_all_summary(&names);
+                }
+                if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
+                    reporter.aborted();
+                    return 0;
+                }
                 let outcome = writer.reload_all_tenants(accounts, reporter);
                 if outcome.failed == 0 { 0 } else { EX_IOERR }
             }
@@ -250,8 +317,19 @@ pub(crate) fn dispatch(
                 accounts::Eligibility::OrphanGroup => {
                     // Convergence path: tenant user is already gone but
                     // the suffixed group survived a prior partial
-                    // failure. Routes through `surface_destroy_error` so
-                    // a profile-rm failure on this arm gets the same
+                    // failure. Cycle 12 confirm; default N — same
+                    // destructive-action posture as the full destroy.
+                    if show_summary {
+                        reporter.destroy_orphan_summary(&name);
+                    }
+                    if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
+                        == ConfirmOutcome::Abort
+                    {
+                        reporter.aborted();
+                        return 0;
+                    }
+                    // Routes through `surface_destroy_error` so a
+                    // profile-rm failure on this arm gets the same
                     // operator-friendly framing as the Destroyable arm.
                     if let Err(e) = writer.destroy_orphan_group(&name, reporter) {
                         surface_destroy_error(reporter, &name, &e);
@@ -268,6 +346,18 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
+                    // Cycle 12 confirm; default N (destructive,
+                    // muscle-memory ENTER must not delete).
+                    if show_summary {
+                        let uid = accounts.uid_for(&name).unwrap_or(0);
+                        reporter.destroy_summary(&name, uid);
+                    }
+                    if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
+                        == ConfirmOutcome::Abort
+                    {
+                        reporter.aborted();
+                        return 0;
+                    }
                     if let Err(e) = writer.destroy_tenant(&name, reporter) {
                         surface_destroy_error(reporter, &name, &e);
                         return EX_IOERR;

@@ -58,7 +58,8 @@ walks the commits.
 ## File map
 
 ```
-src/lib.rs        — public API (`run`); `Cli` + `Verb` (Create / Destroy / Shell / Mode / Doctor / Reload) + `ModeLevel`; mode swap to `DryRunExecutor` when `--dry-run`; constructs Reporter with the active Executor. `run` takes `host: &str` (operator's login name) for doctor's curated-path expansion.
+src/lib.rs        — public API (`run`); `Cli` + `Verb` (Create / Destroy / Shell / Mode / Doctor / Reload) + `ModeLevel`; global `--yes`/`-y` flag (cycle 12, bypasses confirm prompt); mode swap to `DryRunExecutor` when `--dry-run`; constructs Reporter with the active Executor. `run` takes `host: &str` (operator's login name) for doctor's curated-path expansion, plus `stdin: &mut dyn BufRead` + `stdin_is_tty: bool` + `colors: ansi::Colors` for cycle-12's pre-execution confirm prompt and per-stream color gating.
+src/ansi.rs       — internal ANSI escape-sequence wrapper (cycle 12). `Colors { stdout, stderr }` per-stream gate threaded from `main` into `Reporter::new`; `should_color(Stream)` probes `IsTerminal` (used by main only — tests pass `Colors::default()` so byte-form fixtures stay plain); color wrappers `red` / `green` / `yellow` / `cyan` / `bold` / `dim` emit `\x1b[<code>m...\x1b[0m`; `rule(title, width)` renders the `─── <title> ─────...` section divider Reporter uses; `panel(title, body, width)` renders a rounded-corner box (scoped for SC6 failure panels but unused in the shipped surface — tenant failures are 1-liners that don't trip the 3+-line threshold).
 src/commands.rs   — verb dispatch (the `match` on `Verb`). No I/O, no mode/verbosity branching; routes to Reporter methods. `doctor_exit_code(severity, strict)` maps doctor's outcome to 0/1/2. Helpers `surface_destroy_error` / `surface_doctor_error` / `surface_mode_error` / `surface_shell_mode_error` / `surface_reload_error` / `surface_create_post_provision_error` centralize per-error-arm Reporter routing for verbs with multi-arm error types.
 src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`, `reload_tenant`, `reload_all_tenants`, `doctor_tenant`, `doctor_all_tenants`); shared private `build_reapply_plan` (read profile + parse + pre-flight shares + construct PF + per-share ops) and `execute_reapply_plan` (fires the constructed ops) drive `apply_tenant_mode` / `shell_into_tenant` / `reload_tenant`; `reapply_shares_post_provision` skips PF for `create_tenant`'s post-Enable share pass; `execute_share_ops` is the per-share loop shared by both execute paths; private doctor helpers: `check_env_leak` + `check_touch_id_for_sudo` + `check_pf_status` (each host-wide, single-emit) and `probe_tenant_paths` (per-tenant; runs the curated-path probes, the pf-rule structural check on the kernel anchor, the byte-exact anchor-body comparison on the on-disk file via `check_anchor_body_drift`, and the per-share ACL + symlink drift checks via `check_share_drift`). `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute. `ReapplyPlan { install_anchor, reload, share_ops }` + `ShareOps { grant, ensure_dir, ensure_link }` carry the pre-built op list so plan rendering and execution see the same ops. `ShareError { HostPathMissing, TenantPathOccupied }`, extended `ModeError { Profile, Firewall, Acl, Account, Probe, Share }`, and `CreateError::PostProvision(ModeError)` aggregate share-substrate failures. `ReloadAllOutcome { failed }` carries the no-arg-form aggregate. `DoctorOutcome` + `DoctorError { Probe, HostFile, Firewall }` aggregate doctor's results.
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both iterate from `TENANT_UID_FLOOR = 600`.
@@ -66,8 +67,8 @@ src/executor.rs   — `Op` ADT root wrapping `AccountOp` / `ProfileOp` / `Firewa
 src/profile.rs    — `Profile` / `Allowlist` / `Tier` / `Share` / `ShareMode` serde shapes; `parse` (schema-version-checked, validates the `$HOME` prefix-only contract on every `tenant_path`); `expand_tenant_path(name, template) -> PathBuf` resolves the `$HOME` template at the Writer boundary; `default_profile_toml`; `display_path_for` (`~`-rendered form used in plan / echo / error frames).
 src/firewall.rs   — pure functions for PF anchor + `/etc/pf.conf` line ops: `render_anchor`, `ensure_anchor_ref`, `remove_anchor_ref`, `is_anchor_referenced`; `tenant_anchor_name` / `_path` centralizers; `ANCHOR_DIR` / `PF_CONF` / `PF_CONF_BACKUP` constants.
 src/doctor.rs     — pure functions for the doctor verb: `curated_paths(host, tenant, others)` returns the (Category, AccessMode, PathBuf) probe list; `classify(category, outcome) -> Option<Severity>` maps probe results to finding severity; `has_env_delete_for(policy, var)` parses sudoers for the env_delete directive; `pf_rule_presence_check(rules, tenant)` returns up to two `PfRuleDrift` findings for missing `pass` / `block` rules in a kernel anchor; `has_pam_tid(pam_config)` parses `/etc/pam.d/sudo` for an active `auth sufficient pam_tid.so` directive; `pf_status_enabled(status)` checks pfctl -si output for "Status: Enabled"; `anchor_body_matches(actual, expected)` byte-exact equality on the on-disk anchor body vs the profile-derived render; `has_group_acl_entry(listing, group)` substring-matches `group:<g> allow` in an `ls -lde` listing. `Finding { FilesystemExposure, EnvLeak, PfRuleDrift, TouchIdMissing, PfDisabled, AnchorBodyDrift, AclDrift, SymlinkDrift }` + `SymlinkActual { Absent, WrongTarget(PathBuf), NotSymlink }` (inside `SymlinkDrift` to express the three drift sub-cases) + `Severity { Info, Warning, Critical }` + `Category` types. `Finding::guidance(&self) -> Option<String>` returns the 4-section operator-facing block per variant (Why this matters / Recommended fix / Side-effects / Alternative); `None` for `FilesystemExposure` (per-path guidance folds into the future remediation cycle); `SymlinkDrift` returns case-tailored bodies per `SymlinkActual` variant. All I/O lives in `Writer::doctor_*` orchestration on the executor; this module is grep-and-classify only.
-src/reporter.rs   — operator-facing output. Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); `refuse_*` and `*_failed` methods to stderr; `step(op)` echoes per substrate call in real+verbose; plan rendering flows through `Op::describe_via`. Verbs with a profile-driven plan (mode / shell / reload) split into `_intent` (emits the intent line before the profile read) + `_plan` (renders the plan block after the plan is built) so the operator sees verb context even when read fails. Share-substrate failure framing per arm: `mode_acl_failed` / `mode_account_failed` / `mode_probe_failed` / `refuse_mode_share`; shell variants add "before shell entry"; reload has its own `reload_firewall_failed` / `refuse_reload_share` for verb-specific wording. Reload no-arg form uses `reload_all_starting` / `reload_all_done_summary` to bracket the walk. Create's post-provision arm uses `create_post_provision_*_failed` family that points operator at `tenant reload <name>` for recovery. Doctor uses `doctor_starting` (verbose curated-list block + dry-run intent), `doctor_finding` (one-liner; emits the 4-section guidance block indented 2 spaces under the finding when verbose), `doctor_done_summary`, `doctor_failed` (probe substrate), `doctor_host_file_failed` (sudoers / pam.d/sudo substrate), `doctor_firewall_failed` (pfctl substrate), `doctor_all_tenants_noop`, and `refuse_doctor_*` family.
-src/main.rs       — composition root: prod impls + `tenant::run`. Reads `$USER` for the host identity passed to doctor.
+src/reporter.rs   — operator-facing output. Cycle-12 substrate vocab `ok(msg)` (✓ green substrate-success line) + `section(title)` (`─── <title> ───` bold divider). Per-verb `_starting` / `_done` methods bake in phrasing and internally branch on (dry_run, verbose); _starting in real mode emits the `section()` divider, _done emits `─── Done ───` + single enriched closing line naming UID/GID/anchor (create) or other terminal facts; dry-run skips both — the pre-exec `*_summary` covers verb framing. Per-step substrate success goes through `progress(op)` → `ok(op.business_label())`; mechanism `$` echo stays on `step(op)` (real+verbose only). Profile-driven verbs (mode / shell / reload) split into `_intent` (section divider emitted before profile read so operator sees verb context even on read failure) + `_plan` (indented plan block after the plan is built). Pre-execution confirmation: per-verb `*_summary(name, ...)` methods emit the headline + capability bullets + sudo-needed-for line; `confirm(default_yes, stdin, tty, yes_flag) -> ConfirmOutcome { Proceed, Abort }` handles the y/N prompt with reprompt-on-bad-input and skip-conditions (dry-run preview, `--yes`, non-TTY). `aborted()` emits "Aborted by operator. No changes made." on Abort. `doctor_finding` colors the severity prefix per `Finding::severity()` (critical=red+bold, warning=yellow, info=dim) and bold-headers + dim-body styles the verbose guidance block under colors. `refuse_*` and `*_failed` methods stay plain to stderr (cycle-12 SC6 failure-panel surface deferred — tenant failures are 1-liners under the 3+-line panel heuristic). Reload no-arg form uses `reload_all_starting` / `reload_all_done_summary` to bracket the walk. Create's post-provision arm uses `create_post_provision_*_failed` family that points operator at `tenant reload <name>` for recovery.
+src/main.rs       — composition root: prod impls + `tenant::run`. Reads `$USER` for the host identity passed to doctor. Probes `io::stdin().is_terminal()` for the confirm-prompt TTY gate and `ansi::Colors::detect()` for per-stream color decisions; passes both into `tenant::run` so the seam stays at the lib boundary.
 
 tests/cli*.rs            — E2E tests, one binary per verb (`tests/cli_<verb>.rs`) plus `tests/cli.rs` for cross-cutting CLI parser tests. Shared helpers (`NeverExecutor`, `run_with` / `run_with_exec`, `TEST_HOST`, stub builders) live in `tests/common/mod.rs`. Each per-verb file's top-of-file comment describes its scope.
 tests/macos_executor.rs  — per-variant pins of the `MacosExecutor::describe_*` argv contract. One test per Account/Profile/Firewall variant so a future tool swap (dseditgroup → dscl . -create; pfctl → some future PF manager) touches one place per op.
@@ -722,10 +723,64 @@ Things that are easy to violate and would matter:
   `Uid` not `UID`, `Macos` not `MacOS`. Methods are
   `lowest_free_uid`, struct is `UidAllocator`, `MacosReader`.
 
-- **Clap flag scoping** — `-v / --verbose` and `--dry-run` are both
-  `global = true` on `Cli` (accept either before or after the
-  subcommand). Per-subcommand flags (e.g. `--strict`, `--json`,
-  `--yes`) stay scoped to their verb.
+- **Clap flag scoping** — `-v / --verbose`, `--dry-run`, and
+  `-y / --yes` (cycle 12) are all `global = true` on `Cli` (accept
+  either before or after the subcommand). Per-subcommand flags
+  (e.g. `--strict`) stay scoped to their verb.
+
+- **Per-stream ANSI gate threaded from main** (cycle 12) —
+  `ansi::Colors { stdout, stderr }` is computed once at startup
+  via `Colors::detect()` (which probes `IsTerminal` per stream)
+  and threaded through `tenant::run` → `Reporter::new`. Reporter
+  emits escape sequences only when the relevant stream's bit is
+  true; tests pass `Colors::default()` (both false) so the
+  cycle-11 byte-form fixtures stay clean unchanged. NO_COLOR env
+  is deliberately not honored — solo-Mac scope, operator-controlled
+  terminal; out-of-scope for this cycle. Pipe-to-cat / 2>err.log
+  works for free via the per-stream `IsTerminal` probe.
+
+- **Cycle-12 operator UX surface — section + ✓ + done** — real
+  mode for every mutating verb (create / destroy / mode / reload)
+  brackets the substrate with `─── <verb> 'X' ───` (opening
+  section) + `✓ <business label>` lines per substrate step + `─── Done ───`
+  closing section + a single enriched terminal line naming the
+  load-bearing facts (UID/GID/anchor for create; tier for mode;
+  etc. — Q6 lock: single-enriched, not multi-line). The ✓ lines
+  come from `Writer::run<O>` calling `Reporter::progress(op)` after
+  successful execution, which routes through
+  `Op::business_label()` for the past-tense capability summary
+  ("Share group 'X-tenant-share' created (GID 600)" — substrate-
+  agnostic; no `dseditgroup` jargon). Dry-run skips the section
+  + ✓ + done; the cycle-12 `*_summary` covers framing instead.
+
+- **Pre-execution confirm: summary + Y/N + abort discipline** —
+  every mutating verb on a TTY emits a pre-exec `*_summary` block
+  (headline + capability bullets + sudo-needed-for) then prompts
+  `Proceed? [Y/n]` (or `[y/N]` for destroy per Q2 lock: only
+  destroy is N-default — muscle-memory ENTER must not delete).
+  Default-Y for create / mode / reload (operator typed the verb;
+  abort is cheap; idempotent on re-run). The prompt loops on
+  unrecognized input ("Please answer y or n."). Skip-conditions
+  collapse to auto-Proceed: dry-run (emits `(Real run would
+  prompt: Proceed? [Y/n])` preview instead — Q13 lock), `--yes`
+  flag, and non-TTY stdin (Q3 lock — preserves scripted-caller
+  contract). On Abort: `Reporter::aborted()` emits "Aborted by
+  operator. No changes made." and dispatch returns exit 0 without
+  invoking the substrate. Summary itself only emits when
+  `cli.dry_run || stdin_is_tty` — scripted real-mode callers stay
+  silent before the substrate so existing programmatic use isn't
+  noisier than today.
+
+- **Doctor severity colors + verbose-guidance subordination** —
+  `doctor_finding` colors the severity prefix per `Finding::severity()`:
+  critical=red+bold, warning=yellow, info=dim. The cycle-9
+  enriched-guidance block (4-section operator-facing body under
+  `-v`) gets bold on section headers (lines with no leading
+  whitespace in the original guidance text) and dim on body lines
+  (indented in the original), so the finding one-liner stays the
+  scannable focus and the guidance reads as context. Color-off
+  fallthrough is byte-form-identical to the cycle-11 surface —
+  test fixtures pass `Colors::default()` and see plain text.
 
 ## Test discipline
 

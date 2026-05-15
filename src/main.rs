@@ -27,6 +27,20 @@ fn main() -> ExitCode {
         .unwrap_or_else(|_| "operator".to_string());
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    let code = tenant::run(&args, &accounts, &executor, &host, &mut stdout, &mut stderr);
+    let stdin_handle = io::stdin();
+    let stdin_is_tty = std::io::IsTerminal::is_terminal(&stdin_handle);
+    let mut stdin = stdin_handle.lock();
+    let colors = tenant::ansi::Colors::detect();
+    let code = tenant::run(
+        &args,
+        &accounts,
+        &executor,
+        &host,
+        &mut stdout,
+        &mut stderr,
+        &mut stdin,
+        stdin_is_tty,
+        colors,
+    );
     ExitCode::from(code)
 }

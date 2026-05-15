@@ -15,16 +15,27 @@
 //! the `Option<&'static str>` slot for per-step annotations like
 //! `# on rollback`.
 
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use crate::ModeLevel;
 use crate::accounts::{ConflictError, NameError, ShareError, tenant_share_group_name};
-use crate::doctor::{Category, Finding};
+use crate::ansi::{self, Colors};
+use crate::doctor::{Category, Finding, Severity};
 use crate::executor::{
     AccessMode, AccountError, AclError, Executor, FirewallError, Op, ProbeError,
 };
 use crate::profile::{ProfileError, display_path_for};
+
+/// Outcome of the cycle-12 confirmation prompt. `Proceed` covers all
+/// non-aborted paths (user said yes, dry-run skip, `--yes` flag,
+/// non-TTY auto-proceed). `Abort` covers explicit `n`, default-N
+/// (destroy), and EOF / read errors.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ConfirmOutcome {
+    Proceed,
+    Abort,
+}
 
 pub(crate) struct Reporter<'a> {
     stdout: &'a mut dyn Write,
@@ -32,6 +43,7 @@ pub(crate) struct Reporter<'a> {
     verbose: bool,
     dry_run: bool,
     executor: &'a dyn Executor,
+    colors: Colors,
 }
 
 impl<'a> Reporter<'a> {
@@ -41,6 +53,7 @@ impl<'a> Reporter<'a> {
         verbose: bool,
         dry_run: bool,
         executor: &'a dyn Executor,
+        colors: Colors,
     ) -> Self {
         Self {
             stdout,
@@ -48,6 +61,53 @@ impl<'a> Reporter<'a> {
             verbose,
             dry_run,
             executor,
+            colors,
+        }
+    }
+
+    // ============================================================
+    // Cycle 12 — semantic vocabulary actually exercised by cycle 12's
+    // shipped surface: `ok` (substrate ✓) and `section` (─── rule ─).
+    // The wider util.py-style vocabulary (`info` cyan •, `warn` yellow
+    // !, `err` red ✗, `panel`) was scoped for SC6 failure panels but
+    // deferred — tenant's failures are almost all one-liners, so the
+    // 3+-line panel heuristic (cycle 12 Q7 lock) rarely applies. A
+    // future cycle that introduces structured multi-line failure
+    // bodies (e.g. cycle 11's enriched-guidance pattern extended to
+    // refusals) reintroduces this layer.
+    // ============================================================
+
+    /// `✓ <msg>` — substrate success line (green ✓). To stdout.
+    pub fn ok(&mut self, msg: &str) {
+        let check = self.paint_stdout("✓", ansi::green);
+        let _ = writeln!(self.stdout, "{check} {msg}");
+    }
+
+    /// `─── <title> ────...` — section divider, bold title. To stdout.
+    pub fn section(&mut self, title: &str) {
+        if self.colors.stdout {
+            // Compose `─── ` + bold(title) + ` ` + dashes-padded-to-80
+            // by hand; `ansi::rule` counts chars including escape
+            // sequences when given a bolded title, which would
+            // over-truncate the trailing dashes.
+            let bolded = ansi::bold(title);
+            let prefix = "─── ";
+            let suffix = " ";
+            let raw_core = prefix.chars().count() + title.chars().count() + suffix.chars().count();
+            let pad = 80_usize.saturating_sub(raw_core);
+            let dashes: String = "─".repeat(pad);
+            let _ = writeln!(self.stdout, "{prefix}{bolded}{suffix}{dashes}");
+        } else {
+            let line = ansi::rule(title, 80);
+            let _ = writeln!(self.stdout, "{line}");
+        }
+    }
+
+    fn paint_stdout<F: FnOnce(&str) -> String>(&self, s: &str, paint: F) -> String {
+        if self.colors.stdout {
+            paint(s)
+        } else {
+            s.to_string()
         }
     }
 
@@ -63,22 +123,293 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(self.stdout, "$ {line}");
     }
 
+    /// Per-step business-level progress line: `✓ <label>` after a
+    /// substrate op completes successfully. Emits in real mode (both
+    /// standard and verbose). Silent in dry-run — nothing actually
+    /// happened. Cycle 12. Label comes from `Op::business_label`, the
+    /// substrate-agnostic past-tense capability summary.
+    pub fn progress(&mut self, op: Op<'_>) {
+        if self.dry_run {
+            return;
+        }
+        let label = op.business_label();
+        self.ok(&label);
+    }
+
+    // ============================================================
+    // Cycle 12 — pre-execution confirmation
+    // ============================================================
+
+    /// Cycle-12 pre-execution confirmation. Emits `Proceed? [Y/n]`
+    /// (or `[y/N]` when `default_yes=false`), reads a line from
+    /// `stdin`, parses, and returns the outcome. Skip-conditions
+    /// (auto-Proceed without prompting):
+    ///
+    /// - dry-run mode (confirm would be a lie — nothing happens)
+    /// - `yes_flag` true (operator passed `--yes`)
+    /// - stdin not a TTY (scripted caller; per Q3 cycle 12 lock)
+    ///
+    /// Re-prompts on unrecognized input (Q16 edge case).
+    pub fn confirm(
+        &mut self,
+        default_yes: bool,
+        stdin: &mut dyn BufRead,
+        stdin_is_tty: bool,
+        yes_flag: bool,
+    ) -> ConfirmOutcome {
+        if self.dry_run {
+            // Emit a parenthetical preview so the operator sees what
+            // the real run would have asked. Q13 lock.
+            let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+            let _ = writeln!(self.stdout, "(Real run would prompt: Proceed? {hint})");
+            return ConfirmOutcome::Proceed;
+        }
+        if yes_flag {
+            return ConfirmOutcome::Proceed;
+        }
+        if !stdin_is_tty {
+            return ConfirmOutcome::Proceed;
+        }
+        let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+        loop {
+            let _ = write!(self.stdout, "Proceed? {hint} ");
+            let _ = self.stdout.flush();
+            let mut line = String::new();
+            match stdin.read_line(&mut line) {
+                Ok(0) => return ConfirmOutcome::Abort, // EOF
+                Ok(_) => {}
+                Err(_) => return ConfirmOutcome::Abort,
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return if default_yes {
+                    ConfirmOutcome::Proceed
+                } else {
+                    ConfirmOutcome::Abort
+                };
+            }
+            match trimmed.to_ascii_lowercase().as_str() {
+                "y" | "yes" => return ConfirmOutcome::Proceed,
+                "n" | "no" => return ConfirmOutcome::Abort,
+                _ => {
+                    let _ = writeln!(self.stdout, "Please answer y or n.");
+                }
+            }
+        }
+    }
+
+    /// "Aborted by operator. No changes made." — emits when the
+    /// operator answered `n` (or default-N for destroy) to a confirm
+    /// prompt. The verb returned without invoking any substrate.
+    pub fn aborted(&mut self) {
+        let _ = writeln!(self.stdout, "Aborted by operator. No changes made.");
+    }
+
+    // ============================================================
+    // Cycle 12 — per-verb pre-execution business summaries
+    // ============================================================
+
+    /// Pre-execution summary for `create`. Emits the headline +
+    /// capability bullets + sudo-needed-for line. Caller follows with
+    /// `confirm(true, …)` for real mode; dry-run's confirm emits the
+    /// preview parenthetical (Q13).
+    pub fn create_summary(&mut self, name: &str, uid: u32, gid: u32) {
+        let group = tenant_share_group_name(name);
+        let _ = writeln!(
+            self.stdout,
+            "About to create tenant '{name}' \u{2014} an isolated macOS account with restricted network egress."
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} create user account '{name}' (UID {uid}) and group '{group}' (GID {gid})"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} install a per-tenant firewall anchor (egress blocked by default; allowlist hosts declared in the profile)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} write profile config at {}",
+            display_path_for(name)
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} enable pf host-wide if not already enabled"
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(
+            self.stdout,
+            "Sudo needed for: user provisioning, firewall install."
+        );
+        let _ = writeln!(self.stdout);
+    }
+
+    /// Pre-execution summary for `destroy`. Includes the irreversibility
+    /// framing on the home-directory move (recoverable until Deleted
+    /// Users is emptied). Caller follows with `confirm(false, …)` —
+    /// destroy's default is N per Q2 lock.
+    pub fn destroy_summary(&mut self, name: &str, uid: u32) {
+        let group = tenant_share_group_name(name);
+        let _ = writeln!(self.stdout, "About to destroy tenant '{name}' (UID {uid}).");
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(self.stdout, "  \u{2022} remove the user account");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} move /Users/{name} \u{2192} /Users/Deleted Users/{name} (recoverable until /Users/Deleted Users is emptied or the host is rebuilt)"
+        );
+        let _ = writeln!(self.stdout, "  \u{2022} remove group '{group}'");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} remove the firewall anchor and flush its kernel rules"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} remove profile config at {}",
+            display_path_for(name)
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(
+            self.stdout,
+            "Sudo needed for: user removal, firewall teardown."
+        );
+        let _ = writeln!(self.stdout);
+    }
+
+    /// Pre-execution summary for the orphan-group convergence path of
+    /// `destroy`. No user present, but the suffixed group + any
+    /// firewall + profile residue remain. Same default-N posture as
+    /// the full destroy summary.
+    pub fn destroy_orphan_summary(&mut self, name: &str) {
+        let group = tenant_share_group_name(name);
+        let _ = writeln!(
+            self.stdout,
+            "About to destroy orphan group '{group}' for tenant '{name}'."
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(self.stdout, "  \u{2022} remove group '{group}'");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} remove the firewall anchor and flush its kernel rules"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} remove profile config at {}",
+            display_path_for(name)
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(
+            self.stdout,
+            "Sudo needed for: group removal, firewall teardown."
+        );
+        let _ = writeln!(self.stdout);
+    }
+
+    /// Pre-execution summary for `mode`. Same shape as create/destroy
+    /// — headline + bullets + sudo. Names the tier the operator chose.
+    pub fn mode_summary(&mut self, name: &str, level: ModeLevel) {
+        let level_str = level.as_str();
+        let _ = writeln!(
+            self.stdout,
+            "About to apply mode '{level_str}' to tenant '{name}'."
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "This will:");
+        if matches!(level, ModeLevel::Install) {
+            let _ = writeln!(
+                self.stdout,
+                "  \u{2022} re-render the firewall anchor with install-tier hosts added to the allowlist"
+            );
+        } else {
+            let _ = writeln!(
+                self.stdout,
+                "  \u{2022} re-render the firewall anchor at runtime tier"
+            );
+        }
+        let _ = writeln!(self.stdout, "  \u{2022} reload pf");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} re-apply declared shares from the profile (idempotent)"
+        );
+        if matches!(level, ModeLevel::Install) {
+            let _ = writeln!(self.stdout);
+            let _ = writeln!(
+                self.stdout,
+                "The widened allowlist persists until 'tenant mode {name} runtime' (narrow) or 'tenant shell {name}' (auto-narrow on entry)."
+            );
+        }
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "Sudo needed for: firewall install.");
+        let _ = writeln!(self.stdout);
+    }
+
+    /// Pre-execution summary for single-tenant `reload <name>`.
+    pub fn reload_summary(&mut self, name: &str) {
+        let _ = writeln!(self.stdout, "About to reload tenant '{name}' from profile.");
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} re-render and reload the firewall anchor (runtime tier)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} re-apply each declared share from [[shares]] in the profile"
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "Sudo needed for: firewall install.");
+        let _ = writeln!(self.stdout);
+    }
+
+    /// Pre-execution summary for no-arg `tenant reload` (walks all
+    /// tenants). Names the count + comma-separated list so the operator
+    /// can confirm the scope before any substrate fires.
+    pub fn reload_all_summary(&mut self, names: &[String]) {
+        let count = names.len();
+        let list = names.join(", ");
+        let _ = writeln!(
+            self.stdout,
+            "About to reload {count} tenant(s) from their profiles: {list}."
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "For each tenant this will:");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} re-render and reload the firewall anchor (runtime tier)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} re-apply declared shares from [[shares]] in the profile"
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(
+            self.stdout,
+            "Per-tenant failures continue the walk; a final summary names any failed tenants."
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(
+            self.stdout,
+            "Sudo needed for: firewall install (per tenant)."
+        );
+        let _ = writeln!(self.stdout);
+    }
+
     // ============================================================
     // Create verb
     // ============================================================
 
-    /// Pre-exec disclosure for `create`. Standard mode: silent (the
-    /// post-exec `create_done` does the talking). Real+verbose: emits
-    /// "Creating tenant 'X'." + indented plan block. Dry-run (any
-    /// verbosity): emits "Would create tenant 'X'." + (verbose: plan).
-    pub fn create_starting(&mut self, name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
-        let summary = match (self.dry_run, self.verbose) {
-            (true, _) => Some(format!("Would create tenant '{name}'.")),
-            (false, true) => Some(format!("Creating tenant '{name}'.")),
-            (false, false) => None,
-        };
-        if let Some(s) = summary {
-            let _ = writeln!(self.stdout, "{s}");
+    /// Pre-exec disclosure for `create`. Real mode (standard and
+    /// verbose): emits a `─── Creating tenant 'X' ───` section divider
+    /// (cycle 12 — operator-visible "the verb is now running"). Verbose
+    /// adds the indented plan block underneath. Dry-run skips the
+    /// divider — the cycle-12 `create_summary` already framed the verb
+    /// for the operator (Q13 lock); only the verbose plan block emits.
+    pub fn create_starting(&mut self, _name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
+        if !self.dry_run {
+            self.section(&format!("Creating tenant '{_name}'"));
         }
         if self.verbose {
             self.render_plan(plan);
@@ -86,47 +417,48 @@ impl<'a> Reporter<'a> {
     }
 
     /// Post-exec confirmation for `create`. Silent in dry-run (would be
-    /// a lie). Real+standard: "Created tenant 'X'." Real+verbose: inlines
-    /// UID + GID since Phase 3 allocates them independently.
+    /// a lie). Real mode: emits a `─── Done ───` closing section, then a
+    /// single enriched line naming UID, GID, and the anchor name. The
+    /// single-enriched-line shape is Q6's cycle-12 lock — the pre-exec
+    /// summary already structured the facts; the closing line confirms
+    /// completion without duplicating bullets.
     pub fn create_done(&mut self, name: &str, uid: u32, gid: u32) {
         if self.dry_run {
             return;
         }
-        let line = if self.verbose {
-            format!("Created tenant '{name}' (UID {uid}, GID {gid}).")
-        } else {
-            format!("Created tenant '{name}'.")
-        };
-        let _ = writeln!(self.stdout, "{line}");
+        let anchor = crate::firewall::tenant_anchor_name(name);
+        self.section("Done");
+        let _ = writeln!(
+            self.stdout,
+            "Tenant '{name}' ready (UID {uid}, GID {gid}, anchor '{anchor}')."
+        );
     }
 
     // ============================================================
     // Destroy verb (full path)
     // ============================================================
 
-    /// Pre-exec disclosure for `destroy`. Same mode pattern as
-    /// `create_starting`.
+    /// Pre-exec disclosure for `destroy`. Real mode emits the
+    /// `─── Destroying tenant 'X' ───` section divider (cycle 12).
+    /// Verbose adds the indented plan block. Dry-run skips the
+    /// divider; `destroy_summary` already framed the verb (Q13 lock).
     pub fn destroy_starting(&mut self, name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
-        let summary = match (self.dry_run, self.verbose) {
-            (true, _) => Some(format!("Would destroy tenant '{name}'.")),
-            (false, true) => Some(format!("Destroying tenant '{name}'.")),
-            (false, false) => None,
-        };
-        if let Some(s) = summary {
-            let _ = writeln!(self.stdout, "{s}");
+        if !self.dry_run {
+            self.section(&format!("Destroying tenant '{name}'"));
         }
         if self.verbose {
             self.render_plan(plan);
         }
     }
 
-    /// Post-exec confirmation for `destroy`. Unlike `create_done` no UID
-    /// is inlined — a destroyed account's old UID is not new information.
+    /// Post-exec confirmation for `destroy`. Silent in dry-run. Real
+    /// mode: `─── Done ───` closing section + one terminal line.
     pub fn destroy_done(&mut self, name: &str) {
         if self.dry_run {
             return;
         }
-        let _ = writeln!(self.stdout, "Destroyed tenant '{name}'.");
+        self.section("Done");
+        let _ = writeln!(self.stdout, "Tenant '{name}' destroyed.");
     }
 
     // ============================================================
@@ -139,19 +471,11 @@ impl<'a> Reporter<'a> {
     /// this is the verb where the dry+verbose phrasing diverges from
     /// dry+standard (group name appears only in verbose).
     pub fn orphan_group_starting(&mut self, name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
-        let group = tenant_share_group_name(name);
-        let summary = match (self.dry_run, self.verbose) {
-            (true, false) => Some(format!("Would destroy orphan group for tenant '{name}'.")),
-            (true, true) => Some(format!(
-                "Would destroy orphan group '{group}' for tenant '{name}'."
-            )),
-            (false, true) => Some(format!(
-                "Destroying orphan group '{group}' for tenant '{name}'."
-            )),
-            (false, false) => None,
-        };
-        if let Some(s) = summary {
-            let _ = writeln!(self.stdout, "{s}");
+        if !self.dry_run {
+            let group = tenant_share_group_name(name);
+            self.section(&format!(
+                "Destroying orphan group '{group}' for tenant '{name}'"
+            ));
         }
         if self.verbose {
             self.render_plan(plan);
@@ -159,18 +483,16 @@ impl<'a> Reporter<'a> {
     }
 
     /// Post-exec confirmation for the orphan-group convergence path.
-    /// Same standard/verbose split as `orphan_group_starting`.
     pub fn orphan_group_done(&mut self, name: &str) {
         if self.dry_run {
             return;
         }
         let group = tenant_share_group_name(name);
-        let line = if self.verbose {
-            format!("Destroyed orphan group '{group}' for tenant '{name}'.")
-        } else {
-            format!("Destroyed orphan group for tenant '{name}'.")
-        };
-        let _ = writeln!(self.stdout, "{line}");
+        self.section("Done");
+        let _ = writeln!(
+            self.stdout,
+            "Orphan group '{group}' for tenant '{name}' destroyed."
+        );
     }
 
     // ============================================================
@@ -194,12 +516,11 @@ impl<'a> Reporter<'a> {
     /// "intent emitted before narrow"). The plan-render half lives
     /// in `shell_plan`, called after the plan is built.
     pub fn shell_intent(&mut self, name: &str) {
-        let summary = if self.dry_run {
-            format!("Would shell into '{name}'.")
+        if self.dry_run {
+            let _ = writeln!(self.stdout, "Would shell into '{name}'.");
         } else {
-            format!("Shelling into '{name}'.")
-        };
-        let _ = writeln!(self.stdout, "{summary}");
+            self.section(&format!("Entering tenant '{name}'"));
+        }
     }
 
     /// Render the shell verb's plan block in real+verbose mode.
@@ -227,16 +548,9 @@ impl<'a> Reporter<'a> {
     /// lives in `mode_plan`. Standard real is silent; dry-run and
     /// real+verbose emit the "Would apply" / "Applying" line.
     pub fn mode_intent(&mut self, name: &str, level: ModeLevel) {
-        let level_str = level.as_str();
-        let summary = match (self.dry_run, self.verbose) {
-            (true, _) => Some(format!(
-                "Would apply mode '{level_str}' to tenant '{name}'."
-            )),
-            (false, true) => Some(format!("Applying mode '{level_str}' to tenant '{name}'.")),
-            (false, false) => None,
-        };
-        if let Some(s) = summary {
-            let _ = writeln!(self.stdout, "{s}");
+        if !self.dry_run {
+            let level_str = level.as_str();
+            self.section(&format!("Applying mode '{level_str}' to tenant '{name}'"));
         }
     }
 
@@ -247,18 +561,16 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Post-exec confirmation for `mode`. Silent in dry-run (would be
-    /// a lie — no reapply ran). Real (any verbosity): one summary line
-    /// naming the level.
+    /// Post-exec confirmation for `mode`. Silent in dry-run. Real mode:
+    /// `─── Done ───` closing section + one terminal line naming the
+    /// tier.
     pub fn mode_done(&mut self, name: &str, level: ModeLevel) {
         if self.dry_run {
             return;
         }
         let level_str = level.as_str();
-        let _ = writeln!(
-            self.stdout,
-            "Applied mode '{level_str}' to tenant '{name}'."
-        );
+        self.section("Done");
+        let _ = writeln!(self.stdout, "Tenant '{name}' is at {level_str} tier.");
     }
 
     // ============================================================
@@ -441,7 +753,8 @@ impl<'a> Reporter<'a> {
     /// even in verbose mode (Q3 lock — per-path-category guidance
     /// belongs to the future filesystem-exposure remediation cycle).
     pub fn doctor_finding(&mut self, finding: &Finding) {
-        let _ = writeln!(self.stdout, "{finding}");
+        let rendered = self.color_finding_prefix(finding);
+        let _ = writeln!(self.stdout, "{rendered}");
         if self.verbose
             && let Some(guidance) = finding.guidance()
         {
@@ -449,9 +762,55 @@ impl<'a> Reporter<'a> {
                 if line.is_empty() {
                     let _ = writeln!(self.stdout);
                 } else {
-                    let _ = writeln!(self.stdout, "  {line}");
+                    let styled = self.style_guidance_line(line);
+                    let _ = writeln!(self.stdout, "  {styled}");
                 }
             }
+        }
+    }
+
+    /// Cycle-12 severity coloring on the finding's leading prefix.
+    /// Critical → red+bold; warning → yellow; info → dim. Color-off
+    /// fallthrough preserves the cycle-11 byte-form contract.
+    fn color_finding_prefix(&self, finding: &Finding) -> String {
+        let text = finding.to_string();
+        if !self.colors.stdout {
+            return text;
+        }
+        match finding.severity() {
+            Severity::Critical => {
+                if let Some(rest) = text.strip_prefix("critical:") {
+                    return format!("{}{rest}", ansi::red(&ansi::bold("critical:")));
+                }
+            }
+            Severity::Warning => {
+                if let Some(rest) = text.strip_prefix("warning:") {
+                    return format!("{}{rest}", ansi::yellow("warning:"));
+                }
+            }
+            Severity::Info => {
+                if let Some(rest) = text.strip_prefix("info:") {
+                    return format!("{}{rest}", ansi::dim("info:"));
+                }
+            }
+        }
+        text
+    }
+
+    /// Cycle-12 guidance-line styling for `doctor --verbose`. Headers
+    /// (no leading whitespace in the original guidance text) get bold;
+    /// body lines (indented) get dim. The cycle-9 enriched-guidance
+    /// pattern is unchanged structurally; SC7 layers visual
+    /// subordination on top so the finding one-liner stays the
+    /// scannable focus and the body reads as context.
+    fn style_guidance_line(&self, line: &str) -> String {
+        if !self.colors.stdout {
+            return line.to_string();
+        }
+        if line.starts_with(' ') {
+            ansi::dim(line)
+        } else {
+            ansi::bold(line)
         }
     }
 
@@ -789,13 +1148,8 @@ impl<'a> Reporter<'a> {
     /// `shell_intent` and `mode_intent`). The plan-render half lives
     /// in `reload_plan`.
     pub fn reload_intent(&mut self, name: &str) {
-        let summary = match (self.dry_run, self.verbose) {
-            (true, _) => Some(format!("Would reload tenant '{name}'.")),
-            (false, true) => Some(format!("Reloading tenant '{name}'.")),
-            (false, false) => None,
-        };
-        if let Some(s) = summary {
-            let _ = writeln!(self.stdout, "{s}");
+        if !self.dry_run {
+            self.section(&format!("Reloading tenant '{name}'"));
         }
     }
 
@@ -811,7 +1165,8 @@ impl<'a> Reporter<'a> {
         if self.dry_run {
             return;
         }
-        let _ = writeln!(self.stdout, "Reloaded tenant '{name}'.");
+        self.section("Done");
+        let _ = writeln!(self.stdout, "Tenant '{name}' reloaded.");
     }
 
     /// Pre-exec disclosure for the no-arg `tenant reload` walk.
@@ -822,13 +1177,8 @@ impl<'a> Reporter<'a> {
         if count == 0 {
             return;
         }
-        let summary = match (self.dry_run, self.verbose) {
-            (true, _) => Some(format!("Would reload {count} tenant(s).")),
-            (false, true) => Some(format!("Reloading {count} tenant(s).")),
-            (false, false) => None,
-        };
-        if let Some(s) = summary {
-            let _ = writeln!(self.stdout, "{s}");
+        if !self.dry_run {
+            self.section(&format!("Reloading {count} tenant(s)"));
         }
     }
 
@@ -851,6 +1201,7 @@ impl<'a> Reporter<'a> {
         } else {
             format!("Reloaded {succeeded} of {total} tenant(s); {failed} failed.")
         };
+        self.section("Done");
         let _ = writeln!(self.stdout, "{line}");
     }
 

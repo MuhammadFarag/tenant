@@ -653,6 +653,114 @@ impl<'a> Op<'a> {
             Op::Acl(op) => executor.describe_acl(op),
         }
     }
+
+    /// Operator-facing past-tense success label for the op. Drives the
+    /// `✓ <label>` lines emitted by `Reporter::progress` after each
+    /// substrate step succeeds (cycle 12). Distinct from `describe_via`:
+    /// describe is the mechanism-level shell echo (`sudo dseditgroup
+    /// …`); business_label is the capability-level summary the operator
+    /// reads. Substrate-agnostic — no `dseditgroup` / `sysadminctl`
+    /// jargon.
+    pub fn business_label(&self) -> String {
+        match self {
+            Op::Account(op) => account_business_label(op),
+            Op::Profile(op) => profile_business_label(op),
+            Op::Firewall(op) => firewall_business_label(op),
+            Op::Acl(op) => acl_business_label(op),
+        }
+    }
+}
+
+fn account_business_label(op: &AccountOp) -> String {
+    match op {
+        AccountOp::CreateShareGroup { name, gid } => {
+            format!("Share group '{name}-tenant-share' created (GID {gid})")
+        }
+        AccountOp::DeleteShareGroup { name } => {
+            format!("Share group '{name}-tenant-share' removed")
+        }
+        AccountOp::CreateTenantUser { name, uid, .. } => {
+            format!("User account '{name}' provisioned (UID {uid})")
+        }
+        AccountOp::DeleteTenantUser { name } => {
+            format!("User account '{name}' removed (home moved to /Users/Deleted Users/{name})")
+        }
+        AccountOp::LookupUserRecord { name } => {
+            format!("Residual user record check for '{name}'")
+        }
+        AccountOp::DeleteUserRecord { name } => {
+            format!("Residual user record '{name}' cleaned up")
+        }
+        AccountOp::LoginAsUser { name } => format!("Entering shell as '{name}'"),
+        AccountOp::EnsureDirAsUser { path, .. } => {
+            format!("Parent directory {} ensured", path.display())
+        }
+        AccountOp::EnsureSymlinkAsUser { link, target, .. } => {
+            format!(
+                "Symlink {} → {} installed",
+                link.display(),
+                target.display()
+            )
+        }
+    }
+}
+
+fn profile_business_label(op: &ProfileOp) -> String {
+    match op {
+        ProfileOp::Create { name } => {
+            format!(
+                "Profile written to {}",
+                crate::profile::display_path_for(name)
+            )
+        }
+        ProfileOp::Delete { name } => format!(
+            "Profile removed at {}",
+            crate::profile::display_path_for(name)
+        ),
+    }
+}
+
+fn firewall_business_label(op: &FirewallOp) -> String {
+    match op {
+        FirewallOp::InstallAnchor { name, .. } => format!(
+            "Firewall anchor installed at {}",
+            crate::firewall::tenant_anchor_path(name)
+        ),
+        FirewallOp::RemoveAnchor { name } => format!(
+            "Firewall anchor removed at {}",
+            crate::firewall::tenant_anchor_path(name)
+        ),
+        FirewallOp::BackupConfig => {
+            format!(
+                "Backed up {} to {}",
+                crate::firewall::PF_CONF,
+                crate::firewall::PF_CONF_BACKUP
+            )
+        }
+        FirewallOp::RestoreConfigFromBackup => format!(
+            "Restored {} from {}",
+            crate::firewall::PF_CONF,
+            crate::firewall::PF_CONF_BACKUP
+        ),
+        FirewallOp::UpdateConfig { .. } => format!("Updated {}", crate::firewall::PF_CONF),
+        FirewallOp::Reload => "Firewall ruleset reloaded".to_string(),
+        FirewallOp::FlushAnchor { name } => format!(
+            "Kernel rules under anchor '{}' flushed",
+            crate::firewall::tenant_anchor_name(name)
+        ),
+        FirewallOp::Enable => "Firewall enabled host-wide".to_string(),
+    }
+}
+
+fn acl_business_label(op: &AclOp) -> String {
+    match op {
+        AclOp::Grant { path, group, .. } => {
+            format!("ACL granted to group '{group}' on {}", path.display())
+        }
+        AclOp::Revoke { path, group, .. } => {
+            format!("ACL revoked from group '{group}' on {}", path.display())
+        }
+    }
 }
 
 /// Bridge from a leaf op to the typed execution path. `Writer::run` uses
