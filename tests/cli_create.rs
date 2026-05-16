@@ -48,6 +48,7 @@ fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
     assert_eq!(code, 0);
     let plan = "  \
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
                 tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
@@ -90,6 +91,7 @@ fn verbose_shows_lowest_free_uid_with_gap_and_gid_at_floor() {
     assert_eq!(code, 0);
     let plan = "  \
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 602 -GID 600\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
                 tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
@@ -165,6 +167,7 @@ fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
     assert_eq!(code, 0);
     let plan = "  \
                 sudo dseditgroup -o create -n . -i 601 dev-tenant-share\n  \
+                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 601\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
                 tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
@@ -200,6 +203,7 @@ fn verbose_uid_and_gid_allocators_cross_over() {
     assert_eq!(code, 0);
     let plan = "  \
                 sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
                 sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 601 -GID 600\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
                 tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
@@ -455,6 +459,7 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
     let want = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
          ✓ Profile written to ~/.config/tenant/profiles/dev.toml\n\
          ✓ Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup\n\
@@ -475,6 +480,10 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
             AccountOp::CreateShareGroup {
                 name: "dev".into(),
                 gid: 600
+            },
+            AccountOp::AddHostToShareGroup {
+                name: "dev".into(),
+                host: "operator".into(),
             },
             AccountOp::CreateTenantUser {
                 name: "dev".into(),
@@ -504,6 +513,7 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
     let want = format!(
         "{}\n  \
          sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
          sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
          sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
          tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
@@ -518,6 +528,8 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
          sudo pfctl -e\n\
          $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
          $ tee ~/.config/tenant/profiles/dev.toml < default.toml\n\
@@ -562,6 +574,7 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n",
         section_line("Creating tenant 'dev'"),
     );
@@ -571,13 +584,13 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
         "tenant: failed to write profile '~/.config/tenant/profiles/dev.toml' \
          for 'dev': disk full\n"
     );
-    // Two account ops (CreateShareGroup + CreateTenantUser) — no
-    // rollback, since the locked policy is "leave user+group present on
-    // profile failure".
+    // Three account ops (CreateShareGroup + AddHostToShareGroup +
+    // CreateTenantUser) — no rollback, since the locked policy is
+    // "leave user+group present on profile failure".
     assert_eq!(
         exec.account_ops().len(),
-        2,
-        "expected CreateShareGroup + CreateTenantUser; no rollback"
+        3,
+        "expected CreateShareGroup + AddHostToShareGroup + CreateTenantUser; no rollback"
     );
     // Profile is absent from the simulated state (the write failed) —
     // pins the fact that the failure is a real failure, not a silent
@@ -637,6 +650,45 @@ fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
 }
 
 #[test]
+fn create_add_host_failure_aborts_with_orphan_group_recovery_hint() {
+    // Cycle-14 partial-failure: CreateShareGroup succeeded, but the
+    // AddHostToShareGroup step failed. The host now carries an
+    // orphan share group with no host membership AND no tenant user
+    // (because CreateTenantUser never ran). Locked policy (Q3): no
+    // automatic rollback — surface as CreateError::HostMembership;
+    // operator runs `tenant destroy <name>` to converge via the
+    // OrphanGroup eligibility arm. The stderr frame names the host
+    // AND the recovery command.
+    let exec = StubExecutor::new().fail_account_op(
+        AccountOp::AddHostToShareGroup {
+            name: "dev".into(),
+            host: "operator".into(),
+        },
+        AccountError::NonZero {
+            code: 1,
+            stderr: "dseditgroup: not authorized\n".into(),
+        },
+    );
+    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    let want_stdout = format!(
+        "{}\n\
+         ✓ Share group 'dev-tenant-share' created (GID 600)\n",
+        section_line("Creating tenant 'dev'"),
+    );
+    assert_eq!(stdout, want_stdout);
+    assert_eq!(
+        stderr,
+        "tenant: failed to add host 'operator' to group 'dev-tenant-share': \
+         process exited with code 1: dseditgroup: not authorized \
+         \u{2014} host now has an orphan group; next 'tenant destroy dev' will converge\n"
+    );
+    // Two account ops attempted: CreateShareGroup (ok) +
+    // AddHostToShareGroup (failed). CreateTenantUser never ran.
+    assert_eq!(exec.account_ops().len(), 2);
+}
+
+#[test]
 fn create_sysadminctl_failure_rolls_back_dseditgroup() {
     // The partial-failure case Phase 3 was designed for: CreateShareGroup
     // succeeded, but CreateTenantUser failed. Without rollback the host
@@ -660,11 +712,16 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
     // Cycle 12: section + ✓ for the successful CreateShareGroup +
-    // ✓ for the successful rollback DeleteShareGroup. The original
-    // CreateTenantUser failure is the one that routes to stderr.
+    // ✓ for the successful AddHostToShareGroup + ✓ for the successful
+    // rollback DeleteShareGroup. The original CreateTenantUser
+    // failure is the one that routes to stderr. Cycle 14: the rollback
+    // DeleteShareGroup also vanishes the just-added host membership
+    // implicitly (no explicit RemoveHost fires on this arm — the
+    // group's gone, the membership goes with it).
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ Share group 'dev-tenant-share' removed\n",
         section_line("Creating tenant 'dev'"),
     );
@@ -680,6 +737,10 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
             AccountOp::CreateShareGroup {
                 name: "dev".into(),
                 gid: 600
+            },
+            AccountOp::AddHostToShareGroup {
+                name: "dev".into(),
+                host: "operator".into(),
             },
             AccountOp::CreateTenantUser {
                 name: "dev".into(),
@@ -723,6 +784,7 @@ fn create_real_mode_verbose_shows_rollback_echo() {
     let want_stdout = format!(
         "{}\n  \
          sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
+         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
          sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
          sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
          tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
@@ -737,6 +799,8 @@ fn create_real_mode_verbose_shows_rollback_echo() {
          sudo pfctl -e\n\
          $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
          $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' removed\n",
@@ -783,13 +847,15 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
         );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR");
-    // Cycle 12: section divider + ✓ for the first successful step
-    // (CreateShareGroup) lands on stdout. The second step
-    // (CreateTenantUser) fails — no ✓; rollback also fails — no ✓
-    // for DeleteShareGroup either. Both failure frames go to stderr.
+    // Cycle 12: section divider + ✓ for the first two successful steps
+    // (CreateShareGroup + AddHostToShareGroup) lands on stdout. The
+    // third step (CreateTenantUser) fails — no ✓; rollback also
+    // fails — no ✓ for DeleteShareGroup either. Both failure frames
+    // go to stderr.
     let want_stdout = format!(
         "{}\n\
-         ✓ Share group 'dev-tenant-share' created (GID 600)\n",
+         ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
         section_line("Creating tenant 'dev'"),
     );
     assert_eq!(stdout, want_stdout);
@@ -799,7 +865,10 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
                        dseditgroup: not authorized \
                        \u{2014} host now has an orphan group; next 'tenant destroy dev' will converge\n";
     assert_eq!(stderr, want_stderr);
-    assert_eq!(exec.account_ops().len(), 3);
+    // Four account ops: CreateShareGroup (ok) + AddHostToShareGroup
+    // (ok) + CreateTenantUser (failed) + DeleteShareGroup rollback
+    // (failed). Cycle 14 inserted the AddHost step.
+    assert_eq!(exec.account_ops().len(), 4);
 }
 
 #[test]
@@ -978,6 +1047,7 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
          ✓ Profile written to ~/.config/tenant/profiles/dev.toml\n\
          ✓ Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup\n",
@@ -989,8 +1059,12 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
         "tenant: failed to install firewall for 'dev': \
          filesystem error at /etc/pf.anchors/tenant-dev: permission denied\n"
     );
-    // User + group + profile remain on the host.
-    assert_eq!(exec.account_ops().len(), 2, "user+group ops both ran");
+    // CreateShareGroup + AddHost + CreateTenantUser = 3 account ops.
+    assert_eq!(
+        exec.account_ops().len(),
+        3,
+        "create-share-group + add-host + create-tenant-user all ran"
+    );
     assert!(
         exec.has_profile("dev"),
         "profile should remain present after firewall failure"

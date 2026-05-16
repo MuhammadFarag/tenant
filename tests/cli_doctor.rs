@@ -1796,3 +1796,103 @@ fn doctor_share_symlink_drift_verbose_emits_case_tailored_guidance() {
         "Absent guidance should name the ln -sfn substrate; stdout={stdout:?}"
     );
 }
+
+// ============================================================
+// Cycle 14: HostNotInShareGroup
+// ============================================================
+
+#[test]
+fn doctor_emits_host_not_in_share_group_when_membership_missing() {
+    // Operator simulating a cycle-10-era tenant: the share group
+    // exists (the create flow ran pre-cycle-14) but the host was
+    // never added as a secondary member. Doctor queries the
+    // membership via Executor::host_in_group, sees `false`, and
+    // emits the warning naming the host, the group, and the recovery.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_host_in_group("operator", "dev-tenant-share", false);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: host 'operator' is not a member of group 'dev-tenant-share'"),
+        "expected HostNotInShareGroup warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("run `tenant reload dev` to fix"),
+        "warning should name the recovery; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_clean_when_host_is_member() {
+    // Default stub state: host_in_group returns `true` for unmatched
+    // lookups, so no finding fires when the membership is intact.
+    // Locks the "no spurious finding" baseline so future stub tweaks
+    // can't silently regress the default.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new(); // defaults to true
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("is not a member of group"),
+        "no HostNotInShareGroup finding expected; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_strict_exit_1_on_host_not_in_share_group_alone() {
+    // HostNotInShareGroup is Warning-tier; --strict + warning-only
+    // → exit 1. Mirrors the AclDrift strict-mode test.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_host_in_group("operator", "dev-tenant-share", false);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(
+        code, 1,
+        "expected exit 1 on warning+strict; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_no_arg_emits_host_not_in_share_group_per_tenant() {
+    // Two tenants, both missing the host membership; doctor walks
+    // them in alphabetical order and emits one finding per tenant.
+    let stub_reader = make_two_tenant_stub_reader();
+    let stub_exec = StubExecutor::new()
+        .with_host_in_group("operator", "dev-tenant-share", false)
+        .with_host_in_group("operator", "staging-tenant-share", false);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: host 'operator' is not a member of group 'dev-tenant-share'"),
+        "expected dev finding; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("warning: host 'operator' is not a member of group 'staging-tenant-share'"),
+        "expected staging finding; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_host_not_in_share_group_verbose_emits_guidance_block() {
+    // Cycle-9 contract extended to cycle-14's finding: verbose mode
+    // emits the 4-section guidance body. Smoke-check that the
+    // operator sees Why/Fix/Side-effects/Alternative headers and the
+    // dseditgroup alternative command. The full byte-form is pinned
+    // in tests/doctor.rs.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubExecutor::new().with_host_in_group("operator", "dev-tenant-share", false);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("Why this matters"),
+        "verbose should emit Why this matters header; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("Recommended fix"),
+        "verbose should emit Recommended fix header; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share"),
+        "Alternative should name the manual dseditgroup command; stdout={stdout:?}"
+    );
+}

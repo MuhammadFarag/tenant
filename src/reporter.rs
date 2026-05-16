@@ -213,7 +213,7 @@ impl<'a> Reporter<'a> {
     /// capability bullets + sudo-needed-for line. Caller follows with
     /// `confirm(true, …)` for real mode; dry-run's confirm emits the
     /// preview parenthetical (Q13).
-    pub fn create_summary(&mut self, name: &str, uid: u32, gid: u32) {
+    pub fn create_summary(&mut self, name: &str, host: &str, uid: u32, gid: u32) {
         let group = tenant_share_group_name(name);
         let _ = writeln!(
             self.stdout,
@@ -224,6 +224,10 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(
             self.stdout,
             "  \u{2022} create user account '{name}' (UID {uid}) and group '{group}' (GID {gid})"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} add host '{host}' to '{group}' so files the tenant creates in RW shares stay host-writable"
         );
         let _ = writeln!(
             self.stdout,
@@ -250,7 +254,7 @@ impl<'a> Reporter<'a> {
     /// framing on the home-directory move (recoverable until Deleted
     /// Users is emptied). Caller follows with `confirm(false, …)` —
     /// destroy's default is N per Q2 lock.
-    pub fn destroy_summary(&mut self, name: &str, uid: u32) {
+    pub fn destroy_summary(&mut self, name: &str, host: &str, uid: u32) {
         let group = tenant_share_group_name(name);
         let _ = writeln!(self.stdout, "About to destroy tenant '{name}' (UID {uid}).");
         let _ = writeln!(self.stdout);
@@ -259,6 +263,10 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(
             self.stdout,
             "  \u{2022} move /Users/{name} \u{2192} /Users/Deleted Users/{name} (recoverable until /Users/Deleted Users is emptied or the host is rebuilt)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} remove host '{host}' from '{group}'"
         );
         let _ = writeln!(self.stdout, "  \u{2022} remove group '{group}'");
         let _ = writeln!(
@@ -282,7 +290,7 @@ impl<'a> Reporter<'a> {
     /// `destroy`. No user present, but the suffixed group + any
     /// firewall + profile residue remain. Same default-N posture as
     /// the full destroy summary.
-    pub fn destroy_orphan_summary(&mut self, name: &str) {
+    pub fn destroy_orphan_summary(&mut self, name: &str, host: &str) {
         let group = tenant_share_group_name(name);
         let _ = writeln!(
             self.stdout,
@@ -290,6 +298,10 @@ impl<'a> Reporter<'a> {
         );
         let _ = writeln!(self.stdout);
         let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} remove host '{host}' from '{group}' (idempotent if not a member)"
+        );
         let _ = writeln!(self.stdout, "  \u{2022} remove group '{group}'");
         let _ = writeln!(
             self.stdout,
@@ -310,8 +322,9 @@ impl<'a> Reporter<'a> {
 
     /// Pre-execution summary for `mode`. Same shape as create/destroy
     /// — headline + bullets + sudo. Names the tier the operator chose.
-    pub fn mode_summary(&mut self, name: &str, level: ModeLevel) {
+    pub fn mode_summary(&mut self, name: &str, host: &str, level: ModeLevel) {
         let level_str = level.as_str();
+        let group = tenant_share_group_name(name);
         let _ = writeln!(
             self.stdout,
             "About to apply mode '{level_str}' to tenant '{name}'."
@@ -332,6 +345,10 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(self.stdout, "  \u{2022} reload pf");
         let _ = writeln!(
             self.stdout,
+            "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
+        );
+        let _ = writeln!(
+            self.stdout,
             "  \u{2022} re-apply declared shares from the profile (idempotent)"
         );
         if matches!(level, ModeLevel::Install) {
@@ -347,13 +364,18 @@ impl<'a> Reporter<'a> {
     }
 
     /// Pre-execution summary for single-tenant `reload <name>`.
-    pub fn reload_summary(&mut self, name: &str) {
+    pub fn reload_summary(&mut self, name: &str, host: &str) {
+        let group = tenant_share_group_name(name);
         let _ = writeln!(self.stdout, "About to reload tenant '{name}' from profile.");
         let _ = writeln!(self.stdout);
         let _ = writeln!(self.stdout, "This will:");
         let _ = writeln!(
             self.stdout,
             "  \u{2022} re-render and reload the firewall anchor (runtime tier)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
         );
         let _ = writeln!(
             self.stdout,
@@ -367,7 +389,7 @@ impl<'a> Reporter<'a> {
     /// Pre-execution summary for no-arg `tenant reload` (walks all
     /// tenants). Names the count + comma-separated list so the operator
     /// can confirm the scope before any substrate fires.
-    pub fn reload_all_summary(&mut self, names: &[String]) {
+    pub fn reload_all_summary(&mut self, host: &str, names: &[String]) {
         let count = names.len();
         let list = names.join(", ");
         let _ = writeln!(
@@ -379,6 +401,10 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(
             self.stdout,
             "  \u{2022} re-render and reload the firewall anchor (runtime tier)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} ensure host '{host}' is a member of the tenant's share group (idempotent catch-up)"
         );
         let _ = writeln!(
             self.stdout,
@@ -881,6 +907,20 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(
             self.stderr,
             "tenant: failed to create group '{group}' for '{name}': {err}"
+        );
+    }
+
+    /// Cycle 14: `AddHostToShareGroup` failed after `CreateShareGroup`
+    /// succeeded but before `CreateTenantUser` ran. Host now carries
+    /// an orphan share group with no host membership. Recovery is
+    /// `tenant destroy <name>` (orphan-group convergence path is
+    /// idempotent at the substrate; the next destroy converges).
+    pub fn create_host_membership_failed(&mut self, name: &str, host: &str, err: &AccountError) {
+        let group = tenant_share_group_name(name);
+        let _ = writeln!(
+            self.stderr,
+            "tenant: failed to add host '{host}' to group '{group}': {err} \
+             \u{2014} host now has an orphan group; next 'tenant destroy {name}' will converge"
         );
     }
 

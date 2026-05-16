@@ -23,6 +23,7 @@ fn destroy_removes_profile_file_from_store() {
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
                 "Residual user record check for 'dev'",
                 "Residual user record 'dev' cleaned up",
+                "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -62,6 +63,7 @@ fn destroy_succeeds_when_profile_already_absent() {
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
                 "Residual user record check for 'dev'",
                 "Residual user record 'dev' cleaned up",
+                "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -102,6 +104,7 @@ fn destroy_dry_run_verbose_shows_mechanism() {
                 sudo sysadminctl -deleteUser dev\n  \
                 dscl . -read /Users/dev\n  \
                 sudo dscl . -delete /Users/dev\n  \
+                sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share\n  \
                 rm -f ~/.config/tenant/profiles/dev.toml\n  \
                 sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
@@ -130,6 +133,7 @@ fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
                 "Residual user record check for 'dev'",
                 "Residual user record 'dev' cleaned up",
+                "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -148,6 +152,10 @@ fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
             AccountOp::DeleteTenantUser { name: "dev".into() },
             AccountOp::LookupUserRecord { name: "dev".into() },
             AccountOp::DeleteUserRecord { name: "dev".into() },
+            AccountOp::RemoveHostFromShareGroup {
+                name: "dev".into(),
+                host: "operator".into(),
+            },
             AccountOp::DeleteShareGroup { name: "dev".into() },
         ],
     );
@@ -175,6 +183,7 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
          sudo sysadminctl -deleteUser dev\n  \
          dscl . -read /Users/dev\n  \
          sudo dscl . -delete /Users/dev\n  \
+         sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
          sudo dseditgroup -o delete -n . dev-tenant-share\n  \
          rm -f ~/.config/tenant/profiles/dev.toml\n  \
          sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
@@ -188,6 +197,8 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
          ✓ Residual user record check for 'dev'\n\
          $ sudo dscl . -delete /Users/dev\n\
          ✓ Residual user record 'dev' cleaned up\n\
+         $ sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n\
+         ✓ Host 'operator' removed from share group 'dev-tenant-share'\n\
          $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' removed\n\
          $ rm -f ~/.config/tenant/profiles/dev.toml\n\
@@ -238,6 +249,7 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
             "Destroying tenant 'dev'",
             &[
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
+                "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -254,9 +266,14 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
         vec![
             AccountOp::DeleteTenantUser { name: "dev".into() },
             AccountOp::LookupUserRecord { name: "dev".into() },
+            AccountOp::RemoveHostFromShareGroup {
+                name: "dev".into(),
+                host: "operator".into(),
+            },
             AccountOp::DeleteShareGroup { name: "dev".into() },
         ],
-        "expected DeleteTenantUser + LookupUserRecord + DeleteShareGroup (cleanup skipped)"
+        "expected DeleteTenantUser + LookupUserRecord + RemoveHost + DeleteShareGroup \
+         (DeleteUserRecord cleanup skipped because probe found clean)"
     );
 }
 
@@ -291,6 +308,7 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
                 "Residual user record check for 'dev'",
                 "Residual user record 'dev' cleaned up",
+                "Host 'operator' removed from share group 'dev-tenant-share'",
             ],
         ),
     );
@@ -299,9 +317,10 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
         "tenant: failed to destroy 'dev': process exited with code 78: \
          dseditgroup: cannot remove group dev-tenant-share: not authorized\n"
     );
-    // All four account ops attempted — the failure is on
-    // DeleteShareGroup, not before.
-    assert_eq!(exec.account_ops().len(), 4);
+    // Five account ops attempted — DeleteTenantUser + LookupUserRecord
+    // + DeleteUserRecord + RemoveHostFromShareGroup (cycle 14) +
+    // DeleteShareGroup (which failed).
+    assert_eq!(exec.account_ops().len(), 5);
 }
 
 #[test]
@@ -354,6 +373,7 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
          sudo sysadminctl -deleteUser dev\n  \
          dscl . -read /Users/dev\n  \
          sudo dscl . -delete /Users/dev\n  \
+         sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
          sudo dseditgroup -o delete -n . dev-tenant-share\n  \
          rm -f ~/.config/tenant/profiles/dev.toml\n  \
          sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
@@ -364,6 +384,8 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
          $ sudo sysadminctl -deleteUser dev\n\
          ✓ User account 'dev' removed (home moved to /Users/Deleted Users/dev)\n\
          $ dscl . -read /Users/dev\n\
+         $ sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n\
+         ✓ Host 'operator' removed from share group 'dev-tenant-share'\n\
          $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' removed\n\
          $ rm -f ~/.config/tenant/profiles/dev.toml\n\
@@ -499,6 +521,7 @@ fn destroy_accepts_at_floor() {
                 "User account 'edge' removed (home moved to /Users/Deleted Users/edge)",
                 "Residual user record check for 'edge'",
                 "Residual user record 'edge' cleaned up",
+                "Host 'operator' removed from share group 'edge-tenant-share'",
                 "Share group 'edge-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/edge.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -510,12 +533,13 @@ fn destroy_accepts_at_floor() {
             "Tenant 'edge' destroyed.",
         ),
     );
-    // Four account ops: DeleteTenantUser + LookupUserRecord (probe
-    // defaults to Ok) + DeleteUserRecord cleanup + DeleteShareGroup.
+    // Five account ops: DeleteTenantUser + LookupUserRecord (probe
+    // defaults to Ok) + DeleteUserRecord cleanup + RemoveHost
+    // (cycle 14) + DeleteShareGroup.
     assert_eq!(
         exec.account_ops().len(),
-        4,
-        "DeleteTenantUser + LookupUserRecord + DeleteUserRecord + DeleteShareGroup"
+        5,
+        "DeleteTenantUser + LookupUserRecord + DeleteUserRecord + RemoveHost + DeleteShareGroup"
     );
 }
 
@@ -696,6 +720,7 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
         real_success_stdout(
             "Destroying orphan group 'dev-tenant-share' for tenant 'dev'",
             &[
+                "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -710,8 +735,14 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     assert_eq!(
         exec.account_ops(),
-        vec![AccountOp::DeleteShareGroup { name: "dev".into() }],
-        "expected DeleteShareGroup only"
+        vec![
+            AccountOp::RemoveHostFromShareGroup {
+                name: "dev".into(),
+                host: "operator".into(),
+            },
+            AccountOp::DeleteShareGroup { name: "dev".into() },
+        ],
+        "expected RemoveHost + DeleteShareGroup (cycle-14 cosmetic remove before group delete)"
     );
 }
 
@@ -736,6 +767,7 @@ fn destroy_orphan_group_also_removes_profile_if_present() {
         real_success_stdout(
             "Destroying orphan group 'dev-tenant-share' for tenant 'dev'",
             &[
+                "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -780,6 +812,7 @@ fn destroy_dry_run_verbose_for_orphan_group() {
     let (code, stdout, _stderr) = run_with(stub, &["destroy", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
     let plan = "  \
+                sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
                 sudo dseditgroup -o delete -n . dev-tenant-share\n  \
                 rm -f ~/.config/tenant/profiles/dev.toml\n  \
                 sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
@@ -804,6 +837,7 @@ fn destroy_real_mode_verbose_for_orphan_group() {
     assert_eq!(code, 0);
     let want = format!(
         "{}\n  \
+         sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
          sudo dseditgroup -o delete -n . dev-tenant-share\n  \
          rm -f ~/.config/tenant/profiles/dev.toml\n  \
          sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
@@ -811,6 +845,8 @@ fn destroy_real_mode_verbose_for_orphan_group() {
          sudo tee /etc/pf.conf < updated.conf\n  \
          sudo pfctl -f /etc/pf.conf\n  \
          sudo pfctl -a tenant-dev -F all\n\
+         $ sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n\
+         ✓ Host 'operator' removed from share group 'dev-tenant-share'\n\
          $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' removed\n\
          $ rm -f ~/.config/tenant/profiles/dev.toml\n\

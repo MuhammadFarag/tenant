@@ -814,3 +814,79 @@ Alternative
   then run `tenant reload dev`.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
+
+// ============================================================
+// Finding::HostNotInShareGroup — Display + severity + guidance (cycle 14)
+// ============================================================
+
+#[test]
+fn finding_display_host_not_in_share_group() {
+    let f = Finding::HostNotInShareGroup {
+        tenant: "dev".to_string(),
+        host: "operator".to_string(),
+        group: "dev-tenant-share".to_string(),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: host 'operator' is not a member of group 'dev-tenant-share' \u{2014} \
+         files created by tenant 'dev' inside RW shares are not host-writable; \
+         run `tenant reload dev` to fix"
+    );
+}
+
+#[test]
+fn finding_host_not_in_share_group_severity_is_warning() {
+    let f = Finding::HostNotInShareGroup {
+        tenant: "dev".to_string(),
+        host: "operator".to_string(),
+        group: "dev-tenant-share".to_string(),
+    };
+    assert_eq!(f.severity(), Severity::Warning);
+}
+
+#[test]
+fn guidance_host_not_in_share_group_byte_form() {
+    let f = Finding::HostNotInShareGroup {
+        tenant: "dev".to_string(),
+        host: "operator".to_string(),
+        group: "dev-tenant-share".to_string(),
+    };
+    let expected = "Why this matters
+  Host 'operator' is not a member of 'dev-tenant-share'. The cycle-10 share
+  substrate installs an inheritable ACL on every declared `host_path`
+  granting `dev-tenant-share` access \u{2014} the tenant (whose primary group IS
+  `dev-tenant-share`) inherits that grant on any new file they create inside an
+  RW share. The host inherits it ONLY if also a member of `dev-tenant-share`.
+  Without the membership, files the tenant creates inside RW shares
+  are world-readable (POSIX 644) but not host-writable: host can `ls`
+  and `cat` but `vim` reports `E212: Can't open file for writing`.
+  Cycle-10-era tenants (created before this fix) all hit this; manual
+  `dseditgroup -o edit -d operator dev-tenant-share` on a post-cycle-14 tenant
+  also surfaces here.
+
+Recommended fix
+  tenant reload dev
+  The cycle-14 catch-up path runs `dseditgroup -o edit -a operator -t
+  user dev-tenant-share` as the first step inside `execute_reapply_plan`.
+  Idempotent at the substrate \u{2014} re-applying on an existing member
+  is a silent noop.
+
+Side-effects to know about
+  \u{2022} 'operator' gains a secondary group membership. `id` and
+    `groups` start listing `dev-tenant-share`; processes the host runs inherit
+    it on new files and directories they create. On solo-Mac scope
+    this is intended; if multiple human users share the host, only
+    the operator running `tenant reload` gets added.
+  \u{2022} The PF anchor is re-rendered at runtime tier as a side effect.
+    If install-tier widening was active, the narrow drops it; rerun
+    `tenant mode dev install` afterward if still needed.
+  \u{2022} Every declared share is also re-applied. If another share has
+    an unrelated pending refusal, reload aborts before reaching this
+    step; address those first.
+
+Alternative
+  sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share
+  Adds just the membership without running the full reload. Use when
+  `tenant reload` is blocked by an unrelated refusal.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}

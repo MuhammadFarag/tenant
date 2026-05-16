@@ -365,6 +365,19 @@ pub(crate) enum CreateError {
         user: AccountError,
         rollback: AccountError,
     },
+    /// Cycle 14: CreateShareGroup succeeded; `AddHostToShareGroup`
+    /// failed BEFORE `CreateTenantUser` ran. The host now carries an
+    /// orphan `<name>-tenant-share` group with no host membership and
+    /// no tenant user. Locked recovery: `tenant destroy <name>` runs
+    /// the orphan-group convergence path (cycle 5 OrphanGroup arm),
+    /// which itself runs `RemoveHostFromShareGroup` idempotently (the
+    /// substrate's internal checkmember short-circuits when host
+    /// isn't a member). No automatic rollback at create-time — the
+    /// host-add step is load-bearing for tenant usability, so we
+    /// abort and let the operator decide whether to retry or
+    /// converge.
+    HostMembership(AccountError),
+
     /// CreateShareGroup + CreateTenantUser both succeeded; the
     /// profile-write failed (disk full, permission denied, etc.). Locked
     /// policy: leave the user + group present. The operator's recovery
@@ -509,9 +522,16 @@ pub(crate) enum ShellError {
 /// against the substrate. Separating the two lets the verb methods
 /// render the upfront plan over the same ops the substrate will run,
 /// preserving the plan-vs-echo asymmetry contract for share ops.
+///
+/// Cycle 14 adds `add_host`: the catch-up `AddHostToShareGroup` op
+/// that fires after PF reapply (Install + Reload) and before the
+/// per-share ops. Substrate-idempotent, so legacy tenants (created
+/// before cycle 14) get their host membership restored on the next
+/// reload / mode / shell with zero operator action.
 pub(crate) struct ReapplyPlan {
     pub(crate) install_anchor: FirewallOp,
     pub(crate) reload: FirewallOp,
+    pub(crate) add_host: AccountOp,
     pub(crate) share_ops: Vec<ShareOps>,
 }
 
@@ -522,9 +542,10 @@ impl ReapplyPlan {
     /// its plan block.
     pub(crate) fn as_plan_entries(&self) -> Vec<(Op<'_>, Option<&'static str>)> {
         let mut entries: Vec<(Op<'_>, Option<&'static str>)> =
-            Vec::with_capacity(2 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
+            Vec::with_capacity(3 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
         entries.push((Op::Firewall(&self.install_anchor), None));
         entries.push((Op::Firewall(&self.reload), None));
+        entries.push((Op::Account(&self.add_host), None));
         for share in &self.share_ops {
             entries.push((Op::Acl(&share.grant), None));
             if let Some(ensure_dir) = &share.ensure_dir {
@@ -584,6 +605,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn create_tenant(
         &self,
         name: &str,
+        host: &str,
         uid: u32,
         gid: u32,
         reporter: &mut Reporter,
@@ -616,6 +638,10 @@ impl<'a> Writer<'a> {
         let create_group = AccountOp::CreateShareGroup {
             name: name.into(),
             gid,
+        };
+        let add_host = AccountOp::AddHostToShareGroup {
+            name: name.into(),
+            host: host.into(),
         };
         let add_user = AccountOp::CreateTenantUser {
             name: name.into(),
@@ -650,6 +676,7 @@ impl<'a> Writer<'a> {
             name,
             &[
                 (Op::Account(&create_group), None),
+                (Op::Account(&add_host), None),
                 (Op::Account(&add_user), None),
                 (Op::Account(&rollback_group), Some("on rollback")),
                 (Op::Profile(&create_profile), None),
@@ -667,6 +694,14 @@ impl<'a> Writer<'a> {
 
         self.run(&create_group, reporter)
             .map_err(CreateError::Group)?;
+        // Cycle 14: add the host operator as a secondary member of the
+        // just-created share group. Hard-abort on failure (Q3 lock).
+        // No automatic rollback — the orphan-group destroy path
+        // (cycle 5 OrphanGroup arm) converges via `tenant destroy
+        // <name>`, which itself runs RemoveHostFromShareGroup
+        // idempotently.
+        self.run(&add_host, reporter)
+            .map_err(CreateError::HostMembership)?;
         match self.run(&add_user, reporter) {
             Ok(()) => {
                 self.run(&create_profile, reporter)
@@ -768,6 +803,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn destroy_tenant(
         &self,
         name: &str,
+        host: &str,
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
         // Ten-step composition:
@@ -793,6 +829,10 @@ impl<'a> Writer<'a> {
         let delete_user = AccountOp::DeleteTenantUser { name: name.into() };
         let probe = AccountOp::LookupUserRecord { name: name.into() };
         let cleanup = AccountOp::DeleteUserRecord { name: name.into() };
+        let remove_host = AccountOp::RemoveHostFromShareGroup {
+            name: name.into(),
+            host: host.into(),
+        };
         let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
         let delete_profile = ProfileOp::Delete { name: name.into() };
         let backup = FirewallOp::BackupConfig;
@@ -812,6 +852,7 @@ impl<'a> Writer<'a> {
                 (Op::Account(&delete_user), None),
                 (Op::Account(&probe), None),
                 (Op::Account(&cleanup), None),
+                (Op::Account(&remove_host), None),
                 (Op::Account(&delete_group), None),
                 (Op::Profile(&delete_profile), None),
                 (Op::Firewall(&backup), None),
@@ -833,6 +874,13 @@ impl<'a> Writer<'a> {
             Err(other) => return Err(DestroyError::Account(other)),
         }
 
+        // Cycle 14: remove the host operator from the share group
+        // before the group itself is deleted. Substrate-idempotent
+        // via internal checkmember (legacy tenants pre-cycle-14 OR
+        // host already manually removed both surface as the same
+        // no-op execute). Runs unconditionally for plan/echo
+        // symmetry with the create-side `AddHostToShareGroup`.
+        self.run(&remove_host, reporter)?;
         self.run(&delete_group, reporter)?;
         self.run(&delete_profile, reporter)
             .map_err(DestroyError::Profile)?;
@@ -874,6 +922,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn destroy_orphan_group(
         &self,
         name: &str,
+        host: &str,
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
         // Seven-step convergence path: DeleteShareGroup + ProfileOp::Delete
@@ -885,6 +934,10 @@ impl<'a> Writer<'a> {
         // conf without our anchor is a noop, FlushAnchor on an
         // unknown anchor is a noop) so the convergence path stays
         // single-pass.
+        let remove_host = AccountOp::RemoveHostFromShareGroup {
+            name: name.into(),
+            host: host.into(),
+        };
         let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
         let delete_profile = ProfileOp::Delete { name: name.into() };
         let backup = FirewallOp::BackupConfig;
@@ -898,6 +951,7 @@ impl<'a> Writer<'a> {
         reporter.orphan_group_starting(
             name,
             &[
+                (Op::Account(&remove_host), None),
                 (Op::Account(&delete_group), None),
                 (Op::Profile(&delete_profile), None),
                 (Op::Firewall(&backup), None),
@@ -908,6 +962,10 @@ impl<'a> Writer<'a> {
             ],
         );
 
+        // Cycle 14: symmetric with destroy_tenant. Substrate-idempotent
+        // (the OrphanGroup eligibility state can include hosts created
+        // before cycle 14 OR partial-create where AddHost never fired).
+        self.run(&remove_host, reporter)?;
         self.run(&delete_group, reporter)?;
         self.run(&delete_profile, reporter)
             .map_err(DestroyError::Profile)?;
@@ -958,6 +1016,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn apply_tenant_mode(
         &self,
         name: &str,
+        host: &str,
         level: ModeLevel,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
@@ -967,7 +1026,7 @@ impl<'a> Writer<'a> {
         // happens after build so share ops appear in the plan block
         // alongside the PF ops, matching what fires via `$` echo.
         reporter.mode_intent(name, level);
-        let plan = self.build_reapply_plan(name, level)?;
+        let plan = self.build_reapply_plan(name, host, level)?;
         reporter.mode_plan(&plan.as_plan_entries());
         self.execute_reapply_plan(&plan, reporter)?;
         reporter.mode_done(name, level);
@@ -986,7 +1045,12 @@ impl<'a> Writer<'a> {
     /// struct lets the verb methods render the upfront plan
     /// (`mode_starting` / `shell_starting` / `reload_starting`) and
     /// then execute the same ops — plan/echo asymmetry-free.
-    fn build_reapply_plan(&self, name: &str, level: ModeLevel) -> Result<ReapplyPlan, ModeError> {
+    fn build_reapply_plan(
+        &self,
+        name: &str,
+        host: &str,
+        level: ModeLevel,
+    ) -> Result<ReapplyPlan, ModeError> {
         let profile_content = self
             .executor
             .read_profile(name)
@@ -998,10 +1062,15 @@ impl<'a> Writer<'a> {
             body: render_anchor(name, &hosts),
         };
         let reload = FirewallOp::Reload;
+        let add_host = AccountOp::AddHostToShareGroup {
+            name: name.into(),
+            host: host.into(),
+        };
         let share_ops = self.build_share_ops(name, &parsed_profile)?;
         Ok(ReapplyPlan {
             install_anchor,
             reload,
+            add_host,
             share_ops,
         })
     }
@@ -1080,7 +1149,11 @@ impl<'a> Writer<'a> {
 
     /// Execute a pre-built `ReapplyPlan` against the substrate.
     /// PF reapply first (`InstallAnchor → Reload`); a Reload failure
-    /// aborts before any share-substrate mutation.
+    /// aborts before any share-substrate mutation. Cycle 14:
+    /// `AddHostToShareGroup` fires after PF reapply lands and before
+    /// the per-share ops — keeps the catch-up path adjacent to the
+    /// share substrate it enables (host needs the membership for the
+    /// inheritable ACL grant on `host_path` to flow through).
     fn execute_reapply_plan(
         &self,
         plan: &ReapplyPlan,
@@ -1090,6 +1163,8 @@ impl<'a> Writer<'a> {
             .map_err(ModeError::Firewall)?;
         self.run(&plan.reload, reporter)
             .map_err(ModeError::Firewall)?;
+        self.run(&plan.add_host, reporter)
+            .map_err(ModeError::Account)?;
         self.execute_share_ops(&plan.share_ops, reporter)
     }
 
@@ -1154,6 +1229,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn shell_into_tenant(
         &self,
         name: &str,
+        host: &str,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
         // Cycle-4 invariant: intent emitted BEFORE the narrow tries,
@@ -1163,7 +1239,7 @@ impl<'a> Writer<'a> {
         // in the plan block alongside the PF + login ops.
         reporter.shell_intent(name);
         let reapply_plan = self
-            .build_reapply_plan(name, ModeLevel::Runtime)
+            .build_reapply_plan(name, host, ModeLevel::Runtime)
             .map_err(ShellError::Mode)?;
         let login = AccountOp::LoginAsUser { name: name.into() };
         let mut plan_entries = reapply_plan.as_plan_entries();
@@ -1196,6 +1272,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn reload_tenant(
         &self,
         name: &str,
+        host: &str,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
         // Intent emitted BEFORE plan-build so the operator sees verb
@@ -1204,7 +1281,7 @@ impl<'a> Writer<'a> {
         // happens after the plan is built so share ops appear in the
         // plan block alongside the PF ops.
         reporter.reload_intent(name);
-        let plan = self.build_reapply_plan(name, ModeLevel::Runtime)?;
+        let plan = self.build_reapply_plan(name, host, ModeLevel::Runtime)?;
         reporter.reload_plan(&plan.as_plan_entries());
         self.execute_reapply_plan(&plan, reporter)?;
         reporter.reload_done(name);
@@ -1220,6 +1297,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn reload_all_tenants(
         &self,
         accounts: &dyn Reader,
+        host: &str,
         reporter: &mut Reporter,
     ) -> ReloadAllOutcome {
         let names = accounts.tenant_names();
@@ -1230,7 +1308,7 @@ impl<'a> Writer<'a> {
         }
         let mut failed = 0;
         for name in &names {
-            match self.reload_tenant(name, reporter) {
+            match self.reload_tenant(name, host, reporter) {
                 Ok(()) => {}
                 Err(err) => {
                     failed += 1;
@@ -1430,8 +1508,41 @@ impl<'a> Writer<'a> {
         for drift in self.check_share_drift(name, reporter)? {
             findings.push(drift);
         }
+        if let Some(drift) = self.check_host_in_share_group(name, host, reporter)? {
+            findings.push(drift);
+        }
         reporter.doctor_done_summary(name, findings.len());
         Ok(findings)
+    }
+
+    /// Cycle 14: query the directory service for host membership in
+    /// `<name>-tenant-share`; emit `HostNotInShareGroup` when missing.
+    /// Substrate failure (dseditgroup machinery error) surfaces as
+    /// `DoctorError::Probe` via the `AccountError → DoctorError::Probe`
+    /// route — same fail-fast posture as the other doctor checks.
+    fn check_host_in_share_group(
+        &self,
+        name: &str,
+        host: &str,
+        reporter: &mut Reporter,
+    ) -> Result<Option<Finding>, DoctorError> {
+        let group = tenant_share_group_name(name);
+        let is_member = self.executor.host_in_group(host, &group).map_err(|e| {
+            DoctorError::Probe(ProbeError::NonZero {
+                code: -1,
+                stderr: format!("dseditgroup -o checkmember failed: {e}"),
+            })
+        })?;
+        if is_member {
+            return Ok(None);
+        }
+        let finding = Finding::HostNotInShareGroup {
+            tenant: name.to_string(),
+            host: host.to_string(),
+            group,
+        };
+        reporter.doctor_finding(&finding);
+        Ok(Some(finding))
     }
 
     /// Walk the profile's declared `[[shares]]` and emit drift findings

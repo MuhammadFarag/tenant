@@ -35,6 +35,7 @@ fn shell_dry_run_verbose_shows_mechanism() {
     let want = "Would shell into 'dev'.\n  \
                 sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
                 sudo pfctl -f /etc/pf.conf\n  \
+                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
                 sudo -iu dev\n";
     assert_eq!(stdout, want);
 }
@@ -54,16 +55,20 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
-         ✓ Firewall ruleset reloaded\n",
+         ✓ Firewall ruleset reloaded\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want);
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
     assert_eq!(exec.logins(), vec!["dev".to_string()]);
-    assert!(
-        exec.account_ops().is_empty(),
-        "login should not record account_ops: {:?}",
-        exec.account_ops()
+    assert_eq!(
+        exec.account_ops(),
+        vec![AccountOp::AddHostToShareGroup {
+            name: "dev".into(),
+            host: "operator".into(),
+        }],
+        "cycle-14 shell auto-narrow includes the AddHost catch-up op"
     );
 }
 
@@ -80,11 +85,14 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
         "{}\n  \
          sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
          sudo pfctl -f /etc/pf.conf\n  \
+         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
          sudo -iu dev\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          $ sudo pfctl -f /etc/pf.conf\n\
          ✓ Firewall ruleset reloaded\n\
+         $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          $ sudo -iu dev\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -259,7 +267,8 @@ fn shell_propagates_child_exit_code() {
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
-         ✓ Firewall ruleset reloaded\n",
+         ✓ Firewall ruleset reloaded\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want);

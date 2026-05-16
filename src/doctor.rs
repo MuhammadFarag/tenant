@@ -188,6 +188,17 @@ pub enum Finding {
         expected_target: PathBuf,
         actual: SymlinkActual,
     },
+    /// Cycle 14: the host operator is not a secondary member of the
+    /// tenant's `<name>-tenant-share` group. Surfaces (a) pre-cycle-14
+    /// tenants whose create flow never added the host, and (b)
+    /// post-cycle-14 tenants where the operator manually removed
+    /// themselves with `dseditgroup -o edit -d`. Warning-tier; recovery
+    /// is `tenant reload <name>` (the substrate's catch-up path).
+    HostNotInShareGroup {
+        tenant: String,
+        host: String,
+        group: String,
+    },
 }
 
 /// What's actually present at a declared share's `tenant_path`, when
@@ -216,6 +227,7 @@ impl Finding {
             Finding::AnchorBodyDrift { .. } => Severity::Warning,
             Finding::AclDrift { .. } => Severity::Warning,
             Finding::SymlinkDrift { .. } => Severity::Warning,
+            Finding::HostNotInShareGroup { .. } => Severity::Warning,
         }
     }
 
@@ -537,6 +549,49 @@ Alternative
                     ),
                 })
             }
+            Finding::HostNotInShareGroup {
+                tenant,
+                host,
+                group,
+            } => Some(format!(
+                "Why this matters
+  Host '{host}' is not a member of '{group}'. The cycle-10 share
+  substrate installs an inheritable ACL on every declared `host_path`
+  granting `{group}` access \u{2014} the tenant (whose primary group IS
+  `{group}`) inherits that grant on any new file they create inside an
+  RW share. The host inherits it ONLY if also a member of `{group}`.
+  Without the membership, files the tenant creates inside RW shares
+  are world-readable (POSIX 644) but not host-writable: host can `ls`
+  and `cat` but `vim` reports `E212: Can't open file for writing`.
+  Cycle-10-era tenants (created before this fix) all hit this; manual
+  `dseditgroup -o edit -d {host} {group}` on a post-cycle-14 tenant
+  also surfaces here.
+
+Recommended fix
+  tenant reload {tenant}
+  The cycle-14 catch-up path runs `dseditgroup -o edit -a {host} -t
+  user {group}` as the first step inside `execute_reapply_plan`.
+  Idempotent at the substrate \u{2014} re-applying on an existing member
+  is a silent noop.
+
+Side-effects to know about
+  \u{2022} '{host}' gains a secondary group membership. `id` and
+    `groups` start listing `{group}`; processes the host runs inherit
+    it on new files and directories they create. On solo-Mac scope
+    this is intended; if multiple human users share the host, only
+    the operator running `tenant reload` gets added.
+  \u{2022} The PF anchor is re-rendered at runtime tier as a side effect.
+    If install-tier widening was active, the narrow drops it; rerun
+    `tenant mode {tenant} install` afterward if still needed.
+  \u{2022} Every declared share is also re-applied. If another share has
+    an unrelated pending refusal, reload aborts before reaching this
+    step; address those first.
+
+Alternative
+  sudo dseditgroup -o edit -n . -a {host} -t user {group}
+  Adds just the membership without running the full reload. Use when
+  `tenant reload` is blocked by an unrelated refusal."
+            )),
         }
     }
 }
@@ -631,6 +686,16 @@ impl fmt::Display for Finding {
                     ),
                 }
             }
+            Finding::HostNotInShareGroup {
+                tenant,
+                host,
+                group,
+            } => write!(
+                f,
+                "warning: host '{host}' is not a member of group '{group}' \u{2014} \
+                 files created by tenant '{tenant}' inside RW shares are not host-writable; \
+                 run `tenant reload {tenant}` to fix"
+            ),
         }
     }
 }

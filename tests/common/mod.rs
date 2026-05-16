@@ -89,6 +89,9 @@ impl Executor for NeverExecutor {
     ) -> Result<String, tenant::executor::ProbeError> {
         panic!("executor unexpectedly invoked (read_host_acl): path={path:?}");
     }
+    fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError> {
+        panic!("executor unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
+    }
 }
 
 /// Host identity passed to `tenant::run`. Production reads `$USER`; tests
@@ -148,6 +151,7 @@ pub fn create_dry_run_block(name: &str, uid: u32, gid: u32) -> String {
          \n\
          This will:\n  \
          \u{2022} create user account '{name}' (UID {uid}) and group '{name}-tenant-share' (GID {gid})\n  \
+         \u{2022} add host '{TEST_HOST}' to '{name}-tenant-share' so files the tenant creates in RW shares stay host-writable\n  \
          \u{2022} install a per-tenant firewall anchor (egress blocked by default; allowlist hosts declared in the profile)\n  \
          \u{2022} write profile config at ~/.config/tenant/profiles/{name}.toml\n  \
          \u{2022} enable pf host-wide if not already enabled\n\
@@ -167,6 +171,7 @@ pub fn destroy_dry_run_block(name: &str, uid: u32) -> String {
          This will:\n  \
          \u{2022} remove the user account\n  \
          \u{2022} move /Users/{name} \u{2192} /Users/Deleted Users/{name} (recoverable until /Users/Deleted Users is emptied or the host is rebuilt)\n  \
+         \u{2022} remove host '{TEST_HOST}' from '{name}-tenant-share'\n  \
          \u{2022} remove group '{name}-tenant-share'\n  \
          \u{2022} remove the firewall anchor and flush its kernel rules\n  \
          \u{2022} remove profile config at ~/.config/tenant/profiles/{name}.toml\n\
@@ -183,6 +188,7 @@ pub fn destroy_orphan_dry_run_block(name: &str) -> String {
         "About to destroy orphan group '{name}-tenant-share' for tenant '{name}'.\n\
          \n\
          This will:\n  \
+         \u{2022} remove host '{TEST_HOST}' from '{name}-tenant-share' (idempotent if not a member)\n  \
          \u{2022} remove group '{name}-tenant-share'\n  \
          \u{2022} remove the firewall anchor and flush its kernel rules\n  \
          \u{2022} remove profile config at ~/.config/tenant/profiles/{name}.toml\n\
@@ -213,6 +219,7 @@ pub fn mode_dry_run_block(name: &str, level: &str) -> String {
          This will:\n  \
          \u{2022} {re_render}\n  \
          \u{2022} reload pf\n  \
+         \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
          \u{2022} re-apply declared shares from the profile (idempotent)\n{install_tail}\
          \n\
          Sudo needed for: firewall install.\n\
@@ -228,6 +235,7 @@ pub fn reload_dry_run_block(name: &str) -> String {
          \n\
          This will:\n  \
          \u{2022} re-render and reload the firewall anchor (runtime tier)\n  \
+         \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
          \u{2022} re-apply each declared share from [[shares]] in the profile\n\
          \n\
          Sudo needed for: firewall install.\n\

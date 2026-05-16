@@ -782,6 +782,47 @@ Things that are easy to violate and would matter:
   fallthrough is byte-form-identical to the cycle-11 surface —
   test fixtures pass `Colors::default()` and see plain text.
 
+- **Host operator is a secondary member of every tenant's share
+  group** (cycle 14). Added unconditionally at `tenant create` time
+  via `AccountOp::AddHostToShareGroup` between `CreateShareGroup`
+  and `CreateTenantUser`. Removed at `tenant destroy` (and the
+  orphan-group convergence path) via `RemoveHostFromShareGroup`
+  before `DeleteShareGroup`; production substrate runs
+  `dseditgroup -o checkmember` first and skips the `-d` edit if
+  the host isn't currently a member, so the remove is idempotent
+  on legacy pre-cycle-14 tenants and partial-create orphans.
+  `Writer::execute_reapply_plan` re-adds at the top of the share
+  substrate (after PF reapply, before per-share ops) on every
+  reload/mode/shell — the catch-up path for tenants created before
+  cycle 14. Idempotent at substrate (`dseditgroup -o edit -a` on
+  existing membership is a noop). `CreateError::HostMembership(AccountError)`
+  surfaces a failed AddHost as a hard-abort with the operator-facing
+  recovery hint pointing at `tenant destroy <name>` (orphan-group
+  convergence). `Finding::HostNotInShareGroup` (Warning) surfaces
+  the same drift at doctor-time — fires when
+  `Executor::host_in_group(host, group)` returns `false`.
+
+- **Cycle 14 known limitation — group cache requires fresh shell.**
+  macOS snapshots a process's supplementary group list at process
+  creation; the kernel evaluates file ACLs against that snapshot,
+  not against the live directory service. So after `tenant create`
+  (or the catch-up `tenant reload` on a legacy tenant), the
+  operator's CURRENT shell still can't observe the new group
+  membership — files the tenant creates inside RW shares fail to
+  open for write with `Permission denied`, even though
+  `dseditgroup -o checkmember` says the host is a member. The
+  membership IS real at the directory service (verified by the
+  cycle-14 smoke). Workaround: open a NEW Terminal.app window
+  (tabs typically inherit the parent's process group cache; new
+  windows fork from launchd and re-fetch via OD lookup). Permanent
+  fix is parked in `.features/roadmap.md` as "Host-direct ACL on
+  share host_path" — adds a `user:<host>` ACL entry alongside the
+  group entry so the kernel evaluates against the operator's UID
+  directly. Not load-bearing for solo-Mac scope where opening a
+  new Terminal once per tenant is acceptable friction; the cycle-14
+  smoke names this gotcha explicitly so the operator isn't
+  surprised.
+
 ## Test discipline
 
 E2E-first. The bulk of tests live in `tests/cli_<verb>.rs` (one file

@@ -70,16 +70,20 @@ pub(crate) fn dispatch(
             // operator typed the verb; abort is cheap; idempotent
             // on re-run).
             if show_summary {
-                reporter.create_summary(&name, uid, gid);
+                reporter.create_summary(&name, host, uid, gid);
             }
             if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
                 reporter.aborted();
                 return 0;
             }
-            match writer.create_tenant(&name, uid, gid, reporter) {
+            match writer.create_tenant(&name, host, uid, gid, reporter) {
                 Ok(()) => 0,
                 Err(accounts::CreateError::Group(e)) => {
                     reporter.create_group_failed(&name, &e);
+                    EX_IOERR
+                }
+                Err(accounts::CreateError::HostMembership(e)) => {
+                    reporter.create_host_membership_failed(&name, host, &e);
                     EX_IOERR
                 }
                 Err(accounts::CreateError::User(e)) => {
@@ -135,7 +139,7 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
-                    match writer.shell_into_tenant(&name, reporter) {
+                    match writer.shell_into_tenant(&name, host, reporter) {
                         Ok(code) => code.clamp(0, 255) as u8,
                         Err(accounts::ShellError::Account(e)) => {
                             reporter.shell_failed(&name, &e);
@@ -176,7 +180,7 @@ pub(crate) fn dispatch(
                     // Cycle 12 confirm prompt; default Y (convergent
                     // reapply, reversible via the other mode).
                     if show_summary {
-                        reporter.mode_summary(&name, level);
+                        reporter.mode_summary(&name, host, level);
                     }
                     if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
                         == ConfirmOutcome::Abort
@@ -184,7 +188,7 @@ pub(crate) fn dispatch(
                         reporter.aborted();
                         return 0;
                     }
-                    match writer.apply_tenant_mode(&name, level, reporter) {
+                    match writer.apply_tenant_mode(&name, host, level, reporter) {
                         Ok(()) => 0,
                         Err(e) => {
                             surface_mode_error(reporter, &name, &e);
@@ -264,7 +268,7 @@ pub(crate) fn dispatch(
                         // Cycle 12 confirm; default Y (convergent,
                         // idempotent).
                         if show_summary {
-                            reporter.reload_summary(&n);
+                            reporter.reload_summary(&n, host);
                         }
                         if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
                             == ConfirmOutcome::Abort
@@ -272,7 +276,7 @@ pub(crate) fn dispatch(
                             reporter.aborted();
                             return 0;
                         }
-                        match writer.reload_tenant(&n, reporter) {
+                        match writer.reload_tenant(&n, host, reporter) {
                             Ok(()) => 0,
                             Err(e) => {
                                 surface_reload_error(reporter, &n, &e);
@@ -290,17 +294,17 @@ pub(crate) fn dispatch(
                 // there.
                 let names = accounts.tenant_names();
                 if names.is_empty() {
-                    let outcome = writer.reload_all_tenants(accounts, reporter);
+                    let outcome = writer.reload_all_tenants(accounts, host, reporter);
                     return if outcome.failed == 0 { 0 } else { EX_IOERR };
                 }
                 if show_summary {
-                    reporter.reload_all_summary(&names);
+                    reporter.reload_all_summary(host, &names);
                 }
                 if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
                     reporter.aborted();
                     return 0;
                 }
-                let outcome = writer.reload_all_tenants(accounts, reporter);
+                let outcome = writer.reload_all_tenants(accounts, host, reporter);
                 if outcome.failed == 0 { 0 } else { EX_IOERR }
             }
         },
@@ -320,7 +324,7 @@ pub(crate) fn dispatch(
                     // failure. Cycle 12 confirm; default N — same
                     // destructive-action posture as the full destroy.
                     if show_summary {
-                        reporter.destroy_orphan_summary(&name);
+                        reporter.destroy_orphan_summary(&name, host);
                     }
                     if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
                         == ConfirmOutcome::Abort
@@ -331,7 +335,7 @@ pub(crate) fn dispatch(
                     // Routes through `surface_destroy_error` so a
                     // profile-rm failure on this arm gets the same
                     // operator-friendly framing as the Destroyable arm.
-                    if let Err(e) = writer.destroy_orphan_group(&name, reporter) {
+                    if let Err(e) = writer.destroy_orphan_group(&name, host, reporter) {
                         surface_destroy_error(reporter, &name, &e);
                         return EX_IOERR;
                     }
@@ -350,7 +354,7 @@ pub(crate) fn dispatch(
                     // muscle-memory ENTER must not delete).
                     if show_summary {
                         let uid = accounts.uid_for(&name).unwrap_or(0);
-                        reporter.destroy_summary(&name, uid);
+                        reporter.destroy_summary(&name, host, uid);
                     }
                     if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
                         == ConfirmOutcome::Abort
@@ -358,7 +362,7 @@ pub(crate) fn dispatch(
                         reporter.aborted();
                         return 0;
                     }
-                    if let Err(e) = writer.destroy_tenant(&name, reporter) {
+                    if let Err(e) = writer.destroy_tenant(&name, host, reporter) {
                         surface_destroy_error(reporter, &name, &e);
                         return EX_IOERR;
                     }

@@ -145,6 +145,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
             &[
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
+                "Host 'operator' added to share group 'dev-tenant-share'",
                 "ACL granted to group 'dev-tenant-share' on /tmp",
                 "Symlink /Users/dev/src → /tmp installed",
             ],
@@ -490,4 +491,61 @@ fn reload_no_arg_emits_no_op_summary_when_no_tenants() {
     let (code, stdout, _stderr) = run_with(StubReader::default(), &["reload"]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "No tenants on this host to reload.\n");
+}
+
+#[test]
+fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
+    // Cycle 14 catch-up posture: every reload runs `AddHostToShareGroup`
+    // regardless of whether the host is currently a member. The
+    // substrate is idempotent (`dseditgroup -o edit -a` on an existing
+    // member is a silent noop in production; the stub records every
+    // call as one entry in account_ops). Stub default is `true` for
+    // host_in_group; we explicitly set `true` here too to make the
+    // intent visible — the test pins "AddHost fires in the plan even
+    // when state says member already" so a future regression that
+    // tries to optimize the catch-up away via host_in_group pre-check
+    // trips this.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_in_group("operator", "dev-tenant-share", true);
+    let (code, _stdout, _stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        exec.account_ops(),
+        vec![AccountOp::AddHostToShareGroup {
+            name: "dev".into(),
+            host: "operator".into(),
+        }],
+        "reload fires AddHost unconditionally (substrate is idempotent, not Writer-side conditional)"
+    );
+}
+
+#[test]
+fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
+    // Reapply ordering lock: AddHost runs INSIDE execute_reapply_plan
+    // AFTER the PF reapply (InstallAnchor + Reload) and BEFORE the
+    // per-share ops (Acl::Grant + EnsureSymlinkAsUser). Verify by
+    // observing the cross-domain order: firewall_ops happen first,
+    // then the one account op (AddHost), then the acl op.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, _stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        exec.account_ops(),
+        vec![
+            AccountOp::AddHostToShareGroup {
+                name: "dev".into(),
+                host: "operator".into(),
+            },
+            AccountOp::EnsureSymlinkAsUser {
+                name: "dev".into(),
+                link: PathBuf::from("/Users/dev/src"),
+                target: PathBuf::from("/tmp"),
+            },
+        ],
+        "AddHost recorded before the share-substrate ops"
+    );
 }

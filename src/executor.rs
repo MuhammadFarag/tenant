@@ -165,6 +165,32 @@ pub enum AccountOp {
         link: PathBuf,
         target: PathBuf,
     },
+
+    /// Cycle 14: add the host operator as a secondary member of the
+    /// tenant's `<name>-tenant-share` group. Maps to `sudo dseditgroup
+    /// -o edit -n . -a <host> -t user <name>-tenant-share` on macOS.
+    /// Idempotent at the substrate (`dseditgroup -o edit -a` on an
+    /// existing member is a silent noop), so the catch-up path
+    /// (`execute_reapply_plan` running this on every reload/mode/shell)
+    /// costs one dseditgroup invocation per verb regardless of the
+    /// tenant's pre-existing state.
+    ///
+    /// Ported verbatim from sandbox's `_add_human_to_group` step
+    /// (`scripts/lib/phases/phase01_user.py:180-185`); the cycle-1
+    /// port dropped it, and the symptom — bidirectional-write
+    /// asymmetry on RW shares — was caught in the 2026-05-15 operator
+    /// setup pass.
+    AddHostToShareGroup { name: String, host: String },
+
+    /// Cycle 14: symmetric counter to `AddHostToShareGroup`. Maps to
+    /// `sudo dseditgroup -o edit -n . -d <host> -t user
+    /// <name>-tenant-share`. The describe-side renders only the `-d`
+    /// edit form; the production `execute_account` impl invokes
+    /// `dseditgroup -o checkmember -m <host> <group>` first and skips
+    /// the edit when the host is not a member (idempotence for legacy
+    /// pre-cycle-14 tenants and the orphan-group destroy path on a
+    /// partially-created tenant).
+    RemoveHostFromShareGroup { name: String, host: String },
 }
 
 /// Profile-domain operations. The store-backed `~/.config/tenant/profiles/<name>.toml`
@@ -623,6 +649,24 @@ pub trait Executor {
     /// for each, and emits AclDrift when the expected `<tenant>-tenant-share`
     /// group ACL entry is absent.
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError>;
+
+    /// Probe whether `host` is currently a member of `group` in the
+    /// local directory service. Substrate is `dseditgroup -o
+    /// checkmember -m <host> <group>` (no sudo — read-only DS query).
+    /// Exit code 0 maps to `Ok(true)`; non-zero exit (host not a
+    /// member OR group absent) maps to `Ok(false)`. Machinery
+    /// failures — sudo/dseditgroup not on PATH, fork failed — surface
+    /// as `AccountError` (same shape as the account-domain
+    /// substrate's other invocations). Carve-out method (return type
+    /// is `bool`, not unit, so it doesn't fit `WritableOp`).
+    ///
+    /// Cycle 14: doctor's `Finding::HostNotInShareGroup` consumes this
+    /// to detect drift on cycle-10-era tenants and operator-manual
+    /// removals. Also used internally by
+    /// `MacosExecutor::execute_account` on `RemoveHostFromShareGroup`
+    /// to short-circuit the `-d` edit when the host isn't currently a
+    /// member (substrate-side idempotence).
+    fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError>;
 }
 
 /// Top-level ADT wrapper for "any op, regardless of domain." Used by the
@@ -701,6 +745,12 @@ fn account_business_label(op: &AccountOp) -> String {
                 link.display(),
                 target.display()
             )
+        }
+        AccountOp::AddHostToShareGroup { name, host } => {
+            format!("Host '{host}' added to share group '{name}-tenant-share'")
+        }
+        AccountOp::RemoveHostFromShareGroup { name, host } => {
+            format!("Host '{host}' removed from share group '{name}-tenant-share'")
         }
     }
 }
@@ -849,6 +899,12 @@ impl Executor for MacosExecutor {
                 target.display(),
                 link.display(),
             ),
+            AccountOp::AddHostToShareGroup { name, host } => {
+                format!("sudo dseditgroup -o edit -n . -a {host} -t user {name}-tenant-share")
+            }
+            AccountOp::RemoveHostFromShareGroup { name, host } => {
+                format!("sudo dseditgroup -o edit -n . -d {host} -t user {name}-tenant-share")
+            }
         }
     }
 
@@ -857,6 +913,19 @@ impl Executor for MacosExecutor {
         // through `login`. Match-arm panics on it so an accidental wiring
         // through `execute_account` fails loudly in dev / tests rather than
         // silently doing the wrong thing in prod.
+        if let AccountOp::RemoveHostFromShareGroup { name, host } = op {
+            // Cycle-14 idempotence: skip the `-d` edit when host isn't a
+            // current member. Covers (a) legacy tenants pre-cycle-14
+            // (host was never added) and (b) destroy_orphan_group on a
+            // partial-create tenant where AddHost failed. The substrate
+            // is the source of truth — Writer keeps the op in the plan
+            // for symmetry (cycle-14 Q4 lock); the substrate decides
+            // whether to actually fire it.
+            let group = format!("{name}-tenant-share");
+            if !self.host_in_group(host, &group)? {
+                return Ok(());
+            }
+        }
         let argv = match op {
             AccountOp::LoginAsUser { .. } => {
                 panic!(
@@ -1353,6 +1422,22 @@ impl Executor for MacosExecutor {
         }
         Ok(())
     }
+
+    fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError> {
+        // Read-only directory-service membership probe. Exit 0 ⇒ member;
+        // any non-zero exit (host absent from group, group absent) ⇒
+        // false. Machinery failure (dseditgroup not on PATH, fork
+        // failed) surfaces as `AccountError::Spawn`. The non-zero
+        // branch deliberately does NOT inspect stderr; sandbox's prior
+        // art and the cycle-14 idempotence contract treat any non-zero
+        // as "not a member" so the substrate isn't tied to the tool's
+        // exact stderr wording.
+        let output = Command::new("dseditgroup")
+            .args(["-o", "checkmember", "-m", host, group])
+            .output()
+            .map_err(AccountError::Spawn)?;
+        Ok(output.status.success())
+    }
 }
 
 /// Read `path` via `sudo -n cat <path>`. Used for privileged-read
@@ -1538,6 +1623,32 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             target.display().to_string(),
             link.display().to_string(),
         ],
+        AccountOp::AddHostToShareGroup { name, host } => vec![
+            "sudo".into(),
+            "dseditgroup".into(),
+            "-o".into(),
+            "edit".into(),
+            "-n".into(),
+            ".".into(),
+            "-a".into(),
+            host.clone(),
+            "-t".into(),
+            "user".into(),
+            format!("{name}-tenant-share"),
+        ],
+        AccountOp::RemoveHostFromShareGroup { name, host } => vec![
+            "sudo".into(),
+            "dseditgroup".into(),
+            "-o".into(),
+            "edit".into(),
+            "-n".into(),
+            ".".into(),
+            "-d".into(),
+            host.clone(),
+            "-t".into(),
+            "user".into(),
+            format!("{name}-tenant-share"),
+        ],
     }
 }
 
@@ -1699,6 +1810,14 @@ impl Executor for DryRunExecutor {
     /// future code path adds a default share.
     fn read_host_acl(&self, _path: &std::path::Path) -> Result<String, ProbeError> {
         Ok(String::new())
+    }
+
+    /// Dry-run returns `true` so the would-do preview never trips
+    /// doctor's cycle-14 `HostNotInShareGroup` finding — same
+    /// "no actionable warnings in dry-run" posture as `read_host_acl`
+    /// and `tenant_path_kind`.
+    fn host_in_group(&self, _host: &str, _group: &str) -> Result<bool, AccountError> {
+        Ok(true)
     }
 }
 
@@ -1889,6 +2008,25 @@ pub struct StubExecutor {
     /// Per-path one-shot failure injection for `read_host_acl`. First
     /// match wins; cleared after firing. Mirrors `tenant_path_kind_failure`.
     host_acl_failures: RefCell<HashMap<PathBuf, ProbeError>>,
+
+    /// Cycle 14: per-(host, group) override for `host_in_group`. First
+    /// match wins; unmatched lookups default to `true` so doctor tests
+    /// that don't exercise the cycle-14 `HostNotInShareGroup` finding
+    /// don't see a spurious warning. Tests that DO exercise the
+    /// finding set `false` via `with_host_in_group`.
+    host_in_group_state: RefCell<HashMap<(String, String), bool>>,
+
+    /// Cycle 14: recorded `host_in_group` invocations in call order
+    /// (one entry per call). Tests use this to pin that the catch-up
+    /// path inside `execute_reapply_plan` fires the AddHost op
+    /// unconditionally (the recorder shows the op fired regardless of
+    /// stub state).
+    host_in_group_invocations: RefCell<Vec<(String, String)>>,
+
+    /// Cycle 14: one-shot `host_in_group` failure. Mirrors
+    /// `probe_failure`. Used to pin the doctor-failure exit-74
+    /// behavior when dseditgroup-checkmember can't run.
+    host_in_group_failure: RefCell<Option<AccountError>>,
 }
 
 impl StubExecutor {
@@ -2198,6 +2336,32 @@ impl StubExecutor {
             .insert(path.to_path_buf(), err);
         self
     }
+
+    /// Cycle 14: pre-load the membership outcome for `(host, group)`.
+    /// Used by doctor tests to model "host is not a member of the
+    /// tenant's share group" (triggers `Finding::HostNotInShareGroup`).
+    /// Unmatched lookups default to `true` so existing doctor tests
+    /// see no spurious finding.
+    pub fn with_host_in_group(self, host: &str, group: &str, is_member: bool) -> Self {
+        self.host_in_group_state
+            .borrow_mut()
+            .insert((host.to_string(), group.to_string()), is_member);
+        self
+    }
+
+    /// Cycle 14: configure the next `host_in_group` call to fail with
+    /// `err`. One-shot — cleared after firing.
+    pub fn fail_next_host_in_group(self, err: AccountError) -> Self {
+        *self.host_in_group_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    /// Recorded `host_in_group` invocations in call order. Tests use
+    /// this to pin the catch-up path fires unconditionally (the
+    /// recorder shows the trait-level call regardless of stub state).
+    pub fn host_in_group_invocations(&self) -> Vec<(String, String)> {
+        self.host_in_group_invocations.borrow().clone()
+    }
 }
 
 impl Executor for StubExecutor {
@@ -2417,5 +2581,21 @@ impl Executor for StubExecutor {
             ));
         }
         Ok(listing)
+    }
+
+    fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError> {
+        self.host_in_group_invocations
+            .borrow_mut()
+            .push((host.to_string(), group.to_string()));
+        if let Some(err) = self.host_in_group_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        let key = (host.to_string(), group.to_string());
+        Ok(self
+            .host_in_group_state
+            .borrow()
+            .get(&key)
+            .copied()
+            .unwrap_or(true))
     }
 }

@@ -220,6 +220,7 @@ fn mode_runtime_real_mode_op_shape() {
             &[
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
+                "Host 'operator' added to share group 'dev-tenant-share'",
             ],
             "Tenant 'dev' is at runtime tier.",
         ),
@@ -240,20 +241,25 @@ fn mode_runtime_real_mode_op_shape() {
 }
 
 #[test]
-fn mode_does_not_touch_account_or_profile_ops() {
-    // Negative pin: mode operates entirely in the firewall domain.
-    // No DeleteUserRecord, no ProfileOp::Create/Delete — those belong
-    // to create/destroy. A regression that accidentally wired mode
+fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
+    // Cycle-14 narrowed negative pin: mode operates in the firewall
+    // domain PLUS the cycle-14 `AddHostToShareGroup` catch-up step. No
+    // CreateTenantUser / DeleteUserRecord, no ProfileOp::Create /
+    // Delete — those belong to create / destroy. No login — that
+    // belongs to shell. A regression that accidentally wired mode
     // through, say, a ProfileOp::Create would trip this.
     let exec =
         StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0);
-    assert!(
-        exec.account_ops().is_empty(),
-        "mode should not invoke account_ops: {:?}",
-        exec.account_ops()
+    assert_eq!(
+        exec.account_ops(),
+        vec![AccountOp::AddHostToShareGroup {
+            name: "dev".into(),
+            host: "operator".into(),
+        }],
+        "mode should fire exactly one account op: cycle-14 catch-up AddHost"
     );
     assert!(
         exec.profile_ops().is_empty(),
@@ -435,6 +441,7 @@ fn mode_real_standard_emits_only_post_exec_confirmation() {
             &[
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
+                "Host 'operator' added to share group 'dev-tenant-share'",
             ],
             "Tenant 'dev' is at runtime tier.",
         ),
@@ -459,11 +466,14 @@ fn mode_real_verbose_shows_plan_and_echo() {
     let want = format!(
         "{}\n  \
          sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-         sudo pfctl -f /etc/pf.conf\n\
+         sudo pfctl -f /etc/pf.conf\n  \
+         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          $ sudo pfctl -f /etc/pf.conf\n\
          ✓ Firewall ruleset reloaded\n\
+         $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          {}\n\
          Tenant 'dev' is at runtime tier.\n",
         section_line("Applying mode 'runtime' to tenant 'dev'"),
@@ -488,11 +498,14 @@ fn mode_install_real_verbose_shows_install_level_text() {
     let want = format!(
         "{}\n  \
          sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-         sudo pfctl -f /etc/pf.conf\n\
+         sudo pfctl -f /etc/pf.conf\n  \
+         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          $ sudo pfctl -f /etc/pf.conf\n\
          ✓ Firewall ruleset reloaded\n\
+         $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          {}\n\
          Tenant 'dev' is at install tier.\n",
         section_line("Applying mode 'install' to tenant 'dev'"),
@@ -512,7 +525,8 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
     assert_eq!(code, 0);
     let plan = "  \
                 sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo pfctl -f /etc/pf.conf\n";
+                sudo pfctl -f /etc/pf.conf\n  \
+                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n";
     assert_eq!(stdout, mode_dry_run_block("dev", "runtime") + plan);
 }
 
