@@ -125,3 +125,9 @@ Pre-commit hooks run `cargo fmt --check` and `cargo clippy -- -D warnings` on Ru
 This is a solo-developer tool. It runs on the author's Mac. It is not designed for CI, multi-user provisioning, or automated cron use. The substrate calls are sudo-prompting by design; there is no NOPASSWD sudoers entry and no daemon. If you fork it for other use, expect to revisit those assumptions.
 
 The Rust implementation is a port of an earlier Go prototype. Project doctrine and file-level design notes live in [`CLAUDE.md`](./CLAUDE.md) — useful reading if you intend to extend or modify the tool.
+
+## License
+
+Copyright 2026 Muhammad Farag
+
+Licensed under the Apache License, Version 2.0. See [`LICENSE`](./LICENSE) for the full text.

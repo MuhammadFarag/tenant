@@ -2,6 +2,11 @@
 name = "tenant"
 version = "0.1.0"
 edition = "2024"
+authors = ["Muhammad Farag <m@far.ag>"]
+description = "A macOS CLI for provisioning isolated user accounts with per-tenant firewall rules and explicit file shares."
+repository = "https://github.com/MuhammadFarag/tenant"
+readme = "README.md"
+license = "Apache-2.0"
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
