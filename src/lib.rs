@@ -26,7 +26,7 @@ pub(crate) struct Cli {
 
     /// Skip the interactive confirmation prompt that mutating verbs
     /// (create / destroy / mode / reload) emit before executing.
-    /// Equivalent to typing 'y' at the prompt. Cycle 12.
+    /// Equivalent to typing 'y' at the prompt.
     #[arg(short = 'y', long, global = true)]
     pub(crate) yes: bool,
 
@@ -48,9 +48,8 @@ pub(crate) enum Verb {
     /// Apply a PF widening level to the named tenant. Re-renders the
     /// anchor body from the profile's runtime or runtime+install host
     /// set, writes it, and reloads pf. Install widening is intentionally
-    /// non-persistent — the contract for cycle 3 is "the operator
-    /// narrows back manually with `tenant mode <name> runtime`."
-    /// Auto-narrow on shell entry is deferred to cycle 4.
+    /// non-persistent; `tenant shell <name>` auto-narrows to runtime
+    /// tier on entry.
     Mode {
         name: String,
         #[arg(value_enum)]
@@ -84,8 +83,8 @@ pub(crate) enum Verb {
     /// Bare `tenant reload` walks every tenant on the host (parallel
     /// to `tenant doctor`'s no-arg shape). Per-tenant failures don't
     /// abort the walk; the verb continues and surfaces a summary at
-    /// the end (Q15 lock). Exit code is 0 on full success or 74 if
-    /// any tenant tripped.
+    /// the end. Exit code is 0 on full success or 74 if any tenant
+    /// tripped.
     ///
     /// Always lands at runtime tier — install-tier widening stays the
     /// explicit `tenant mode <name> install` operator action.
@@ -96,9 +95,7 @@ pub(crate) enum Verb {
 
 /// Which tier of the profile's allowlist the rendered PF anchor body
 /// should include. Runtime is the baseline (only `allowlist.runtime.hosts`);
-/// install is the widened set (`runtime + install`). Cycle 3 carves
-/// the binary distinction; future tiers (e.g. provisioning, ci) would
-/// extend the enum.
+/// install is the widened set (`runtime + install`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ModeLevel {
     Runtime,

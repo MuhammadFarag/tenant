@@ -18,6 +18,6 @@ fn help_exits_zero() {
 fn dry_run_accepted_as_global_flag_before_subcommand() {
     let (code, stdout, stderr) = run_with(StubReader::default(), &["--dry-run", "create", "dev"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    // Cycle 12 dry-run: summary + prompt-preview, no substrate.
+    // Dry-run: summary + prompt-preview, no substrate.
     assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
 }

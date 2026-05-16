@@ -83,7 +83,7 @@ fn rejects_defaults_user_qualifier() {
     // `Defaults:user env_delete +=` applies when invoking user
     // matches `user`. Even if it covers the operator's sudo invocation
     // for this run, it doesn't generalize to other invokers. Parser
-    // rejects all qualified forms in cycle 1.
+    // rejects all qualified forms.
     let policy = "Defaults:alice env_delete += \"SSH_AUTH_SOCK\"\n";
     assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
 }

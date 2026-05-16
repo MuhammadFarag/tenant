@@ -101,15 +101,15 @@ pub const TEST_HOST: &str = "operator";
 
 /// Expected `─── <title> ───...` section divider line emitted by
 /// `Reporter::section` under colors=off, width 80. Centralized so tests
-/// pin the cycle-12 wireframe without re-encoding the padding math at
-/// every call site; if Reporter's section width or dash count ever
-/// changes, both sides move together via `tenant::ansi::rule`.
+/// pin the wireframe without re-encoding the padding math at every
+/// call site; if Reporter's section width or dash count ever changes,
+/// both sides move together via `tenant::ansi::rule`.
 pub fn section_line(title: &str) -> String {
     tenant::ansi::rule(title, 80)
 }
 
-/// Build the full cycle-12 real-mode-success stdout block: section
-/// divider opening, `✓ <label>` for each step, `─── Done ───` section,
+/// Build the full real-mode-success stdout block: section divider
+/// opening, `✓ <label>` for each step, `─── Done ───` section,
 /// closing line. Tests pass the ordered list of business labels they
 /// expect to see; the helper handles framing. Trailing newline included.
 pub fn real_success_stdout(opening_title: &str, checks: &[&str], closing: &str) -> String {
@@ -127,9 +127,9 @@ pub fn real_success_stdout(opening_title: &str, checks: &[&str], closing: &str) 
     out
 }
 
-/// Cycle-12 real-mode-failure stdout block (no Done section, no closing
-/// line — the verb didn't complete). Only the section opening + ✓
-/// lines for steps that actually succeeded before the failure.
+/// Real-mode-failure stdout block (no Done section, no closing line
+/// — the verb didn't complete). Only the section opening + ✓ lines
+/// for steps that actually succeeded before the failure.
 pub fn real_failure_stdout(opening_title: &str, checks: &[&str]) -> String {
     let mut out = section_line(opening_title);
     out.push('\n');
@@ -141,8 +141,8 @@ pub fn real_failure_stdout(opening_title: &str, checks: &[&str]) -> String {
     out
 }
 
-/// Render the cycle-15 verbose plan section as it appears inside a
-/// summary (after the bullets, before "Sudo needed for:"). Each
+/// Render the verbose plan section as it appears inside a summary
+/// (after the bullets, before "Sudo needed for:"). Each
 /// `(intent, shell, annotation)` entry becomes:
 ///
 /// ```text
@@ -170,7 +170,7 @@ pub fn verbose_plan_section(entries: &[(&str, &str, Option<&str>)]) -> String {
     out
 }
 
-/// Pre-built plan entries for the `create` verb in the cycle-15
+/// Pre-built plan entries for the `create` verb in the
 /// intent-leads-shell-follows layout. Returns the 14-entry list every
 /// `tenant create <name> -v` invocation expects (UID/GID substituted),
 /// for splicing into a verbose summary via `verbose_plan_section`.
@@ -273,8 +273,8 @@ pub fn create_verbose_plan_block(name: &str, uid: u32, gid: u32) -> String {
     verbose_plan_section_owned(&create_verbose_plan_entries(name, uid, gid))
 }
 
-/// Pre-built plan entries for the `destroy` verb in cycle-15 layout
-/// (11 entries).
+/// Pre-built plan entries for the `destroy` verb in the
+/// intent-leads-shell-follows layout (11 entries).
 pub fn destroy_verbose_plan_entries(name: &str) -> Vec<(String, String, Option<&'static str>)> {
     vec![
         (
@@ -390,14 +390,14 @@ pub fn orphan_verbose_plan_block(name: &str) -> String {
     verbose_plan_section_owned(&orphan_verbose_plan_entries(name))
 }
 
-/// Cycle-12 dry-run summary block for `tenant create <name> --dry-run`.
+/// Dry-run summary block for `tenant create <name> --dry-run`.
 /// Matches `Reporter::create_summary` byte-for-byte, then appends the
 /// "(Real run would prompt: Proceed? [Y/n])" preview line that
-/// `Reporter::confirm` emits in dry-run mode (Q13 lock).
+/// `Reporter::confirm` emits in dry-run mode.
 ///
-/// Cycle 15: `plan_section` splices the verbose "Plan (commands to
-/// execute):" block in BEFORE the "Sudo needed for:" line. Pass
-/// `None` for the standard-mode dry-run (no plan); pass
+/// `plan_section` splices the verbose "Plan (commands to execute):"
+/// block in BEFORE the "Sudo needed for:" line. Pass `None` for the
+/// standard-mode dry-run (no plan); pass
 /// `Some(verbose_plan_section(&entries))` for the verbose-mode shape.
 pub fn create_dry_run_block(name: &str, uid: u32, gid: u32, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
@@ -419,8 +419,8 @@ pub fn create_dry_run_block(name: &str, uid: u32, gid: u32, plan_section: Option
 }
 
 /// Dry-run summary block for `tenant destroy <name> --dry-run` (full
-/// destroy path, default-N prompt preview). Cycle 15: `plan_section`
-/// optionally splices the verbose plan block (Q3 lock pattern).
+/// destroy path, default-N prompt preview). `plan_section` optionally
+/// splices the verbose plan block.
 pub fn destroy_dry_run_block(name: &str, uid: u32, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     format!(
@@ -441,8 +441,8 @@ pub fn destroy_dry_run_block(name: &str, uid: u32, plan_section: Option<&str>) -
     )
 }
 
-/// Dry-run summary block for the orphan-group convergence path. Cycle
-/// 15: `plan_section` optionally splices the verbose plan block.
+/// Dry-run summary block for the orphan-group convergence path.
+/// `plan_section` optionally splices the verbose plan block.
 pub fn destroy_orphan_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     format!(
@@ -462,7 +462,7 @@ pub fn destroy_orphan_dry_run_block(name: &str, plan_section: Option<&str>) -> S
 }
 
 /// Dry-run summary block for `tenant mode <name> <level> --dry-run`.
-/// Cycle 15: `plan_section` optionally splices the verbose plan block.
+/// `plan_section` optionally splices the verbose plan block.
 pub fn mode_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     let re_render = if level == "install" {
@@ -494,7 +494,7 @@ pub fn mode_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -
 }
 
 /// Dry-run summary block for single-tenant `tenant reload <name>`.
-/// Cycle 15: `plan_section` optionally splices the verbose plan block.
+/// `plan_section` optionally splices the verbose plan block.
 pub fn reload_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     format!(
@@ -526,7 +526,7 @@ pub fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
         &mut stdout,
         &mut stderr,
         &mut stdin,
-        false, // stdin not a TTY → confirm auto-proceeds (cycle 12 Q3 lock)
+        false, // stdin not a TTY → confirm auto-proceeds
         tenant::ansi::Colors::default(),
     );
     (
@@ -559,7 +559,7 @@ pub fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u
     )
 }
 
-/// Cycle-12 confirm-aware test runner. Simulates a TTY stdin so the
+/// Confirm-aware test runner. Simulates a TTY stdin so the
 /// confirmation prompt fires, with `stdin_content` as the operator's
 /// keystrokes (one or more lines, `\n`-terminated). Use for tests that
 /// exercise y/N parsing, default-Y vs default-N, and reprompt-on-bad-
@@ -607,10 +607,11 @@ pub fn stub_with_tenant(name: &str) -> StubReader {
 }
 
 /// Helper: profile TOML with the given runtime + install host lists
-/// AND a `[[shares]]` block for cycle-10 share-reapply tests. Each
-/// share triple is `(host_path, mode, tenant_path)`; mode is "ro" or
-/// "rw" verbatim from the schema. Empty `shares` slice produces no
-/// `[[shares]]` blocks (backward-compat with cycle-9-era profiles).
+/// AND a `[[shares]]` block for share-reapply tests. Each share triple
+/// is `(host_path, mode, tenant_path)`; mode is "ro" or "rw" verbatim
+/// from the schema. Empty `shares` slice produces no `[[shares]]`
+/// blocks (backward-compat for profiles authored before shares were
+/// added to the schema).
 pub fn profile_with_shares(
     runtime: &[&str],
     install: &[&str],

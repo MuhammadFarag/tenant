@@ -338,16 +338,16 @@ fn run_dscl(args: &[&str]) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Granular error type for the create writer. Phase 3 splits the create
-/// flow into two account-domain ops (CreateShareGroup +
-/// CreateTenantUser), each of which can fail; cycle 1 adds the
-/// profile-write step. The dispatcher needs to know which one failed so
-/// it can render the right error message: `create_group_failed` if
-/// dseditgroup tripped (the user wasn't touched), `create_failed` if
-/// sysadminctl tripped (the writer ran a rollback). The third variant
-/// covers the worst case where the rollback itself failed — the host is
-/// left with an orphan group, which the operator needs to know about so
-/// they can re-run destroy to converge.
+/// Granular error type for the create writer. The create flow splits
+/// into account-domain ops (CreateShareGroup + CreateTenantUser) and
+/// a profile-write step, each of which can fail. The dispatcher needs
+/// to know which one failed so it can render the right error message:
+/// `create_group_failed` if dseditgroup tripped (the user wasn't
+/// touched), `create_failed` if sysadminctl tripped (the writer ran
+/// a rollback). The `UserWithRollback` variant covers the worst case
+/// where the rollback itself failed — the host is left with an orphan
+/// group, which the operator needs to know about so they can re-run
+/// destroy to converge.
 #[derive(Debug)]
 pub(crate) enum CreateError {
     /// CreateShareGroup failed before CreateTenantUser ran. No rollback —
@@ -360,22 +360,21 @@ pub(crate) enum CreateError {
     /// failed. The host now has an orphan `<name>-tenant-share` group
     /// with no corresponding user. The dispatcher emits two stderr
     /// lines, the second pointing the operator at `tenant destroy` for
-    /// convergence (cycle 5's OrphanGroup arm).
+    /// convergence (the OrphanGroup arm of `destroy_eligibility`).
     UserWithRollback {
         user: AccountError,
         rollback: AccountError,
     },
-    /// Cycle 14: CreateShareGroup succeeded; `AddHostToShareGroup`
-    /// failed BEFORE `CreateTenantUser` ran. The host now carries an
-    /// orphan `<name>-tenant-share` group with no host membership and
-    /// no tenant user. Locked recovery: `tenant destroy <name>` runs
-    /// the orphan-group convergence path (cycle 5 OrphanGroup arm),
-    /// which itself runs `RemoveHostFromShareGroup` idempotently (the
-    /// substrate's internal checkmember short-circuits when host
-    /// isn't a member). No automatic rollback at create-time — the
-    /// host-add step is load-bearing for tenant usability, so we
-    /// abort and let the operator decide whether to retry or
-    /// converge.
+    /// CreateShareGroup succeeded; `AddHostToShareGroup` failed BEFORE
+    /// `CreateTenantUser` ran. The host now carries an orphan
+    /// `<name>-tenant-share` group with no host membership and no
+    /// tenant user. Recovery: `tenant destroy <name>` runs the
+    /// orphan-group convergence path, which itself runs
+    /// `RemoveHostFromShareGroup` idempotently (the substrate's
+    /// internal checkmember short-circuits when host isn't a member).
+    /// No automatic rollback at create-time — the host-add step is
+    /// load-bearing for tenant usability, so we abort and let the
+    /// operator decide whether to retry or converge.
     HostMembership(AccountError),
 
     /// CreateShareGroup + CreateTenantUser both succeeded; the
@@ -396,12 +395,12 @@ pub(crate) enum CreateError {
     /// failure surfaces during the firewall composition step.
     Firewall(FirewallError),
 
-    /// Cycle 10: post-provision share-reapply step failed. The host
-    /// has user + group + profile + PF anchor + enable all installed
-    /// but the per-share substrate (Acl / Account / Probe / Share)
-    /// tripped. Operator's recovery: `tenant reload <name>` (idempotent
-    /// retry) or `tenant destroy <name>` + retry create. Default profile
-    /// has no shares so this arm is unreachable on the production path
+    /// Post-provision share-reapply step failed. The host has user +
+    /// group + profile + PF anchor + enable all installed but the
+    /// per-share substrate (Acl / Account / Probe / Share) tripped.
+    /// Operator's recovery: `tenant reload <name>` (idempotent retry)
+    /// or `tenant destroy <name>` + retry create. Default profile has
+    /// no shares so this arm is unreachable on the production path
     /// today; tests using `with_create_profile_content` to pre-populate
     /// a profile with shares exercise it.
     PostProvision(ModeError),
@@ -434,23 +433,23 @@ impl From<AccountError> for DestroyError {
     }
 }
 
-/// Pre-flight refusals from the share-reapply substrate (cycle 10).
-/// Operator-actionable cases that should be loud before the substrate
-/// runs (Q11 / Q12 locks). Each variant carries the path so the
-/// operator can locate the conflict directly.
+/// Pre-flight refusals from the share-reapply substrate. Operator-
+/// actionable cases that should be loud before the substrate runs.
+/// Each variant carries the path so the operator can locate the
+/// conflict directly.
 #[derive(Debug)]
 pub(crate) enum ShareError {
-    /// Q11 lock: profile declared a `host_path` that doesn't exist on
-    /// disk at reapply time. Refuse loudly — the profile is a
-    /// declaration of what the operator wants; missing host_path is a
-    /// profile-authoring mistake.
+    /// Profile declared a `host_path` that doesn't exist on disk at
+    /// reapply time. Refuse loudly — the profile is a declaration of
+    /// what the operator wants; missing host_path is a profile-authoring
+    /// mistake.
     HostPathMissing { path: PathBuf },
 
-    /// Q12 lock: profile declared a `tenant_path` that exists as a
-    /// real directory or file (NOT a symlink). Substrate `ln -sfn`
-    /// would silently fail to replace a real-dir tenant_path; we
-    /// pre-check and refuse so the operator chooses between editing
-    /// the profile or removing the conflict.
+    /// Profile declared a `tenant_path` that exists as a real directory
+    /// or file (NOT a symlink). Substrate `ln -sfn` would silently fail
+    /// to replace a real-dir tenant_path; we pre-check and refuse so
+    /// the operator chooses between editing the profile or removing
+    /// the conflict.
     TenantPathOccupied { path: PathBuf },
 }
 
@@ -475,8 +474,8 @@ impl fmt::Display for ShareError {
 /// Failure surface for the `mode` verb and (by reuse) the `shell`
 /// auto-narrow + the `reload` verb + create-side post-provision step.
 /// Read/parse failures on the tenant's profile surface as `Profile`;
-/// anchor-write or pfctl-reload failures surface as `Firewall`. Cycle
-/// 10 adds four arms for the share-reapply substrate:
+/// anchor-write or pfctl-reload failures surface as `Firewall`. Four
+/// arms for the share-reapply substrate:
 /// - `Acl`: chmod +a/-a substrate failure on the host side
 /// - `Account`: sudo-u mkdir/ln substrate failure on the tenant side
 /// - `Probe`: tenant_path_kind machinery failure (sudo-cache, fork)
@@ -502,14 +501,14 @@ pub(crate) enum ModeError {
 }
 
 /// Failure surface for the `shell` verb. The login spawn itself can
-/// fail with `Account`; the cycle-4 narrow-on-shell-entry can fail
-/// with `Mode` (read/parse the profile, or InstallAnchor / Reload).
-/// Abort-on-narrow-failure (cycle-4 Q2 lock) — the shell is NOT
-/// launched if the narrow can't complete, because doing so would
-/// leave the operator inside a session that might still be at the
-/// previous (potentially install-tier-widened) firewall posture.
-/// Operator recovery is `tenant mode <name> runtime` to narrow
-/// manually, then retry `tenant shell <name>`.
+/// fail with `Account`; the narrow-on-shell-entry can fail with
+/// `Mode` (read/parse the profile, or InstallAnchor / Reload).
+/// Abort-on-narrow-failure — the shell is NOT launched if the narrow
+/// can't complete, because doing so would leave the operator inside
+/// a session that might still be at the previous (potentially
+/// install-tier-widened) firewall posture. Operator recovery is
+/// `tenant mode <name> runtime` to narrow manually, then retry
+/// `tenant shell <name>`.
 #[derive(Debug)]
 pub(crate) enum ShellError {
     Account(AccountError),
@@ -523,11 +522,12 @@ pub(crate) enum ShellError {
 /// render the upfront plan over the same ops the substrate will run,
 /// preserving the plan-vs-echo asymmetry contract for share ops.
 ///
-/// Cycle 14 adds `add_host`: the catch-up `AddHostToShareGroup` op
-/// that fires after PF reapply (Install + Reload) and before the
-/// per-share ops. Substrate-idempotent, so legacy tenants (created
-/// before cycle 14) get their host membership restored on the next
-/// reload / mode / shell with zero operator action.
+/// `add_host` is the catch-up `AddHostToShareGroup` op that fires
+/// after PF reapply (Install + Reload) and before the per-share ops.
+/// Substrate-idempotent, so legacy tenants (created before host
+/// membership was wired into create) get their host membership
+/// restored on the next reload / mode / shell with zero operator
+/// action.
 pub(crate) struct ReapplyPlan {
     pub(crate) install_anchor: FirewallOp,
     pub(crate) reload: FirewallOp,
@@ -574,9 +574,9 @@ impl ShareOps {
 
 /// Outcome of `Writer::reload_all_tenants`. Carries the per-tenant
 /// failure count; the dispatcher maps `failed > 0 → EX_IOERR (74)`,
-/// `failed == 0 → 0` (Q15 lock). Tenant count and success count are
-/// implicit (the count comes from `Reader::tenant_names().len()`;
-/// success = total - failed).
+/// `failed == 0 → 0`. Tenant count and success count are implicit
+/// (the count comes from `Reader::tenant_names().len()`; success =
+/// total - failed).
 #[derive(Debug)]
 pub(crate) struct ReloadAllOutcome {
     pub(crate) failed: u32,
@@ -610,7 +610,7 @@ impl<'a> Writer<'a> {
         gid: u32,
         reporter: &mut Reporter,
     ) -> Result<(), CreateError> {
-        // Twelve-step composition. Account + profile (cycle 1):
+        // Twelve-step composition. Account + profile:
         //   1. CreateShareGroup
         //   2. CreateTenantUser
         //   3. DeleteShareGroup  # on rollback (if step 2 fails)
@@ -661,12 +661,11 @@ impl<'a> Writer<'a> {
 
         self.run(&create_group, reporter)
             .map_err(CreateError::Group)?;
-        // Cycle 14: add the host operator as a secondary member of the
-        // just-created share group. Hard-abort on failure (Q3 lock).
-        // No automatic rollback — the orphan-group destroy path
-        // (cycle 5 OrphanGroup arm) converges via `tenant destroy
-        // <name>`, which itself runs RemoveHostFromShareGroup
-        // idempotently.
+        // Add the host operator as a secondary member of the
+        // just-created share group. Hard-abort on failure. No
+        // automatic rollback — the orphan-group destroy path
+        // converges via `tenant destroy <name>`, which itself runs
+        // RemoveHostFromShareGroup idempotently.
         self.run(&add_host, reporter)
             .map_err(CreateError::HostMembership)?;
         match self.run(&add_user, reporter) {
@@ -732,8 +731,8 @@ impl<'a> Writer<'a> {
                     return Err(CreateError::Firewall(reload_err));
                 }
                 self.run(&enable, reporter).map_err(CreateError::Firewall)?;
-                // Cycle 10: post-provision share reapply on the
-                // freshly-written profile. Default profile has no
+                // Post-provision share reapply on the freshly-written
+                // profile. Default profile has no
                 // `[[shares]]`, so the share substrate is a no-op on
                 // the production path. Tests using
                 // `with_create_profile_content` to pre-populate a
@@ -778,7 +777,7 @@ impl<'a> Writer<'a> {
         //   2. LookupUserRecord   — residue probe
         //   3. DeleteUserRecord   — conditional dscl cleanup
         //   4. DeleteShareGroup   — Phase-3 group cleanup
-        //   5. ProfileOp::Delete  — cycle 1's profile cleanup
+        //   5. ProfileOp::Delete  — profile cleanup
         //   6. BackupConfig       — pf.conf snapshot before edits
         //   7. RemoveAnchor       — delete /etc/pf.anchors/tenant-<name>
         //   8. UpdateConfig       — write pf.conf with tenant ref removed
@@ -820,12 +819,12 @@ impl<'a> Writer<'a> {
             Err(other) => return Err(DestroyError::Account(other)),
         }
 
-        // Cycle 14: remove the host operator from the share group
-        // before the group itself is deleted. Substrate-idempotent
-        // via internal checkmember (legacy tenants pre-cycle-14 OR
-        // host already manually removed both surface as the same
-        // no-op execute). Runs unconditionally for plan/echo
-        // symmetry with the create-side `AddHostToShareGroup`.
+        // Remove the host operator from the share group before the
+        // group itself is deleted. Substrate-idempotent via internal
+        // checkmember (legacy tenants without host membership OR host
+        // already manually removed both surface as the same no-op
+        // execute). Runs unconditionally for plan/echo symmetry with
+        // the create-side `AddHostToShareGroup`.
         self.run(&remove_host, reporter)?;
         self.run(&delete_group, reporter)?;
         self.run(&delete_profile, reporter)
@@ -872,14 +871,13 @@ impl<'a> Writer<'a> {
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
         // Seven-step convergence path: DeleteShareGroup + ProfileOp::Delete
-        // (cycle 1) + the five-step PF teardown (cycle 2 including
-        // FlushAnchor). If a partial create left an anchor or pf.conf
-        // reference, the firewall steps converge it here too — and if
-        // there's nothing to tear down, each step is idempotent
-        // (RemoveAnchor on missing file is a noop, UpdateConfig on
-        // conf without our anchor is a noop, FlushAnchor on an
-        // unknown anchor is a noop) so the convergence path stays
-        // single-pass.
+        // + the five-step PF teardown (including FlushAnchor). If a
+        // partial create left an anchor or pf.conf reference, the
+        // firewall steps converge it here too — and if there's nothing
+        // to tear down, each step is idempotent (RemoveAnchor on
+        // missing file is a noop, UpdateConfig on conf without our
+        // anchor is a noop, FlushAnchor on an unknown anchor is a
+        // noop) so the convergence path stays single-pass.
         let remove_host = AccountOp::RemoveHostFromShareGroup {
             name: name.into(),
             host: host.into(),
@@ -893,9 +891,10 @@ impl<'a> Writer<'a> {
 
         reporter.orphan_group_starting(name);
 
-        // Cycle 14: symmetric with destroy_tenant. Substrate-idempotent
-        // (the OrphanGroup eligibility state can include hosts created
-        // before cycle 14 OR partial-create where AddHost never fired).
+        // Symmetric with destroy_tenant. Substrate-idempotent (the
+        // OrphanGroup eligibility state can include hosts created
+        // before host membership was wired into create OR
+        // partial-create where AddHost never fired).
         self.run(&remove_host, reporter)?;
         self.run(&delete_group, reporter)?;
         self.run(&delete_profile, reporter)
@@ -929,26 +928,26 @@ impl<'a> Writer<'a> {
     /// (`level == Install`), and reapplies via the existing
     /// `FirewallOp::InstallAnchor` + `FirewallOp::Reload` pair.
     ///
-    /// **No defensive `FlushAnchor`** before InstallAnchor (cycle-3
-    /// Q1 lock): the parent `load anchor` directive in `/etc/pf.conf`
-    /// stays in place across mode reapply, so `pfctl -f` re-reads the
-    /// anchor file and replaces the in-kernel ruleset on every reload.
-    /// The cycle-2 destroy-side FlushAnchor is load-bearing only when
-    /// the parent load directive is removed (orphan-anchor case);
-    /// mode-reapply is structurally different. The cycle-3 manual
-    /// smoke verifies empirically by checking the kernel `<allowed>`
-    /// table shrinks correctly on narrow-back.
+    /// **No defensive `FlushAnchor`** before InstallAnchor: the parent
+    /// `load anchor` directive in `/etc/pf.conf` stays in place across
+    /// mode reapply, so `pfctl -f` re-reads the anchor file and
+    /// replaces the in-kernel ruleset on every reload. The destroy-
+    /// side FlushAnchor is load-bearing only when the parent load
+    /// directive is removed (orphan-anchor case); mode-reapply is
+    /// structurally different — manual smoke confirms the kernel
+    /// `<allowed>` table shrinks correctly on narrow-back.
     ///
-    /// **No automatic recovery** on Reload failure (matches the
-    /// plugin's `reapply_anchor`). If Reload fails, the anchor file
-    /// reflects the new body but the kernel rules still match the
-    /// old body — operator reruns `tenant mode <name> <level>` to
-    /// retry. The verb is idempotent at the substrate.
-    /// Apply a pre-built reapply plan at the given tier. Cycle 15:
-    /// dispatch calls `build_reapply_plan` BEFORE the confirm prompt
-    /// (Q3 lock — profile-read failures surface pre-prompt rather
-    /// than mid-substrate); this verb takes the constructed plan as
-    /// a parameter rather than building it internally.
+    /// **No automatic recovery** on Reload failure. If Reload fails,
+    /// the anchor file reflects the new body but the kernel rules
+    /// still match the old body — operator reruns `tenant mode
+    /// <name> <level>` to retry. The verb is idempotent at the
+    /// substrate.
+    ///
+    /// Apply a pre-built reapply plan at the given tier. Dispatch
+    /// calls `build_reapply_plan` BEFORE the confirm prompt (so
+    /// profile-read failures surface pre-prompt rather than mid-
+    /// substrate); this verb takes the constructed plan as a
+    /// parameter rather than building it internally.
     pub(crate) fn apply_tenant_mode(
         &self,
         name: &str,
@@ -964,11 +963,11 @@ impl<'a> Writer<'a> {
 
     /// Build the full op list for a profile-to-tenant reapply at
     /// `level`. Reads the profile, parses it, pre-flights every share
-    /// entry (Q11 host_path existence; Q12 tenant_path occupancy),
-    /// and constructs the op sequence: `InstallAnchor → Reload →
-    /// (per share: Grant, optionally EnsureDir, EnsureSymlink)` in
-    /// profile-declared order (Q13 lock). Pre-flight refusals surface
-    /// before any op fires so the caller's plan emission stays clean.
+    /// entry (host_path existence; tenant_path occupancy), and
+    /// constructs the op sequence: `InstallAnchor → Reload → (per
+    /// share: Grant, optionally EnsureDir, EnsureSymlink)` in
+    /// profile-declared order. Pre-flight refusals surface before
+    /// any op fires so the caller's plan emission stays clean.
     ///
     /// Owning the parsed profile + the constructed ops in a single
     /// struct lets the verb methods render the upfront plan
@@ -1078,11 +1077,11 @@ impl<'a> Writer<'a> {
 
     /// Execute a pre-built `ReapplyPlan` against the substrate.
     /// PF reapply first (`InstallAnchor → Reload`); a Reload failure
-    /// aborts before any share-substrate mutation. Cycle 14:
-    /// `AddHostToShareGroup` fires after PF reapply lands and before
-    /// the per-share ops — keeps the catch-up path adjacent to the
-    /// share substrate it enables (host needs the membership for the
-    /// inheritable ACL grant on `host_path` to flow through).
+    /// aborts before any share-substrate mutation. `AddHostToShareGroup`
+    /// fires after PF reapply lands and before the per-share ops —
+    /// keeps the catch-up path adjacent to the share substrate it
+    /// enables (host needs the membership for the inheritable ACL
+    /// grant on `host_path` to flow through).
     fn execute_reapply_plan(
         &self,
         plan: &ReapplyPlan,
@@ -1135,17 +1134,17 @@ impl<'a> Writer<'a> {
     }
 
     /// Interactive shell entry into the tenant. Three logical steps:
-    /// (1) narrow the tenant's PF anchor back to runtime tier (cycle-4
-    /// auto-narrow — unconditional, idempotent, security-load-bearing),
+    /// (1) narrow the tenant's PF anchor back to runtime tier
+    /// (auto-narrow — unconditional, idempotent, security-load-bearing),
     /// (2) emit the verb's pre-exec intent + echo for the login op,
     /// (3) hand off to the substrate's `login` method.
     ///
     /// The narrow uses `build_reapply_plan` + `execute_reapply_plan`
     /// (shared with `apply_tenant_mode` and `reload_tenant`) — same
-    /// data flow, no mode-verb intent/done emit. If the narrow
-    /// fails, the login is NOT launched (Q2 lock, abort posture); the
-    /// operator's recovery is `tenant mode <name> runtime` to narrow
-    /// manually, then retry.
+    /// data flow, no mode-verb intent/done emit. If the narrow fails,
+    /// the login is NOT launched (abort posture); the operator's
+    /// recovery is `tenant mode <name> runtime` to narrow manually,
+    /// then retry.
     ///
     /// The LoginAsUser op is built only to feed `describe_account` for
     /// the plan and echo lines; execution goes through the substrate's
@@ -1161,11 +1160,11 @@ impl<'a> Writer<'a> {
         host: &str,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
-        // Cycle-4 invariant: intent emitted BEFORE the narrow tries,
-        // so the operator sees the verb context even if the
-        // pre-flight profile read fails. Plan rendering happens AFTER
-        // the plan is built (post-profile-read) so share ops appear
-        // in the plan block alongside the PF + login ops.
+        // Intent emitted BEFORE the narrow tries, so the operator
+        // sees the verb context even if the pre-flight profile read
+        // fails. Plan rendering happens AFTER the plan is built
+        // (post-profile-read) so share ops appear in the plan block
+        // alongside the PF + login ops.
         reporter.shell_intent(name);
         let reapply_plan = self
             .build_reapply_plan(name, host, ModeLevel::Runtime)
@@ -1182,11 +1181,12 @@ impl<'a> Writer<'a> {
 
     /// Run a single op: emit the `$` echo line (in real+verbose),
     /// execute the op against the substrate, then emit the `✓
-    /// <business>` progress line in real mode (cycle 12). Generic over
-    /// `WritableOp` so `AccountOp` and `ProfileOp` both flow through one
-    /// method, each preserving its domain-specific error type. The
-    /// echo + execute + progress coupling means a Writer caller can't
-    /// accidentally execute without narrating either before or after.
+    /// <business>` progress line in real mode. Generic over
+    /// `WritableOp` so `AccountOp` and `ProfileOp` both flow through
+    /// one method, each preserving its domain-specific error type.
+    /// The echo + execute + progress coupling means a Writer caller
+    /// can't accidentally execute without narrating either before
+    /// or after.
     fn run<O: WritableOp>(&self, op: &O, reporter: &mut Reporter) -> Result<(), O::Error> {
         reporter.step(op.op_ref());
         op.execute_via(self.executor)?;
@@ -1194,15 +1194,13 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Reload a single tenant — runtime-tier PF reapply + share
-    /// substrate. Cycle 10's headline verb's per-tenant arm. Reuses
-    /// `build_reapply_plan` + `execute_reapply_plan` under runtime
-    /// tier; the verb's distinct framing lives on the Reporter.
-    /// Reload a single tenant from a pre-built plan. Cycle 15:
-    /// dispatch (or the no-arg reload walk) builds the plan upfront
-    /// via `build_reapply_plan` and passes it in. Profile-read /
-    /// share-pre-flight failures surface at the build site, not
-    /// here.
+    /// Reload a single tenant from a pre-built plan — runtime-tier
+    /// PF reapply + share substrate. Reuses `build_reapply_plan` +
+    /// `execute_reapply_plan` under runtime tier; the verb's distinct
+    /// framing lives on the Reporter. Dispatch (or the no-arg reload
+    /// walk) builds the plan upfront via `build_reapply_plan` and
+    /// passes it in. Profile-read / share-pre-flight failures surface
+    /// at the build site, not here.
     pub(crate) fn reload_tenant(
         &self,
         name: &str,
@@ -1215,12 +1213,12 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Reload every tenant on the host. Q15 lock: continue on
-    /// per-tenant failure, accumulate, surface a single end-of-run
-    /// summary. The exit code at the dispatcher reflects the worst
-    /// outcome (0 if all clean; 74 if any tripped). Tenants are
-    /// walked in `Reader::tenant_names()` order (alphabetical) for
-    /// deterministic output across runs.
+    /// Reload every tenant on the host. Continue on per-tenant
+    /// failure, accumulate, surface a single end-of-run summary.
+    /// The exit code at the dispatcher reflects the worst outcome
+    /// (0 if all clean; 74 if any tripped). Tenants are walked in
+    /// `Reader::tenant_names()` order (alphabetical) for deterministic
+    /// output across runs.
     pub(crate) fn reload_all_tenants(
         &self,
         accounts: &dyn Reader,
@@ -1235,13 +1233,12 @@ impl<'a> Writer<'a> {
         }
         let mut failed = 0;
         for name in &names {
-            // Per-tenant build + execute. Cycle 15: the no-arg walk
-            // doesn't pre-build plans in dispatch (Q5 lock — no
-            // per-tenant plans in the bulk summary), so the
-            // build_reapply_plan call lives here. A build failure
-            // (profile read / share pre-flight) routes through the
-            // same per-tenant Reporter methods as an execute
-            // failure.
+            // Per-tenant build + execute. The no-arg walk doesn't
+            // pre-build plans in dispatch (no per-tenant plans in the
+            // bulk summary), so the build_reapply_plan call lives here.
+            // A build failure (profile read / share pre-flight) routes
+            // through the same per-tenant Reporter methods as an
+            // execute failure.
             let outcome = match self.build_reapply_plan(name, host, ModeLevel::Runtime) {
                 Ok(plan) => self.reload_tenant(name, &plan, reporter),
                 Err(err) => Err(err),
@@ -1368,10 +1365,10 @@ impl<'a> Writer<'a> {
 
     /// Read `/etc/pam.d/sudo` + emit the host-wide `TouchIdMissing`
     /// finding if no active `auth sufficient pam_tid.so` directive
-    /// is present (cycle 7 SC3). Runs once per `tenant doctor`
-    /// invocation (single-emit, host-level); both `doctor_tenant`
-    /// and `doctor_all_tenants` call this. Returns the emitted
-    /// finding (if any) so the caller aggregates it for `--strict`.
+    /// is present. Runs once per `tenant doctor` invocation
+    /// (single-emit, host-level); both `doctor_tenant` and
+    /// `doctor_all_tenants` call this. Returns the emitted finding
+    /// (if any) so the caller aggregates it for `--strict`.
     fn check_touch_id_for_sudo(
         &self,
         reporter: &mut Reporter,
@@ -1386,10 +1383,9 @@ impl<'a> Writer<'a> {
     }
 
     /// Read pf's global enable state + emit the host-wide
-    /// `PfDisabled` finding (Critical) if pf is off (cycle 7 SC4).
-    /// Runs once per `tenant doctor` invocation (single-emit,
-    /// host-level); a single global pf state covers every tenant
-    /// anchor.
+    /// `PfDisabled` finding (Critical) if pf is off. Runs once per
+    /// `tenant doctor` invocation (single-emit, host-level); a single
+    /// global pf state covers every tenant anchor.
     fn check_pf_status(&self, reporter: &mut Reporter) -> Result<Option<Finding>, FirewallError> {
         let status = self.executor.read_pf_status()?;
         if pf_status_enabled(&status) {
@@ -1401,13 +1397,13 @@ impl<'a> Writer<'a> {
     }
 
     /// Probe one tenant's view of the curated path list, then
-    /// structural-check the kernel's pf anchor for the same tenant
-    /// (cycle 7 SC2). Emits `doctor_starting` (curated-list
-    /// disclosure in verbose; dry-run intent line), then each
-    /// filesystem finding inline, then any `PfRuleDrift` findings
-    /// inline, then `doctor_done_summary` with the total per-tenant
-    /// finding count. Env-leak + other host-wide findings are the
-    /// caller's responsibility.
+    /// structural-check the kernel's pf anchor for the same tenant.
+    /// Emits `doctor_starting` (curated-list disclosure in verbose;
+    /// dry-run intent line), then each filesystem finding inline,
+    /// then any `PfRuleDrift` findings inline, then
+    /// `doctor_done_summary` with the total per-tenant finding count.
+    /// Env-leak + other host-wide findings are the caller's
+    /// responsibility.
     fn probe_tenant_paths(
         &self,
         host: &str,
@@ -1450,7 +1446,7 @@ impl<'a> Writer<'a> {
         Ok(findings)
     }
 
-    /// Cycle 14: query the directory service for host membership in
+    /// Query the directory service for host membership in
     /// `<name>-tenant-share`; emit `HostNotInShareGroup` when missing.
     /// Substrate failure (dseditgroup machinery error) surfaces as
     /// `DoctorError::Probe` via the `AccountError → DoctorError::Probe`
@@ -1481,16 +1477,15 @@ impl<'a> Writer<'a> {
     }
 
     /// Walk the profile's declared `[[shares]]` and emit drift findings
-    /// for each: cycle 11's `AclDrift` (host_path missing the
+    /// for each: `AclDrift` (host_path missing the
     /// `<tenant>-tenant-share` group's ACL entry) and `SymlinkDrift`
     /// (tenant_path isn't the declared symlink: Absent / WrongTarget /
     /// NotSymlink sub-cases via `SymlinkActual`). The two checks are
     /// independent — a single share entry can fire both findings.
-    /// Q4 (cycle 8) parallel: a profile that can't be read or parsed
-    /// SKIPS the check silently (a future `ProfileMissing` finding
-    /// would surface that case separately). Q5 (cycle 11) parallel: a
-    /// per-path substrate failure on `read_host_acl` or
-    /// `tenant_path_kind` aborts the loop with `DoctorError::Probe`,
+    /// A profile that can't be read or parsed SKIPS the check silently
+    /// (a future `ProfileMissing` finding would surface that case
+    /// separately). A per-path substrate failure on `read_host_acl`
+    /// or `tenant_path_kind` aborts the loop with `DoctorError::Probe`,
     /// surfacing the error frame; mirrors `read_kernel_pf_rules`'s
     /// fail-fast posture for the doctor walk.
     ///
@@ -1527,8 +1522,9 @@ impl<'a> Writer<'a> {
                 findings.push(finding);
             }
             // SymlinkDrift check: probe tenant_path_kind and compare
-            // against the declared host_path target. Cycle-11 Q3
-            // lock: string-exact comparison (no canonicalize).
+            // against the declared host_path target. String-exact
+            // comparison (no canonicalize) — the profile names the
+            // operator's declared intent.
             let tenant_path = expand_tenant_path(name, &share.tenant_path);
             let kind = self.executor.tenant_path_kind(name, &tenant_path)?;
             let actual_opt = match kind {
@@ -1559,12 +1555,12 @@ impl<'a> Writer<'a> {
     /// Compare the on-disk anchor body for `name` against the
     /// runtime-tier render of the current profile. Returns a
     /// `Finding::AnchorBodyDrift` on mismatch, `None` on match.
-    /// Q4 lock: a profile that can't be read or parsed SKIPS the
-    /// check (returns `Ok(None)`) so a missing/corrupt profile is
-    /// reported by a different cycle's finding, not as a spurious
-    /// drift. Q9 lock: comparison is against the runtime tier only —
-    /// install-tier widening outside a shell session IS drift per
-    /// the cycle-4 session-scoped doctrine.
+    /// A profile that can't be read or parsed SKIPS the check
+    /// (returns `Ok(None)`) so a missing/corrupt profile is reported
+    /// by a different finding, not as a spurious drift. Comparison
+    /// is against the runtime tier only — install-tier widening
+    /// outside a shell session IS drift, since `tenant shell <name>`
+    /// auto-narrows on entry.
     fn check_anchor_body_drift(&self, name: &str) -> Result<Option<Finding>, HostFileError> {
         let profile_content = match self.executor.read_profile(name) {
             Ok(c) => c,
@@ -1589,8 +1585,8 @@ impl<'a> Writer<'a> {
 /// filesystem-probe substrate; `HostFile` covers reads of host
 /// config files (sudoers + drop-ins via `read_env_policy`;
 /// `/etc/pam.d/sudo` via `read_pam_sudo`); `Firewall` covers pfctl
-/// reads (`read_kernel_pf_rules` cycle 7 SC2; `read_pf_status` SC4).
-/// The dispatcher routes each variant to a Reporter method with
+/// reads (`read_kernel_pf_rules` and `read_pf_status`). The
+/// dispatcher routes each variant to a Reporter method with
 /// verb-appropriate framing.
 #[derive(Debug)]
 pub(crate) enum DoctorError {

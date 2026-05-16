@@ -1,10 +1,9 @@
-// Combinatorial coverage on `doctor::has_group_acl_entry` (cycle 11
-// SC2). The parser's call site is inside the writer's per-share
-// drift loop and would otherwise need many overlapping E2E tests to
-// exercise the shapes ACL listings take in practice. Same
-// justification as `tests/env_policy_parse.rs` / `tests/pam_parse.rs`:
-// per-shape unit testing on a pure function whose state space is
-// combinatorial.
+// Combinatorial coverage on `doctor::has_group_acl_entry`. The
+// parser's call site is inside the writer's per-share drift loop
+// and would otherwise need many overlapping E2E tests to exercise
+// the shapes ACL listings take in practice. Same justification as
+// `tests/env_policy_parse.rs` / `tests/pam_parse.rs`: per-shape
+// unit testing on a pure function whose state space is combinatorial.
 
 use tenant::doctor::has_group_acl_entry;
 
@@ -22,7 +21,7 @@ fn detects_entry_with_canonical_macos_storage_bits() {
 
 #[test]
 fn detects_entry_with_pre_canonicalized_bits() {
-    // The cycle-10 `AclOp::Grant` substrate writes
+    // The `AclOp::Grant` substrate writes the
     // `read,write,execute,...` form. If `ls -lde` is queried before
     // macOS has canonicalized (or never canonicalizes — depends on
     // macOS version), the line stores the operator's input shape.

@@ -46,8 +46,8 @@ fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
     let (code, stdout, _stderr) =
         run_with(StubReader::default(), &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    // Cycle 15: the verbose plan section lives inside the summary
-    // (between the bullets and "Sudo needed for:"), rendered in
+    // The verbose plan section lives inside the summary (between
+    // the bullets and "Sudo needed for:"), rendered in
     // intent-leads-shell-follows layout via `create_verbose_plan_block`.
     let plan = create_verbose_plan_block("dev", 600, 600);
     assert_eq!(stdout, create_dry_run_block("dev", 600, 600, Some(&plan)));
@@ -352,7 +352,7 @@ fn create_writes_default_profile_to_store() {
 fn create_writes_profile_with_correct_toml_shape() {
     // Byte-exact pin on the default profile content. Schema-version
     // floor at 1 (future migrations bump this); two empty allowlist
-    // sections matching the shape cycle 2's PF anchor will read from.
+    // sections matching the shape the PF anchor render reads from.
     // No `[share]` section — that's Claude-Code-specific and out of
     // scope for the generic Rust port.
     let exec = StubExecutor::new();
@@ -392,9 +392,9 @@ fn create_dry_run_does_not_write_profile() {
 
 #[test]
 fn create_real_mode_standard_emits_only_post_exec_confirmation() {
-    // Standard real mode (cycle 12): section divider + ✓ per
-    // substrate step + Done section + single enriched closing line
-    // naming UID + GID + anchor. The op order is load-bearing:
+    // Standard real mode: section divider + ✓ per substrate step
+    // + Done section + single enriched closing line naming UID +
+    // GID + anchor. The op order is load-bearing:
     // CreateShareGroup must precede CreateTenantUser so the new
     // user's home directory chowns to `dev-tenant-share` (sysadminctl
     // chowns the home dir to the group named by `-GID` at creation
@@ -447,12 +447,12 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
 
 #[test]
 fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
-    // Cycle 15: scripted-real-verbose (TTY=false) drops the verbose
-    // plan from output entirely (Q1 lock — solo-Mac scope; cleaner
-    // log trace). The section divider opens the verb, per-substrate
-    // $ echo + ✓ progress interleave, then Done section + single
-    // enriched closing line. The plan-before-prompt move lives on
-    // the TTY path; this test pins the scripted-mode shape.
+    // Scripted-real-verbose (TTY=false) drops the verbose plan from
+    // output entirely — solo-Mac scope, cleaner log trace. The
+    // section divider opens the verb, per-substrate $ echo + ✓
+    // progress interleave, then Done section + single enriched
+    // closing line. The plan-before-prompt move lives on the TTY
+    // path; this test pins the scripted-mode shape.
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
         run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
@@ -500,10 +500,10 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
     });
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
-    // Cycle 12: pre-failure ✓ stream is operator-visible. The two
-    // account ops succeeded; the profile-write substrate failed; no
-    // Done section closes the verb. Verb-failure signal is "no Done
-    // section + closing line, plus stderr frame".
+    // Pre-failure ✓ stream is operator-visible. The two account ops
+    // succeeded; the profile-write substrate failed; no Done section
+    // closes the verb. Verb-failure signal is "no Done section +
+    // closing line, plus stderr frame".
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
@@ -564,8 +564,8 @@ fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
     let exec = StubExecutor::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Cycle 12: section divider lands before the substrate fires; the
-    // first substrate op fails so no ✓ lines emit. Stdout carries the
+    // Section divider lands before the substrate fires; the first
+    // substrate op fails so no ✓ lines emit. Stdout carries the
     // single section line; failure routes to stderr.
     assert_eq!(
         stdout,
@@ -584,11 +584,11 @@ fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
 
 #[test]
 fn create_add_host_failure_aborts_with_orphan_group_recovery_hint() {
-    // Cycle-14 partial-failure: CreateShareGroup succeeded, but the
+    // Partial-failure: CreateShareGroup succeeded, but the
     // AddHostToShareGroup step failed. The host now carries an
     // orphan share group with no host membership AND no tenant user
-    // (because CreateTenantUser never ran). Locked policy (Q3): no
-    // automatic rollback — surface as CreateError::HostMembership;
+    // (because CreateTenantUser never ran). No automatic rollback
+    // — surface as CreateError::HostMembership;
     // operator runs `tenant destroy <name>` to converge via the
     // OrphanGroup eligibility arm. The stderr frame names the host
     // AND the recovery command.
@@ -644,13 +644,13 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
     );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
-    // Cycle 12: section + ✓ for the successful CreateShareGroup +
-    // ✓ for the successful AddHostToShareGroup + ✓ for the successful
-    // rollback DeleteShareGroup. The original CreateTenantUser
-    // failure is the one that routes to stderr. Cycle 14: the rollback
-    // DeleteShareGroup also vanishes the just-added host membership
-    // implicitly (no explicit RemoveHost fires on this arm — the
-    // group's gone, the membership goes with it).
+    // Section + ✓ for the successful CreateShareGroup + ✓ for the
+    // successful AddHostToShareGroup + ✓ for the successful rollback
+    // DeleteShareGroup. The original CreateTenantUser failure is the
+    // one that routes to stderr. The rollback DeleteShareGroup also
+    // vanishes the just-added host membership implicitly (no explicit
+    // RemoveHost fires on this arm — the group's gone, the membership
+    // goes with it).
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
@@ -687,12 +687,12 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
 
 #[test]
 fn create_real_mode_verbose_shows_rollback_echo() {
-    // Cycle 15: scripted-real-verbose (TTY=false) drops the verbose
-    // plan from output (Q1 lock). The section divider opens, the
-    // substrate's $ echo + ✓ progress lines interleave through the
-    // CreateShareGroup + AddHost + CreateTenantUser steps, then the
-    // rollback fires. No Done section + closing line because create
-    // failed; stderr carries the original sysadminctl error.
+    // Scripted-real-verbose (TTY=false) drops the verbose plan from
+    // output. The section divider opens, the substrate's $ echo + ✓
+    // progress lines interleave through the CreateShareGroup +
+    // AddHost + CreateTenantUser steps, then the rollback fires.
+    // No Done section + closing line because create failed; stderr
+    // carries the original sysadminctl error.
     let exec = StubExecutor::new().fail_account_op(
         AccountOp::CreateTenantUser {
             name: "dev".into(),
@@ -759,7 +759,7 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
         );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR");
-    // Cycle 12: section divider + ✓ for the first two successful steps
+    // Section divider + ✓ for the first two successful steps
     // (CreateShareGroup + AddHostToShareGroup) lands on stdout. The
     // third step (CreateTenantUser) fails — no ✓; rollback also
     // fails — no ✓ for DeleteShareGroup either. Both failure frames
@@ -779,7 +779,7 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
     assert_eq!(stderr, want_stderr);
     // Four account ops: CreateShareGroup (ok) + AddHostToShareGroup
     // (ok) + CreateTenantUser (failed) + DeleteShareGroup rollback
-    // (failed). Cycle 14 inserted the AddHost step.
+    // (failed).
     assert_eq!(exec.account_ops().len(), 4);
 }
 
@@ -821,9 +821,9 @@ fn create_real_mode_invokes_firewall_ops_in_locked_order() {
 fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
     // Profile read → parse → render_anchor: the InstallAnchor body
     // should contain the rendered anchor with the runtime allowlist.
-    // Cycle 2 writes the default profile (empty runtime hosts) before
-    // reading, so the body's table is the empty `{ }` form. Pins the
-    // read→parse→render data flow end-to-end.
+    // The create flow writes the default profile (empty runtime
+    // hosts) before reading, so the body's table is the empty `{ }`
+    // form. Pins the read→parse→render data flow end-to-end.
     let exec = StubExecutor::new();
     let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -852,10 +852,10 @@ fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() 
     // this test simulates "the scaffolded profile had runtime hosts"
     // via `with_create_profile_content` and pins that the same data
     // flow (read_profile → parse → render_anchor) carries the hosts
-    // all the way to `InstallAnchor.body`. The cycle-2 manual smoke
-    // (`.features/cycle2-allow-smoke.sh`) verifies the same flow
-    // against real pfctl + egress traffic; this is the unit-level
-    // counterpart that catches regressions without needing root.
+    // all the way to `InstallAnchor.body`. The manual smoke verifies
+    // the same flow against real pfctl + egress traffic; this is the
+    // unit-level counterpart that catches regressions without needing
+    // root.
     let populated = "schema_version = 1\n\
                      \n\
                      [allowlist.runtime]\n\
@@ -952,8 +952,8 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
     );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
-    // Cycle 12: section + ✓ for the successful steps before the
-    // firewall InstallAnchor failure (CreateShareGroup, CreateTenantUser,
+    // Section + ✓ for the successful steps before the firewall
+    // InstallAnchor failure (CreateShareGroup, CreateTenantUser,
     // ProfileCreate, BackupConfig). No Done section — the verb
     // failed.
     let want_stdout = format!(
@@ -1002,9 +1002,9 @@ fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence
     );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
-    // Cycle 12: stdout is non-empty under the new ✓ progress narration;
-    // we just check it starts with the section divider and never emits
-    // the Done section (verb failed).
+    // Stdout is non-empty under the ✓ progress narration; we just
+    // check it starts with the section divider and never emits the
+    // Done section (verb failed).
     assert!(
         stdout.starts_with(&format!("{}\n", section_line("Creating tenant 'dev'"))),
         "expected section divider opener: {stdout:?}",
@@ -1107,8 +1107,8 @@ fn create_pf_enable_failure_surfaces_via_create_firewall_failed() {
 #[test]
 fn create_dry_run_bypasses_firewall_executor() {
     // Dry-run swaps in DryRunExecutor; the wired StubExecutor's
-    // firewall_ops list stays empty. Mirrors the cycle-1
-    // `create_dry_run_does_not_write_profile` discipline for firewall.
+    // firewall_ops list stays empty. Mirrors
+    // `create_dry_run_does_not_write_profile` for firewall.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(
         StubReader::default(),
@@ -1135,8 +1135,8 @@ fn create_real_mode_dseditgroup_failure_surfaces_executor_stderr() {
     );
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Cycle 12: section divider lands; the first substrate op fails so
-    // no ✓ emits; stderr carries the framing.
+    // Section divider lands; the first substrate op fails so no ✓
+    // emits; stderr carries the framing.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Creating tenant 'dev'")),
@@ -1170,7 +1170,7 @@ fn create_success_path_does_not_invoke_flush_anchor() {
 }
 
 // ================================================================
-// Cycle 10: post-provision share reapply
+// Post-provision share reapply
 // ================================================================
 //
 // On the standard production path the default profile has no
@@ -1266,13 +1266,13 @@ fn create_post_provision_refusal_carries_recovery_hint() {
 }
 
 // ================================================================
-// Cycle 12: pre-execution confirmation prompt (SC5)
+// Pre-execution confirmation prompt
 // ================================================================
 
 #[test]
 fn create_real_verbose_interactive_emits_plan_before_prompt() {
-    // Cycle 15 — headline behavior pin: under verbose + TTY, the
-    // operator sees the plan BEFORE the confirm prompt. The plan
+    // Headline behavior pin: under verbose + TTY, the operator sees
+    // the plan BEFORE the confirm prompt. The plan
     // section header "Plan (commands to execute):" must appear between
     // the "Sudo needed for:" line and the "Proceed? [Y/n]" prompt;
     // the section divider must only appear AFTER the operator answers
@@ -1316,7 +1316,7 @@ fn create_real_verbose_interactive_emits_plan_before_prompt() {
          commits to the verb after seeing the plan + prompt, not before; \
          prompt={prompt_idx} section={section_idx} in {stdout:?}"
     );
-    // Plan layout uses the cycle-15 intent-leads-shell-follows shape.
+    // Plan layout uses the intent-leads-shell-follows shape.
     assert!(
         stdout.contains("  \u{2022} Create share group 'dev-tenant-share' (GID 600)"),
         "plan should carry the intent bullet for CreateShareGroup: {stdout:?}"

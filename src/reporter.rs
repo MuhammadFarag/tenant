@@ -27,8 +27,8 @@ use crate::executor::{
 };
 use crate::profile::{ProfileError, display_path_for};
 
-/// Outcome of the cycle-12 confirmation prompt. `Proceed` covers all
-/// non-aborted paths (user said yes, dry-run skip, `--yes` flag,
+/// Outcome of the pre-execution confirmation prompt. `Proceed` covers
+/// all non-aborted paths (user said yes, dry-run skip, `--yes` flag,
 /// non-TTY auto-proceed). `Abort` covers explicit `n`, default-N
 /// (destroy), and EOF / read errors.
 #[derive(Debug, PartialEq, Eq)]
@@ -66,15 +66,13 @@ impl<'a> Reporter<'a> {
     }
 
     // ============================================================
-    // Cycle 12 — semantic vocabulary actually exercised by cycle 12's
-    // shipped surface: `ok` (substrate ✓) and `section` (─── rule ─).
-    // The wider util.py-style vocabulary (`info` cyan •, `warn` yellow
-    // !, `err` red ✗, `panel`) was scoped for SC6 failure panels but
-    // deferred — tenant's failures are almost all one-liners, so the
-    // 3+-line panel heuristic (cycle 12 Q7 lock) rarely applies. A
-    // future cycle that introduces structured multi-line failure
-    // bodies (e.g. cycle 11's enriched-guidance pattern extended to
-    // refusals) reintroduces this layer.
+    // Semantic vocabulary actually exercised by the shipped surface:
+    // `ok` (substrate ✓) and `section` (─── rule ─). The wider
+    // util.py-style vocabulary (`info` cyan •, `warn` yellow !,
+    // `err` red ✗, `panel`) is scoped but deferred — tenant's
+    // failures are almost all one-liners, so the 3+-line panel
+    // heuristic rarely applies. A future surface that introduces
+    // structured multi-line failure bodies reintroduces this layer.
     // ============================================================
 
     /// `✓ <msg>` — substrate success line (green ✓). To stdout.
@@ -126,7 +124,7 @@ impl<'a> Reporter<'a> {
     /// Per-step business-level progress line: `✓ <label>` after a
     /// substrate op completes successfully. Emits in real mode (both
     /// standard and verbose). Silent in dry-run — nothing actually
-    /// happened. Cycle 12. Label comes from `Op::business_label`, the
+    /// happened. Label comes from `Op::business_label`, the
     /// substrate-agnostic past-tense capability summary.
     pub fn progress(&mut self, op: Op<'_>) {
         if self.dry_run {
@@ -137,19 +135,19 @@ impl<'a> Reporter<'a> {
     }
 
     // ============================================================
-    // Cycle 12 — pre-execution confirmation
+    // Pre-execution confirmation
     // ============================================================
 
-    /// Cycle-12 pre-execution confirmation. Emits `Proceed? [Y/n]`
-    /// (or `[y/N]` when `default_yes=false`), reads a line from
-    /// `stdin`, parses, and returns the outcome. Skip-conditions
-    /// (auto-Proceed without prompting):
+    /// Pre-execution confirmation. Emits `Proceed? [Y/n]` (or `[y/N]`
+    /// when `default_yes=false`), reads a line from `stdin`, parses,
+    /// and returns the outcome. Skip-conditions (auto-Proceed without
+    /// prompting):
     ///
     /// - dry-run mode (confirm would be a lie — nothing happens)
     /// - `yes_flag` true (operator passed `--yes`)
-    /// - stdin not a TTY (scripted caller; per Q3 cycle 12 lock)
+    /// - stdin not a TTY (scripted caller)
     ///
-    /// Re-prompts on unrecognized input (Q16 edge case).
+    /// Re-prompts on unrecognized input.
     pub fn confirm(
         &mut self,
         default_yes: bool,
@@ -159,7 +157,7 @@ impl<'a> Reporter<'a> {
     ) -> ConfirmOutcome {
         if self.dry_run {
             // Emit a parenthetical preview so the operator sees what
-            // the real run would have asked. Q13 lock.
+            // the real run would have asked.
             let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
             let _ = writeln!(self.stdout, "(Real run would prompt: Proceed? {hint})");
             return ConfirmOutcome::Proceed;
@@ -206,16 +204,15 @@ impl<'a> Reporter<'a> {
     }
 
     // ============================================================
-    // Cycle 12 — per-verb pre-execution business summaries
+    // Per-verb pre-execution business summaries
     // ============================================================
 
     /// Pre-execution summary for `create`. Emits the headline +
     /// capability bullets + (verbose, when `plan` is Some) plan block +
     /// sudo-needed-for line. Caller follows with `confirm(true, …)` for
-    /// real mode; dry-run's confirm emits the preview parenthetical
-    /// (Q13). Cycle 15: the verbose plan block moved from `_starting`
-    /// into the summary so the operator sees the literal commands
-    /// BEFORE the prompt.
+    /// real mode; dry-run's confirm emits the preview parenthetical.
+    /// The verbose plan block lives in the summary so the operator
+    /// sees the literal commands BEFORE the prompt.
     pub fn create_summary(
         &mut self,
         name: &str,
@@ -264,7 +261,7 @@ impl<'a> Reporter<'a> {
     /// Pre-execution summary for `destroy`. Includes the irreversibility
     /// framing on the home-directory move (recoverable until Deleted
     /// Users is emptied). Caller follows with `confirm(false, …)` —
-    /// destroy's default is N per Q2 lock.
+    /// destroy defaults to N so muscle-memory ENTER never deletes.
     pub fn destroy_summary(
         &mut self,
         name: &str,
@@ -465,11 +462,9 @@ impl<'a> Reporter<'a> {
     // ============================================================
 
     /// Pre-exec disclosure for `create`. Real mode emits a
-    /// `─── Creating tenant 'X' ───` section divider (cycle 12 — operator-
-    /// visible "the verb is now running"). Dry-run skips the divider; the
-    /// cycle-12 `create_summary` already framed the verb (Q13 lock).
-    /// Cycle 15: the verbose plan block moved into `create_summary`, so
-    /// this method is now section-only.
+    /// `─── Creating tenant 'X' ───` section divider — operator-visible
+    /// "the verb is now running". Dry-run skips the divider; the
+    /// pre-exec `create_summary` already framed the verb.
     pub fn create_starting(&mut self, name: &str) {
         if !self.dry_run {
             self.section(&format!("Creating tenant '{name}'"));
@@ -477,11 +472,10 @@ impl<'a> Reporter<'a> {
     }
 
     /// Post-exec confirmation for `create`. Silent in dry-run (would be
-    /// a lie). Real mode: emits a `─── Done ───` closing section, then a
-    /// single enriched line naming UID, GID, and the anchor name. The
-    /// single-enriched-line shape is Q6's cycle-12 lock — the pre-exec
-    /// summary already structured the facts; the closing line confirms
-    /// completion without duplicating bullets.
+    /// a lie). Real mode: emits a `─── Done ───` closing section, then
+    /// a single enriched line naming UID, GID, and the anchor name —
+    /// the pre-exec summary already structured the facts; the closing
+    /// line confirms completion without duplicating bullets.
     pub fn create_done(&mut self, name: &str, uid: u32, gid: u32) {
         if self.dry_run {
             return;
@@ -499,9 +493,9 @@ impl<'a> Reporter<'a> {
     // ============================================================
 
     /// Pre-exec disclosure for `destroy`. Real mode emits the
-    /// `─── Destroying tenant 'X' ───` section divider (cycle 12).
-    /// Dry-run skips the divider; `destroy_summary` already framed the
-    /// verb (Q13 lock). Cycle 15: verbose plan moved into the summary.
+    /// `─── Destroying tenant 'X' ───` section divider. Dry-run skips
+    /// the divider; the pre-exec `destroy_summary` already framed
+    /// the verb.
     pub fn destroy_starting(&mut self, name: &str) {
         if !self.dry_run {
             self.section(&format!("Destroying tenant '{name}'"));
@@ -524,8 +518,7 @@ impl<'a> Reporter<'a> {
 
     /// Pre-exec disclosure for the orphan-group convergence path.
     /// Real mode emits the section divider; dry-run is silent
-    /// (`destroy_orphan_summary` covers the framing). Cycle 15:
-    /// verbose plan moved into the summary.
+    /// (`destroy_orphan_summary` covers the framing).
     pub fn orphan_group_starting(&mut self, name: &str) {
         if !self.dry_run {
             let group = tenant_share_group_name(name);
@@ -559,15 +552,11 @@ impl<'a> Reporter<'a> {
     /// this line standard mode would leave the operator looking at a
     /// bare sudo prompt with no project-side context.
     ///
-    /// Plan grew from 1 to 3 lines in cycle 4: the auto-narrow's
-    /// `InstallAnchor → Reload` runs before `LoginAsUser`. The plan
-    /// shows all three; echo (via `step`) emits each `$ <line>` as
-    /// the writer drives the ops.
     /// Emit just the shell intent line (no plan). Called BEFORE the
     /// reapply plan is built so the operator sees the verb context
-    /// even if the pre-flight profile read fails (cycle-4 invariant:
-    /// "intent emitted before narrow"). The plan-render half lives
-    /// in `shell_plan`, called after the plan is built.
+    /// even if the pre-flight profile read fails — intent is emitted
+    /// before any narrow. The plan-render half lives in `shell_plan`,
+    /// called after the plan is built.
     pub fn shell_intent(&mut self, name: &str) {
         if self.dry_run {
             let _ = writeln!(self.stdout, "Would shell into '{name}'.");
@@ -581,8 +570,8 @@ impl<'a> Reporter<'a> {
     /// from the profile + share entries. Shell has no pre-exec
     /// confirmation (the operator becomes the shell after `login`
     /// returns), so the plan stays here rather than moving into a
-    /// summary (cycle 15 only relocates plan emission for prompt-
-    /// having verbs). Layout matches the cycle-15 intent-leads-shell-
+    /// summary — only prompt-having verbs relocate plan emission
+    /// into their summary. Layout matches the intent-leads-shell-
     /// follows rendering used by the prompt-having verbs' summaries.
     pub fn shell_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         if self.verbose {
@@ -597,15 +586,9 @@ impl<'a> Reporter<'a> {
     // Mode verb
     // ============================================================
 
-    /// Pre-exec disclosure for `mode`. Same mode pattern as
-    /// `create_starting` / `destroy_starting`: standard real is
-    /// silent (the post-exec `mode_done` does the talking); real+verbose
-    /// emits the "Applying" intent + indented plan; dry-run (any
-    /// verbosity) emits "Would apply" + (verbose: plan).
     /// Emit the mode intent line (section divider; real mode only).
-    /// Cycle 15: the verbose plan now lives in `mode_summary` (rendered
-    /// before the prompt); this method no longer renders plan, and the
-    /// cycle-10 `mode_plan` sibling has been removed.
+    /// The verbose plan lives in `mode_summary` (rendered before the
+    /// prompt), so this method doesn't render plan.
     pub fn mode_intent(&mut self, name: &str, level: ModeLevel) {
         if !self.dry_run {
             let level_str = level.as_str();
@@ -762,7 +745,7 @@ impl<'a> Reporter<'a> {
     }
 
     // ============================================================
-    // Doctor verb (cycle 5)
+    // Doctor verb
     // ============================================================
 
     /// Pre-walk disclosure for `doctor <name>`. Standard real mode is
@@ -798,12 +781,12 @@ impl<'a> Reporter<'a> {
     /// probe that produced it returns. Output goes to stdout; finding
     /// text is the byte-form pinned by `Finding::Display`.
     ///
-    /// In verbose mode (cycle 9), each finding's one-liner is followed
-    /// by the structured-guidance block from `Finding::guidance()`,
-    /// indented 2 spaces under the finding line. `FilesystemExposure`
-    /// returns `None` for guidance and renders the one-liner alone
-    /// even in verbose mode (Q3 lock — per-path-category guidance
-    /// belongs to the future filesystem-exposure remediation cycle).
+    /// In verbose mode, each finding's one-liner is followed by the
+    /// structured-guidance block from `Finding::guidance()`, indented
+    /// 2 spaces under the finding line. `FilesystemExposure` returns
+    /// `None` for guidance and renders the one-liner alone even in
+    /// verbose mode — per-path-category guidance belongs to the future
+    /// remediation surface, not the detection surface.
     pub fn doctor_finding(&mut self, finding: &Finding) {
         let rendered = self.color_finding_prefix(finding);
         let _ = writeln!(self.stdout, "{rendered}");
@@ -821,9 +804,9 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Cycle-12 severity coloring on the finding's leading prefix.
-    /// Critical → red+bold; warning → yellow; info → dim. Color-off
-    /// fallthrough preserves the cycle-11 byte-form contract.
+    /// Severity coloring on the finding's leading prefix. Critical →
+    /// red+bold; warning → yellow; info → dim. Color-off fallthrough
+    /// preserves the plain byte-form contract for tests.
     fn color_finding_prefix(&self, finding: &Finding) -> String {
         let text = finding.to_string();
         if !self.colors.stdout {
@@ -849,12 +832,10 @@ impl<'a> Reporter<'a> {
         text
     }
 
-    /// Cycle-12 guidance-line styling for `doctor --verbose`. Headers
-    /// (no leading whitespace in the original guidance text) get bold;
-    /// body lines (indented) get dim. The cycle-9 enriched-guidance
-    /// pattern is unchanged structurally; SC7 layers visual
-    /// subordination on top so the finding one-liner stays the
-    /// scannable focus and the body reads as context.
+    /// Guidance-line styling for `doctor --verbose`. Headers (no
+    /// leading whitespace in the original guidance text) get bold;
+    /// body lines (indented) get dim. Visual subordination keeps the
+    /// finding one-liner the scannable focus and the body as context.
     fn style_guidance_line(&self, line: &str) -> String {
         if !self.colors.stdout {
             return line.to_string();
@@ -888,8 +869,8 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Sub-cycle 3 noop for the bare `tenant doctor` (all-tenants)
-    /// form. Sub-cycle 5 replaces this with the real enumeration.
+    /// Noop frame for the bare `tenant doctor` (all-tenants) form
+    /// when no tenants exist on the host.
     pub fn doctor_all_tenants_noop(&mut self) {
         let _ = writeln!(self.stdout, "doctor: no tenants to audit.");
     }
@@ -915,8 +896,8 @@ impl<'a> Reporter<'a> {
     }
 
     /// Firewall-read failure for `doctor`. The substrate could not
-    /// read pf state via `pfctl` (cycle 7 SC2's `read_kernel_pf_rules`;
-    /// SC4's `read_pf_status`). Most likely cause: sudo session isn't
+    /// read pf state via `pfctl` (`read_kernel_pf_rules` /
+    /// `read_pf_status`). Most likely cause: sudo session isn't
     /// cached (`sudo -v` recovers). Distinct from
     /// `doctor_host_file_failed` (config-file substrate) so the
     /// operator sees which machinery tripped.
@@ -936,11 +917,11 @@ impl<'a> Reporter<'a> {
         );
     }
 
-    /// Cycle 14: `AddHostToShareGroup` failed after `CreateShareGroup`
-    /// succeeded but before `CreateTenantUser` ran. Host now carries
-    /// an orphan share group with no host membership. Recovery is
-    /// `tenant destroy <name>` (orphan-group convergence path is
-    /// idempotent at the substrate; the next destroy converges).
+    /// `AddHostToShareGroup` failed after `CreateShareGroup` succeeded
+    /// but before `CreateTenantUser` ran. Host now carries an orphan
+    /// share group with no host membership. Recovery is `tenant
+    /// destroy <name>` (orphan-group convergence path is idempotent
+    /// at the substrate; the next destroy converges).
     pub fn create_host_membership_failed(&mut self, name: &str, host: &str, err: &AccountError) {
         let group = tenant_share_group_name(name);
         let _ = writeln!(
@@ -1017,7 +998,7 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(self.stderr, "tenant: failed to shell into '{name}': {err}");
     }
 
-    /// Cycle-4 shell-narrow profile arm — read or parse of the on-disk
+    /// Shell-narrow profile arm — read or parse of the on-disk
     /// profile failed during the auto-narrow that runs before `login`.
     /// Distinct from `mode_profile_failed`'s wording because the
     /// operator typed `tenant shell <name>`, not `tenant mode`; the
@@ -1032,8 +1013,8 @@ impl<'a> Reporter<'a> {
         );
     }
 
-    /// Cycle-4 shell-narrow firewall arm — InstallAnchor or Reload
-    /// tripped during the auto-narrow. Same parallel as
+    /// Shell-narrow firewall arm — InstallAnchor or Reload tripped
+    /// during the auto-narrow. Same parallel as
     /// `shell_narrow_profile_failed`: distinct verb framing
     /// ("before shell entry") so the operator sees the narrow as a
     /// shell-verb step, not a mode-verb invocation they didn't make.
@@ -1068,7 +1049,7 @@ impl<'a> Reporter<'a> {
     }
 
     // ============================================================
-    // Cycle 10: share-reapply failure framing
+    // Share-reapply failure framing
     // ============================================================
     //
     // The share substrate fires from `mode` / `shell` / `reload` /
@@ -1109,8 +1090,8 @@ impl<'a> Reporter<'a> {
 
     /// `mode` verb — pre-flight share refusal (HostPathMissing /
     /// TenantPathOccupied). `refuse_*` framing because the operator
-    /// authored the conflict (Q11/Q12 locks); the substrate never
-    /// ran. ShareError's Display surfaces the specific case.
+    /// authored the conflict; the substrate never ran. ShareError's
+    /// Display surfaces the specific case.
     pub fn refuse_mode_share(&mut self, name: &str, err: &ShareError) {
         let _ = writeln!(self.stderr, "tenant: cannot apply mode for '{name}': {err}");
     }
@@ -1198,7 +1179,7 @@ impl<'a> Reporter<'a> {
     }
 
     // ============================================================
-    // Reload verb (cycle 10)
+    // Reload verb
     // ============================================================
     //
     // The operator-facing "I edited the profile, apply it" verb.
@@ -1209,9 +1190,8 @@ impl<'a> Reporter<'a> {
     // arms get reload-specific wording where "mode" would mislead.
 
     /// Emit the reload intent line (section divider; real mode only).
-    /// Cycle 15: the verbose plan now lives in `reload_summary` (rendered
-    /// before the prompt); this method no longer renders plan, and the
-    /// cycle-10 `reload_plan` sibling has been removed.
+    /// The verbose plan lives in `reload_summary` (rendered before
+    /// the prompt), so this method doesn't render plan.
     pub fn reload_intent(&mut self, name: &str) {
         if !self.dry_run {
             self.section(&format!("Reloading tenant '{name}'"));
@@ -1323,10 +1303,10 @@ impl<'a> Reporter<'a> {
     // ============================================================
 
     /// Emit the verbose "Plan (commands to execute):" section that
-    /// lives inside each prompt-having verb's `*_summary` (cycle 15).
-    /// Silent in standard mode (verbose-only disclosure). Silent when
-    /// `plan` is `None` (no-arg `reload`, where bulk-summary doesn't
-    /// pre-render per-tenant plans — Q5 lock).
+    /// lives inside each prompt-having verb's `*_summary`. Silent in
+    /// standard mode (verbose-only disclosure). Silent when `plan` is
+    /// `None` (no-arg `reload`, where the bulk-summary doesn't
+    /// pre-render per-tenant plans).
     fn emit_plan_section(&mut self, plan: Option<&[(Op<'_>, Option<&'static str>)]>) {
         if !self.verbose {
             return;
@@ -1341,8 +1321,8 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(self.stdout);
     }
 
-    /// Render the upfront plan block in cycle-15's intent-leads-shell-
-    /// follows layout. Each entry emits:
+    /// Render the upfront plan block in the intent-leads-shell-follows
+    /// layout. Each entry emits:
     ///
     /// ```text
     ///   • <intent>[  # <annotation>]
@@ -1351,11 +1331,10 @@ impl<'a> Reporter<'a> {
     ///
     /// with NO blank line between entries — the column-2 `•` + column-6
     /// shell indent give enough visual contrast to pair intent and
-    /// shell unambiguously; on a 14-entry create plan the cycle-15-
-    /// initial inter-entry breathing room added more vertical fatigue
-    /// than visual help. `intent` comes from `Op::intent_label()`
-    /// (future-tense capability headline); `shell` from
-    /// `Op::describe_via` (substrate echo line). Conditional
+    /// shell unambiguously; a 14-entry create plan accumulates too
+    /// much vertical fatigue otherwise. `intent` comes from
+    /// `Op::intent_label()` (future-tense capability headline); `shell`
+    /// from `Op::describe_via` (substrate echo line). Conditional
     /// annotations (`# on rollback`, `# on reload failure`) hang off
     /// the END of the intent line, not the shell line — operator reads
     /// WHAT + WHEN at headline level.
@@ -1365,9 +1344,9 @@ impl<'a> Reporter<'a> {
     /// followed by a dim remainder (visual cue: privileged + state-
     /// changing); shell lines starting with anything else render fully
     /// dim (visual cue: probe or operator-owned non-privileged). Bold-
-    /// not-color for the sudo accent keeps the cycle-12 severity color
-    /// budget intact. Colors off (tests pass `Colors::default()`): plain
-    /// text in both arms.
+    /// not-color for the sudo accent keeps the severity color budget
+    /// (red/green/yellow/cyan) reserved for severity signals. Colors
+    /// off (tests pass `Colors::default()`): plain text in both arms.
     fn render_plan_block(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         for (op, annotation) in plan {
             let intent = op.intent_label();
@@ -1382,9 +1361,9 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Apply the cycle-15 privilege-aware accent to a shell line.
-    /// `sudo` first token → bold `sudo` + dim rest; anything else →
-    /// dim whole line. Colors off short-circuits to the raw line.
+    /// Apply the privilege-aware accent to a shell line. `sudo` first
+    /// token → bold `sudo` + dim rest; anything else → dim whole line.
+    /// Colors off short-circuits to the raw line.
     fn format_shell_line(&self, line: &str) -> String {
         if !self.colors.stdout {
             return line.to_string();

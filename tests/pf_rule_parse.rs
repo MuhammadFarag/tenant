@@ -1,6 +1,6 @@
 //! Combinatorial unit tests for `doctor::pf_rule_presence_check` —
 //! the structural-presence check on the kernel's `tenant-<name>`
-//! anchor (cycle 7 SC2).
+//! anchor.
 //!
 //! Justification (per CLAUDE.md test discipline): the check's input
 //! space is combinatorial over pfctl output shape (empty / pass-only

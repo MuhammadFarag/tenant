@@ -1,5 +1,5 @@
 //! Internal ANSI escape-sequence wrapper for tenant's operator-facing
-//! output. Cycle 12 — UX overhaul.
+//! output.
 //!
 //! Three responsibilities:
 //!   - color wrappers (`red`/`green`/`yellow`/`cyan`/`bold`/`dim`) that
@@ -11,8 +11,7 @@
 //! state at runtime. Production composition (main.rs) computes this
 //! once at startup and threads the booleans through `tenant::run` →
 //! `Reporter::new`. Tests pass `false` so escape sequences don't leak
-//! into byte-form fixtures (the per-stream gate is what keeps the
-//! cycle-11 test bank passing unchanged).
+//! into byte-form fixtures.
 
 use std::io::IsTerminal;
 
@@ -24,9 +23,8 @@ pub enum Stream {
 
 /// Per-stream color decision threaded from the composition root into
 /// `Reporter`. Both off by default — tests' `Vec<u8>`-backed writers
-/// aren't terminals, so the cycle-11 byte-form fixtures stay clean
-/// without per-test wiring. `main.rs` flips the bits at startup via
-/// `should_color`.
+/// aren't terminals, so byte-form fixtures stay clean without per-test
+/// wiring. `main.rs` flips the bits at startup via `should_color`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Colors {
     pub stdout: bool,

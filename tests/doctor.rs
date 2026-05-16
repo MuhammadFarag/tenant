@@ -95,10 +95,10 @@ fn classify_cross_tenant_allowed_is_warning() {
 
 #[test]
 fn classify_tenant_artifact_allowed_is_info() {
-    // `/etc/pf.anchors/tenant-<other>` is mode 0644 by design (cycle-2's
-    // install flow) — the read IS allowed, and we report it as `info`
-    // rather than `critical` because the exposure is intentional and
-    // the operator should know without being alarmed.
+    // `/etc/pf.anchors/tenant-<other>` is mode 0644 by design (the
+    // install flow sets it) — the read IS allowed, and we report it
+    // as `info` rather than `critical` because the exposure is
+    // intentional and the operator should know without being alarmed.
     assert_eq!(
         classify(Category::TenantArtifact, AccessOutcome::Allowed),
         Some(Severity::Info)
@@ -257,19 +257,18 @@ fn curated_paths_omits_self_from_other_lists() {
 }
 
 // ============================================================
-// Severity ordering — load-bearing for --strict (sub-cycle 4)
+// Severity ordering — load-bearing for --strict
 // ============================================================
 
 // ============================================================
-// anchor_body_matches — byte-exact equality (cycle 8)
+// anchor_body_matches — byte-exact equality
 // ============================================================
 //
 // Pure-function comparator for doctor's anchor-body drift check.
 // Compares the on-disk anchor body against the profile-derived
-// `render_anchor` output. Locked at byte-exact per the cycle-8
-// brief Q2: the render path is deterministic, so any difference is
-// real drift. Soften later (e.g. trim trailing whitespace) only if
-// false positives surface.
+// `render_anchor` output. Locked at byte-exact: the render path is
+// deterministic, so any difference is real drift. Soften later
+// (e.g. trim trailing whitespace) only if false positives surface.
 
 #[test]
 fn anchor_body_matches_equal_strings_true() {
@@ -295,7 +294,7 @@ fn anchor_body_matches_empty_strings_true() {
 }
 
 // ============================================================
-// Finding::AnchorBodyDrift — Display + severity (cycle 8)
+// Finding::AnchorBodyDrift — Display + severity
 // ============================================================
 
 #[test]
@@ -319,7 +318,7 @@ fn finding_anchor_body_drift_severity_is_warning() {
 }
 
 // ============================================================
-// Finding::guidance — per-variant multi-section text (cycle 9)
+// Finding::guidance — per-variant multi-section text
 // ============================================================
 //
 // Byte-exact pins on the structured-guidance block each variant emits
@@ -327,15 +326,14 @@ fn finding_anchor_body_drift_severity_is_warning() {
 // headers appear in the locked order and that tenant-name / var-name
 // substitution lands in every place the text references them. Sentence
 // case for headers, imperative voice for fixes, literal tenant name in
-// per-tenant variants (Q10 lock).
+// per-tenant variants.
 
 #[test]
 fn guidance_filesystem_exposure_returns_none() {
-    // Q3 lock: FilesystemExposure intentionally has no cycle-9 guidance
-    // body. Per-path-category text folds into the future
-    // filesystem-exposure remediation cycle alongside the ACL machinery.
-    // `guidance()` returns None; Reporter renders the one-liner alone
-    // even in verbose mode.
+    // FilesystemExposure intentionally has no guidance body — per-path-
+    // category text belongs with the future remediation surface, not
+    // the detection surface. `guidance()` returns None; Reporter
+    // renders the one-liner alone even in verbose mode.
     let f = Finding::FilesystemExposure {
         severity: Severity::Critical,
         tenant: "dev".to_string(),
@@ -420,9 +418,9 @@ Alternative
 
 #[test]
 fn guidance_pf_disabled_byte_form() {
-    // PfDisabled is host-wide; no tenant interpolation. Q6 lock:
-    // "Why this matters" emphasizes the zero-isolation stake.
-    // No Alternative section (binary state — pf is either on or off).
+    // PfDisabled is host-wide; no tenant interpolation. "Why this
+    // matters" emphasizes the zero-isolation stake. No Alternative
+    // section (binary state — pf is either on or off).
     let f = Finding::PfDisabled;
     let expected = "Why this matters
   pf is globally disabled on this host. Every tenant has an anchor
@@ -454,9 +452,9 @@ Side-effects to know about
 
 #[test]
 fn guidance_env_leak_byte_form() {
-    // Q7 lock: Alternative names the qualified-Defaults case (operators
-    // who already have a runas-qualified directive and are confused
-    // why doctor still nags). The Recommended fix is the unqualified
+    // Alternative names the qualified-Defaults case (operators who
+    // already have a runas-qualified directive and are confused why
+    // doctor still nags). The Recommended fix is the unqualified
     // form per the CLAUDE.md doctrine.
     let f = Finding::EnvLeak {
         var: "SSH_AUTH_SOCK".to_string(),
@@ -505,10 +503,9 @@ Alternative
 
 #[test]
 fn guidance_touch_id_missing_byte_form() {
-    // Q8 lock: Info-toned "why" (recommendation, not correctness
-    // drift); no Alternative (no meaningful different command exists
-    // in this project's threat model — either you want Touch ID or
-    // you don't).
+    // Info-toned "why" (recommendation, not correctness drift); no
+    // Alternative (no meaningful different command exists in this
+    // project's threat model — either you want Touch ID or you don't).
     let f = Finding::TouchIdMissing;
     let expected = "Why this matters
   /etc/pam.d/sudo doesn't enable Touch ID for sudo authentication.
@@ -541,7 +538,7 @@ Side-effects to know about
 }
 
 // ============================================================
-// Severity ordering — load-bearing for --strict (sub-cycle 4)
+// Severity ordering — load-bearing for --strict
 // ============================================================
 
 #[test]
@@ -565,7 +562,7 @@ fn severity_ordering_critical_max() {
 }
 
 // ============================================================
-// Finding::AclDrift — Display + severity (cycle 11 SC3)
+// Finding::AclDrift — Display + severity
 // ============================================================
 
 #[test]
@@ -611,9 +608,9 @@ fn guidance_acl_drift_byte_form() {
 Recommended fix
   tenant reload dev
   Re-applies every declared share in the tenant's profile. macOS
-  `chmod +a` is natively idempotent (cycle-10 doctrine \u{2014} re-applying
-  an existing entry is a noop, not a duplicate), so this is safe to
-  run regardless of the path's current ACL state.
+  `chmod +a` is natively idempotent \u{2014} re-applying an existing
+  entry is a noop, not a duplicate \u{2014} so this is safe to run
+  regardless of the path's current ACL state.
 
 Side-effects to know about
   \u{2022} Every share in the profile is re-applied, not just this one.
@@ -628,13 +625,13 @@ Side-effects to know about
 Alternative
   chmod +a \"group:dev-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/src
   Re-applies just this one entry. Use when `tenant reload` is blocked
-  by an unrelated refusal. The bit list shown is the cycle-10 `rw`
-  default; for read-only shares omit `write,delete,append`.";
+  by an unrelated refusal. The bit list shown is the `rw` default;
+  for read-only shares omit `write,delete,append`.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
 // ============================================================
-// Finding::SymlinkDrift — Display + severity + guidance (cycle 11 SC4)
+// Finding::SymlinkDrift — Display + severity + guidance
 // ============================================================
 //
 // Three SymlinkActual sub-cases (Absent / WrongTarget / NotSymlink)
@@ -722,9 +719,9 @@ fn guidance_symlink_drift_absent_byte_form() {
 
 Recommended fix
   tenant reload dev
-  Re-runs the cycle-10 share-reapply substrate, which calls `sudo -n
-  -u dev /bin/ln -sfn /Users/Shared/src /Users/dev/src`. `ln -sfn` is
-  idempotent — replaces any existing entry at the same path with the
+  Re-runs the share-reapply substrate, which calls `sudo -n -u
+  dev /bin/ln -sfn /Users/Shared/src /Users/dev/src`. `ln -sfn` is idempotent
+  \u{2014} replaces any existing entry at the same path with the
   declared symlink.
 
 Side-effects to know about
@@ -759,8 +756,8 @@ fn guidance_symlink_drift_wrong_target_byte_form() {
 
 Recommended fix
   tenant reload dev
-  Re-runs the cycle-10 share-reapply substrate, which calls `sudo -n
-  -u dev /bin/ln -sfn /Users/Shared/src /Users/dev/src`. `ln -sfn` replaces
+  Re-runs the share-reapply substrate, which calls `sudo -n -u
+  dev /bin/ln -sfn /Users/Shared/src /Users/dev/src`. `ln -sfn` replaces
   the existing symlink in place; no manual `rm` needed.
 
 Side-effects to know about
@@ -790,10 +787,9 @@ fn guidance_symlink_drift_not_symlink_byte_form() {
   The tenant_path /Users/dev/src is declared in tenant 'dev's profile to
   symlink /Users/Shared/src, but a real file or directory currently occupies
   that path \u{2014} not a symlink. `tenant reload` will refuse with
-  `TenantPathOccupied` rather than clobber it (cycle-10 Q12 doctrine
-  \u{2014} substrate never overwrites real operator data). Until the
-  conflict is removed, the declared share isn't reachable through
-  this path.
+  `TenantPathOccupied` rather than clobber it (the substrate never
+  overwrites real operator data). Until the conflict is removed, the
+  declared share isn't reachable through this path.
 
 Recommended fix
   sudo -n -u dev rm -rf /Users/dev/src && tenant reload dev
@@ -816,7 +812,7 @@ Alternative
 }
 
 // ============================================================
-// Finding::HostNotInShareGroup — Display + severity + guidance (cycle 14)
+// Finding::HostNotInShareGroup — Display + severity + guidance
 // ============================================================
 
 #[test]
@@ -852,24 +848,24 @@ fn guidance_host_not_in_share_group_byte_form() {
         group: "dev-tenant-share".to_string(),
     };
     let expected = "Why this matters
-  Host 'operator' is not a member of 'dev-tenant-share'. The cycle-10 share
-  substrate installs an inheritable ACL on every declared `host_path`
-  granting `dev-tenant-share` access \u{2014} the tenant (whose primary group IS
-  `dev-tenant-share`) inherits that grant on any new file they create inside an
-  RW share. The host inherits it ONLY if also a member of `dev-tenant-share`.
-  Without the membership, files the tenant creates inside RW shares
-  are world-readable (POSIX 644) but not host-writable: host can `ls`
+  Host 'operator' is not a member of 'dev-tenant-share'. The share substrate
+  installs an inheritable ACL on every declared `host_path` granting
+  `dev-tenant-share` access \u{2014} the tenant (whose primary group IS `dev-tenant-share`)
+  inherits that grant on any new file they create inside an RW share.
+  The host inherits it ONLY if also a member of `dev-tenant-share`. Without
+  the membership, files the tenant creates inside RW shares are
+  world-readable (POSIX 644) but not host-writable: host can `ls`
   and `cat` but `vim` reports `E212: Can't open file for writing`.
-  Cycle-10-era tenants (created before this fix) all hit this; manual
-  `dseditgroup -o edit -d operator dev-tenant-share` on a post-cycle-14 tenant
-  also surfaces here.
+  Legacy tenants (created before host membership was wired into the
+  create flow) all hit this; manual `dseditgroup -o edit -d operator
+  dev-tenant-share` on a newer tenant also surfaces here.
 
 Recommended fix
   tenant reload dev
-  The cycle-14 catch-up path runs `dseditgroup -o edit -a operator -t
-  user dev-tenant-share` as the first step inside `execute_reapply_plan`.
-  Idempotent at the substrate \u{2014} re-applying on an existing member
-  is a silent noop.
+  The catch-up path runs `dseditgroup -o edit -a operator -t user
+  dev-tenant-share` as the first step inside `execute_reapply_plan`.
+  Idempotent at the substrate \u{2014} re-applying on an existing
+  member is a silent noop.
 
 Side-effects to know about
   \u{2022} 'operator' gains a secondary group membership. `id` and

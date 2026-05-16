@@ -14,12 +14,10 @@
 //!    matter, what severity each category produces). No I/O.
 //! 3. **Writer (`accounts::Writer::doctor_tenant`)** — orchestrates
 //!    probes for one tenant, collects findings, drives the Reporter.
-//!    Sub-cycle 5 adds the all-tenants walk on top.
+//!    Bare `tenant doctor` runs the all-tenants walk on top.
 //!
-//! Per cycle-5 brief: the curated list is fixed (not configurable);
-//! verbose mode surfaces the list to the operator so the bounded scope
-//! is operator-visible. Cycle-2 (post-detection remediation) will add
-//! mechanism reporting on Denied probes if needed.
+//! The curated list is fixed (not configurable); verbose mode surfaces
+//! the list to the operator so the bounded scope is operator-visible.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -27,9 +25,9 @@ use std::path::{Path, PathBuf};
 use crate::executor::{AccessMode, AccessOutcome};
 
 /// Severity tier of a finding. Order is load-bearing: `--strict` exit
-/// code logic (sub-cycle 4) consumes `findings.iter().map(severity).max()`
-/// to decide between exit 0 (no findings worse than info), 1 (warning
-/// max), or 2 (critical present). Info < Warning < Critical.
+/// code logic consumes `findings.iter().map(severity).max()` to decide
+/// between exit 0 (no findings worse than info), 1 (warning max), or
+/// 2 (critical present). Info < Warning < Critical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Info,
@@ -51,9 +49,9 @@ impl Severity {
 /// produces (when a probe comes back `Allowed`) is locked by
 /// `classify` — see the matrix there.
 ///
-/// The brief's Q5 sudoers env-leak finding is rendered separately
-/// (sub-cycle 6 adds the `Finding::EnvLeak` variant); it has no
-/// curated path and therefore no `Category` entry.
+/// The sudoers env-leak finding is rendered separately via
+/// `Finding::EnvLeak`; it has no curated path and therefore no
+/// `Category` entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
     /// Host-side secret targets — private keys, cloud credentials,
@@ -76,59 +74,57 @@ pub enum Category {
     /// Tenant-project artifacts on the host (per-tenant profiles in
     /// the host's `~/.config/tenant/profiles/`, per-tenant PF anchor
     /// files in `/etc/pf.anchors/`). The anchor files specifically
-    /// are mode 0644 by design (cycle-2 install flow), so they WILL
-    /// surface as `Allowed`; we report as `info` rather than warning
-    /// because the exposure is intentional and the operator only
-    /// needs to know it exists, not act on it.
+    /// are mode 0644 by design, so they WILL surface as `Allowed`;
+    /// we report as `info` rather than warning because the exposure
+    /// is intentional and the operator only needs to know it exists,
+    /// not act on it.
     TenantArtifact,
 }
 
 /// A doctor-detected exposure.
 ///
 /// `FilesystemExposure` is the per-tenant per-path probe finding from
-/// `probe_access_as_tenant` returning Allowed (sub-cycles 3 + 5).
+/// `probe_access_as_tenant` returning Allowed.
 ///
 /// `EnvLeak` is the host-wide finding from the sudoers env-policy
-/// check (sub-cycle 6): if `/etc/sudoers` (plus drop-ins) doesn't
-/// `env_delete += "<var>"` an inherited env var, that var propagates
-/// from the operator's session into every `sudo -iu <tenant>`. The
-/// canonical case is SSH_AUTH_SOCK — macOS ssh-agent's socket gets
-/// inherited so the tenant can `ssh` anywhere the host has cached
-/// keys for. Warning-tier (not critical) because the leak depends on
-/// the operator's session env actually holding the var; recovery is
-/// a one-line `/etc/sudoers` edit. The finding line names the
-/// directive shape so the operator's fix is mechanical.
+/// check: if `/etc/sudoers` (plus drop-ins) doesn't `env_delete +=
+/// "<var>"` an inherited env var, that var propagates from the
+/// operator's session into every `sudo -iu <tenant>`. The canonical
+/// case is SSH_AUTH_SOCK — macOS ssh-agent's socket gets inherited
+/// so the tenant can `ssh` anywhere the host has cached keys for.
+/// Warning-tier (not critical) because the leak depends on the
+/// operator's session env actually holding the var; recovery is a
+/// one-line `/etc/sudoers` edit. The finding line names the directive
+/// shape so the operator's fix is mechanical.
 ///
-/// `PfRuleDrift` is the per-tenant finding from cycle 7 SC2: the
-/// kernel's anchor for `tenant-<name>` is missing a structural rule
-/// (no `pass` rule, no `block return` rule, or both — empty anchor).
-/// Warning-tier because the drift is recoverable via `tenant mode
-/// <name> runtime` (re-renders + reloads the anchor). `detail`
-/// names which structural rule is missing.
+/// `PfRuleDrift` is the per-tenant kernel-side finding: the kernel's
+/// anchor for `tenant-<name>` is missing a structural rule (no `pass`
+/// rule, no `block return` rule, or both — empty anchor). Warning-tier
+/// because the drift is recoverable via `tenant mode <name> runtime`
+/// (re-renders + reloads the anchor). `detail` names which structural
+/// rule is missing.
 ///
-/// `TouchIdMissing` is the host-wide finding from cycle 7 SC3:
-/// `/etc/pam.d/sudo` has no active `pam_tid.so` directive. Info-tier
-/// per the cycle-7 brief Q5 lock — it's a recommendation aligned
-/// with the project's NOPASSWD-sudoers stance (Touch ID makes sudo
-/// faster AND adds an auth factor), not a correctness drift. Info
-/// findings do not trip `--strict`'s exit-1, so the operator sees
-/// the tip once but isn't nagged on every doctor run.
+/// `TouchIdMissing` is the host-wide finding: `/etc/pam.d/sudo` has
+/// no active `pam_tid.so` directive. Info-tier — it's a recommendation
+/// aligned with the project's NOPASSWD-sudoers stance (Touch ID
+/// makes sudo faster AND adds an auth factor), not a correctness
+/// drift. Info findings do not trip `--strict`'s exit-1, so the
+/// operator sees the tip once but isn't nagged on every doctor run.
 ///
-/// `PfDisabled` is the host-wide finding from cycle 7 SC4: pf's
-/// global enable state is off (`pfctl -d` was run, or pf never
-/// got enabled on this host). Critical-tier — when pf is off, NO
-/// tenant's firewall enforces anything; every tenant's anchor is
-/// silently inert. Recovery is `sudo pfctl -e` (idempotent at the
-/// substrate; the create flow's `FirewallOp::Enable` is the same
-/// command).
+/// `PfDisabled` is the host-wide finding: pf's global enable state
+/// is off (`pfctl -d` was run, or pf never got enabled on this host).
+/// Critical-tier — when pf is off, NO tenant's firewall enforces
+/// anything; every tenant's anchor is silently inert. Recovery is
+/// `sudo pfctl -e` (idempotent at the substrate; the create flow's
+/// `FirewallOp::Enable` is the same command).
 ///
-/// `AnchorBodyDrift` is the per-tenant finding from cycle 8: the
-/// on-disk anchor file at `/etc/pf.anchors/tenant-<name>` differs
-/// byte-for-byte from what `firewall::render_anchor` would produce
-/// from the current profile (runtime tier — install widening is
-/// session-scoped, so any sustained install-tier on-disk state IS
-/// drift). Warning-tier; recovery is `tenant mode <name> runtime`
-/// (re-renders + reloads the anchor), same as `PfRuleDrift`.
+/// `AnchorBodyDrift` is the per-tenant file-side finding: the on-disk
+/// anchor file at `/etc/pf.anchors/tenant-<name>` differs byte-for-byte
+/// from what `firewall::render_anchor` would produce from the current
+/// profile (runtime tier — install widening is session-scoped, so any
+/// sustained install-tier on-disk state IS drift). Warning-tier;
+/// recovery is `tenant mode <name> runtime` (re-renders + reloads
+/// the anchor), same as `PfRuleDrift`.
 ///
 /// Vocabulary note: the variant says "body" (the technical content
 /// concept) and the `Display` impl says "anchor file drift" / "on-disk
@@ -137,26 +133,26 @@ pub enum Category {
 /// two-level framing as `PfRuleDrift` ("rule" internally, "pf anchor"
 /// in Display).
 ///
-/// `AclDrift` is the cycle 11 per-tenant finding: a declared
-/// `[[shares]]` entry's `host_path` is missing the
-/// `<tenant>-tenant-share` group's `allow` ACL entry. Warning-tier;
-/// recovery is `tenant reload <name>` (cycle 10's substrate is
-/// idempotent — Grant re-applies cleanly). The set of paths audited
-/// is bounded by the profile's declared shares (cycle 11 NOT-in-scope:
-/// orphan-ACL detection across the host filesystem).
+/// `AclDrift` is the per-tenant finding: a declared `[[shares]]`
+/// entry's `host_path` is missing the `<tenant>-tenant-share` group's
+/// `allow` ACL entry. Warning-tier; recovery is `tenant reload <name>`
+/// (the share substrate is idempotent — Grant re-applies cleanly).
+/// The set of paths audited is bounded by the profile's declared
+/// shares (orphan-ACL detection across the host filesystem is NOT in
+/// scope).
 ///
-/// `SymlinkDrift` is the cycle 11 per-tenant finding: a declared
-/// share's `tenant_path` doesn't match the declared `host_path` via
-/// symlink. Three sub-cases via `SymlinkActual`: `Absent` (no entry
-/// at tenant_path — tenant `rm`'d the symlink or never had one),
+/// `SymlinkDrift` is the per-tenant finding: a declared share's
+/// `tenant_path` doesn't match the declared `host_path` via symlink.
+/// Three sub-cases via `SymlinkActual`: `Absent` (no entry at
+/// tenant_path — tenant `rm`'d the symlink or never had one),
 /// `WrongTarget(actual)` (symlink exists but points elsewhere — operator
 /// changed the profile's host_path without re-running reload), and
-/// `NotSymlink` (tenant_path is a real file or directory — Q12 reload
-/// would refuse; doctor surfaces the conflict before the next reload
-/// attempt). Warning-tier; recovery is `tenant reload <name>` for the
-/// first two cases and manual cleanup + reload for `NotSymlink`.
-/// Q3 lock: target comparison is string-exact (no canonicalize) —
-/// profile names operator's declared intent.
+/// `NotSymlink` (tenant_path is a real file or directory — reload's
+/// pre-flight would refuse; doctor surfaces the conflict before the
+/// next reload attempt). Warning-tier; recovery is `tenant reload <name>`
+/// for the first two cases and manual cleanup + reload for `NotSymlink`.
+/// Target comparison is string-exact (no canonicalize) — the profile
+/// names the operator's declared intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
     FilesystemExposure {
@@ -188,12 +184,12 @@ pub enum Finding {
         expected_target: PathBuf,
         actual: SymlinkActual,
     },
-    /// Cycle 14: the host operator is not a secondary member of the
-    /// tenant's `<name>-tenant-share` group. Surfaces (a) pre-cycle-14
-    /// tenants whose create flow never added the host, and (b)
-    /// post-cycle-14 tenants where the operator manually removed
-    /// themselves with `dseditgroup -o edit -d`. Warning-tier; recovery
-    /// is `tenant reload <name>` (the substrate's catch-up path).
+    /// The host operator is not a secondary member of the tenant's
+    /// `<name>-tenant-share` group. Surfaces (a) legacy tenants whose
+    /// create flow predates the host-membership step, and (b) tenants
+    /// where the operator manually removed themselves with
+    /// `dseditgroup -o edit -d`. Warning-tier; recovery is `tenant
+    /// reload <name>` (the substrate's catch-up path re-adds the host).
     HostNotInShareGroup {
         tenant: String,
         host: String,
@@ -206,9 +202,9 @@ pub enum Finding {
 /// guidance per variant — Absent / WrongTarget have the same recovery
 /// (`tenant reload <name>` re-creates the link via `ln -sfn`);
 /// NotSymlink requires manual cleanup first (reload would refuse with
-/// `ShareError::TenantPathOccupied`, per cycle-10 Q12). Q4 lock:
-/// `NotSymlink` is a SymlinkDrift case, NOT a separate `Finding`
-/// variant — all three express "symlink isn't what was declared".
+/// `ShareError::TenantPathOccupied`). All three express "symlink
+/// isn't what was declared" — they're modelled as one Finding variant
+/// rather than three, so callers route through a single arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymlinkActual {
     Absent,
@@ -236,11 +232,10 @@ impl Finding {
     /// no trailing newline). Reporter prefixes each rendered line with
     /// 2 spaces under the finding line for verbose-mode emission.
     ///
-    /// `None` for `FilesystemExposure` per the cycle-9 brief Q3 lock:
-    /// per-path-category guidance depends on operator intent (file vs
-    /// directory; intentional-public vs accidental-leak; POSIX vs ACL
-    /// fix) and folds into the eventual filesystem-exposure remediation
-    /// cycle alongside the ACL machinery.
+    /// `None` for `FilesystemExposure`: per-path-category guidance
+    /// depends on operator intent (file vs directory; intentional-public
+    /// vs accidental-leak; POSIX vs ACL fix) and would belong with the
+    /// remediation surface, not the detection surface.
     ///
     /// Section structure mirrors the sandbox plugin's
     /// `home_check.HomeCheck::guidance()` prior art:
@@ -431,9 +426,9 @@ Side-effects to know about
 Recommended fix
   tenant reload {tenant}
   Re-applies every declared share in the tenant's profile. macOS
-  `chmod +a` is natively idempotent (cycle-10 doctrine \u{2014} re-applying
-  an existing entry is a noop, not a duplicate), so this is safe to
-  run regardless of the path's current ACL state.
+  `chmod +a` is natively idempotent \u{2014} re-applying an existing
+  entry is a noop, not a duplicate \u{2014} so this is safe to run
+  regardless of the path's current ACL state.
 
 Side-effects to know about
   \u{2022} Every share in the profile is re-applied, not just this one.
@@ -448,8 +443,8 @@ Side-effects to know about
 Alternative
   chmod +a \"group:{group} allow read,write,execute,delete,append,file_inherit,directory_inherit\" {path}
   Re-applies just this one entry. Use when `tenant reload` is blocked
-  by an unrelated refusal. The bit list shown is the cycle-10 `rw`
-  default; for read-only shares omit `write,delete,append`."
+  by an unrelated refusal. The bit list shown is the `rw` default;
+  for read-only shares omit `write,delete,append`."
                 ))
             }
             Finding::SymlinkDrift {
@@ -471,9 +466,9 @@ Alternative
 
 Recommended fix
   tenant reload {tenant}
-  Re-runs the cycle-10 share-reapply substrate, which calls `sudo -n
-  -u {tenant} /bin/ln -sfn {expected} {tpath}`. `ln -sfn` is
-  idempotent — replaces any existing entry at the same path with the
+  Re-runs the share-reapply substrate, which calls `sudo -n -u
+  {tenant} /bin/ln -sfn {expected} {tpath}`. `ln -sfn` is idempotent
+  \u{2014} replaces any existing entry at the same path with the
   declared symlink.
 
 Side-effects to know about
@@ -501,8 +496,8 @@ Alternative
 
 Recommended fix
   tenant reload {tenant}
-  Re-runs the cycle-10 share-reapply substrate, which calls `sudo -n
-  -u {tenant} /bin/ln -sfn {expected} {tpath}`. `ln -sfn` replaces
+  Re-runs the share-reapply substrate, which calls `sudo -n -u
+  {tenant} /bin/ln -sfn {expected} {tpath}`. `ln -sfn` replaces
   the existing symlink in place; no manual `rm` needed.
 
 Side-effects to know about
@@ -524,10 +519,9 @@ Alternative
   The tenant_path {tpath} is declared in tenant '{tenant}'s profile to
   symlink {expected}, but a real file or directory currently occupies
   that path \u{2014} not a symlink. `tenant reload` will refuse with
-  `TenantPathOccupied` rather than clobber it (cycle-10 Q12 doctrine
-  \u{2014} substrate never overwrites real operator data). Until the
-  conflict is removed, the declared share isn't reachable through
-  this path.
+  `TenantPathOccupied` rather than clobber it (the substrate never
+  overwrites real operator data). Until the conflict is removed, the
+  declared share isn't reachable through this path.
 
 Recommended fix
   sudo -n -u {tenant} rm -rf {tpath} && tenant reload {tenant}
@@ -555,24 +549,24 @@ Alternative
                 group,
             } => Some(format!(
                 "Why this matters
-  Host '{host}' is not a member of '{group}'. The cycle-10 share
-  substrate installs an inheritable ACL on every declared `host_path`
-  granting `{group}` access \u{2014} the tenant (whose primary group IS
-  `{group}`) inherits that grant on any new file they create inside an
-  RW share. The host inherits it ONLY if also a member of `{group}`.
-  Without the membership, files the tenant creates inside RW shares
-  are world-readable (POSIX 644) but not host-writable: host can `ls`
+  Host '{host}' is not a member of '{group}'. The share substrate
+  installs an inheritable ACL on every declared `host_path` granting
+  `{group}` access \u{2014} the tenant (whose primary group IS `{group}`)
+  inherits that grant on any new file they create inside an RW share.
+  The host inherits it ONLY if also a member of `{group}`. Without
+  the membership, files the tenant creates inside RW shares are
+  world-readable (POSIX 644) but not host-writable: host can `ls`
   and `cat` but `vim` reports `E212: Can't open file for writing`.
-  Cycle-10-era tenants (created before this fix) all hit this; manual
-  `dseditgroup -o edit -d {host} {group}` on a post-cycle-14 tenant
-  also surfaces here.
+  Legacy tenants (created before host membership was wired into the
+  create flow) all hit this; manual `dseditgroup -o edit -d {host}
+  {group}` on a newer tenant also surfaces here.
 
 Recommended fix
   tenant reload {tenant}
-  The cycle-14 catch-up path runs `dseditgroup -o edit -a {host} -t
-  user {group}` as the first step inside `execute_reapply_plan`.
-  Idempotent at the substrate \u{2014} re-applying on an existing member
-  is a silent noop.
+  The catch-up path runs `dseditgroup -o edit -a {host} -t user
+  {group}` as the first step inside `execute_reapply_plan`.
+  Idempotent at the substrate \u{2014} re-applying on an existing
+  member is a silent noop.
 
 Side-effects to know about
   \u{2022} '{host}' gains a secondary group membership. `id` and
@@ -705,11 +699,10 @@ impl fmt::Display for Finding {
 /// (`Executor::read_anchor_body`) and the expected render
 /// (`firewall::render_anchor` over the runtime-tier hosts).
 ///
-/// Byte-exact per the cycle-8 brief Q2: `render_anchor` is
-/// deterministic — same profile + tenant produces identical output
-/// across runs — so any difference is real drift, not cosmetic. If
-/// trailing-whitespace or comment-edit false positives ever surface,
-/// soften the comparator here.
+/// Byte-exact: `render_anchor` is deterministic — same profile +
+/// tenant produces identical output across runs — so any difference
+/// is real drift, not cosmetic. If trailing-whitespace or comment-edit
+/// false positives ever surface, soften the comparator here.
 pub fn anchor_body_matches(actual: &str, expected: &str) -> bool {
     actual == expected
 }
@@ -731,10 +724,10 @@ pub fn anchor_body_matches(actual: &str, expected: &str) -> bool {
 /// applies only when sudo runs as `plugin-dev`, not when it runs
 /// as a tenant — so it doesn't protect the operator's tenant
 /// sessions even though the literal text mentions `env_delete`.
-/// Cycle-1 brief Q5 lock: better to nag the operator about a leak
-/// covered by a per-runas directive (false positive — they can add
-/// an unqualified directive to silence) than to silently miss a real
-/// leak.
+/// Tradeoff: conservative-false. Better to nag the operator about a
+/// leak covered by a per-runas directive (false positive — they can
+/// add an unqualified directive to silence) than to silently miss
+/// a real leak.
 pub fn has_env_delete_for(policy: &str, var: &str) -> bool {
     for raw_line in policy.lines() {
         let line = raw_line.trim();
@@ -899,7 +892,7 @@ pub fn curated_paths(
     out
 }
 
-/// Does `pfctl -si` report pf as enabled? (Cycle 7 SC4.)
+/// Does `pfctl -si` report pf as enabled?
 ///
 /// Match shape: a non-comment line whose trimmed form starts with
 /// `Status: Enabled`. `pfctl -si`'s canonical first line is e.g.
@@ -921,7 +914,7 @@ pub fn pf_status_enabled(status: &str) -> bool {
 }
 
 /// Does `/etc/pam.d/sudo` enable Touch-ID-for-sudo via an active
-/// `pam_tid.so` directive? (Cycle 7 SC3.)
+/// `pam_tid.so` directive?
 ///
 /// Match shape: a non-comment line whose tokens are `auth sufficient
 /// pam_tid.so` (control == `sufficient`, module == `pam_tid.so`).
@@ -960,16 +953,16 @@ pub fn has_pam_tid(pam_config: &str) -> bool {
 }
 
 /// Structural-presence check on the kernel's pf rules for the
-/// `tenant-<name>` anchor (cycle 7 SC2). Returns up to two
-/// `PfRuleDrift` findings: one if no `pass` rule is present, one if
-/// no `block return` rule is present.
+/// `tenant-<name>` anchor. Returns up to two `PfRuleDrift` findings:
+/// one if no `pass` rule is present, one if no `block return` rule
+/// is present.
 ///
-/// Structural (not exact line-by-line) per the cycle-7 brief Q7 lock:
-/// pfctl's output format isn't a stable contract (numerical IPs vs
-/// hostnames, table-reference reformatting) so an exact-match check
-/// would false-positive on cosmetic drift. The structural shape
-/// catches the case that actually matters — "kernel anchor is empty
-/// or missing one of the two rule classes the runtime requires".
+/// Structural rather than exact-match: pfctl's output format isn't
+/// a stable contract (numerical IPs vs hostnames, table-reference
+/// reformatting) so an exact-match check would false-positive on
+/// cosmetic drift. The structural shape catches the case that
+/// actually matters — "kernel anchor is empty or missing one of
+/// the two rule classes the runtime requires".
 ///
 /// Match shape: line begins with `pass ` (any pass rule) and
 /// separately a line begins with `block ` (any block rule). Both are
@@ -1018,7 +1011,7 @@ pub fn pf_rule_presence_check(rules: &str, tenant: &str) -> Vec<Finding> {
 /// comparison would false-negative. The presence of the group's
 /// `allow` entry is the structural invariant doctor cares about; the
 /// specific bits are the operator's choice via the profile's
-/// `mode = "ro"` / `"rw"` and the cycle-10 `AclMode` translation.
+/// `mode = "ro"` / `"rw"` translated by the `AclMode` substrate.
 ///
 /// Word-boundary discipline: we delimit the group name with `:` on
 /// the left and ` allow` on the right so a prefix-collision case like
@@ -1043,9 +1036,9 @@ pub fn has_group_acl_entry(listing: &str, group: &str) -> bool {
 }
 
 /// Render a curated path for the verbose-mode "Curated sensitive paths
-/// checked:" disclosure block (sub-cycle 7). Forms one line per path
-/// with the access mode suffix so operators can see which capability
-/// was probed (Read vs List on the same path produce two lines).
+/// checked:" disclosure block. Forms one line per path with the access
+/// mode suffix so operators can see which capability was probed
+/// (Read vs List on the same path produce two lines).
 pub fn render_curated_line(access: AccessMode, path: &Path) -> String {
     let verb = match access {
         AccessMode::Read => "read",

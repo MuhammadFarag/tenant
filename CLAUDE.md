@@ -904,6 +904,20 @@ Things that are easy to violate and would matter:
   `*_summary`). `shell_plan` survives unchanged (shell has no
   prompt; plan stays in the verb).
 
+- **Comment density is a symptom, not a goal.** Comments are kept
+  when the WHY is non-obvious (hidden constraint, subtle invariant,
+  bug-workaround, surprising behavior) and dropped when the code or
+  identifier already says the same thing. Cycle history (cycle
+  numbers, Q-lock indices, sub-cycle numbers) lives ONLY in this
+  file and the gitignored `.features/primes/` files; tracked source
+  (`src/` + `tests/`) carries no cycle / Q-lock / SC references — a
+  reader without the prime files should be able to make sense of the
+  code in isolation. Tests follow the same rule with one exception:
+  sharpening / negative-pin comments survive because their WHY isn't
+  carried by the test name alone. Module-level `//!` docs get a
+  longer leash because they serve a different audience (someone
+  landing on the file fresh) than inline comments.
+
 ## Test discipline
 
 E2E-first. The bulk of tests live in `tests/cli_<verb>.rs` (one file

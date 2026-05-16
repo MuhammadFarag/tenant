@@ -125,7 +125,7 @@ fn parse_refuses_invalid_toml_syntax() {
     );
 }
 
-// --- [[shares]] table-array (cycle 10) ---------------------------------
+// --- [[shares]] table-array --------------------------------------------
 //
 // The profile grows an optional table-array declaring per-tenant
 // filesystem shares: `(host_path, mode, tenant_path)` triples. Mode is a
@@ -189,10 +189,10 @@ fn parses_share_entry_with_ro_mode() {
 
 #[test]
 fn parses_multiple_share_entries_preserves_declared_order() {
-    // Q13 lock: profile-declared order, not alphabetical-by-host-path.
-    // Same convention as `allowlist.runtime.hosts`. Operator-readable;
-    // order doesn't affect correctness (idempotent substrate) — preserving
-    // intent is the small win.
+    // Profile-declared order, not alphabetical-by-host-path. Same
+    // convention as `allowlist.runtime.hosts`. Operator-readable;
+    // order doesn't affect correctness (idempotent substrate) —
+    // preserving intent is the small win.
     let toml = toml_with_shares_section(
         "[[shares]]\n\
          host_path = \"/Users/Shared/zeta\"\n\
@@ -217,11 +217,11 @@ fn parses_multiple_share_entries_preserves_declared_order() {
 
 #[test]
 fn parses_share_entry_with_home_prefixed_tenant_path() {
-    // Q3 lock: `$HOME` is the only template variable; expansion happens
-    // in the Writer when it resolves the share entry. The parser stores
-    // the raw string so the type itself signals "this is a template, not
-    // yet resolved" — a substrate call against a raw template would be
-    // a type mistake at construction time.
+    // `$HOME` is the only template variable; expansion happens in
+    // the Writer when it resolves the share entry. The parser stores
+    // the raw string so the type itself signals "this is a template,
+    // not yet resolved" — a substrate call against a raw template
+    // would be a type mistake at construction time.
     let toml = toml_with_shares_section(
         "[[shares]]\n\
          host_path = \"/Users/Shared/sandbox/dev\"\n\
@@ -234,9 +234,9 @@ fn parses_share_entry_with_home_prefixed_tenant_path() {
 
 #[test]
 fn absent_shares_array_yields_empty_vec() {
-    // Backward-compat: every profile written by `tenant create` before
-    // cycle 10 has no `[[shares]]` section. Parse must succeed and yield
-    // an empty Vec so cycle-9-era profiles keep working.
+    // Backward-compat: profiles written before the share substrate
+    // shipped have no `[[shares]]` section. Parse must succeed and
+    // yield an empty Vec so older profiles keep working.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -254,7 +254,7 @@ fn absent_shares_array_yields_empty_vec() {
 
 #[test]
 fn unknown_mode_value_rejected() {
-    // Q1 lock: only `"ro"` and `"rw"` accepted. POSIX bit-string forms
+    // Only `"ro"` and `"rw"` accepted. POSIX bit-string forms
     // (`"r"`, `"rwe"`, etc.) and uppercase variants all fail parse.
     let toml = toml_with_shares_section(
         "[[shares]]\n\
@@ -300,10 +300,10 @@ fn missing_mode_rejected() {
     );
 }
 
-// --- expand_tenant_path (cycle 10) ------------------------------------
+// --- expand_tenant_path -----------------------------------------------
 //
-// Q3 lock: `$HOME` is the only template variable. The Writer expands it
-// to `/Users/<tenant>` at op-construction time; the substrate sees
+// `$HOME` is the only template variable. The Writer expands it to
+// `/Users/<tenant>` at op-construction time; the substrate sees
 // absolute paths. Literal absolute paths flow through unchanged.
 
 #[test]
@@ -352,7 +352,7 @@ fn expand_tenant_path_does_not_expand_mid_string_home() {
     );
 }
 
-// --- $HOME prefix-only validation (cycle 10 round 1 review) -----------
+// --- $HOME prefix-only validation -------------------------------------
 //
 // `parse` refuses any tenant_path containing `$HOME` not at position 0
 // (followed by `/` or as the whole path). Catches operator typos like

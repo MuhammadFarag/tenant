@@ -117,9 +117,9 @@ fn macos_describes_ensure_symlink_as_user() {
     // an existing symlink with the same target re-links to the same
     // place (no-op effect); an existing symlink to a different target
     // gets replaced; an existing REAL dir or file at `link` is the
-    // Q12-lock case the Writer pre-checks for (substrate would error
-    // here without that guard; Writer surfaces `ShareError::TenantPathOccupied`
-    // before the substrate runs).
+    // `TenantPathOccupied` case the Writer pre-checks for (substrate
+    // would error here without that guard; Writer surfaces
+    // `ShareError::TenantPathOccupied` before the substrate runs).
     let s = MacosExecutor;
     assert_eq!(
         s.describe_account(&AccountOp::EnsureSymlinkAsUser {
@@ -133,13 +133,14 @@ fn macos_describes_ensure_symlink_as_user() {
 
 #[test]
 fn macos_describes_add_host_to_share_group() {
-    // Cycle 14: secondary group membership for the host operator on
-    // every tenant's `<name>-tenant-share` group. Ported verbatim from
-    // sandbox's `_add_human_to_group` substrate. `-t user` disambiguates
-    // the member type for dseditgroup (the alternative is `-t group`
-    // for nested-group memberships, which tenant doesn't use). The
-    // operator-facing render names the host literally so a verbose plan
-    // line is self-documenting about WHO is being added.
+    // Secondary group membership for the host operator on every
+    // tenant's `<name>-tenant-share` group. Ported verbatim from
+    // sandbox's `_add_human_to_group` substrate. `-t user`
+    // disambiguates the member type for dseditgroup (the alternative
+    // is `-t group` for nested-group memberships, which tenant
+    // doesn't use). The operator-facing render names the host
+    // literally so a verbose plan line is self-documenting about
+    // WHO is being added.
     let s = MacosExecutor;
     assert_eq!(
         s.describe_account(&AccountOp::AddHostToShareGroup {
@@ -152,14 +153,13 @@ fn macos_describes_add_host_to_share_group() {
 
 #[test]
 fn macos_describes_remove_host_from_share_group() {
-    // Cycle 14 destroy-side counter to `AddHostToShareGroup`. The
-    // substrate runs `dseditgroup -o checkmember -m <host>
-    // <group>` internally before the `-o edit -d` to make removal
-    // idempotent on (a) legacy tenants pre-dating cycle 14 (host
-    // was never a member) and (b) the orphan-group destroy path on
-    // a partially-created tenant. The describe-side renders the
-    // edit form only — checkmember is mechanism the operator
-    // doesn't need a line for.
+    // Destroy-side counter to `AddHostToShareGroup`. The substrate
+    // runs `dseditgroup -o checkmember -m <host> <group>` internally
+    // before the `-o edit -d` to make removal idempotent on (a)
+    // legacy tenants where the host was never a member and (b) the
+    // orphan-group destroy path on a partially-created tenant. The
+    // describe-side renders the edit form only — checkmember is
+    // mechanism the operator doesn't need a line for.
     let s = MacosExecutor;
     assert_eq!(
         s.describe_account(&AccountOp::RemoveHostFromShareGroup {
@@ -265,7 +265,7 @@ fn macos_describes_flush_anchor() {
     );
 }
 
-// --- AclOp (cycle 10) -------------------------------------------------
+// --- AclOp ------------------------------------------------------------
 //
 // ACL strings ported verbatim from the sandbox plugin's
 // `scripts/lib/acl.py` (read_exec_inherit_entry / rw_inherit_entry):

@@ -11,8 +11,7 @@ const EX_IOERR: u8 = 74;
 const EX_DOCTOR_WARNING: u8 = 1;
 const EX_DOCTOR_CRITICAL: u8 = 2;
 
-/// Map `(max_severity, --strict)` to an exit code. Sub-cycle 4 wires
-/// the `--strict` test cases:
+/// Map `(max_severity, --strict)` to an exit code:
 /// - Without strict: always exit 0 (findings are informational).
 /// - With strict, no findings (max = None): exit 0.
 /// - With strict, max = Info: exit 0 (info-tier doesn't trip --strict).
@@ -43,12 +42,11 @@ pub(crate) fn dispatch(
     stdin_is_tty: bool,
     yes_flag: bool,
 ) -> u8 {
-    // Cycle 12: pre-execution summary emits ONLY when the operator
-    // is interactive OR running dry-run. Non-TTY real-mode invocation
-    // (scripted callers) stays silent before the substrate, preserving
-    // today's scripted-caller contract (Q3 lock). `--yes` doesn't
-    // suppress the summary on a TTY — operator opted out of the
-    // PROMPT, not the context.
+    // The pre-execution summary emits ONLY when the operator is
+    // interactive OR running dry-run. Non-TTY real-mode invocation
+    // (scripted callers) stays silent before the substrate. `--yes`
+    // doesn't suppress the summary on a TTY — the operator opted
+    // out of the PROMPT, not the context.
     let show_summary = cli.dry_run || stdin_is_tty;
     match cli.verb {
         Verb::Create { name } => {
@@ -67,13 +65,13 @@ pub(crate) fn dispatch(
             // diverge.
             let uid = allocation::UidAllocator::new(accounts).lowest_free_uid();
             let gid = allocation::GidAllocator::new(accounts).lowest_free_gid();
-            // Cycle 12 pre-execution confirmation: summary + prompt
+            // Pre-execution confirmation: summary + prompt
             // BEFORE any substrate fires. Default Y for create (the
             // operator typed the verb; abort is cheap; idempotent
             // on re-run).
             //
-            // Cycle 15: the plan slice the verbose summary renders is
-            // built here in dispatch, mirroring the substrate flow the
+            // The plan slice the verbose summary renders is built
+            // here in dispatch, mirroring the substrate flow the
             // verb fires. The placeholder InstallAnchor / UpdateConfig
             // bodies are empty strings — `describe_via` ignores those
             // fields, so plan + echo lines come out identical to the
@@ -169,11 +167,11 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            // Mode reuses `destroy_eligibility`'s 5-way classifier (per
-            // cycle-3's locked design). Same collapse as shell:
-            // NotPresent + OrphanGroup both refuse via `refuse_mode_absent`
-            // — the operator wants to switch a tenant's mode; the
-            // lingering group alone can't host one.
+            // Mode reuses `destroy_eligibility`'s 5-way classifier.
+            // Same collapse as shell: NotPresent + OrphanGroup both
+            // refuse via `refuse_mode_absent` — the operator wants
+            // to switch a tenant's mode; the lingering group alone
+            // can't host one.
             match accounts::destroy_eligibility(accounts, &name) {
                 accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
                     reporter.refuse_mode_absent(&name);
@@ -188,13 +186,12 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
-                    // Cycle 15: build the reapply plan BEFORE the
-                    // summary so profile-read / share pre-flight
-                    // failures surface pre-prompt (Q3 lock — don't
-                    // ask the operator to confirm something already
-                    // doomed). The verbose summary renders the plan
-                    // upfront; the verb then receives the same plan
-                    // for execution.
+                    // Build the reapply plan BEFORE the summary so
+                    // profile-read / share pre-flight failures surface
+                    // pre-prompt — don't ask the operator to confirm
+                    // something already doomed. The verbose summary
+                    // renders the plan upfront; the verb then receives
+                    // the same plan for execution.
                     let plan = match writer.build_reapply_plan(&name, host, level) {
                         Ok(p) => p,
                         Err(e) => {
@@ -203,8 +200,8 @@ pub(crate) fn dispatch(
                         }
                     };
                     let plan_entries = plan.as_plan_entries();
-                    // Cycle 12 confirm prompt; default Y (convergent
-                    // reapply, reversible via the other mode).
+                    // Confirm prompt; default Y (convergent reapply,
+                    // reversible via the other mode).
                     if show_summary {
                         reporter.mode_summary(&name, host, level, Some(&plan_entries));
                     }
@@ -291,9 +288,9 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     accounts::Eligibility::Destroyable => {
-                        // Cycle 15: build the reapply plan BEFORE the
-                        // summary so profile-read / share pre-flight
-                        // failures surface pre-prompt (Q3 lock).
+                        // Build the reapply plan BEFORE the summary
+                        // so profile-read / share pre-flight failures
+                        // surface pre-prompt.
                         let plan = match writer.build_reapply_plan(&n, host, ModeLevel::Runtime) {
                             Ok(p) => p,
                             Err(e) => {
@@ -302,8 +299,7 @@ pub(crate) fn dispatch(
                             }
                         };
                         let plan_entries = plan.as_plan_entries();
-                        // Cycle 12 confirm; default Y (convergent,
-                        // idempotent).
+                        // Default Y (convergent, idempotent).
                         if show_summary {
                             reporter.reload_summary(&n, host, Some(&plan_entries));
                         }
@@ -324,11 +320,10 @@ pub(crate) fn dispatch(
                 }
             }
             None => {
-                // Cycle 12: list the tenants up-front so the operator
-                // confirms the scope before any substrate fires. Empty
-                // host short-circuits via reload_all_done_summary
-                // (which prints "No tenants…"), so we skip the prompt
-                // there.
+                // List the tenants up-front so the operator confirms
+                // the scope before any substrate fires. Empty host
+                // short-circuits via reload_all_done_summary (which
+                // prints "No tenants…"), so we skip the prompt there.
                 let names = accounts.tenant_names();
                 if names.is_empty() {
                     let outcome = writer.reload_all_tenants(accounts, host, reporter);
@@ -358,7 +353,7 @@ pub(crate) fn dispatch(
                 accounts::Eligibility::OrphanGroup => {
                     // Convergence path: tenant user is already gone but
                     // the suffixed group survived a prior partial
-                    // failure. Cycle 12 confirm; default N — same
+                    // failure. Confirm; default N — same
                     // destructive-action posture as the full destroy.
                     let orphan_plan_ops = build_orphan_plan_ops(&name, host);
                     let orphan_plan = orphan_plan_entries(&orphan_plan_ops);
@@ -389,8 +384,8 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
-                    // Cycle 12 confirm; default N (destructive,
-                    // muscle-memory ENTER must not delete).
+                    // Confirm; default N (destructive, muscle-memory
+                    // ENTER must not delete).
                     let destroy_plan_ops = build_destroy_plan_ops(&name, host);
                     let destroy_plan = destroy_plan_entries(&destroy_plan_ops);
                     if show_summary {
@@ -439,9 +434,9 @@ fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) 
 }
 
 /// Route a `ModeError` (mode verb) to the right Reporter framing.
-/// Cycle 10's share-reapply substrate adds four new arms beyond the
-/// existing Profile + Firewall pair; centralizing the dispatch keeps
-/// the verb arm in `dispatch` thin.
+/// The share-reapply substrate adds four arms beyond the Profile +
+/// Firewall pair; centralizing the dispatch keeps the verb arm in
+/// `dispatch` thin.
 fn surface_mode_error(reporter: &mut Reporter, name: &str, error: &accounts::ModeError) {
     match error {
         accounts::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
@@ -485,10 +480,10 @@ fn surface_reload_error(reporter: &mut Reporter, name: &str, error: &accounts::M
 }
 
 // ============================================================
-// Cycle 15 — plan-slice construction for prompt-having verbs
+// Plan-slice construction for prompt-having verbs
 //
 // Dispatch builds the plan-side op list BEFORE the summary so the
-// verbose plan block can render before the confirm prompt (Q3 lock).
+// verbose plan block can render before the confirm prompt.
 // `*_plan_ops` owns the ops; `*_plan_entries` flattens them into the
 // borrowed-slice shape the Reporter expects.
 //
@@ -660,11 +655,11 @@ fn orphan_plan_entries(ops: &OrphanGroupPlanOps) -> Vec<(Op<'_>, Option<&'static
 }
 
 /// Route a `CreateError::PostProvision(ModeError)` to the right
-/// Reporter framing. Post-provision is the cycle 10 arm where the
-/// tenant has already been provisioned (user + group + profile + PF +
-/// enable all succeeded) but the share-reapply substrate failed —
-/// the per-arm framing names the existing-tenant-state explicitly so
-/// the operator's recovery is `tenant reload`, not `tenant create`
+/// Reporter framing. Post-provision is the arm where the tenant has
+/// already been provisioned (user + group + profile + PF + enable
+/// all succeeded) but the share-reapply substrate failed — the
+/// per-arm framing names the existing-tenant-state explicitly so the
+/// operator's recovery is `tenant reload`, not `tenant create`
 /// (which would refuse on name-conflict). Profile/Firewall arms are
 /// unreachable on the create path because `reapply_shares_post_provision`
 /// is called with a pre-parsed Profile and doesn't touch firewall

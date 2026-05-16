@@ -9,24 +9,24 @@ mod common;
 use common::*;
 
 // ================================================================
-// Mode verb — cycle 3 of the PF + profile + mode bundle
+// Mode verb
 // ================================================================
 //
 // Locked design (see CLAUDE.md doctrine):
-// - Q1: NO defensive FlushAnchor before InstallAnchor. The parent
+// - NO defensive FlushAnchor before InstallAnchor. The parent
 //   `load anchor` directive stays in pf.conf across mode reapply,
 //   so `pfctl -f` re-reads the anchor file and replaces the
-//   in-kernel ruleset. Verified empirically by the cycle-3 smoke.
-// - Q2: Implicit current-mode (no state file). The on-disk anchor
-//   body is the source of truth.
-// - Q3: Auto-narrow on shell entry deferred to cycle 4. Cycle 3
-//   ships the `mode` verb only; the operator narrows manually with
-//   `tenant mode <name> runtime` after install-tier work.
-// - Q4: ModeError { Profile, Firewall } — verb-isolated failure
-//   surface paralleling DestroyError's split.
+//   in-kernel ruleset.
+// - Implicit current-mode (no state file). The on-disk anchor body
+//   is the source of truth.
+// - `tenant shell <name>` auto-narrows to runtime tier on entry;
+//   between sessions, the operator narrows manually with `tenant
+//   mode <name> runtime` if needed.
+// - ModeError { Profile, Firewall, Acl, Account, Probe, Share } —
+//   verb-isolated failure surface paralleling DestroyError's split.
 
 // ----------------------------------------------------------------
-// Sub-cycle 3.1: clap parse + dry-run vertical slice
+// Clap parse + dry-run vertical slice
 // ----------------------------------------------------------------
 
 #[test]
@@ -81,7 +81,7 @@ fn mode_requires_level() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 3.2: validation + eligibility refusals
+// Validation + eligibility refusals
 // ----------------------------------------------------------------
 
 #[test]
@@ -129,8 +129,7 @@ fn mode_refuses_when_tenant_absent() {
 fn mode_refuses_when_only_orphan_group_present() {
     // OrphanGroup collapses to the same refusal as NotPresent for
     // mode purposes — operator wants to apply a mode; the lingering
-    // group can't host one. Mirrors shell's collapse from cycle 1
-    // shell rollout.
+    // group can't host one. Same collapse as the shell verb.
     let stub = StubReader {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -198,16 +197,16 @@ fn mode_dry_run_refuses_missing_tenant() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 3.3: real-mode happy path — runtime
+// Real-mode happy path — runtime
 // ----------------------------------------------------------------
 
 #[test]
 fn mode_runtime_real_mode_op_shape() {
     // Two-op composition: InstallAnchor (with body rendered from
     // profile.allowlist.runtime.hosts — empty in the default profile)
-    // + Reload. No defensive FlushAnchor (Q1 lock). Pre-load an
-    // existing profile via with_existing_profile so the writer's
-    // read_profile finds something.
+    // + Reload. No defensive FlushAnchor. Pre-load an existing
+    // profile via with_existing_profile so the writer's read_profile
+    // finds something.
     let exec =
         StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) =
@@ -242,8 +241,8 @@ fn mode_runtime_real_mode_op_shape() {
 
 #[test]
 fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
-    // Cycle-14 narrowed negative pin: mode operates in the firewall
-    // domain PLUS the cycle-14 `AddHostToShareGroup` catch-up step. No
+    // Narrowed negative pin: mode operates in the firewall domain
+    // PLUS the `AddHostToShareGroup` catch-up step. No
     // CreateTenantUser / DeleteUserRecord, no ProfileOp::Create /
     // Delete — those belong to create / destroy. No login — that
     // belongs to shell. A regression that accidentally wired mode
@@ -259,7 +258,7 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
             name: "dev".into(),
             host: "operator".into(),
         }],
-        "mode should fire exactly one account op: cycle-14 catch-up AddHost"
+        "mode should fire exactly one account op: the catch-up AddHost"
     );
     assert!(
         exec.profile_ops().is_empty(),
@@ -275,8 +274,8 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
 
 #[test]
 fn mode_does_not_emit_restore_config_op() {
-    // Negative pin for Q4 lock: no auto-recovery on Reload failure.
-    // Cycle 2's create-side restore-on-reload-failure sequence
+    // Negative pin: no auto-recovery on Reload failure. The
+    // create-side restore-on-reload-failure sequence
     // (RestoreConfigFromBackup → RemoveAnchor → Reload → FlushAnchor)
     // does NOT fire for mode. Even on success the op list should be
     // exactly [InstallAnchor, Reload] with no other firewall ops.
@@ -320,7 +319,7 @@ fn mode_uses_centralized_anchor_name() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 3.4: install mode + populated profile
+// Install mode + populated profile
 // ----------------------------------------------------------------
 
 #[test]
@@ -350,8 +349,8 @@ fn mode_install_with_only_runtime_populated() {
 
 #[test]
 fn mode_install_with_runtime_and_install_populated() {
-    // The cycle-3 happy-path canonical: runtime=[a] + install=[b,c]
-    // under install mode → anchor body has [a, b, c] in that order.
+    // Happy-path canonical: runtime=[a] + install=[b,c] under
+    // install mode → anchor body has [a, b, c] in that order.
     // Order matters for render_anchor's output stability.
     let profile = profile_with_hosts(
         &["api.example.com"],
@@ -379,10 +378,10 @@ fn mode_install_with_runtime_and_install_populated() {
 
 #[test]
 fn mode_runtime_with_runtime_and_install_populated_excludes_install() {
-    // The cycle-3 narrow path: runtime=[a] + install=[b,c] under
-    // runtime mode → anchor body has [a] only. Install hosts are
-    // EXCLUDED. This is the security-relevant case — narrowing back
-    // must shrink the host set.
+    // Narrow path: runtime=[a] + install=[b,c] under runtime mode →
+    // anchor body has [a] only. Install hosts are EXCLUDED. This is
+    // the security-relevant case — narrowing back must shrink the
+    // host set.
     let profile = profile_with_hosts(
         &["api.example.com"],
         &["nodejs.org", "storage.googleapis.com"],
@@ -421,7 +420,7 @@ fn mode_install_with_empty_runtime_and_populated_install() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 3.5: display — standard + verbose + dry-run
+// Display — standard + verbose + dry-run
 // ----------------------------------------------------------------
 
 #[test]
@@ -463,8 +462,9 @@ fn mode_real_verbose_shows_plan_and_echo() {
         &["mode", "dev", "runtime", "-v"],
     );
     assert_eq!(code, 0);
-    // Cycle 15: scripted-real-verbose drops the verbose plan
-    // (Q1 lock).
+    // Scripted-real-verbose drops the verbose plan — cleaner log
+    // trace for scripted callers; the section divider + per-step
+    // echo + ✓ progress remains the trace surface.
     let want = format!(
         "{}\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
@@ -494,7 +494,7 @@ fn mode_install_real_verbose_shows_install_level_text() {
         &["mode", "dev", "install", "-v"],
     );
     assert_eq!(code, 0);
-    // Cycle 15: scripted-real-verbose drops the verbose plan (Q1).
+    // Scripted-real-verbose drops the verbose plan.
     let want = format!(
         "{}\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
@@ -520,8 +520,8 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
         &["mode", "dev", "runtime", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    // Cycle 15: verbose plan moves into the summary in intent-leads-
-    // shell-follows layout (3 entries: InstallAnchor, Reload,
+    // Verbose plan lives inside the summary in intent-leads-shell-
+    // follows layout (3 entries: InstallAnchor, Reload,
     // AddHostToShareGroup; default profile has no `[[shares]]`).
     let plan = verbose_plan_section(&[
         (
@@ -564,7 +564,7 @@ fn mode_dry_run_bypasses_injected_executor() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 3.6: failure paths
+// Failure paths
 // ----------------------------------------------------------------
 
 #[test]
@@ -573,11 +573,10 @@ fn mode_read_profile_failure_surfaces() {
     // a "not found" ProfileError. Mode should surface this through
     // mode_profile_failed with the profile path framed for the operator.
     //
-    // Cycle 15 (Q3 lock): dispatch builds the reapply plan BEFORE
-    // mode_intent emits, so a profile-read failure exits the verb
-    // pre-section-divider. Stdout stays empty; stderr carries the
-    // failure framing. Don't ask the operator to confirm something
-    // doomed to fail.
+    // Dispatch builds the reapply plan BEFORE mode_intent emits, so
+    // a profile-read failure exits the verb pre-section-divider.
+    // Stdout stays empty; stderr carries the failure framing —
+    // don't ask the operator to confirm something doomed to fail.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
@@ -637,8 +636,8 @@ fn mode_install_anchor_failure_surfaces() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Cycle 12: section divider lands; first substrate (InstallAnchor)
-    // fails — no ✓, no Done section.
+    // Section divider lands; first substrate (InstallAnchor) fails
+    // — no ✓, no Done section.
     assert_eq!(
         stdout,
         format!(
@@ -677,8 +676,8 @@ fn mode_reload_failure_surfaces_without_recovery() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Cycle 12: section + ✓ for InstallAnchor (succeeded), no ✓ for
-    // Reload (the failure), no Done section.
+    // Section + ✓ for InstallAnchor (succeeded), no ✓ for Reload
+    // (the failure), no Done section.
     assert_eq!(
         stdout,
         real_failure_stdout(
@@ -713,26 +712,22 @@ fn mode_reload_failure_surfaces_without_recovery() {
 }
 
 // ================================================================
-// Cycle 10: share reapply integration with mode verb
+// Share reapply integration with mode verb
 // ================================================================
 //
 // `tenant mode <name> <tier>` reapplies PF anchor AT THE TIER + per-
 // share substrate (ACL grant + parent dir ensure + symlink ensure).
-// Tests pin op sequences, refusal paths (Q11 host_path missing, Q12
-// tenant_path occupied), Q13 declared-order, and $HOME expansion at
-// the layer boundary.
+// Tests pin op sequences, refusal paths (host_path missing,
+// tenant_path occupied), profile-declared share order, and `$HOME`
+// expansion at the layer boundary.
 
 #[test]
 fn mode_profile_read_failure_surfaces_before_prompt() {
-    // Cycle 15 (Q3 lock) — behavior pin: dispatch builds the reapply
-    // plan BEFORE the confirm prompt, so a missing profile surfaces
-    // pre-prompt with no stdout output (no section divider, no
-    // bullets, no plan). Don't ask the operator to confirm an action
-    // already known to fail. Stderr carries the framed failure.
-    //
-    // This pin replaces the cycle-4 `mode_verbose_emits_intent_before_profile_read_failure`
-    // — that earlier invariant ("intent emits before read failure")
-    // was reversed when cycle 15 moved plan-build to dispatch.
+    // Behavior pin: dispatch builds the reapply plan BEFORE the
+    // confirm prompt, so a missing profile surfaces pre-prompt with
+    // no stdout output (no section divider, no bullets, no plan).
+    // Don't ask the operator to confirm an action already known to
+    // fail. Stderr carries the framed failure.
     let exec = StubExecutor::new(); // no profile preloaded
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -842,8 +837,8 @@ fn mode_runtime_with_nested_tenant_path_emits_ensure_dir_for_parent() {
 
 #[test]
 fn mode_runtime_preserves_profile_declared_share_order() {
-    // Q13 lock: shares apply in profile-declared order. Verify by
-    // recording the AclOp sequence: zeta first, alpha second.
+    // Shares apply in profile-declared order. Verify by recording
+    // the AclOp sequence: zeta first, alpha second.
     let toml = profile_with_shares(
         &[],
         &[],
@@ -870,14 +865,14 @@ fn mode_runtime_preserves_profile_declared_share_order() {
 
 #[test]
 fn mode_refuses_when_host_path_does_not_exist() {
-    // Q11 lock: HostPathMissing surfaces as refuse_mode_share before
-    // any share substrate op runs. The PF reapply ops still fire
-    // (they precede the share pass) — but no AclOp / AccountOp
-    // EnsureDir / EnsureSymlink should be recorded.
+    // HostPathMissing surfaces as refuse_mode_share before any share
+    // substrate op runs. The PF reapply ops still fire (they precede
+    // the share pass) — but no AclOp / AccountOp EnsureDir /
+    // EnsureSymlink should be recorded.
     let toml = profile_with_shares(
         &[],
         &[],
-        &[("/nonexistent/cycle10/sentinel", "rw", "$HOME/src")],
+        &[("/nonexistent/missing/sentinel", "rw", "$HOME/src")],
     );
     let exec = StubExecutor::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
@@ -891,7 +886,7 @@ fn mode_refuses_when_host_path_does_not_exist() {
         "stderr should be framed by refuse_mode_share: {stderr:?}"
     );
     assert!(
-        stderr.contains("/nonexistent/cycle10/sentinel"),
+        stderr.contains("/nonexistent/missing/sentinel"),
         "stderr should name the missing host_path: {stderr:?}"
     );
     assert!(
@@ -908,9 +903,9 @@ fn mode_refuses_when_host_path_does_not_exist() {
 
 #[test]
 fn mode_refuses_when_tenant_path_is_real_directory() {
-    // Q12 lock: TenantPathOccupied surfaces as refuse_mode_share
-    // when probe returns PathKind::Other. Stub returns Other for
-    // the expanded tenant_path; no substrate op fires after refusal.
+    // TenantPathOccupied surfaces as refuse_mode_share when probe
+    // returns PathKind::Other. Stub returns Other for the expanded
+    // tenant_path; no substrate op fires after refusal.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new()
         .with_existing_profile("dev", &toml)

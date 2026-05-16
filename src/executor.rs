@@ -5,9 +5,9 @@
 //! Earlier iterations fused intent (what the writer wanted to do) with
 //! mechanism (the argv that does it on macOS). Writers built argv via a
 //! `build_*_argv` family of helpers; the executor only knew how to spawn
-//! processes. Adding non-argv operations (cycle 1's profile-write; cycle
-//! 2's PF anchor install) forced "synthetic argv" hacks to flow non-shell
-//! ops through the same display/test pipeline.
+//! processes. Adding non-argv operations (profile-write, PF anchor
+//! install) forced "synthetic argv" hacks to flow non-shell ops
+//! through the same display/test pipeline.
 //!
 //! Today: the writer expresses *intent* via per-domain `Op` enums
 //! (`AccountOp`, `ProfileOp`); the substrate `Executor` knows how to
@@ -51,9 +51,9 @@ pub enum AccessMode {
 /// existing symlink (which the share reapply can safely replace via
 /// `ln -sfn`) carrying its resolved target so doctor can compare
 /// against the declared `host_path`; `Other` means a real file or
-/// directory occupies the path. Q12 lock: `Other` triggers
+/// directory occupies the path — `Other` triggers
 /// `ShareError::TenantPathOccupied` so the operator chooses between
-/// editing the profile or removing the conflict manually — substrate
+/// editing the profile or removing the conflict manually. Substrate
 /// never clobbers real operator data.
 ///
 /// Substrate composition: a `sudo -n -u <tenant> /bin/test -L`
@@ -72,11 +72,11 @@ pub enum PathKind {
 /// Probe verdict. `Allowed` means the tenant CAN access the path under
 /// the requested mode (the probe's exit code is zero); `Denied` covers
 /// the expected hardened-host case where the kernel refuses (POSIX,
-/// ACLs, sandbox, TCC — doctor doesn't distinguish; the cycle-1 brief's
-/// Q3 lock defers mechanism-of-denial to a future remediation cycle);
-/// `Unknown` is reserved for ambiguous probe outcomes (e.g. probe ran
-/// but produced indeterminate stderr). Doctor's `classify` collapses
-/// every non-Allowed outcome to no-finding.
+/// ACLs, sandbox, TCC — doctor doesn't distinguish, since
+/// mechanism-of-denial belongs with the future remediation surface);
+/// `Unknown` is reserved for ambiguous probe outcomes (e.g. probe
+/// ran but produced indeterminate stderr). Doctor's `classify`
+/// collapses every non-Allowed outcome to no-finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessOutcome {
     Allowed,
@@ -140,7 +140,7 @@ pub enum AccountOp {
     LoginAsUser { name: String },
 
     /// Ensure a directory exists at `path`, created by the tenant `name`.
-    /// Cycle 10's shares substrate uses this to pre-create
+    /// The shares substrate uses this to pre-create
     /// `parent(tenant_path)` before symlinking — e.g.
     /// `$HOME/.local/share/` so a downstream `$HOME/.local/share/chezmoi`
     /// symlink lands. Maps to `sudo -n -u <name> /bin/mkdir -p <path>`
@@ -152,21 +152,21 @@ pub enum AccountOp {
     EnsureDirAsUser { name: String, path: PathBuf },
 
     /// Ensure a symlink at `link` points at `target`, created by the
-    /// tenant `name`. Cycle 10's shares substrate uses this to install
-    /// the `tenant_path → host_path` symlink that gives the tenant a
+    /// tenant `name`. The shares substrate uses this to install the
+    /// `tenant_path → host_path` symlink that gives the tenant a
     /// stable filesystem entry point under their home. Maps to
-    /// `sudo -n -u <name> /bin/ln -sfn <target> <link>` — `-sfn` is the
-    /// idempotent shape (force-overwrite-existing-symlink + no-follow-
-    /// existing-dir-target). An existing REAL directory or file at
-    /// `link` is the Q12-lock case the Writer guards against before
-    /// the substrate runs.
+    /// `sudo -n -u <name> /bin/ln -sfn <target> <link>` — `-sfn` is
+    /// the idempotent shape (force-overwrite-existing-symlink +
+    /// no-follow-existing-dir-target). An existing REAL directory or
+    /// file at `link` is the `TenantPathOccupied` case the Writer
+    /// guards against before the substrate runs.
     EnsureSymlinkAsUser {
         name: String,
         link: PathBuf,
         target: PathBuf,
     },
 
-    /// Cycle 14: add the host operator as a secondary member of the
+    /// Add the host operator as a secondary member of the
     /// tenant's `<name>-tenant-share` group. Maps to `sudo dseditgroup
     /// -o edit -n . -a <host> -t user <name>-tenant-share` on macOS.
     /// Idempotent at the substrate (`dseditgroup -o edit -a` on an
@@ -176,34 +176,33 @@ pub enum AccountOp {
     /// tenant's pre-existing state.
     ///
     /// Ported verbatim from sandbox's `_add_human_to_group` step
-    /// (`scripts/lib/phases/phase01_user.py:180-185`); the cycle-1
-    /// port dropped it, and the symptom — bidirectional-write
-    /// asymmetry on RW shares — was caught in the 2026-05-15 operator
-    /// setup pass.
+    /// (`scripts/lib/phases/phase01_user.py:180-185`); originally
+    /// dropped during the initial port, and the symptom —
+    /// bidirectional-write asymmetry on RW shares — was caught in
+    /// the 2026-05-15 operator setup pass.
     AddHostToShareGroup { name: String, host: String },
 
-    /// Cycle 14: symmetric counter to `AddHostToShareGroup`. Maps to
-    /// `sudo dseditgroup -o edit -n . -d <host> -t user
-    /// <name>-tenant-share`. The describe-side renders only the `-d`
-    /// edit form; the production `execute_account` impl invokes
-    /// `dseditgroup -o checkmember -m <host> <group>` first and skips
-    /// the edit when the host is not a member (idempotence for legacy
-    /// pre-cycle-14 tenants and the orphan-group destroy path on a
-    /// partially-created tenant).
+    /// Symmetric counter to `AddHostToShareGroup`. Maps to `sudo
+    /// dseditgroup -o edit -n . -d <host> -t user <name>-tenant-share`.
+    /// The describe-side renders only the `-d` edit form; the
+    /// production `execute_account` impl invokes `dseditgroup -o
+    /// checkmember -m <host> <group>` first and skips the edit when
+    /// the host is not a member (idempotence for legacy tenants
+    /// without host membership and the orphan-group destroy path
+    /// on a partially-created tenant).
     RemoveHostFromShareGroup { name: String, host: String },
 }
 
 /// Profile-domain operations. The store-backed `~/.config/tenant/profiles/<name>.toml`
 /// file is the host-side artifact; the substrate handles the actual fs work
-/// (or in-memory recording for tests). Cycle 2's profile read path lives on
-/// `Executor::read_profile` (a dedicated method, not a variant here) because
-/// the return type — file content, not unit — doesn't fit
+/// (or in-memory recording for tests). The profile read path lives on
+/// `Executor::read_profile` (a dedicated method, not a variant here)
+/// because the return type — file content, not unit — doesn't fit
 /// `execute_profile`'s shape. Parallels `login`'s carve-out from
 /// `execute_account` for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileOp {
-    /// Write the default profile content for `name`. Idempotent overwrite
-    /// (matches the cycle-1 contract).
+    /// Write the default profile content for `name`. Idempotent overwrite.
     Create { name: String },
 
     /// Remove the profile file. Idempotent: NotFound is success, mirroring
@@ -256,15 +255,14 @@ impl AclMode {
     }
 }
 
-/// ACL-domain operations (cycle 10). `Grant` adds an inheritable ACL entry
+/// ACL-domain operations. `Grant` adds an inheritable ACL entry
 /// granting `group` access to `path` at the requested mode; `Revoke`
-/// removes the same entry. Both are idempotent at the substrate (the
-/// production `execute_acl` pre-checks `ls -lde <path>` for an existing
-/// entry before invoking `chmod +a` / `chmod -a`; sandbox's pattern). No
-/// `sudo` prefix on the argv — the operator (host user) is expected to
-/// own or have ACL-write on `host_path`; if they don't, `chmod` fails
-/// with `AclError::NonZero` and the stderr surfaces under
-/// `Reporter::*_failed`.
+/// removes the same entry. Both are idempotent at the substrate (macOS
+/// `chmod +a` is natively idempotent — re-applying an existing entry
+/// is a noop). No `sudo` prefix on the argv — the operator (host
+/// user) is expected to own or have ACL-write on `host_path`; if
+/// they don't, `chmod` fails with `AclError::NonZero` and the stderr
+/// surfaces under `Reporter::*_failed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AclOp {
     /// Grant `group` access to `path` at `mode`. ACL entry is inheritable
@@ -362,12 +360,12 @@ impl fmt::Display for AccountError {
 }
 
 /// Failure surface for privileged-or-cheap reads of host config files
-/// — `/etc/sudoers` + `/etc/sudoers.d/*` (sub-cycle 6) and
-/// `/etc/pam.d/sudo` (cycle 7 SC3). The substrate concatenates the
-/// readable text into one blob that doctor's parsers grep through;
-/// either the read invocation fails (spawn / non-zero on sudo-gated
-/// reads) or a direct filesystem read fails (cheap mode-0644 reads).
-/// Mirrors `FirewallError`'s shape with an extra `Fs` variant for the
+/// — `/etc/sudoers` + `/etc/sudoers.d/*` (privileged) and
+/// `/etc/pam.d/sudo` (mode-0644 direct read). The substrate
+/// concatenates the readable text into one blob that doctor's parsers
+/// grep through; either the read invocation fails (spawn / non-zero
+/// on sudo-gated reads) or a direct filesystem read fails. Mirrors
+/// `FirewallError`'s shape with an extra `Fs` variant for the
 /// direct-read case.
 #[derive(Debug)]
 pub enum HostFileError {
@@ -466,12 +464,9 @@ impl fmt::Display for FirewallError {
     }
 }
 
-/// ACL-domain error (cycle 10). Mirrors `AccountError`'s shape because the
-/// substrate is `chmod` (a tool with the same spawn / non-zero contract as
-/// dseditgroup / sysadminctl). The substrate uses `ls -lde` as the pre-flight
-/// idempotence check; that call's failure surfaces under the same `NonZero`
-/// arm (the operator-facing message names chmod regardless of which sub-step
-/// failed — clear enough for solo-Mac scope).
+/// ACL-domain error. Mirrors `AccountError`'s shape because the
+/// substrate is `chmod` (a tool with the same spawn / non-zero contract
+/// as dseditgroup / sysadminctl).
 #[derive(Debug)]
 pub enum AclError {
     Spawn(io::Error),
@@ -520,7 +515,7 @@ pub trait Executor {
     /// Read the on-disk profile TOML content for `name`. Separate from
     /// `execute_profile` because the return type (file content, not unit)
     /// doesn't fit `execute_profile`'s shape — same carve-out rationale
-    /// as `login`. Cycle 2's create-side firewall step calls this to feed
+    /// as `login`. Called by the create-side firewall step to feed
     /// the anchor renderer.
     fn read_profile(&self, name: &str) -> Result<String, ProfileError>;
 
@@ -614,39 +609,37 @@ pub trait Executor {
     ///
     /// Why this matters: pf can be globally disabled with `pfctl
     /// -d`. When disabled, NO anchor rules enforce — every tenant's
-    /// firewall is silently inert. Cycle 7 SC4's `Finding::PfDisabled`
-    /// is the host-wide critical-tier finding that surfaces this
-    /// state.
+    /// firewall is silently inert. `Finding::PfDisabled` is the
+    /// host-wide critical-tier finding that surfaces this state.
     fn read_pf_status(&self) -> Result<String, FirewallError>;
 
     /// Read the on-disk per-tenant anchor file
     /// (`firewall::tenant_anchor_path(name)`). Mode 0644 root-owned
-    /// (cycle 2's install flow sets this) — direct `fs::read_to_string`,
+    /// (the install flow sets this) — direct `fs::read_to_string`,
     /// no sudo. Reuses `HostFileError` (same shape and substrate
     /// posture as `read_pam_sudo`). Carve-out: content return, not
     /// unit.
     ///
-    /// Cycle 8's `Finding::AnchorBodyDrift` consumes this: doctor
-    /// compares the on-disk body byte-for-byte against
-    /// `firewall::render_anchor` over the runtime-tier hosts. The
-    /// "file" side complement to `read_kernel_pf_rules`'s "kernel"
-    /// side — neither alone is sufficient, since the two can drift
-    /// independently (operator hand-edit on the file, or a `pfctl
-    /// -f` race on the kernel).
+    /// `Finding::AnchorBodyDrift` consumes this: doctor compares the
+    /// on-disk body byte-for-byte against `firewall::render_anchor`
+    /// over the runtime-tier hosts. The "file" side complement to
+    /// `read_kernel_pf_rules`'s "kernel" side — neither alone is
+    /// sufficient, since the two can drift independently (operator
+    /// hand-edit on the file, or a `pfctl -f` race on the kernel).
     fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError>;
 
     /// Read the host-side ACL state on `path`. Substrate is `ls -lde
     /// <path>` from the operator process (no sudo — operator owns or
-    /// has list-traverse on host_path; cycle-11 Q2 lock). Returns the
-    /// raw output as a single string for `doctor::has_group_acl_entry`
-    /// to grep. Reuses `ProbeError` because the substrate posture
-    /// mirrors `probe_access_as_tenant` (machinery-failure cases are
-    /// errors; "no matching entry" is a non-error outcome the parser
-    /// turns into a no-finding). Carve-out: content return, not unit.
+    /// has list-traverse on host_path). Returns the raw output as a
+    /// single string for `doctor::has_group_acl_entry` to grep.
+    /// Reuses `ProbeError` because the substrate posture mirrors
+    /// `probe_access_as_tenant` (machinery-failure cases are errors;
+    /// "no matching entry" is a non-error outcome the parser turns
+    /// into a no-finding). Carve-out: content return, not unit.
     ///
-    /// Cycle 11's `Finding::AclDrift` consumes this: doctor walks the
-    /// profile's `[[shares]]` array, calls `read_host_acl(host_path)`
-    /// for each, and emits AclDrift when the expected `<tenant>-tenant-share`
+    /// `Finding::AclDrift` consumes this: doctor walks the profile's
+    /// `[[shares]]` array, calls `read_host_acl(host_path)` for each,
+    /// and emits AclDrift when the expected `<tenant>-tenant-share`
     /// group ACL entry is absent.
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError>;
 
@@ -660,12 +653,13 @@ pub trait Executor {
     /// substrate's other invocations). Carve-out method (return type
     /// is `bool`, not unit, so it doesn't fit `WritableOp`).
     ///
-    /// Cycle 14: doctor's `Finding::HostNotInShareGroup` consumes this
-    /// to detect drift on cycle-10-era tenants and operator-manual
-    /// removals. Also used internally by
-    /// `MacosExecutor::execute_account` on `RemoveHostFromShareGroup`
-    /// to short-circuit the `-d` edit when the host isn't currently a
-    /// member (substrate-side idempotence).
+    /// Doctor's `Finding::HostNotInShareGroup` consumes this to
+    /// detect drift on legacy tenants (created before host membership
+    /// was wired into create) and operator-manual removals. Also
+    /// used internally by `MacosExecutor::execute_account` on
+    /// `RemoveHostFromShareGroup` to short-circuit the `-d` edit
+    /// when the host isn't currently a member (substrate-side
+    /// idempotence).
     fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError>;
 }
 
@@ -700,9 +694,9 @@ impl<'a> Op<'a> {
 
     /// Operator-facing past-tense success label for the op. Drives the
     /// `✓ <label>` lines emitted by `Reporter::progress` after each
-    /// substrate step succeeds (cycle 12). Distinct from `describe_via`:
-    /// describe is the mechanism-level shell echo (`sudo dseditgroup
-    /// …`); business_label is the capability-level summary the operator
+    /// substrate step succeeds. Distinct from `describe_via`: describe
+    /// is the mechanism-level shell echo (`sudo dseditgroup …`);
+    /// business_label is the capability-level summary the operator
     /// reads. Substrate-agnostic — no `dseditgroup` / `sysadminctl`
     /// jargon.
     pub fn business_label(&self) -> String {
@@ -715,14 +709,14 @@ impl<'a> Op<'a> {
     }
 
     /// Operator-facing future-tense capability label for the op. Leads
-    /// each step in the verbose pre-prompt plan block (cycle 15) as a
-    /// `• <intent>` bullet, with the shell line indented underneath.
-    /// Sibling to `business_label` (past-tense; drives the `✓` progress
-    /// lines emitted post-execution). Substrate-agnostic — no
-    /// `dseditgroup` / `sysadminctl` / `pfctl` jargon. Cycle 15 sharpens
-    /// the probe variants (`LookupUserRecord` / `DeleteUserRecord`)
-    /// whose business_label past-tense doesn't read naturally as a
-    /// future-tense bullet.
+    /// each step in the verbose pre-prompt plan block as a `• <intent>`
+    /// bullet, with the shell line indented underneath. Sibling to
+    /// `business_label` (past-tense; drives the `✓` progress lines
+    /// emitted post-execution). Substrate-agnostic — no `dseditgroup`
+    /// / `sysadminctl` / `pfctl` jargon. The probe variants
+    /// (`LookupUserRecord` / `DeleteUserRecord`) are sharpened apart
+    /// from their business_label so the future-tense bullet reads
+    /// naturally.
     pub fn intent_label(&self) -> String {
         match self {
             Op::Account(op) => account_intent_label(op),
@@ -1024,13 +1018,13 @@ impl Executor for MacosExecutor {
         // through `execute_account` fails loudly in dev / tests rather than
         // silently doing the wrong thing in prod.
         if let AccountOp::RemoveHostFromShareGroup { name, host } = op {
-            // Cycle-14 idempotence: skip the `-d` edit when host isn't a
-            // current member. Covers (a) legacy tenants pre-cycle-14
-            // (host was never added) and (b) destroy_orphan_group on a
+            // Idempotence: skip the `-d` edit when host isn't a
+            // current member. Covers (a) legacy tenants where the host
+            // was never added and (b) destroy_orphan_group on a
             // partial-create tenant where AddHost failed. The substrate
             // is the source of truth — Writer keeps the op in the plan
-            // for symmetry (cycle-14 Q4 lock); the substrate decides
-            // whether to actually fire it.
+            // for symmetry; the substrate decides whether to actually
+            // fire it.
             let group = format!("{name}-tenant-share");
             if !self.host_in_group(host, &group)? {
                 return Ok(());
@@ -1157,8 +1151,8 @@ impl Executor for MacosExecutor {
         // `/bin/test -<flag> <path>` returns:
         //   0  → predicate true (Allowed)
         //   1  → predicate false (Denied — includes file-doesn't-exist;
-        //        cycle-1 brief Q3 lock accepts the ambiguity, cycle-2
-        //        remediation surfaces the mechanism).
+        //        we accept the ambiguity here, since mechanism-of-denial
+        //        belongs with the future remediation surface).
         //   ≥2 → anything else (Unknown — probe machinery hiccup).
         // `sudo -n` is the non-interactive flag: if the operator's
         // sudo session isn't already cached, sudo fails with non-zero
@@ -1370,19 +1364,18 @@ impl Executor for MacosExecutor {
         //     captures the target string. readlink itself does not
         //     resolve intermediate symlinks; we record what's literally
         //     stored in the link entry. Doctor's SymlinkDrift comparator
-        //     is string-exact (cycle-11 Q3 lock).
+        //     is string-exact.
         //   On symlink-miss: `sudo -n -u <name> /bin/test -e <path>`
         //     distinguishes Other vs Absent.
         // sudo-machinery failures (auth cache miss, fork failed) surface
         // as `ProbeError`. Same NonZero pattern as
         // `probe_access_as_tenant`.
         //
-        // Note on absolute paths: cycle-10's smoke pinned `/bin/test`
-        // (not `/usr/bin/test`); cycle-11's smoke pinned the inverse
-        // for readlink — Darwin 25.x ships readlink at `/usr/bin/`,
-        // not `/bin/`. `ln` is at `/bin/ln` (per cycle 10). No single
-        // bin-directory is canonical on macOS; the right answer is
-        // per-utility.
+        // Note on absolute paths: macOS Tahoe (Darwin 25.x) ships
+        // `test` at `/bin/test` (not `/usr/bin/test`); readlink at
+        // `/usr/bin/readlink` (not `/bin/readlink`); `ln` at `/bin/ln`.
+        // No single bin-directory is canonical on macOS; the right
+        // answer is per-utility.
         let path_str = path.to_string_lossy().into_owned();
         let symlink_out = Command::new("sudo")
             .args(["-n", "-u", name, "/bin/test", "-L", &path_str])
@@ -1447,13 +1440,13 @@ impl Executor for MacosExecutor {
     }
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
-        // Operator-process `ls -lde <path>` (cycle-11 Q2 lock: host-side
-        // ACL is host state, read from the operator process — no sudo,
-        // no run-as-tenant). `ls`'s exit code is 0 on success, non-zero
-        // when the path is unreadable (which IS a substrate failure for
-        // doctor's purposes — operator can't audit a path they can't
-        // list). Concatenate stdout+stderr so both `total N + entries`
-        // lines and any error blurb feed the parser uniformly.
+        // Operator-process `ls -lde <path>`: host-side ACL is host
+        // state, read from the operator process — no sudo, no
+        // run-as-tenant. `ls`'s exit code is 0 on success, non-zero
+        // when the path is unreadable (which IS a substrate failure
+        // for doctor's purposes — operator can't audit a path they
+        // can't list). Concatenate stdout+stderr so both `total N +
+        // entries` lines and any error blurb feed the parser uniformly.
         let path_str = path.to_string_lossy().into_owned();
         let output = Command::new("ls")
             .args(["-lde", &path_str])
@@ -1491,10 +1484,8 @@ impl Executor for MacosExecutor {
     fn execute_acl(&self, op: &AclOp) -> Result<(), AclError> {
         // macOS `chmod +a` is natively idempotent — re-applying the
         // same ACL entry to a path that already carries it doesn't
-        // add a duplicate and doesn't error. Verified empirically by
-        // cycle 10's smoke (step 8): three sequential `tenant reload`
-        // invocations kept the ACL entry count at 1. So Grant runs
-        // chmod unconditionally; substrate-side dedup is the contract.
+        // add a duplicate and doesn't error. So Grant runs chmod
+        // unconditionally; substrate-side dedup is the contract.
         //
         // An earlier draft tried a substring-match pre-check against
         // `ls -lde` output before calling chmod, but macOS canonicalizes
@@ -1507,9 +1498,9 @@ impl Executor for MacosExecutor {
         //
         // Revoke (`chmod -a`) on an absent entry currently surfaces
         // as `AclError::NonZero` with "No matching ACL entry" stderr.
-        // No cycle-10 path exercises Revoke; cycle 11's doctor
-        // ACL-drift remediation will need to tolerate that case (or
-        // pre-check via ls).
+        // No production path exercises Revoke today; future
+        // ACL-drift remediation will need to tolerate that case
+        // (or pre-check via ls).
         let (flag, path, group, mode) = match op {
             AclOp::Grant {
                 path, group, mode, ..
@@ -1538,10 +1529,9 @@ impl Executor for MacosExecutor {
         // any non-zero exit (host absent from group, group absent) ⇒
         // false. Machinery failure (dseditgroup not on PATH, fork
         // failed) surfaces as `AccountError::Spawn`. The non-zero
-        // branch deliberately does NOT inspect stderr; sandbox's prior
-        // art and the cycle-14 idempotence contract treat any non-zero
-        // as "not a member" so the substrate isn't tied to the tool's
-        // exact stderr wording.
+        // branch deliberately does NOT inspect stderr; the idempotence
+        // contract treats any non-zero as "not a member" so the
+        // substrate isn't tied to the tool's exact stderr wording.
         let output = Command::new("dseditgroup")
             .args(["-o", "checkmember", "-m", host, group])
             .output()
@@ -1629,7 +1619,7 @@ fn spawn_firewall(argv: &[String]) -> Result<(), FirewallError> {
 }
 
 /// Extract the tenant name from any `ProfileOp` variant. Centralizes the
-/// pattern-match so future variants (cycle 2's `Read`) just slot in.
+/// pattern-match so future variants (e.g. a `Read` op) just slot in.
 fn op_name(op: &ProfileOp) -> &str {
     match op {
         ProfileOp::Create { name } | ProfileOp::Delete { name } => name,
@@ -1832,11 +1822,10 @@ impl Executor for DryRunExecutor {
         Ok(())
     }
 
-    /// Dry-run skips probes entirely (sub-cycle 3 test pins this). The
-    /// dispatcher's `Verb::Doctor` arm short-circuits before calling
-    /// any executor probe under `--dry-run`; if anything does reach
-    /// this impl, return Unknown rather than fabricating a misleading
-    /// Allowed/Denied answer.
+    /// Dry-run skips probes entirely. The dispatcher's `Verb::Doctor`
+    /// arm short-circuits before calling any executor probe under
+    /// `--dry-run`; if anything does reach this impl, return Unknown
+    /// rather than fabricating a misleading Allowed/Denied answer.
     fn probe_access_as_tenant(
         &self,
         _name: &str,
@@ -1923,9 +1912,9 @@ impl Executor for DryRunExecutor {
     }
 
     /// Dry-run returns `true` so the would-do preview never trips
-    /// doctor's cycle-14 `HostNotInShareGroup` finding — same
-    /// "no actionable warnings in dry-run" posture as `read_host_acl`
-    /// and `tenant_path_kind`.
+    /// doctor's `HostNotInShareGroup` finding — same "no actionable
+    /// warnings in dry-run" posture as `read_host_acl` and
+    /// `tenant_path_kind`.
     fn host_in_group(&self, _host: &str, _group: &str) -> Result<bool, AccountError> {
         Ok(true)
     }
@@ -2000,9 +1989,7 @@ pub struct StubExecutor {
     /// scaffolded default had different runtime/install hosts" —
     /// lets create-flow tests exercise the read_profile + parse +
     /// render_anchor path with non-empty allowlists without
-    /// rewriting `default_profile_toml`. The cycle-2 allow-path
-    /// manual smoke validates this end-to-end against real pfctl; the
-    /// automated counterpart pins the same data flow through the stub.
+    /// rewriting `default_profile_toml`.
     create_profile_overrides: RefCell<HashMap<String, String>>,
 
     /// Recorded probe invocations. Each entry is the `(name, path,
@@ -2038,7 +2025,7 @@ pub struct StubExecutor {
     /// missing entry falls back to a "happy" default rules string
     /// (both `pass` + `block` present) so doctor tests that don't
     /// care about the PF-rule path don't see spurious `PfRuleDrift`
-    /// findings. SC2 tests override with `with_kernel_pf_rules` to
+    /// findings. Tests override with `with_kernel_pf_rules` to
     /// exercise drift cases.
     kernel_pf_rules: RefCell<HashMap<String, String>>,
 
@@ -2050,7 +2037,7 @@ pub struct StubExecutor {
     /// In-memory simulation of `/etc/pam.d/sudo`. Default is a
     /// "Touch-ID-active" placeholder (see `StubExecutor::new`) so
     /// doctor tests that don't care about the PAM path don't see
-    /// spurious `TouchIdMissing` findings. SC3 tests override with
+    /// spurious `TouchIdMissing` findings. Tests override with
     /// `with_pam_sudo_content` to exercise the absent / commented
     /// cases.
     pam_sudo_content: RefCell<String>,
@@ -2060,22 +2047,22 @@ pub struct StubExecutor {
 
     /// In-memory simulation of `pfctl -si` output. Default is
     /// "Status: Enabled" so doctor tests that don't care about
-    /// pf-enabled don't see spurious `PfDisabled` findings. SC4
-    /// tests override with `with_pf_status_content`.
+    /// pf-enabled don't see spurious `PfDisabled` findings. Tests
+    /// override with `with_pf_status_content`.
     pf_status_content: RefCell<String>,
 
     /// One-shot pf-status read failure. Mirrors
     /// `kernel_pf_rules_failure`.
     pf_status_failure: RefCell<Option<FirewallError>>,
 
-    /// Per-tenant in-memory simulation of the on-disk anchor body
-    /// (cycle 8). Lookup keyed by tenant name; a missing entry falls
-    /// back to the runtime-tier render of whatever profile is in
+    /// Per-tenant in-memory simulation of the on-disk anchor body.
+    /// Lookup keyed by tenant name; a missing entry falls back to
+    /// the runtime-tier render of whatever profile is in
     /// `profile_state` for the same name, OR to
     /// `render_anchor(name, &[])` when no profile is present — both
     /// shapes match what doctor would compute as "expected" so tests
     /// that don't care about anchor-body drift don't see spurious
-    /// `AnchorBodyDrift` findings. Cycle 8 tests override with
+    /// `AnchorBodyDrift` findings. Tests override with
     /// `with_anchor_body` to exercise hand-edit drift.
     anchor_body_state: RefCell<HashMap<String, String>>,
 
@@ -2119,23 +2106,22 @@ pub struct StubExecutor {
     /// match wins; cleared after firing. Mirrors `tenant_path_kind_failure`.
     host_acl_failures: RefCell<HashMap<PathBuf, ProbeError>>,
 
-    /// Cycle 14: per-(host, group) override for `host_in_group`. First
-    /// match wins; unmatched lookups default to `true` so doctor tests
-    /// that don't exercise the cycle-14 `HostNotInShareGroup` finding
-    /// don't see a spurious warning. Tests that DO exercise the
-    /// finding set `false` via `with_host_in_group`.
+    /// Per-(host, group) override for `host_in_group`. First match
+    /// wins; unmatched lookups default to `true` so doctor tests that
+    /// don't exercise the `HostNotInShareGroup` finding don't see a
+    /// spurious warning. Tests that DO exercise the finding set
+    /// `false` via `with_host_in_group`.
     host_in_group_state: RefCell<HashMap<(String, String), bool>>,
 
-    /// Cycle 14: recorded `host_in_group` invocations in call order
-    /// (one entry per call). Tests use this to pin that the catch-up
-    /// path inside `execute_reapply_plan` fires the AddHost op
-    /// unconditionally (the recorder shows the op fired regardless of
-    /// stub state).
+    /// Recorded `host_in_group` invocations in call order (one entry
+    /// per call). Tests use this to pin that the catch-up path inside
+    /// `execute_reapply_plan` fires the AddHost op unconditionally
+    /// (the recorder shows the op fired regardless of stub state).
     host_in_group_invocations: RefCell<Vec<(String, String)>>,
 
-    /// Cycle 14: one-shot `host_in_group` failure. Mirrors
-    /// `probe_failure`. Used to pin the doctor-failure exit-74
-    /// behavior when dseditgroup-checkmember can't run.
+    /// One-shot `host_in_group` failure. Mirrors `probe_failure`. Used
+    /// to pin the doctor-failure exit-74 behavior when
+    /// dseditgroup-checkmember can't run.
     host_in_group_failure: RefCell<Option<AccountError>>,
 }
 
@@ -2144,18 +2130,18 @@ impl StubExecutor {
         let s = Self::default();
         // Default env policy to "no leak" so doctor tests that don't
         // care about the env-leak path don't see a spurious EnvLeak
-        // finding. Sub-cycle 6 tests override with
-        // `with_env_policy_content` to exercise the leak case.
+        // finding. Tests override with `with_env_policy_content` to
+        // exercise the leak case.
         *s.env_policy_content.borrow_mut() =
             "Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string();
         // Default pam.d/sudo to "Touch ID active" so doctor tests
         // that don't care about the Touch-ID-for-sudo path don't see
-        // a spurious TouchIdMissing finding. Cycle 7 SC3 tests
-        // override with `with_pam_sudo_content`.
+        // a spurious TouchIdMissing finding. Tests override with
+        // `with_pam_sudo_content`.
         *s.pam_sudo_content.borrow_mut() = "auth       sufficient     pam_tid.so\n".to_string();
         // Default pf status to "Enabled" so doctor tests that don't
         // care about the pf-enabled path don't see a spurious
-        // PfDisabled finding. Cycle 7 SC4 tests override with
+        // PfDisabled finding. Tests override with
         // `with_pf_status_content`.
         *s.pf_status_content.borrow_mut() = "Status: Enabled for 0 days 00:00:00\n".to_string();
         s
@@ -2225,10 +2211,9 @@ impl StubExecutor {
     }
 
     /// Pre-load a profile (e.g. for destroy tests that need to assert
-    /// "this was here before, gone after"). Mirrors the pre-refactor
-    /// `StubProfileStore::with_profile`. Content is opaque to the
-    /// substrate; only the presence/absence semantics matter for
-    /// cycle-1 assertions.
+    /// "this was here before, gone after"). Content is opaque to the
+    /// substrate; only the presence/absence semantics matter for the
+    /// assertions.
     pub fn with_existing_profile(self, name: &str, content: &str) -> Self {
         self.profile_state
             .borrow_mut()
@@ -2237,7 +2222,7 @@ impl StubExecutor {
     }
 
     /// Pre-load `/etc/pf.conf` content for `read_pf_conf`. Used by
-    /// cycle-2 tests that need a host-state with existing anchor refs
+    /// firewall tests that need a host-state with existing anchor refs
     /// (so `ensure_anchor_ref` / `remove_anchor_ref` exercise the
     /// non-empty case).
     pub fn with_pf_conf(self, content: &str) -> Self {
@@ -2318,7 +2303,7 @@ impl StubExecutor {
     }
 
     /// Pre-load the kernel pf rules for the `tenant-<name>` anchor.
-    /// `read_kernel_pf_rules(name)` returns this text. Used by SC2
+    /// `read_kernel_pf_rules(name)` returns this text. Used by
     /// PF-rule-drift tests to inject "kernel anchor is empty" or
     /// "kernel anchor is missing a pass rule" cases.
     pub fn with_kernel_pf_rules(self, name: &str, content: &str) -> Self {
@@ -2338,8 +2323,8 @@ impl StubExecutor {
     }
 
     /// Pre-load `/etc/pam.d/sudo` content for `read_pam_sudo`. Used
-    /// by SC3's Touch-ID-for-sudo tests to model "operator's pam.d
-    /// has it / doesn't have it / has it commented out".
+    /// by Touch-ID-for-sudo tests to model "operator's pam.d has it /
+    /// doesn't have it / has it commented out".
     pub fn with_pam_sudo_content(self, content: &str) -> Self {
         *self.pam_sudo_content.borrow_mut() = content.to_string();
         self
@@ -2353,7 +2338,7 @@ impl StubExecutor {
     }
 
     /// Pre-load the `pfctl -si` output for `read_pf_status`. Used
-    /// by SC4 tests to model "pf is disabled" vs "pf is enabled"
+    /// by pf-status tests to model "pf is disabled" vs "pf is enabled"
     /// without poking the host's actual pf state.
     pub fn with_pf_status_content(self, content: &str) -> Self {
         *self.pf_status_content.borrow_mut() = content.to_string();
@@ -2368,11 +2353,11 @@ impl StubExecutor {
     }
 
     /// Pre-load the on-disk anchor body for `name`.
-    /// `read_anchor_body(name)` returns this text. Used by cycle-8
-    /// tests to inject "operator hand-edited the file" or "anchor
-    /// matches install-tier render but not runtime-tier" drift cases.
-    /// Mirrors `with_kernel_pf_rules` (content-shaped subject —
-    /// no `_content` suffix).
+    /// `read_anchor_body(name)` returns this text. Used by anchor-body
+    /// drift tests to inject "operator hand-edited the file" or
+    /// "anchor matches install-tier render but not runtime-tier"
+    /// drift cases. Mirrors `with_kernel_pf_rules` (content-shaped
+    /// subject — no `_content` suffix).
     pub fn with_anchor_body(self, name: &str, content: &str) -> Self {
         self.anchor_body_state
             .borrow_mut()
@@ -2409,10 +2394,10 @@ impl StubExecutor {
     }
 
     /// Pre-load the `PathKind` outcome for `(name, path)`. Used by
-    /// cycle-10 share-reapply tests to model "tenant_path is a real
-    /// directory" (triggers `ShareError::TenantPathOccupied`) or
-    /// "tenant_path is an existing symlink" (idempotent re-link) cases.
-    /// Unmatched lookups default to `Absent`.
+    /// share-reapply tests to model "tenant_path is a real directory"
+    /// (triggers `ShareError::TenantPathOccupied`) or "tenant_path
+    /// is an existing symlink" (idempotent re-link) cases. Unmatched
+    /// lookups default to `Absent`.
     pub fn with_tenant_path_kind(self, name: &str, path: &std::path::Path, kind: PathKind) -> Self {
         self.tenant_path_kinds
             .borrow_mut()
@@ -2428,7 +2413,7 @@ impl StubExecutor {
     }
 
     /// Pre-load the `ls -lde` listing returned for `path`. Used by
-    /// cycle-11 doctor tests to model "host_path is missing the
+    /// doctor tests to model "host_path is missing the
     /// `<tenant>-tenant-share` ACL entry" (triggers `Finding::AclDrift`)
     /// or "host_path carries an unrelated group's entry" cases.
     pub fn with_host_acl(self, path: &std::path::Path, listing: &str) -> Self {
@@ -2447,9 +2432,9 @@ impl StubExecutor {
         self
     }
 
-    /// Cycle 14: pre-load the membership outcome for `(host, group)`.
-    /// Used by doctor tests to model "host is not a member of the
-    /// tenant's share group" (triggers `Finding::HostNotInShareGroup`).
+    /// Pre-load the membership outcome for `(host, group)`. Used by
+    /// doctor tests to model "host is not a member of the tenant's
+    /// share group" (triggers `Finding::HostNotInShareGroup`).
     /// Unmatched lookups default to `true` so existing doctor tests
     /// see no spurious finding.
     pub fn with_host_in_group(self, host: &str, group: &str, is_member: bool) -> Self {
@@ -2459,8 +2444,8 @@ impl StubExecutor {
         self
     }
 
-    /// Cycle 14: configure the next `host_in_group` call to fail with
-    /// `err`. One-shot — cleared after firing.
+    /// Configure the next `host_in_group` call to fail with `err`.
+    /// One-shot — cleared after firing.
     pub fn fail_next_host_in_group(self, err: AccountError) -> Self {
         *self.host_in_group_failure.borrow_mut() = Some(err);
         self

@@ -100,8 +100,8 @@ fn destroy_dry_run_verbose_shows_mechanism() {
         &["destroy", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    // Cycle 15: verbose plan moves into the summary (intent-leads-
-    // shell-follows layout).
+    // Verbose plan lives inside the summary (intent-leads-shell-
+    // follows layout).
     let plan = destroy_verbose_plan_block("dev");
     assert_eq!(stdout, destroy_dry_run_block("dev", 600, Some(&plan)));
 }
@@ -165,8 +165,9 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
     // → all four commands echo (dseditgroup-delete is the load-bearing
     // 4th step Phase 3 adds). The trailing post-exec confirmation closes
     // the block.
-    // Cycle 15: scripted-real-verbose (TTY=false) drops the plan
-    // block entirely (Q1 lock). Section + $ echo + ✓ + Done.
+    // Scripted-real-verbose (TTY=false) drops the plan block
+    // entirely (cleaner log trace; the section + $ echo + ✓ + Done
+    // remains the trace surface).
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
@@ -223,8 +224,8 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
     );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Cycle 12: no ✓ for `LookupUserRecord` (probe Err == "no
-    // residue") and consequently no DeleteUserRecord step at all.
+    // No ✓ for `LookupUserRecord` (probe Err == "no residue") and
+    // consequently no DeleteUserRecord step at all.
     assert_eq!(
         stdout,
         real_success_stdout(
@@ -261,15 +262,15 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
 
 #[test]
 fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
-    // Phase 3's load-bearing 4th step: if dseditgroup-delete fails after
-    // sysadminctl-deleteUser succeeded and the dscl-cleanup ran (or was
-    // skipped as a noop), the host now carries an orphan tenant-share
-    // group. The writer must surface this as EX_IOERR so the operator
-    // knows to retry — and cycle 5's OrphanGroup eligibility arm
-    // converges on retry. The error message reuses the existing
+    // Load-bearing dseditgroup-delete step: if it fails after
+    // sysadminctl-deleteUser succeeded and the dscl-cleanup ran (or
+    // was skipped as a noop), the host now carries an orphan
+    // tenant-share group. The writer must surface this as EX_IOERR
+    // so the operator knows to retry — the OrphanGroup eligibility
+    // arm converges on retry. The error message reuses the existing
     // `destroy_failed` shape; the captured dseditgroup stderr inside
-    // ExecError carries enough detail (the dseditgroup tool prints its
-    // own argv-aware context) for the operator to diagnose.
+    // ExecError carries enough detail (the dseditgroup tool prints
+    // its own argv-aware context) for the operator to diagnose.
     let exec = StubExecutor::new().fail_account_op(
         AccountOp::DeleteShareGroup { name: "dev".into() },
         AccountError::NonZero {
@@ -279,9 +280,9 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
     );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Cycle 12: pre-failure ✓ stream is visible (Delete user, residue
-    // probe + cleanup all succeeded). DeleteShareGroup failed — no
-    // ✓ for it, no Done section.
+    // Pre-failure ✓ stream is visible (Delete user, residue probe +
+    // cleanup all succeeded). DeleteShareGroup failed — no ✓ for it,
+    // no Done section.
     assert_eq!(
         stdout,
         real_failure_stdout(
@@ -300,8 +301,8 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
          dseditgroup: cannot remove group dev-tenant-share: not authorized\n"
     );
     // Five account ops attempted — DeleteTenantUser + LookupUserRecord
-    // + DeleteUserRecord + RemoveHostFromShareGroup (cycle 14) +
-    // DeleteShareGroup (which failed).
+    // + DeleteUserRecord + RemoveHostFromShareGroup + DeleteShareGroup
+    // (which failed).
     assert_eq!(exec.account_ops().len(), 5);
 }
 
@@ -350,10 +351,9 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
-    // Cycle 15: scripted-real-verbose drops the plan block (Q1
-    // lock). The $ echo block still skips dscl-delete because the
-    // probe cleared the DS state; that's the operator's signal that
-    // the dscl path was clean.
+    // Scripted-real-verbose drops the plan block. The $ echo block
+    // still skips dscl-delete because the probe cleared the DS state;
+    // that's the operator's signal that the dscl path was clean.
     let want = format!(
         "{}\n\
          $ sudo sysadminctl -deleteUser dev\n\
@@ -509,8 +509,8 @@ fn destroy_accepts_at_floor() {
         ),
     );
     // Five account ops: DeleteTenantUser + LookupUserRecord (probe
-    // defaults to Ok) + DeleteUserRecord cleanup + RemoveHost
-    // (cycle 14) + DeleteShareGroup.
+    // defaults to Ok) + DeleteUserRecord cleanup + RemoveHost +
+    // DeleteShareGroup.
     assert_eq!(
         exec.account_ops().len(),
         5,
@@ -624,8 +624,8 @@ fn destroy_real_mode_propagates_exec_failure() {
     let exec = StubExecutor::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Cycle 12: section divider lands; the first substrate op
-    // (DeleteTenantUser) fails so no ✓ emits.
+    // Section divider lands; the first substrate op (DeleteTenantUser)
+    // fails so no ✓ emits.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Destroying tenant 'dev'")),
@@ -643,7 +643,7 @@ fn destroy_real_mode_failure_surfaces_executor_stderr() {
         .fail_account_blanket(78, "sysadminctl: -deleteUser failed: not authorized\n");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Cycle 12: section + no ✓ — first substrate op failed.
+    // Section + no ✓ — first substrate op failed.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Destroying tenant 'dev'")),
@@ -675,14 +675,14 @@ fn destroy_dry_run_bypasses_injected_executor() {
 
 #[test]
 fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_present() {
-    // The cycle-5 convergence path: the user was destroyed earlier (or
-    // a previous destroy failed at the dseditgroup-delete step), leaving
+    // The convergence path: the user was destroyed earlier (or a
+    // previous destroy failed at the dseditgroup-delete step), leaving
     // a `<name>-tenant-share` group with no corresponding user. The
     // destroy verb classifies this as `OrphanGroup` and converges by
     // running just the dseditgroup-delete. Exactly ONE exec call — no
-    // sysadminctl, no dscl — and exit 0. Standard-mode stdout names the
-    // tenant (not the group) so it stays parallel with the rest of the
-    // destroy UX from the operator's perspective.
+    // sysadminctl, no dscl — and exit 0. Standard-mode stdout names
+    // the tenant (not the group) so it stays parallel with the rest
+    // of the destroy UX from the operator's perspective.
     let stub = StubReader {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -717,7 +717,7 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
             },
             AccountOp::DeleteShareGroup { name: "dev".into() },
         ],
-        "expected RemoveHost + DeleteShareGroup (cycle-14 cosmetic remove before group delete)"
+        "expected RemoveHost + DeleteShareGroup (cosmetic remove before group delete)"
     );
 }
 
@@ -786,9 +786,9 @@ fn destroy_dry_run_verbose_for_orphan_group() {
     };
     let (code, stdout, _stderr) = run_with(stub, &["destroy", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    // Cycle 15: verbose plan moves into the orphan-group summary
-    // (intent-leads-shell-follows layout; 8 entries since the user
-    // is already absent).
+    // Verbose plan lives inside the orphan-group summary (intent-
+    // leads-shell-follows layout; 8 entries since the user is
+    // already absent).
     let plan = orphan_verbose_plan_block("dev");
     assert_eq!(stdout, destroy_orphan_dry_run_block("dev", Some(&plan)));
 }
@@ -798,8 +798,8 @@ fn destroy_real_mode_verbose_for_orphan_group() {
     // Real-mode verbose: same three-section shape as the regular destroy
     // (pre-exec intent + plan, `$` echo for each command, post-exec
     // confirmation), just with one argv in each block instead of four.
-    // Cycle 15: scripted-real-verbose drops the plan block (Q1
-    // lock). Orphan path has 8 steps — no user-removal.
+    // Scripted-real-verbose drops the plan block. Orphan path has
+    // 8 steps — no user-removal.
     let stub = StubReader {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -865,8 +865,8 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
     let exec = StubExecutor::new().fail_account_blanket(78, "dseditgroup: not authorized\n");
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Cycle 12: section divider lands; the orphan-group's first
-    // substrate op (DeleteShareGroup) fails — no ✓, no Done section.
+    // Section divider lands; the orphan-group's first substrate op
+    // (DeleteShareGroup) fails — no ✓, no Done section.
     assert_eq!(
         stdout,
         format!(
@@ -1072,13 +1072,14 @@ fn destroy_orphan_group_invokes_flush_anchor_as_final_firewall_step() {
 }
 
 // ================================================================
-// Cycle 12: pre-execution confirmation prompt (SC5)
+// Pre-execution confirmation prompt
 // ================================================================
 
 #[test]
 fn destroy_with_tty_default_n_aborts_on_empty_input() {
-    // Destructive verb: default is N (Q2 lock). Operator hits ENTER
-    // without typing → Abort. Substrate must NOT fire. Exit 0.
+    // Destructive verb: default is N so muscle-memory ENTER never
+    // deletes. Operator hits ENTER without typing → Abort.
+    // Substrate must NOT fire. Exit 0.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["destroy", "dev"], b"\n");

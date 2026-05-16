@@ -21,21 +21,22 @@ fn shell_dry_run_default_shows_intent() {
 
 #[test]
 fn shell_dry_run_verbose_shows_mechanism() {
-    // Dry-run verbose: intent + 3-line plan (cycle 4). The auto-narrow's
-    // InstallAnchor + Reload precede the LoginAsUser in the plan. Dry-run
-    // doesn't emit `$` echoes (echo is real+verbose only). The plan's
+    // Dry-run verbose: intent + plan. The auto-narrow's InstallAnchor
+    // + Reload precede the LoginAsUser in the plan. Dry-run doesn't
+    // emit `$` echoes (echo is real+verbose only). The plan's
     // InstallAnchor describe line uses the placeholder body — its
-    // describe ignores the body field, so the line is stable across the
-    // empty-body plan placeholder and the real-body op at execute time.
+    // describe ignores the body field, so the line is stable across
+    // the empty-body plan placeholder and the real-body op at execute
+    // time.
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["shell", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    // Cycle 15: shell's verbose plan adopts the intent-leads-shell-
-    // follows layout (shell has no prompt, so the plan stays in the
-    // verb rather than moving into a summary). 4 entries: Install +
-    // Reload + AddHost (cycle-14 catch-up) + LoginAsUser.
+    // Shell's verbose plan uses the intent-leads-shell-follows layout
+    // (shell has no prompt, so the plan stays in the verb rather than
+    // moving into a summary). 4 entries: Install + Reload + AddHost
+    // (catch-up) + LoginAsUser.
     let want = format!(
         "Would shell into 'dev'.\n\
          {}",
@@ -67,8 +68,8 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
         StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Cycle 12: section + ✓ for each substrate step before login.
-    // No closing line — login transfers control to the shell.
+    // Section + ✓ for each substrate step before login. No closing
+    // line — login transfers control to the shell.
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
@@ -85,22 +86,22 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
             name: "dev".into(),
             host: "operator".into(),
         }],
-        "cycle-14 shell auto-narrow includes the AddHost catch-up op"
+        "shell auto-narrow includes the AddHost catch-up op"
     );
 }
 
 #[test]
 fn shell_real_mode_verbose_shows_plan_and_echo() {
-    // Real+verbose: intent + 3-line plan + 3 `$` echoes (cycle 4 narrow's
-    // InstallAnchor + Reload precede the LoginAsUser). No post-exec line.
+    // Real+verbose: intent + plan + `$` echoes (narrow's InstallAnchor
+    // + Reload precede the LoginAsUser). No post-exec line.
     let exec =
         StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"]);
     assert_eq!(code, 0);
-    // Cycle 15: shell's verbose plan adopts the intent-leads-shell-
-    // follows layout (shell has no prompt, so the plan stays in the
-    // verb rather than moving into a summary).
+    // Shell's verbose plan uses the intent-leads-shell-follows layout
+    // (shell has no prompt, so the plan stays in the verb rather than
+    // moving into a summary).
     let plan = verbose_plan_section(&[
         (
             "Install firewall anchor at /etc/pf.anchors/tenant-dev",
@@ -167,8 +168,8 @@ fn shell_refuses_when_only_orphan_group_present() {
 fn shell_refuses_below_floor() {
     // Tenant-floor guard mirrors destroy: an account exists with a
     // positive UID below TENANT_UID_FLOOR (600) → refuse. `legacyusr`
-    // sidesteps the reserved-name blocklist (cycle 3) so this test
-    // exercises the state-based refusal path specifically.
+    // sidesteps the reserved-name blocklist so this test exercises
+    // the state-based refusal path specifically.
     let stub = StubReader {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), 0)].into_iter().collect(),
@@ -283,18 +284,18 @@ fn shell_dry_run_refuses_missing_tenant() {
 
 #[test]
 fn shell_propagates_child_exit_code() {
-    // Q1=(b) design lock: tenant forwards the child shell's exit code as
-    // its own. Stub the executor's login to return 5; tenant exits 5.
-    // The "Shelling into" intent line still emits — pre-exec emission
-    // happens before login is consulted. Cycle 4: profile must be
-    // pre-loaded so the auto-narrow succeeds before login fires.
+    // Tenant forwards the child shell's exit code as its own. Stub
+    // the executor's login to return 5; tenant exits 5. The
+    // "Shelling into" intent line still emits — pre-exec emission
+    // happens before login is consulted. Profile must be pre-loaded
+    // so the auto-narrow succeeds before login fires.
     let exec = StubExecutor::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .login_exit_code(5);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 5, "stderr={stderr:?}");
-    // Cycle 12: section + ✓ stream from the narrow reapply land
-    // before login fires.
+    // Section + ✓ stream from the narrow reapply land before login
+    // fires.
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
@@ -330,32 +331,32 @@ fn shell_dry_run_bypasses_injected_executor() {
 }
 
 // ================================================================
-// Cycle 4: auto-narrow on shell entry
+// Auto-narrow on shell entry
 // ================================================================
 //
 // Locked design (extends CLAUDE.md doctrine):
-// - Q1: Unconditional reapply on every `tenant shell <name>`. The
-//   on-disk anchor is the source of truth (cycle-3 Q2 lock); reapply
-//   is idempotent at the substrate.
-// - Q2: Abort-on-narrow-failure with verb-contextual framing. New
+// - Unconditional reapply on every `tenant shell <name>`. The
+//   on-disk anchor is the source of truth; reapply is idempotent
+//   at the substrate.
+// - Abort-on-narrow-failure with verb-contextual framing.
 //   `ShellError { Account, Mode }` surfaces narrow failures through
 //   `shell_narrow_failed` (firewall) and `shell_narrow_profile_failed`
-//   (profile read/parse). The shell is NOT launched on narrow failure.
-// - Q3: No annotation on the narrow steps. Annotations mark
+//   (profile read/parse). The shell is NOT launched on narrow
+//   failure.
+// - No annotation on the narrow steps. Annotations mark
 //   conditional/contingent steps (`# on rollback`, `# on reload
-//   failure`); cycle-4 narrow is unconditional.
-// - Q4: Reboot bypass acknowledged in CLAUDE.md doctrine; `tenant
-//   shell` is the canonical entry point. Operator using `sudo -iu`
-//   directly bypasses the narrow.
+//   failure`); the narrow is unconditional.
+// - Reboot bypass acknowledged in CLAUDE.md doctrine; `tenant shell`
+//   is the canonical entry point. Operator using `sudo -iu` directly
+//   bypasses the narrow.
 
 #[test]
 fn shell_narrows_to_runtime_before_login() {
-    // Cycle 4: every `tenant shell <name>` reapplies the runtime-tier
-    // anchor body before launching the login shell. Unconditional
-    // narrow — even if the tenant is already in runtime, the two-op
+    // Every `tenant shell <name>` reapplies the runtime-tier anchor
+    // body before launching the login shell. Unconditional narrow —
+    // even if the tenant is already in runtime, the two-op
     // [InstallAnchor, Reload] sequence runs. Idempotent at the
-    // substrate; matches Q2's "on-disk anchor is source of truth" lock
-    // from cycle 3.
+    // substrate.
     //
     // Pin: firewall_ops = [InstallAnchor(runtime body), Reload];
     // login fires after the narrow; ordering matters.
@@ -389,7 +390,7 @@ fn shell_refusal_does_not_invoke_narrow() {
     // refusal tests use NeverExecutor (which panics on any substrate
     // call) so they already implicitly assert this — this test makes
     // it explicit with a StubExecutor whose firewall_ops + logins are
-    // observable, pinning the contract at the verb-level for cycle 4.
+    // observable, pinning the contract at the verb level.
     let exec =
         StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["shell", "ghost"]);
@@ -416,14 +417,14 @@ fn shell_refusal_does_not_invoke_narrow() {
 
 #[test]
 fn shell_does_not_invoke_flush_anchor() {
-    // Negative pin paralleling cycle-3's
-    // `mode_does_not_emit_restore_config_op`: the parent `load anchor`
-    // directive in /etc/pf.conf stays in place across shell entry, so
-    // `pfctl -f` re-reads the anchor file and replaces the in-kernel
-    // ruleset on every reload — structurally different from cycle 2's
-    // destroy orphan-anchor case where the parent directive is removed
-    // and FlushAnchor IS load-bearing. A defensive FlushAnchor here
-    // would wipe rules we're simultaneously installing.
+    // Negative pin paralleling `mode_does_not_emit_restore_config_op`:
+    // the parent `load anchor` directive in /etc/pf.conf stays in
+    // place across shell entry, so `pfctl -f` re-reads the anchor
+    // file and replaces the in-kernel ruleset on every reload —
+    // structurally different from the destroy orphan-anchor case
+    // where the parent directive is removed and FlushAnchor IS
+    // load-bearing. A defensive FlushAnchor here would wipe rules
+    // we're simultaneously installing.
     let exec =
         StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
@@ -520,8 +521,8 @@ fn shell_aborts_when_install_anchor_fails() {
         );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Cycle 12: section divider lands; InstallAnchor (first substrate)
-    // fails — no ✓.
+    // Section divider lands; InstallAnchor (first substrate) fails —
+    // no ✓.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Entering tenant 'dev'")),
@@ -547,9 +548,9 @@ fn shell_aborts_when_install_anchor_fails() {
 fn shell_aborts_when_reload_fails() {
     // Reload tripping (e.g. pfctl syntax error in anchor body) →
     // shell_narrow_failed → exit 74 → login NOT launched. Critically,
-    // NO recovery sequence fires (mirrors cycle-3's
-    // `mode_reload_failure_surfaces_without_recovery` lock — the shell
-    // narrow shares the same no-auto-recovery posture as the mode verb).
+    // NO recovery sequence fires (the shell narrow shares the same
+    // no-auto-recovery posture as the mode verb, per
+    // `mode_reload_failure_surfaces_without_recovery`).
     let exec = StubExecutor::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_firewall_op(
@@ -561,8 +562,8 @@ fn shell_aborts_when_reload_fails() {
         );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Cycle 12: section + ✓ for InstallAnchor (succeeded), no ✓ for
-    // Reload (failed).
+    // Section + ✓ for InstallAnchor (succeeded), no ✓ for Reload
+    // (failed).
     assert_eq!(
         stdout,
         real_failure_stdout(
@@ -600,7 +601,7 @@ fn shell_aborts_when_reload_fails() {
 fn shell_install_anchor_body_excludes_install_hosts() {
     // Security-load-bearing invariant: even if the tenant's profile
     // declares install-tier hosts, the auto-narrow body must include
-    // ONLY runtime-tier hosts. Mirrors cycle-3's
+    // ONLY runtime-tier hosts. Mirrors
     // `mode_runtime_with_runtime_and_install_populated_excludes_install`
     // — same data flow through a different verb. A regression that
     // passed `ModeLevel::Install` to the helper (e.g. typo) would
@@ -625,13 +626,13 @@ fn shell_install_anchor_body_excludes_install_hosts() {
 }
 
 // ================================================================
-// Cycle 10: shell auto-reapply includes shares
+// Shell auto-reapply includes shares
 // ================================================================
 //
-// `tenant shell <name>` extends cycle-4's PF narrow to also reapply
-// shares before handing off to login. Tests pin the substrate fires
-// in the right order, that share refusals abort login, and that
-// substrate failures on the share pass route through the
+// `tenant shell <name>` extends the PF narrow to also reapply shares
+// before handing off to login. Tests pin the substrate fires in the
+// right order, that share refusals abort login, and that substrate
+// failures on the share pass route through the
 // `shell_narrow_*_failed` family (distinct from `mode_*_failed`).
 
 #[test]
@@ -662,13 +663,13 @@ fn shell_auto_reapply_includes_share_substrate() {
 
 #[test]
 fn shell_refuses_when_host_path_missing_does_not_launch_login() {
-    // Q11 lock applied through shell: HostPathMissing refusal aborts
-    // BEFORE login launches. Frame names "before shell entry" so the
-    // operator sees the shell-verb context.
+    // HostPathMissing refusal aborts BEFORE login launches. Frame
+    // names "before shell entry" so the operator sees the shell-verb
+    // context.
     let toml = profile_with_shares(
         &[],
         &[],
-        &[("/nonexistent/cycle10/shell-sentinel", "rw", "$HOME/src")],
+        &[("/nonexistent/missing/shell-sentinel", "rw", "$HOME/src")],
     );
     let exec = StubExecutor::new().with_existing_profile("dev", &toml);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
@@ -795,10 +796,10 @@ fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
 
 #[test]
 fn shell_negative_pin_share_substrate_does_not_emit_firewall_recovery_ops() {
-    // The existing cycle-4 negative pin still holds with cycle 10
-    // wired in: shell never emits FlushAnchor / BackupConfig /
-    // RestoreConfigFromBackup / RemoveAnchor / UpdateConfig / Enable
-    // even when the share substrate is exercising.
+    // The negative pin holds with shares wired in: shell never emits
+    // FlushAnchor / BackupConfig / RestoreConfigFromBackup /
+    // RemoveAnchor / UpdateConfig / Enable even when the share
+    // substrate is exercising.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new()
         .with_existing_profile("dev", &toml)

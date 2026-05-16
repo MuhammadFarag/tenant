@@ -1,5 +1,5 @@
 //! Combinatorial unit tests for `doctor::has_pam_tid` — the
-//! `/etc/pam.d/sudo` Touch-ID directive parser (cycle 7 SC3).
+//! `/etc/pam.d/sudo` Touch-ID directive parser.
 //!
 //! Justification (per CLAUDE.md test discipline): the parser's
 //! input space is combinatorial over pam.d shape — comment vs

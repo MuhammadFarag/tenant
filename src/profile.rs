@@ -1,13 +1,13 @@
-//! Per-tenant profile config — the cycle-1 artifact that cycle 2 (PF
-//! anchor) and cycle 3 (`mode` verb) read from. Cycle 1 only writes a
-//! default profile at create-time and removes it at destroy-time; reads
-//! land in cycle 2 when the PF anchor needs the allowlist.
+//! Per-tenant profile config — TOML at `~/.config/tenant/profiles/<name>.toml`.
+//! Carries the PF allowlist (runtime / install tiers) and any
+//! `[[shares]]` filesystem-share declarations. Read by the firewall
+//! render path, the `mode` verb, and the `reload` verb; written at
+//! create-time as a default scaffold and removed at destroy-time.
 //!
-//! Post-R.2: the substrate for profile operations lives on the unified
-//! `Executor` trait (`describe_profile` + `execute_profile`), not a
-//! separate `ProfileStore`. This file now holds only the data shapes
-//! shared across that interface: the error type, the default TOML
-//! content, and the display-form path helper.
+//! Substrate ops live on the unified `Executor` trait (the
+//! `describe_profile` / `execute_profile` pair). This file holds only
+//! the data shapes shared across that interface: the error type, the
+//! default TOML content, and the display-form path helper.
 
 use std::fmt;
 use std::io;
@@ -26,14 +26,11 @@ pub fn display_path_for(name: &str) -> String {
     format!("~/.config/tenant/profiles/{name}.toml")
 }
 
-/// The default profile content scaffolded at create-time. Schema is
-/// minimal on purpose — cycle 2's PF anchor and cycle 3's mode verb
-/// will surface what else belongs here. Empty hosts arrays mean "no
-/// egress allowlisted yet"; the operator edits this file before
-/// `tenant pf-install` (cycle 2). Hand-rolled `format!` rather than
-/// going through `toml::ser` because cycle 1 only writes this fixed
-/// content — the toml/serde dep earns its keep when cycle 2 starts
-/// reading.
+/// The default profile content scaffolded at create-time. Empty hosts
+/// arrays mean "no egress allowlisted yet"; the operator edits this
+/// file before any non-trivial use. Hand-rolled `format!` rather than
+/// going through `toml::ser` because this content is fixed — the
+/// toml/serde dep earns its keep on the read side.
 pub fn default_profile_toml() -> String {
     "schema_version = 1\n\
      \n\
@@ -70,26 +67,26 @@ impl From<io::Error> for ProfileError {
     }
 }
 
-/// Parsed per-tenant profile. Cycle 2's create-side firewall step reads
-/// the on-disk TOML via `Executor::read_profile`, then runs this `parse`
-/// on the content to extract the allowlist tiers for `render_anchor`.
+/// Parsed per-tenant profile. Read on the create-side firewall step
+/// (via `Executor::read_profile`) and parsed via `parse` to extract
+/// the allowlist tiers for `render_anchor`.
 ///
-/// `schema_version` is checked against the supported set (currently just
-/// `1`) before structural deserialization so a future schema bump
-/// produces an operator-readable refusal rather than a low-level serde
-/// error frame. Host order is preserved across parse → render so the
-/// anchor file's host order matches the operator's grouping intent in
-/// the profile.
+/// `schema_version` is checked against the supported set (currently
+/// just `1`) before structural deserialization so a future schema
+/// bump produces an operator-readable refusal rather than a low-level
+/// serde error frame. Host order is preserved across parse → render
+/// so the anchor file's host order matches the operator's grouping
+/// intent in the profile.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Profile {
     pub schema_version: u32,
     pub allowlist: Allowlist,
-    /// Per-tenant filesystem shares (cycle 10). Each entry declares a
-    /// host_path the tenant should be able to access (via `<name>-tenant-share`
-    /// ACL grant) and a tenant-side `tenant_path` symlink that points at
-    /// it. Absent `[[shares]]` array deserializes to an empty Vec via
-    /// `#[serde(default)]`, preserving backward-compat for cycle-9-era
-    /// profiles that have no shares section.
+    /// Per-tenant filesystem shares. Each entry declares a host_path
+    /// the tenant should be able to access (via `<name>-tenant-share`
+    /// ACL grant) and a tenant-side `tenant_path` symlink that points
+    /// at it. Absent `[[shares]]` array deserializes to an empty Vec
+    /// via `#[serde(default)]`, preserving backward-compat for
+    /// profiles authored before the share substrate.
     #[serde(default)]
     pub shares: Vec<Share>,
 }
@@ -118,12 +115,13 @@ pub struct Share {
     pub tenant_path: String,
 }
 
-/// Per-share access intent. Two values, intent-named (`ro` / `rw`) per
-/// Q1 lock — POSIX bit-string forms rejected because POSIX bit semantics
-/// differ for files vs directories (`r` alone on a directory means "list
-/// names but can't open any" which is almost never the operator intent).
-/// String discriminator via serde: `mode = "ro"` and `mode = "rw"` are
-/// the only accepted TOML forms; anything else is a parse error.
+/// Per-share access intent. Two values, intent-named (`ro` / `rw`).
+/// POSIX bit-string forms are intentionally rejected because POSIX
+/// bit semantics differ for files vs directories (`r` alone on a
+/// directory means "list names but can't open any" which is almost
+/// never the operator intent). String discriminator via serde:
+/// `mode = "ro"` and `mode = "rw"` are the only accepted TOML forms;
+/// anything else is a parse error.
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum ShareMode {
@@ -132,8 +130,8 @@ pub enum ShareMode {
 }
 
 /// Expand a `tenant_path` template into an absolute `PathBuf` for tenant
-/// `name`. Q3-locked: `$HOME` is the only supported template variable; it
-/// expands to `/Users/<name>` (the macOS tenant home convention) and only
+/// `name`. `$HOME` is the only supported template variable; it expands
+/// to `/Users/<name>` (the macOS tenant home convention) and only
 /// when it appears as the prefix. A `tenant_path` like `/etc/$HOME/foo`
 /// stays literal so an operator typo doesn't silently become a different
 /// path. Literal absolute paths (`/opt/shared`) flow through unchanged.
@@ -189,7 +187,7 @@ pub fn parse(content: &str) -> Result<Profile, ProfileError> {
     Ok(profile)
 }
 
-/// Q3 prefix-only `$HOME` contract: token expands only when it appears
+/// Prefix-only `$HOME` contract: token expands only when it appears
 /// at position 0 followed by `/` (or as the whole path on its own).
 /// Any other occurrence of `$HOME` in `tenant_path` is a likely typo
 /// and refused at parse time. Examples refused: `$HOME$HOME/src` (would

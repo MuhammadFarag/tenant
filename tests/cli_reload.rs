@@ -1,15 +1,14 @@
-//! E2E coverage for the `tenant reload [<name>]` verb — cycle 10's
-//! "I edited the profile, apply it" surface. The verb composes PF
-//! reapply (InstallAnchor + Reload at runtime tier) and the share
-//! reapply substrate (AclOp::Grant + EnsureDirAsUser parent +
-//! EnsureSymlinkAsUser per `[[shares]]` entry).
+//! E2E coverage for the `tenant reload [<name>]` verb — the
+//! operator-facing "I edited the profile, apply it" surface. The
+//! verb composes PF reapply (InstallAnchor + Reload at runtime tier)
+//! and the share reapply substrate (AclOp::Grant + EnsureDirAsUser
+//! parent + EnsureSymlinkAsUser per `[[shares]]` entry).
 //!
 //! Locked behavior:
 //! - Always lands at runtime tier (no tier flag — `tenant mode
 //!   <name> install` keeps the tier-swap role)
 //! - No-arg form walks every tenant, continues on per-tenant failure,
 //!   reports a summary, exits 0 if all clean / 74 if any tripped
-//!   (Q15)
 //! - Single-tenant form refuses with EX_USAGE on absent / below-floor
 //!   / system-account names (mirrors mode + shell + doctor)
 
@@ -24,7 +23,7 @@ mod common;
 use common::*;
 
 // ----------------------------------------------------------------
-// Sub-cycle 5.1: clap parse + dry-run vertical slice
+// Clap parse + dry-run vertical slice
 // ----------------------------------------------------------------
 
 #[test]
@@ -50,7 +49,7 @@ fn reload_no_arg_form_dry_run_with_no_tenants_emits_summary_only() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 5.2: validation + eligibility refusals
+// Validation + eligibility refusals
 // ----------------------------------------------------------------
 
 #[test]
@@ -126,7 +125,7 @@ fn reload_refuses_system_account() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 5.3: real-mode happy path + share substrate
+// Real-mode happy path + share substrate
 // ----------------------------------------------------------------
 
 #[test]
@@ -195,10 +194,10 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
 
 #[test]
 fn reload_profile_read_failure_surfaces_before_prompt() {
-    // Cycle 15 (Q3 lock) — behavior pin: dispatch builds the reapply
-    // plan BEFORE the confirm prompt, so a missing profile surfaces
-    // pre-prompt with no stdout output. Replaces the cycle-4 invariant
-    // (which had `reload_intent` emit before profile-read).
+    // Behavior pin: dispatch builds the reapply plan BEFORE the
+    // confirm prompt, so a missing profile surfaces pre-prompt with
+    // no stdout output. Don't ask the operator to confirm an action
+    // already known to fail.
     let exec = StubExecutor::new(); // no profile preloaded
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -219,16 +218,16 @@ fn reload_profile_read_failure_surfaces_before_prompt() {
 
 #[test]
 fn reload_verbose_plan_block_includes_share_ops() {
-    // Cycle 15: the verbose plan block lives in the summary, rendered
-    // only when the operator is interactive OR in dry-run. Scripted
-    // real-mode drops the plan (Q1 lock). Dry-run can't be used here
-    // because `DryRunExecutor::read_profile` returns the default
-    // empty-shares TOML regardless of the underlying stub's seeded
-    // profile, so the plan would render PF-only. Solve by simulating
-    // an interactive (TTY=true) operator who answers `y`; the live
-    // executor reads the share-bearing profile, the summary renders
-    // the share ops in cycle-15's intent-leads layout, the prompt
-    // is consumed, and execution proceeds.
+    // The verbose plan block lives in the summary, rendered only
+    // when the operator is interactive OR in dry-run. Scripted
+    // real-mode drops the plan (solo-Mac scope; cleaner log trace).
+    // Dry-run can't be used here because `DryRunExecutor::read_profile`
+    // returns the default empty-shares TOML regardless of the
+    // underlying stub's seeded profile, so the plan would render
+    // PF-only. Solve by simulating an interactive (TTY=true) operator
+    // who answers `y`; the live executor reads the share-bearing
+    // profile, the summary renders the share ops in the intent-leads
+    // layout, the prompt is consumed, and execution proceeds.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new().with_existing_profile("dev", &toml);
     let (code, stdout, _stderr) = run_with_stdin(
@@ -287,10 +286,10 @@ fn reload_single_tenant_with_existing_symlink_at_tenant_path_succeeds_idempotent
 
 #[test]
 fn reload_single_tenant_verbose_emits_per_op_echo() {
-    // Cycle 15: scripted-real-verbose drops the upfront plan (Q1
-    // lock); section divider opens, `$` echo + ✓ progress lines
-    // fire per substrate op, Done section + closing line. PF ops +
-    // per-share ops both appear in the echo block.
+    // Scripted-real-verbose drops the upfront plan; section divider
+    // opens, `$` echo + ✓ progress lines fire per substrate op, Done
+    // section + closing line. PF ops + per-share ops both appear in
+    // the echo block.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new().with_existing_profile("dev", &toml);
     let (code, stdout, _stderr) = run_with_exec(
@@ -348,7 +347,7 @@ fn reload_with_default_profile_runs_pf_only_no_share_ops() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 5.4: substrate-failure framing
+// Substrate-failure framing
 // ----------------------------------------------------------------
 
 #[test]
@@ -380,13 +379,13 @@ fn reload_firewall_failure_surfaces_with_reload_specific_wording() {
 
 #[test]
 fn reload_refuses_when_host_path_missing() {
-    // Q11 lock applied through reload: HostPathMissing refusal frame
-    // says "cannot reload" (distinct from mode-verb's "cannot apply
+    // HostPathMissing refusal applied through reload: frame says
+    // "cannot reload" (distinct from mode-verb's "cannot apply
     // mode").
     let toml = profile_with_shares(
         &[],
         &[],
-        &[("/nonexistent/cycle10/reload-sentinel", "rw", "$HOME/src")],
+        &[("/nonexistent/missing/reload-sentinel", "rw", "$HOME/src")],
     );
     let exec = StubExecutor::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
@@ -396,14 +395,14 @@ fn reload_refuses_when_host_path_missing() {
         "expected refuse_reload_share frame: {stderr:?}"
     );
     assert!(
-        stderr.contains("/nonexistent/cycle10/reload-sentinel"),
+        stderr.contains("/nonexistent/missing/reload-sentinel"),
         "should name the missing host_path: {stderr:?}"
     );
 }
 
 #[test]
 fn reload_refuses_when_tenant_path_occupied() {
-    // Q12 lock applied through reload.
+    // TenantPathOccupied refusal applied through reload.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new()
         .with_existing_profile("dev", &toml)
@@ -472,7 +471,7 @@ fn reload_routes_symlink_failure_via_reapply_arms() {
 }
 
 // ----------------------------------------------------------------
-// Sub-cycle 5.5: no-arg form (Q15)
+// No-arg form (walk every tenant)
 // ----------------------------------------------------------------
 
 #[test]
@@ -493,7 +492,7 @@ fn reload_no_arg_walks_all_tenants_in_alphabetical_order() {
 
 #[test]
 fn reload_no_arg_continues_on_per_tenant_failure() {
-    // Q15 lock: one tenant fails, the walk continues to the next.
+    // One tenant fails, the walk continues to the next.
     // Inject a profile-read failure for 'dev' but leave 'staging'
     // healthy. The walk emits per-tenant failure inline + a summary
     // counting 1 failure.
@@ -523,7 +522,7 @@ fn reload_no_arg_emits_no_op_summary_when_no_tenants() {
 
 #[test]
 fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
-    // Cycle 14 catch-up posture: every reload runs `AddHostToShareGroup`
+    // Catch-up posture: every reload runs `AddHostToShareGroup`
     // regardless of whether the host is currently a member. The
     // substrate is idempotent (`dseditgroup -o edit -a` on an existing
     // member is a silent noop in production; the stub records every

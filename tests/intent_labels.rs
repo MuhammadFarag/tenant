@@ -1,7 +1,7 @@
 //! Per-variant byte-form pins on `Op::intent_label()` — the future-tense
 //! capability label that leads each step in the verbose pre-prompt plan
-//! block (cycle 15). Sibling to `Op::business_label()` (past-tense; drives
-//! the `✓ <label>` progress lines).
+//! block. Sibling to `Op::business_label()` (past-tense; drives the
+//! `✓ <label>` progress lines).
 //!
 //! These ARE unit tests, which crosses the project's "E2E-only"
 //! convention. Justified by the per-variant combinatorial coverage on a
@@ -269,12 +269,12 @@ fn intent_acl_revoke() {
 
 // ============================================================
 // Sharpening pin: intent_label differs from business_label for the
-// previously-weak probe variants. The prime calls out LookupUserRecord +
-// DeleteUserRecord as cases where cycle-12's business_label reads OK as
-// past-tense (`Residual user record check for 'dev'`) but doesn't read
-// naturally as a future-tense bullet — the cycle-15 intent_label rewrites
-// to a sharper headline. This test pins that they actually differ so a
-// future "let's just alias intent_label to business_label" regression
+// previously-weak probe variants. LookupUserRecord + DeleteUserRecord
+// are cases where the past-tense business_label (`Residual user
+// record check for 'dev'`) reads OK after success but doesn't read
+// naturally as a future-tense bullet — intent_label uses a sharper
+// future-tense headline. This test pins that they actually differ
+// so a "let's just alias intent_label to business_label" regression
 // trips.
 // ============================================================
 

@@ -5,15 +5,13 @@ mod common;
 use common::*;
 
 // ============================================================
-// Doctor verb — cycle 5 (filesystem-exposure detection)
+// Doctor verb (filesystem-exposure detection)
 // ============================================================
 //
-// Sub-cycle 1 covers refusal paths + help-text disclosure only. Probe
-// orchestration + finding emission land in sub-cycle 3; the all-tenants
-// walk lands in sub-cycle 5. Refusals reuse `destroy_eligibility`'s
-// 5-way classifier (same as shell/mode): NotPresent and OrphanGroup
-// collapse into `refuse_doctor_absent` (the operator wants to audit
-// a real tenant; an orphan group has no tenant to audit).
+// Refusals reuse `destroy_eligibility`'s 5-way classifier (same as
+// shell/mode): NotPresent and OrphanGroup collapse into
+// `refuse_doctor_absent` (the operator wants to audit a real tenant;
+// an orphan group has no tenant to audit).
 
 #[test]
 fn doctor_refuses_when_tenant_absent() {
@@ -103,7 +101,7 @@ fn doctor_rejects_invalid_start() {
     );
 }
 
-// ----- Sub-cycle 3: probe orchestration + finding emission -----
+// ----- Probe orchestration + finding emission -----
 //
 // The probe carve-out (`Executor::probe_access_as_tenant`) lets the
 // Writer ask the substrate "can <tenant> read/list <path>?" without
@@ -209,7 +207,7 @@ fn doctor_dry_run_skips_probes() {
     );
 }
 
-// ----- Sub-cycle 7: verbose curated-list disclosure -----
+// ----- Verbose curated-list disclosure -----
 //
 // Bounded-scope transparency: doctor's verbose output names every
 // path it probed, before findings. A clean "no findings" verdict
@@ -266,14 +264,14 @@ fn doctor_verbose_then_findings_ordering() {
     );
 }
 
-// ----- Sub-cycle 6: sudoers env-leak check -----
+// ----- Sudoers env-leak check -----
 //
 // Doctor reads `/etc/sudoers` + drop-ins (concatenated via
 // `Executor::read_env_policy`) and parses for `env_delete` directives.
 // If `SSH_AUTH_SOCK` isn't covered, doctor emits a host-wide
 // `Finding::EnvLeak` warning so the operator knows their session env
 // (specifically the ssh-agent socket) is propagating into `tenant
-// shell` sessions. Cycle 1 hard-codes the SSH_AUTH_SOCK var; future
+// shell` sessions. SSH_AUTH_SOCK is hard-coded today; future
 // cycles may generalize.
 
 #[test]
@@ -320,7 +318,7 @@ fn doctor_finds_env_delete_in_drop_in_file() {
     );
 }
 
-// ----- Sub-cycle 5: all-tenants walk + cross-tenant probes -----
+// ----- All-tenants walk + cross-tenant probes -----
 //
 // `tenant doctor` without a positional name enumerates every
 // tenant-range account via `Reader::tenant_names()` and probes each
@@ -406,7 +404,7 @@ fn doctor_single_tenant_omits_other_tenant_perspectives() {
     );
 }
 
-// ----- Sub-cycle 4: --strict exit codes -----
+// ----- --strict exit codes -----
 //
 // Without --strict: doctor always exits 0 on a successful walk (findings
 // are informational). With --strict: max finding severity drives the
@@ -489,26 +487,26 @@ fn doctor_non_strict_critical_still_exits_0() {
 }
 
 // ============================================================
-// Cycle 7 — doctor cycle 2: host-config drift checks
+// Host-config drift checks
 // ============================================================
 //
-// Three new checks (SC2 / SC3 / SC4):
-//   - SC2: PF rule presence (per-tenant; kernel anchor vs intent)
-//   - SC3: Touch-ID-for-sudo (host-wide; /etc/pam.d/sudo)
-//   - SC4: pfctl-enabled status (host-wide)
+// Three checks:
+//   - PF rule presence (per-tenant; kernel anchor vs intent)
+//   - Touch-ID-for-sudo (host-wide; /etc/pam.d/sudo)
+//   - pfctl-enabled status (host-wide)
 // All checks share doctor's existing severity / --strict / exit-code
-// plumbing; new finding variants live in `src/doctor.rs::Finding`.
+// plumbing; finding variants live in `src/doctor.rs::Finding`.
 
-// ----- Sub-cycle 2: PF rule presence (per-tenant) -----
+// ----- PF rule presence (per-tenant) -----
 //
 // `Executor::read_kernel_pf_rules(name)` runs `sudo pfctl -a
 // tenant-<name> -sr` and returns the raw text; doctor's
 // `pf_rule_presence_check` does a structural check (line begins with
 // `pass ` AND a line begins with `block `, ignoring comments). The
 // structural shape catches "kernel anchor is empty or wrong" without
-// false-positiving on pfctl's output formatting cosmetics (Q7-a lock).
-// Recovery is `tenant mode <name> runtime` (re-renders + reloads the
-// anchor); Warning-tier severity.
+// false-positiving on pfctl's output formatting cosmetics. Recovery
+// is `tenant mode <name> runtime` (re-renders + reloads the anchor);
+// Warning-tier severity.
 
 #[test]
 fn doctor_pf_rules_present_no_finding() {
@@ -663,14 +661,14 @@ fn doctor_pf_rules_substrate_failure_routes_to_firewall_failed_frame() {
     );
 }
 
-// ----- Sub-cycle 3: Touch-ID-for-sudo (host-wide) -----
+// ----- Touch-ID-for-sudo (host-wide) -----
 //
 // `Executor::read_pam_sudo()` reads `/etc/pam.d/sudo` (mode 0644,
 // direct fs read). Doctor's `has_pam_tid` parses for an active
 // `auth sufficient pam_tid.so` directive; if absent, doctor emits
 // one `Finding::TouchIdMissing` (info-tier) per invocation,
-// regardless of how many tenants are on the host. Info-tier per
-// Q5 lock — Touch ID is a recommendation aligned with the project's
+// regardless of how many tenants are on the host. Info-tier —
+// Touch ID is a recommendation aligned with the project's
 // NOPASSWD-sudoers stance, not a correctness drift.
 
 #[test]
@@ -730,10 +728,10 @@ fn doctor_pam_tid_commented_emits_info_finding() {
 
 #[test]
 fn doctor_pam_tid_info_does_not_trip_strict() {
-    // Cycle 7 SC3 Q5 lock: TouchIdMissing is Info-tier. With
-    // --strict + ONLY a TouchIdMissing finding, exit code must be
-    // 0 (Info doesn't trip --strict's exit-1). Pin against a
-    // regression that bumps TouchIdMissing to Warning by accident.
+    // TouchIdMissing is Info-tier. With --strict + ONLY a
+    // TouchIdMissing finding, exit code must be 0 (Info doesn't trip
+    // --strict's exit-1). Pin against a regression that bumps
+    // TouchIdMissing to Warning by accident.
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubExecutor::new().with_pam_sudo_content("");
     let (code, _stdout, stderr) =
@@ -760,9 +758,9 @@ fn doctor_pam_tid_all_tenants_emits_once() {
 #[test]
 fn doctor_pam_substrate_failure_routes_to_host_file_failed_frame() {
     // `HostFileError::Fs` on read_pam_sudo propagates as a
-    // substrate-execution failure. Doctor surfaces via the existing
-    // `doctor_host_file_failed` (SC1 generalized it from env-policy
-    // to any host-config-file read). Exit 74 (EX_IOERR).
+    // substrate-execution failure. Doctor surfaces via
+    // `doctor_host_file_failed` (the path-agnostic host-config-file
+    // read failure frame). Exit 74 (EX_IOERR).
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubExecutor::new().fail_next_pam_sudo(tenant::executor::HostFileError::Fs {
         path: "/etc/pam.d/sudo".to_string(),
@@ -784,7 +782,7 @@ fn doctor_pam_substrate_failure_routes_to_host_file_failed_frame() {
     );
 }
 
-// ----- Sub-cycle 4: pfctl-enabled (host-wide) -----
+// ----- pfctl-enabled (host-wide) -----
 //
 // `Executor::read_pf_status()` runs `sudo pfctl -si` and returns the
 // raw text; doctor's `pf_status_enabled` checks for the canonical
@@ -848,8 +846,8 @@ fn doctor_pf_disabled_all_tenants_emits_once() {
 
 #[test]
 fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
-    // `FirewallError::Spawn` on read_pf_status surfaces via the
-    // existing `doctor_firewall_failed` (SC2 added it); exit 74.
+    // `FirewallError::Spawn` on read_pf_status surfaces via
+    // `doctor_firewall_failed`; exit 74.
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubExecutor::new().fail_next_pf_status(
         tenant::executor::FirewallError::Spawn(std::io::Error::other("pfctl not found")),
@@ -866,7 +864,7 @@ fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
     );
 }
 
-// ----- Sub-cycle 5: anchor-body drift (cycle 8) -----
+// ----- Anchor-body drift -----
 //
 // `Executor::read_anchor_body(name)` reads the on-disk anchor file
 // `/etc/pf.anchors/tenant-<name>` (mode 0644, direct fs read).
@@ -874,14 +872,14 @@ fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
 // over the profile's runtime-tier hosts and compares byte-exact via
 // `doctor::anchor_body_matches`. On mismatch, one
 // `Finding::AnchorBodyDrift` (Warning) per tenant; recovery is
-// `tenant mode <name> runtime`. Q4 lock: a profile that can't be
-// read or parsed SKIPS this check (no AnchorBodyDrift fires) and
-// the rest of doctor continues.
+// `tenant mode <name> runtime`. A profile that can't be read or
+// parsed SKIPS this check (no AnchorBodyDrift fires) and the rest
+// of doctor continues.
 //
-// Q9 lock: comparison is against the RUNTIME tier render only.
-// Install-tier widening outside an active shell session is itself
-// drift the operator should know about — symmetric with cycle 4's
-// shell auto-narrow doctrine.
+// Comparison is against the RUNTIME tier render only. Install-tier
+// widening outside an active shell session is itself drift the
+// operator should know about — symmetric with the shell auto-narrow
+// doctrine.
 
 #[test]
 fn doctor_anchor_body_in_sync_no_finding() {
@@ -972,9 +970,9 @@ fn doctor_anchor_body_drift_with_strict_exits_1() {
 
 #[test]
 fn doctor_anchor_body_profile_unreadable_skips_check() {
-    // Q4 lock: profile-read failure → SKIP the anchor-body check
-    // (no finding emitted from this check). Other checks still run;
-    // exit 0; clean summary. Negative pin: AnchorBodyDrift must NOT
+    // Profile-read failure → SKIP the anchor-body check (no finding
+    // emitted from this check). Other checks still run; exit 0;
+    // clean summary. Negative pin: AnchorBodyDrift must NOT
     // false-positive on profile-missing state.
     let stub_reader = make_tenant_stub_reader("dev");
     // No `with_existing_profile` → read_profile returns an error.
@@ -1057,11 +1055,12 @@ fn doctor_anchor_body_drift_suppresses_no_findings_summary() {
 
 #[test]
 fn doctor_anchor_body_install_tier_match_still_drifts() {
-    // Q9 negative pin: anchor body matches the INSTALL-tier render
+    // Negative pin: anchor body matches the INSTALL-tier render
     // (runtime+install hosts) but NOT the runtime-tier render
-    // (runtime only). The Q9 lock chose runtime-only comparison —
-    // install-tier widening outside a shell session IS drift the
-    // operator should know about. Verify drift still fires.
+    // (runtime only). Runtime-only comparison is the chosen
+    // semantics — install-tier widening outside a shell session
+    // IS drift the operator should know about. Verify drift still
+    // fires.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_hosts(&["runtime.example.com"], &["install.example.com"]);
     // Anchor body matches install-tier render (BOTH hosts present).
@@ -1084,7 +1083,7 @@ fn doctor_anchor_body_install_tier_match_still_drifts() {
 }
 
 // ============================================================
-// Cycle 9 — enriched finding guidance (verbose-mode surfacing)
+// Enriched finding guidance (verbose-mode surfacing)
 // ============================================================
 //
 // Each non-FilesystemExposure finding grows a multi-section
@@ -1122,8 +1121,7 @@ fn doctor_verbose_emits_indented_guidance_below_finding() {
     // Verbose + one finding → one-liner followed by the indented
     // guidance block. Pin: the "Why this matters" header appears
     // AFTER the finding line, with the locked 2-space indent.
-    // AnchorBodyDrift is the style-template variant from cycle-9
-    // Q10 lock; using it here verifies the full pipeline (variant
+    // AnchorBodyDrift here verifies the full pipeline (variant
     // → guidance() → Reporter prefix → stdout).
     let stub_reader = make_tenant_stub_reader("dev");
     let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
@@ -1159,8 +1157,8 @@ fn doctor_verbose_emits_indented_guidance_below_finding() {
         );
     }
     // Tenant name should appear inside the indented block (e.g. the
-    // recommended fix line) — pins the Q10 lock that per-tenant
-    // variants name the literal tenant in their guidance.
+    // recommended fix line) — pins that per-tenant variants name
+    // the literal tenant in their guidance.
     assert!(
         stdout.contains("  tenant mode dev runtime\n"),
         "guidance should name the literal tenant 'dev' in the fix command; stdout={stdout:?}"
@@ -1169,10 +1167,11 @@ fn doctor_verbose_emits_indented_guidance_below_finding() {
 
 #[test]
 fn doctor_verbose_filesystem_exposure_omits_guidance_block() {
-    // Q3 lock pinned at the user-facing surface: FilesystemExposure
-    // has no cycle-9 guidance body, so even in verbose mode the
-    // one-liner emits alone. Pin: the critical finding fires AND the
-    // "Why this matters" guidance header is absent.
+    // Pinned at the user-facing surface: FilesystemExposure has no
+    // guidance body (guidance belongs with the future remediation
+    // surface), so even in verbose mode the one-liner emits alone.
+    // Pin: the critical finding fires AND the "Why this matters"
+    // guidance header is absent.
     //
     // Set the stub to produce ONLY a FilesystemExposure finding (no
     // env leak, no pf drift, no anchor drift, etc.) so a missing
@@ -1199,7 +1198,7 @@ fn doctor_verbose_filesystem_exposure_omits_guidance_block() {
     );
     assert!(
         !stdout.contains("Why this matters"),
-        "FilesystemExposure must not emit a cycle-9 guidance block; stdout={stdout:?}"
+        "FilesystemExposure must not emit a guidance block; stdout={stdout:?}"
     );
 }
 
@@ -1271,7 +1270,7 @@ fn doctor_help_text_mentions_sudo_session_and_admin_requirement() {
 }
 
 // ============================================================
-// Cycle 11 SC3 — AclDrift on declared shares
+// AclDrift on declared shares
 // ============================================================
 //
 // `Executor::read_host_acl(path)` reads `ls -lde <path>` and feeds
@@ -1455,9 +1454,10 @@ fn doctor_share_drift_dry_run_emits_no_finding() {
 
 #[test]
 fn doctor_share_drift_skips_when_profile_unreadable() {
-    // Cycle-8 Q4 parallel: profile-read failure SKIPS the share-drift
-    // check silently. No AclDrift; clean summary; exit 0. A future
-    // ProfileMissing finding would surface the profile state separately.
+    // Profile-read failure SKIPS the share-drift check silently —
+    // same posture as the anchor-body-drift check. No AclDrift;
+    // clean summary; exit 0. A future ProfileMissing finding would
+    // surface the profile state separately.
     let stub_reader = make_tenant_stub_reader("dev");
     // No `with_existing_profile` → read_profile returns an error.
     let stub_exec = StubExecutor::new();
@@ -1541,10 +1541,10 @@ fn doctor_share_drift_all_tenants_scoped_per_tenant() {
 
 #[test]
 fn doctor_share_acl_drift_verbose_emits_guidance_block() {
-    // Cycle-9 contract: every Finding variant with a `guidance()` body
-    // emits the 4-section block under `-v`. AclDrift's body names the
-    // recovery command in the Recommended fix section. Symlink kind
-    // pre-loaded as correct so only AclDrift's guidance fires.
+    // Every Finding variant with a `guidance()` body emits the
+    // 4-section block under `-v`. AclDrift's body names the recovery
+    // command in the Recommended fix section. Symlink kind pre-loaded
+    // as correct so only AclDrift's guidance fires.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let stub_exec = StubExecutor::new()
@@ -1575,13 +1575,13 @@ fn doctor_share_acl_drift_verbose_emits_guidance_block() {
 }
 
 // ============================================================
-// Cycle 11 SC4 — SymlinkDrift on declared shares
+// SymlinkDrift on declared shares
 // ============================================================
 //
 // `Executor::tenant_path_kind(name, tenant_path)` returns one of
 // PathKind::{Absent, Symlink(target), Other}; doctor compares against
-// the declared host_path (Q3 lock: string-exact, no canonicalize) and
-// emits one of the three SymlinkActual cases.
+// the declared host_path (string-exact, no canonicalize) and emits
+// one of the three SymlinkActual cases.
 
 #[test]
 fn doctor_share_symlink_absent_emits_warning() {
@@ -1656,7 +1656,8 @@ fn doctor_share_symlink_wrong_target_emits_warning() {
 fn doctor_share_symlink_not_symlink_emits_warning() {
     // tenant_path is a real file or directory. PathKind::Other →
     // SymlinkDrift::NotSymlink. Recovery requires manual cleanup
-    // before reload (cycle-10 Q12 TenantPathOccupied refusal).
+    // before reload (reload's TenantPathOccupied pre-flight refuses
+    // a real file at tenant_path).
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let stub_exec = StubExecutor::new()
@@ -1685,8 +1686,8 @@ fn doctor_share_symlink_not_symlink_emits_warning() {
 #[test]
 fn doctor_share_symlink_matching_target_no_finding() {
     // PathKind::Symlink(target) where target == declared host_path
-    // → no SymlinkDrift finding. The happy-path equality test on the
-    // cycle-11 Q3 string-exact comparator.
+    // → no SymlinkDrift finding. The happy-path equality test on
+    // the string-exact comparator.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let stub_exec = StubExecutor::new()
@@ -1752,8 +1753,9 @@ fn doctor_share_symlink_drift_dry_run_emits_no_finding() {
 fn doctor_share_symlink_substrate_failure_exits_74() {
     // ProbeError on tenant_path_kind propagates as DoctorError::Probe;
     // dispatcher routes through doctor_failed frame. Exit 74. Tests
-    // the "tenant_path_kind half" of the cycle-11 Q5 fail-fast posture
-    // (the AclDrift half lives in doctor_share_drift_substrate_failure_exits_74).
+    // the "tenant_path_kind half" of the fail-fast posture (the
+    // AclDrift half lives in
+    // doctor_share_drift_substrate_failure_exits_74).
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let stub_exec = StubExecutor::new()
@@ -1772,10 +1774,9 @@ fn doctor_share_symlink_substrate_failure_exits_74() {
 
 #[test]
 fn doctor_share_symlink_drift_verbose_emits_case_tailored_guidance() {
-    // Cycle-9 contract for SymlinkDrift: each SymlinkActual sub-case
-    // emits its own guidance body. Smoke-test the Absent case names
-    // `ln -sfn` in the recovery; the byte-form pins in tests/doctor.rs
-    // cover the full bodies.
+    // Each SymlinkActual sub-case emits its own guidance body.
+    // Smoke-test the Absent case names `ln -sfn` in the recovery;
+    // the byte-form pins in tests/doctor.rs cover the full bodies.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let stub_exec = StubExecutor::new()
@@ -1798,15 +1799,15 @@ fn doctor_share_symlink_drift_verbose_emits_case_tailored_guidance() {
 }
 
 // ============================================================
-// Cycle 14: HostNotInShareGroup
+// HostNotInShareGroup
 // ============================================================
 
 #[test]
 fn doctor_emits_host_not_in_share_group_when_membership_missing() {
-    // Operator simulating a cycle-10-era tenant: the share group
-    // exists (the create flow ran pre-cycle-14) but the host was
-    // never added as a secondary member. Doctor queries the
-    // membership via Executor::host_in_group, sees `false`, and
+    // Operator simulating a legacy tenant: the share group exists
+    // (the create flow ran before host membership was wired in) but
+    // the host was never added as a secondary member. Doctor queries
+    // the membership via Executor::host_in_group, sees `false`, and
     // emits the warning naming the host, the group, and the recovery.
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubExecutor::new().with_host_in_group("operator", "dev-tenant-share", false);
@@ -1874,11 +1875,10 @@ fn doctor_no_arg_emits_host_not_in_share_group_per_tenant() {
 
 #[test]
 fn doctor_host_not_in_share_group_verbose_emits_guidance_block() {
-    // Cycle-9 contract extended to cycle-14's finding: verbose mode
-    // emits the 4-section guidance body. Smoke-check that the
-    // operator sees Why/Fix/Side-effects/Alternative headers and the
-    // dseditgroup alternative command. The full byte-form is pinned
-    // in tests/doctor.rs.
+    // Verbose mode emits the 4-section guidance body. Smoke-check
+    // that the operator sees Why/Fix/Side-effects/Alternative headers
+    // and the dseditgroup alternative command. The full byte-form
+    // is pinned in tests/doctor.rs.
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubExecutor::new().with_host_in_group("operator", "dev-tenant-share", false);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
