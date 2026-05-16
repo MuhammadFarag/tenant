@@ -15,10 +15,16 @@ Verbs:
 - `tenant mode <name> install|runtime` — re-render anchor at the
   requested allowlist tier + reload pf; widens egress for install-tier
   work, narrows back when done.
-- `tenant shell <name>` — auto-narrows to runtime tier AND reapplies
-  the profile's `[[shares]]` before launching the login shell, so any
-  leftover install-tier widening or operator-clobbered ACL/symlink is
-  session-scoped.
+- `tenant shell <name> [--mode install|runtime] [-- <cmd>]` — two
+  forms gated on argv presence. Empty argv (interactive): auto-narrows
+  to runtime AND reapplies `[[shares]]` before launching the login
+  shell, so any leftover install-tier widening or operator-clobbered
+  ACL/symlink is session-scoped. Non-empty argv (command form): same
+  reapply at the requested tier (runtime by default; `--mode install`
+  widens), runs `<cmd>` as the tenant via `sudo -iu`, then on
+  install-mode ALWAYS narrows back to runtime on completion. Child
+  exit code propagates; narrow-on-finally failure emits a yellow `⚠`
+  stderr warning without overriding the child's exit.
 - `tenant reload [<name>]` — config-driven "I edited the profile,
   apply it": rewrites anchor at runtime + reapplies shares. No-arg
   walks every tenant; exits 0 clean / 74 on any failure.
@@ -42,21 +48,21 @@ the code *currently does*. For the chronology of shipped versions,
 ## File map
 
 ```
-src/lib.rs        — public API (`run`); `Cli` + `Verb` (Create / Destroy / Shell / Mode / Doctor / Reload) + `ModeLevel`; global `--verbose` / `--dry-run` / `--yes`. `run` takes `host: &str` + `stdin: &mut dyn BufRead` + `stdin_is_tty: bool` + `colors: ansi::Colors`. Swaps to `DryRunExecutor` when `--dry-run`.
+src/lib.rs        — public API (`run`); `Cli` + `Verb` (Create / Destroy / Shell / Mode / Doctor / Reload) + `ModeLevel`; global `--verbose` / `--dry-run` / `--yes`. `Verb::Shell` carries `name: String` + `mode: Option<ModeLevel>` + `argv: Vec<String>` (clap `last = true` requires `--` separator; `requires = "argv"` on `--mode` rejects `tenant shell <name> --mode install` without a command). `run` takes `host: &str` + `stdin: &mut dyn BufRead` + `stdin_is_tty: bool` + `colors: ansi::Colors`. Swaps to `DryRunExecutor` when `--dry-run`.
 src/ansi.rs       — internal ANSI wrapper. `Colors { stdout, stderr }` per-stream gate via `Colors::detect()`; wrappers `red`/`green`/`yellow`/`cyan`/`bold`/`dim`; `rule(title, width)` for the section divider; `panel` exists but unused.
 src/commands.rs   — verb dispatch (`match` on `Verb`). No I/O; routes to Reporter. `doctor_exit_code(severity, strict)` → 0/1/2. Helpers `surface_destroy_error` / `surface_doctor_error` / `surface_mode_error` / `surface_shell_mode_error` / `surface_reload_error` / `surface_create_post_provision_error` centralize per-arm Reporter routing. Plan-op builders (`build_create_plan_ops` / `build_destroy_plan_ops` / `build_orphan_plan_ops`) construct the verbose plan; for `mode` / single-tenant `reload`, dispatch calls `Writer::build_reapply_plan` upfront so profile-read failures surface pre-prompt. Each mutating verb calls `Writer::pre_exec_doctor_summary` with the verb-appropriate `DoctorScope` between summary and confirm.
-src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` verb methods (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`, `reload_tenant`, `reload_all_tenants`, `doctor_tenant`, `doctor_all_tenants`, `pre_exec_doctor_summary`). Shared `build_reapply_plan` + `execute_reapply_plan` drive mode/shell/reload; `reapply_shares_post_provision` skips PF for create's post-Enable share pass; `execute_share_ops` is the shared per-share loop. Doctor helpers: host-wide `check_env_leak` / `check_touch_id_for_sudo` / `check_pf_status` (single-emit per invocation) + per-tenant `probe_tenant_paths` (curated probes + structural pf-rule check + `check_anchor_body_drift` + per-share `check_share_drift`); `collect_share_drift` is the quiet sibling for the inline audit. `DoctorScope { Create, Shell, Mode, Reload }`. `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute. `ReapplyPlan` + `ShareOps` carry the pre-built op list. Errors: `ShareError { HostPathMissing, TenantPathOccupied }`, `ModeError { Profile, Firewall, Acl, Account, Probe, Share }`, `CreateError::PostProvision(ModeError)`, `CreateError::HostMembership(AccountError)`, `ReloadAllOutcome { failed }`, `DoctorOutcome` + `DoctorError { Probe, HostFile, Firewall }`.
+src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` verb methods (`create_tenant`, `destroy_tenant`, `destroy_orphan_group`, `shell_into_tenant`, `apply_tenant_mode`, `reload_tenant`, `reload_all_tenants`, `doctor_tenant`, `doctor_all_tenants`, `pre_exec_doctor_summary`). `shell_into_tenant(name, host, argv, mode, reporter)` branches on argv-presence into `shell_interactive` (empty argv; today's flow) or `shell_command` (non-empty; entry reapply at requested tier → exec_as_tenant → narrow-on-finally to runtime, gated on `mode == Install`). Shared `build_reapply_plan` + `execute_reapply_plan` drive mode/shell/reload; `reapply_shares_post_provision` skips PF for create's post-Enable share pass; `execute_share_ops` is the shared per-share loop. Doctor helpers: host-wide `check_env_leak` / `check_touch_id_for_sudo` / `check_pf_status` (single-emit per invocation) + per-tenant `probe_tenant_paths` (curated probes + structural pf-rule check + `check_anchor_body_drift` + per-share `check_share_drift`); `collect_share_drift` is the quiet sibling for the inline audit. `DoctorScope { Create, Shell, Mode, Reload }` — Shell covers both interactive and command forms. `validate_name` / `check_conflict` / `destroy_eligibility`; `tenant_share_group_name`. `Writer::run<O: WritableOp>` couples per-step echo + execute. `ReapplyPlan` + `ShareOps` carry the pre-built op list. Errors: `ShareError { HostPathMissing, TenantPathOccupied }`, `ModeError { Profile, Firewall, Acl, Account, Probe, Share }`, `ShellError { Account, Mode, NarrowFailed { child_exit, narrow_err } }` (NarrowFailed exercised only by the command form), `CreateError::PostProvision(ModeError)`, `CreateError::HostMembership(AccountError)`, `ReloadAllOutcome { failed }`, `DoctorOutcome` + `DoctorError { Probe, HostFile, Firewall }`.
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both iterate from `TENANT_UID_FLOOR = 600`.
-src/executor.rs   — `Op` ADT over `AccountOp` / `ProfileOp` / `FirewallOp` / `AclOp`; `WritableOp` trait; `Op::describe_via(executor)` (substrate echo), `Op::business_label()` (past-tense ✓ progress), `Op::intent_label()` (future-tense `• <intent>` plan-bullet). `Executor` trait: per-domain `describe_*` / `execute_*` pairs + non-unit carve-outs (`login`, `read_profile`, `read_pf_conf`, `probe_access_as_tenant`, `read_env_policy`, `read_kernel_pf_rules`, `read_pam_sudo`, `read_pf_status`, `read_anchor_body`, `read_host_acl`, `tenant_path_kind`, `host_in_group`). Impls: `MacosExecutor` / `StubExecutor` / `DryRunExecutor`. Errors: `AccountError` / `ProfileError` / `FirewallError` / `ProbeError` / `HostFileError` (sudoers, pam.d/sudo, on-disk anchor) / `AclError`. Enums: `AccessMode { Read, List }`, `AccessOutcome { Allowed, Denied, Unknown }`, `PathKind { Absent, Symlink(target: PathBuf), Other }`, `AclMode { Ro, Rw }`. `AccountOp::LoginAsUser` / `EnsureDirAsUser` / `EnsureSymlinkAsUser` substrate-group the `sudo -n -u <tenant>` mechanism.
+src/executor.rs   — `Op` ADT over `AccountOp` / `ProfileOp` / `FirewallOp` / `AclOp`; `WritableOp` trait; `Op::describe_via(executor)` (substrate echo), `Op::business_label()` (past-tense ✓ progress), `Op::intent_label()` (future-tense `• <intent>` plan-bullet). `Executor` trait: per-domain `describe_*` / `execute_*` pairs + non-unit carve-outs (`login`, `exec_as_tenant`, `read_profile`, `read_pf_conf`, `probe_access_as_tenant`, `read_env_policy`, `read_kernel_pf_rules`, `read_pam_sudo`, `read_pf_status`, `read_anchor_body`, `read_host_acl`, `tenant_path_kind`, `host_in_group`). Impls: `MacosExecutor` / `StubExecutor` / `DryRunExecutor`. Errors: `AccountError` / `ProfileError` / `FirewallError` / `ProbeError` / `HostFileError` (sudoers, pam.d/sudo, on-disk anchor) / `AclError`. Enums: `AccessMode { Read, List }`, `AccessOutcome { Allowed, Denied, Unknown }`, `PathKind { Absent, Symlink(target: PathBuf), Other }`, `AclMode { Ro, Rw }`. `AccountOp::LoginAsUser` / `ExecAsUser { name, argv }` / `EnsureDirAsUser` / `EnsureSymlinkAsUser` substrate-group the `sudo -[in] -u <tenant>` mechanism family; `LoginAsUser` + `ExecAsUser` carve out to `Executor::login` / `Executor::exec_as_tenant` (stdio inherit + i32 child exit), the other two flow through `execute_account`.
 src/profile.rs    — `Profile` / `Allowlist` / `Tier` / `Share` / `ShareMode` serde shapes; `parse` (schema-version + `$HOME` prefix-only validation); `expand_tenant_path(name, template) -> PathBuf`; `default_profile_toml`; `display_path_for` (`~`-rendered form).
 src/firewall.rs   — pure functions: `render_anchor`, `ensure_anchor_ref`, `remove_anchor_ref`, `is_anchor_referenced`; `tenant_anchor_name` / `_path`; constants `ANCHOR_DIR` / `PF_CONF` / `PF_CONF_BACKUP`.
 src/doctor.rs     — pure functions: `curated_paths(host, tenant, others)`; `classify(category, outcome) -> Option<Severity>`; `has_env_delete_for(policy, var)`; `pf_rule_presence_check(rules, tenant)`; `has_pam_tid(pam_config)`; `pf_status_enabled(status)`; `anchor_body_matches(actual, expected)`; `has_group_acl_entry(listing, group)`. `Finding { FilesystemExposure, EnvLeak, PfRuleDrift, TouchIdMissing, PfDisabled, AnchorBodyDrift, AclDrift, SymlinkDrift, HostNotInShareGroup }` + `SymlinkActual { Absent, WrongTarget(PathBuf), NotSymlink }` + `Severity { Info, Warning, Critical }` + `Category`. `Finding::guidance(&self) -> Option<String>` returns the 4-section operator-facing block (Why this matters / Recommended fix / Side-effects / Alternative); `None` for `FilesystemExposure`. All I/O in `Writer::doctor_*`; this module is grep-and-classify only.
-src/reporter.rs   — operator-facing output. Substrate vocab `ok(msg)` (✓ green) + `section(title)` (`─── <title> ───`). Per-verb `_starting` / `_done` branch on (dry_run, verbose); `_starting` emits the section divider; `_done` emits `─── Done ───` + a single enriched closing line. Per-step success: `progress(op)` → `ok(op.business_label())`; `$` echo via `step(op)` (real+verbose). `mode_intent` / `reload_intent` section-only; `shell_intent` + `shell_plan` survive (no prompt). Pre-execution: per-verb `*_summary(name, ..., plan: Option<&[(Op, Option<&str>)]>)` emits headline + capability bullets + (verbose + `plan = Some`) `Plan (commands to execute):` + sudo-needed-for line. `shell_summary(name, host)` (no plan slot). `render_plan_block`: `  • <intent>[  # <annotation>]` + indented shell line (privilege-aware: bold `sudo` + dim rest, else all-dim). `confirm(...) -> ConfirmOutcome { Proceed, Abort }`; `aborted()` → "Aborted by operator. No changes made." `doctor_finding` colors severity; bold-headers + dim-body for verbose guidance. `doctor_finding_one_liner` (no guidance) + `doctor_summary_pending(count, target)` (`⚠ Doctor: …`, silent on 0) drive the inline pre-exec audit. `refuse_*` / `*_failed` plain on stderr. Reload no-arg: `reload_all_starting` / `reload_all_done_summary`. Create's post-provision: `create_post_provision_*_failed` points at `tenant reload <name>`.
+src/reporter.rs   — operator-facing output. Substrate vocab `ok(msg)` (✓ green) + `section(title)` (`─── <title> ───`). Per-verb `_starting` / `_done` branch on (dry_run, verbose); `_starting` emits the section divider; `_done` emits `─── Done ───` + a single enriched closing line. Per-step success: `progress(op)` → `ok(op.business_label())`; `$` echo via `step(op)` (real+verbose). `mode_intent` / `reload_intent` section-only; `shell_intent` + `shell_plan` survive (no prompt). Command-form trio: `shell_command_intent(name, mode)` (section divider with `(install tier)` suffix when widening), `shell_command_summary(name, host, mode, argv)` (mode-aware bullets; install-tier adds widen + narrow-on-finally bullets + extra sudo-footer phrase), `shell_command_done(child_exit, mode)` (closing `─── Done ───` + `Command exited with code N[ (firewall narrowed back to runtime tier)]`); interactive form keeps its own `shell_summary` / `shell_intent` / `shell_plan` triple with no closing surface. Pre-execution: per-verb `*_summary(name, ..., plan: Option<&[(Op, Option<&str>)]>)` emits headline + capability bullets + (verbose + `plan = Some`) `Plan (commands to execute):` + sudo-needed-for line. `shell_summary(name, host)` (no plan slot). `render_plan_block`: `  • <intent>[  # <annotation>]` + indented shell line (privilege-aware: bold `sudo` + dim rest, else all-dim). `confirm(...) -> ConfirmOutcome { Proceed, Abort }`; `aborted()` → "Aborted by operator. No changes made." `doctor_finding` colors severity; bold-headers + dim-body for verbose guidance. `doctor_finding_one_liner` (no guidance) + `doctor_summary_pending(count, target)` (`⚠ Doctor: …`, silent on 0) drive the inline pre-exec audit. `refuse_*` / `*_failed` plain on stderr; `shell_narrow_firewall_failed` (FirewallError, interactive-form arm) sits alongside `shell_narrow_profile_failed` / `shell_narrow_acl_failed` / `shell_narrow_account_failed` / `shell_narrow_probe_failed`. Command-form `shell_narrow_failed(name, &ModeError)` is the yellow `⚠` stderr warning (cycle 18 retrofits to a multi-line panel). Reload no-arg: `reload_all_starting` / `reload_all_done_summary`. Create's post-provision: `create_post_provision_*_failed` points at `tenant reload <name>`.
 src/main.rs       — composition root: prod impls + `tenant::run`. Reads `$USER`; probes stdin TTY + colors.
 
 tests/cli*.rs            — E2E tests, one binary per verb (`cli_<verb>.rs`) plus `cli.rs` for CLI parser cross-cutting; shared helpers in `tests/common/mod.rs`.
 tests/macos_executor.rs  — per-variant pins of `MacosExecutor::describe_*` argv contract.
-tests/intent_labels.rs   — per-variant byte-form pins of `Op::intent_label()`; sharpening pin that `intent_label` ≠ `business_label` for `LookupUserRecord` / `DeleteUserRecord`.
+tests/intent_labels.rs   — per-variant byte-form pins of `Op::intent_label()`; sharpening pins that `intent_label` ≠ `business_label` for `LookupUserRecord` / `DeleteUserRecord` / `ExecAsUser`.
 tests/macos_reader.rs    — `MacosReader::new()` dscl-integration smoke (`#[cfg(target_os = "macos")]`).
 tests/doctor.rs          — combinatorial: `curated_paths`, `classify` matrix, `Finding::Display` byte-form (incl. all 3 `SymlinkActual` sub-cases), `Finding::guidance` byte-form, `anchor_body_matches`, `Severity` ordering (load-bearing for `--strict`).
 tests/env_policy_parse.rs — combinatorial on `has_env_delete_for` (quoted/unquoted, `+=` vs `=`, single-var vs list, `Defaults` qualifiers).
@@ -196,23 +202,106 @@ Things that are easy to violate and would matter:
 
 - **Shell auto-narrows AND reapplies shares on entry,
   unconditionally, abort-on-failure** — every `tenant shell <name>`
-  runs the full reapply BEFORE `Executor::login`. Unconditional
-  (PF reload + every share op idempotent at substrate) and
-  load-bearing (any failure aborts login). `ShellError { Account,
-  Mode }`; dispatch routes Mode failures through
-  `surface_shell_mode_error` — six arms framed as "before shell
-  entry". Recovery on share failure: `tenant reload <name>`
-  (idempotent) or address the `ShareError` refusal. `shell_intent`
-  emits BEFORE the profile read so verb context shows even on
-  profile-read failure. Negative pin: no `FlushAnchor` /
-  `BackupConfig` / `RestoreConfigFromBackup` / `RemoveAnchor` ever
-  fires on shell.
+  (both interactive and command forms) runs the full reapply BEFORE
+  the substrate hand-off. Unconditional (PF reload + every share op
+  idempotent at substrate) and load-bearing (any failure aborts).
+  `ShellError { Account, Mode, NarrowFailed { … } }`; dispatch routes
+  Mode failures through `surface_shell_mode_error` — six arms framed
+  as "before shell entry". Recovery on share failure: `tenant reload
+  <name>` (idempotent) or address the `ShareError` refusal.
+  `shell_intent` / `shell_command_intent` emit BEFORE the profile
+  read so verb context shows even on profile-read failure. Negative
+  pin: no `FlushAnchor` / `BackupConfig` / `RestoreConfigFromBackup`
+  / `RemoveAnchor` ever fires on shell (either form).
+
+- **`tenant shell` collapses interactive + command forms under one
+  verb** — argv presence is the discriminator: empty argv = today's
+  interactive login flow; non-empty argv after `--` = single-command
+  form running as the tenant via `sudo -iu` then narrowing back on
+  install-mode. Prior-art lock: kubectl / docker / ssh / sudo /
+  runuser all unify "interactive entry" and "single command" under
+  one verb with argv presence flipping the mode. Q1 (clap `last =
+  true` on `argv`) requires the `--` separator — eliminates the
+  `tenant shell dev -v` ambiguity (tenant-flag vs child-argv). Q2
+  (clap `requires = "argv"` on `--mode`) rejects bare `tenant shell
+  dev --mode install` at parse — widening the interactive session
+  would either need narrow-on-exit machinery (real doctrinal change)
+  or leave the operator at install tier after exit (silent persistent
+  widening). Q3 (no confirm prompt for either form) keeps the
+  pre-exec summary + cycle-16 audit as the safety surface; the
+  operator typed the verb + the command, prompting feels like noise.
+  No parallel `tenant exec` verb; no `DoctorScope::Exec` variant;
+  no `ExecError` parallel to `ShellError`.
+
+- **`AccountOp::ExecAsUser { name, argv }` + `Executor::exec_as_tenant`
+  carve-out** — sibling to `AccountOp::LoginAsUser` under the
+  `sudo -iu` mechanism family. Substrate is `sudo -iu <name> --
+  <argv...>` (the `--` separator is load-bearing — without it, an
+  argv[0] starting with `-` would be interpreted as a sudo flag).
+  Execution goes through `Executor::exec_as_tenant`, NOT
+  `execute_account` — same carve-out posture as `login` (stdio
+  inherits so sudo can prompt + child drives the controlling
+  terminal; returns i32 child exit code). `account_argv` arm
+  produces `["sudo", "-iu", <name>, "--", <argv...>]`; an argv
+  element carrying shell metacharacters (pipe, redirect) survives
+  intact as a single process-argv entry. Both label methods
+  (`business_label` → `"Command '<basename>' executed as '<name>'"`,
+  `intent_label` → `"Run as '<name>': <argv joined>"`) assume
+  non-empty argv; dispatch routes empty argv to `shell_interactive`
+  before any `ExecAsUser` is constructed. `execute_account` panics
+  on the variant (matches `LoginAsUser`'s defensive panic).
+
+- **Command-form narrow-on-finally gated on `mode == Install` +
+  child-exit propagation** — `Writer::shell_command` runs the entry
+  reapply at the requested tier, calls `exec_as_tenant`, then on
+  install-mode runs a runtime-tier reapply on completion (always —
+  regardless of child outcome — because on-disk anchor diverged
+  from runtime intent the moment the entry widen landed). Runtime
+  mode skips the post-child narrow: the entry reapply IS the
+  runtime posture; a second reapply would write the same bytes for
+  zero on-disk delta. Q4 substrate-stage guard: if widen failed at
+  `build_reapply_plan` (no substrate fired), no narrow attempt; if
+  widen-execute fired any substrate (Reload failed after
+  InstallAnchor), a best-effort inline narrow runs before the Mode
+  error surfaces. Child exit code propagates to the verb's exit
+  (option (a) lock); `ShellError::NarrowFailed { child_exit,
+  narrow_err }` carries both the child's exit (for propagation)
+  and the narrow error. Narrow-on-finally failure emits
+  `Reporter::shell_narrow_failed` — a yellow `⚠` stderr one-liner
+  naming `tenant mode <name> runtime` for recovery — but does NOT
+  override the child's exit code (operator's `$?` matches the
+  command's outcome). Interactive form never exercises the
+  `NarrowFailed` arm (today's pre-login abort posture preserved).
+  Cycle 18 retrofits the `⚠` one-liner to a multi-line panel; the
+  Writer + dispatch contract doesn't change.
+
+- **Command-form closing surface** — `Reporter::shell_command_done(
+  child_exit, mode)` emits `─── Done ───` + `Command exited with
+  code N.` (runtime mode) or `Command exited with code N (firewall
+  narrowed back to runtime tier).` (install mode). Dispatch fires
+  it on `Ok` (with the resolved mode) and on `NarrowFailed` (with
+  `Runtime` to elide the misleading narrow-back suffix — the `⚠`
+  stderr already named the real firewall state). Interactive form
+  has NO closing surface: operator's terminal context is gone after
+  `Executor::login` returns (cycle-4 doctrine — a "Shelled into …"
+  line afterwards would be at best redundant and at worst land in
+  a different terminal context). Argv-presence is the discriminator
+  in dispatch.
+
+- **`DoctorScope::Shell` covers both shell forms** — interactive
+  and command forms share the same audit-relevance set (PfDisabled
+  host-wide + EnvLeak host-wide + all per-tenant drift). No
+  `DoctorScope::Exec` variant; dispatch routes through
+  `pre_exec_doctor_summary(Some(name), host, DoctorScope::Shell,
+  reporter)` regardless of argv presence.
 
 - **Auto-narrow only protects the `tenant shell` entry path** —
   `sudo -iu tenant` directly bypasses the binary and inherits the
   current anchor posture. If install-tier widening was left in
   place before reboot, pf.conf reloads the still-widened anchor on
-  boot. `tenant shell <name>` is the canonical entry point.
+  boot. `tenant shell <name>` (or `tenant shell <name> -- <cmd>`)
+  is the canonical entry point; the command form's narrow-on-finally
+  is what makes `--mode install -- <cmd>` safe as a one-liner.
 
 - **Tenant-floor guard on destroy** — `destroy_eligibility` refuses
   with `EX_USAGE 64` when the named account exists with UID below
@@ -240,11 +329,16 @@ Things that are easy to violate and would matter:
   informational" contract); `64` (`EX_USAGE`) for user-input
   failure (validation, create-side conflict, all refusals); `74`
   (`EX_IOERR`) for substrate execution failure on every verb
-  except shell. Shell propagates the child shell's exit code
-  (clamped 0..=255). `1` is clap's default for parse errors and
-  `ModeLevel` rejection. Doctor's `--strict` carves: `1` if max
-  severity is warning, `2` if any critical; without `--strict`
-  doctor exits `0` on a successful walk.
+  except shell. Shell propagates the child's exit code (clamped
+  0..=255) — interactive form returns the login shell's exit;
+  command form returns the `exec_as_tenant` child's exit, and
+  narrow-on-finally failure does NOT override it (operator's `$?`
+  matches what the command actually returned; the `⚠` stderr
+  warning carries the narrow signal). `1` is clap's default for
+  parse errors and `ModeLevel` rejection (includes Q2's `--mode
+  install` without argv refusal). Doctor's `--strict` carves: `1`
+  if max severity is warning, `2` if any critical; without
+  `--strict` doctor exits `0` on a successful walk.
 
 - **Probe-as-tenant subsumes ACL semantics at the kernel level** —
   doctor's filesystem-exposure detection invokes `sudo -n -u

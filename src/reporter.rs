@@ -621,6 +621,138 @@ impl<'a> Reporter<'a> {
         }
     }
 
+    /// Command-form shell intent — section divider naming the tier in
+    /// real mode, dry-run preamble line in dry-run. Emitted BEFORE the
+    /// reapply plan is built so verb context survives a profile-read
+    /// failure (mirrors `shell_intent` for the interactive form). Real
+    /// shape and bytes finalize in SC3; this stub keeps the compile
+    /// quiet during SC2 wiring.
+    pub fn shell_command_intent(&mut self, name: &str, mode: ModeLevel) {
+        if self.dry_run {
+            let _ = writeln!(
+                self.stdout,
+                "Would run command as tenant '{name}' ({} tier).",
+                mode.as_str()
+            );
+        } else if mode == ModeLevel::Runtime {
+            self.section(&format!("Running command as tenant '{name}'"));
+        } else {
+            self.section(&format!(
+                "Running command as tenant '{name}' ({} tier)",
+                mode.as_str()
+            ));
+        }
+    }
+
+    /// Pre-execution summary for the command form. Real shape finalizes
+    /// in SC3; this stub keeps the SC2 compile clean. Same `show_summary`
+    /// gating as the interactive form's `shell_summary`.
+    pub fn shell_command_summary(
+        &mut self,
+        name: &str,
+        host: &str,
+        mode: ModeLevel,
+        argv: &[String],
+    ) {
+        let group = tenant_share_group_name(name);
+        let joined = argv.join(" ");
+        if mode == ModeLevel::Runtime {
+            let _ = writeln!(self.stdout, "About to run a command as tenant '{name}'.");
+        } else {
+            let _ = writeln!(
+                self.stdout,
+                "About to run a command as tenant '{name}' (mode: {}).",
+                mode.as_str()
+            );
+        }
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "This will:");
+        if mode == ModeLevel::Runtime {
+            let _ = writeln!(
+                self.stdout,
+                "  \u{2022} ensure the firewall is at runtime tier (auto-narrow; idempotent if already there)"
+            );
+        } else {
+            let _ = writeln!(
+                self.stdout,
+                "  \u{2022} widen the firewall to install tier (narrows back to runtime on completion)"
+            );
+        }
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} re-apply each declared share from [[shares]] in the profile"
+        );
+        let _ = writeln!(self.stdout, "  \u{2022} run as '{name}': {joined}");
+        if mode != ModeLevel::Runtime {
+            let _ = writeln!(
+                self.stdout,
+                "  \u{2022} narrow the firewall to runtime tier (always — even if the command fails)"
+            );
+        }
+        let _ = writeln!(self.stdout);
+        if mode == ModeLevel::Runtime {
+            let _ = writeln!(
+                self.stdout,
+                "Sudo needed for: firewall install, share reapply, exec."
+            );
+        } else {
+            let _ = writeln!(
+                self.stdout,
+                "Sudo needed for: firewall install, share reapply, exec, firewall narrow."
+            );
+        }
+        let _ = writeln!(self.stdout);
+    }
+
+    /// Yellow `⚠` stderr one-liner when narrow-on-finally failed after
+    /// a child-ran case (command form only). Cycle 18 retrofits to a
+    /// multi-line panel; cycle 17 ships the one-liner stub. Visual
+    /// vocabulary follows cycle-16's `doctor_summary_pending`. Does NOT
+    /// override the child's exit code — dispatcher returns the child's
+    /// exit alongside this stderr signal.
+    pub fn shell_narrow_failed(&mut self, name: &str, _err: &crate::accounts::ModeError) {
+        let prefix = if self.colors.stderr {
+            "\x1b[33m\u{26a0}\x1b[0m"
+        } else {
+            "\u{26a0}"
+        };
+        let _ = writeln!(
+            self.stderr,
+            "{prefix} tenant '{name}': firewall not narrowed after command — install-tier widening still in effect; run `tenant mode {name} runtime` to recover"
+        );
+    }
+
+    /// Closing surface for the command form: `─── Done ───` separator
+    /// followed by `Command exited with code N.` (runtime mode) or
+    /// `Command exited with code N (firewall narrowed back to runtime
+    /// tier).` (install mode). The narrow-back parenthetical fires
+    /// only when the entry widened, as a narrative cue that on-disk
+    /// state returned to runtime tier. Matches the prime's Flow 1
+    /// (runtime, bare) and Flow 2/3 (install, suffixed) shapes.
+    ///
+    /// Real-mode only — dry-run skips the closing. The operator-facing
+    /// signal that the verb finished is load-bearing for the install
+    /// case especially (otherwise the operator only sees ✓ lines and
+    /// has no confirmation the narrow-on-finally succeeded).
+    pub fn shell_command_done(&mut self, child_exit: i32, mode: ModeLevel) {
+        if self.dry_run {
+            return;
+        }
+        self.section("Done");
+        if mode == ModeLevel::Install {
+            let _ = writeln!(
+                self.stdout,
+                "Command exited with code {child_exit} (firewall narrowed back to runtime tier)."
+            );
+        } else {
+            let _ = writeln!(self.stdout, "Command exited with code {child_exit}.");
+        }
+    }
+
     // ============================================================
     // Mode verb
     // ============================================================
@@ -1094,7 +1226,7 @@ impl<'a> Reporter<'a> {
     /// `shell_narrow_profile_failed`: distinct verb framing
     /// ("before shell entry") so the operator sees the narrow as a
     /// shell-verb step, not a mode-verb invocation they didn't make.
-    pub fn shell_narrow_failed(&mut self, name: &str, err: &FirewallError) {
+    pub fn shell_narrow_firewall_failed(&mut self, name: &str, err: &FirewallError) {
         let _ = writeln!(
             self.stderr,
             "tenant: failed to narrow firewall for '{name}' before shell entry: {err}"

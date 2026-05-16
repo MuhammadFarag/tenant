@@ -42,8 +42,40 @@ pub(crate) enum Verb {
     Destroy {
         name: String,
     },
+    /// Enter the tenant context. Two forms gated on argv presence:
+    ///
+    /// - `tenant shell <name>` — interactive: auto-narrows the firewall
+    ///   to runtime tier, reapplies declared shares, then launches a
+    ///   login shell as the tenant. Operator IS the shell on return.
+    ///
+    /// - `tenant shell <name> [--mode install|runtime] -- <cmd...>` —
+    ///   command form: same reapply (at the requested tier; runtime by
+    ///   default), then runs `<cmd...>` as the tenant via `sudo -iu`,
+    ///   then ALWAYS reapplies at runtime tier on completion (RAII
+    ///   cleanup — guarantees on-disk state returns to runtime even if
+    ///   the command widened with `--mode install`). Child exit code
+    ///   propagates to the verb's exit. A narrow-on-finally failure
+    ///   emits a yellow ⚠ stderr warning naming `tenant mode <name>
+    ///   runtime` for recovery, but does NOT override the child's exit
+    ///   code (operator's $? sees the command's outcome).
+    ///
+    /// `--mode` is valid only with `-- <cmd>` (clap rejects bare
+    /// `--mode install` because widening the interactive session would
+    /// leave the operator at install tier silently). The `--` separator
+    /// is POSIX-canonical and matches `sudo` / `kubectl exec` /
+    /// `docker exec`.
     Shell {
         name: String,
+        /// Firewall tier for the command-form reapply. `install` widens
+        /// for the call; runtime narrow always fires on completion.
+        /// Requires `-- <cmd>` — clap rejects `--mode` without argv.
+        #[arg(long, value_enum, requires = "argv")]
+        mode: Option<ModeLevel>,
+        /// Command to run as the tenant. Empty = interactive login
+        /// shell (today's flow). Non-empty after `--` separator =
+        /// single-command form.
+        #[arg(last = true)]
+        argv: Vec<String>,
     },
     /// Apply a PF widening level to the named tenant. Re-renders the
     /// anchor body from the profile's runtime or runtime+install host

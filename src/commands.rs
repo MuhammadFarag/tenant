@@ -129,7 +129,7 @@ pub(crate) fn dispatch(
                 }
             }
         }
-        Verb::Shell { name } => {
+        Verb::Shell { name, mode, argv } => {
             if let Err(e) = accounts::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
@@ -154,13 +154,22 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
+                    // Clap enforces `--mode` requires argv (parse-time
+                    // refusal), so if mode is Some, argv is non-empty;
+                    // dispatch still resolves to Runtime when mode is
+                    // None for the interactive branch's symmetry.
+                    let resolved_mode = mode.unwrap_or(ModeLevel::Runtime);
                     // Shell has no confirm prompt (interactive entry,
                     // auto-narrow is convergent + idempotent), but the
                     // pre-exec audit still wants visual context — the
                     // summary supplies it. Same `show_summary` gate as
                     // the other verbs; scripted callers stay silent.
                     if show_summary {
-                        reporter.shell_summary(&name, host);
+                        if argv.is_empty() {
+                            reporter.shell_summary(&name, host);
+                        } else {
+                            reporter.shell_command_summary(&name, host, resolved_mode, &argv);
+                        }
                         writer.pre_exec_doctor_summary(
                             Some(&name),
                             host,
@@ -168,8 +177,19 @@ pub(crate) fn dispatch(
                             reporter,
                         );
                     }
-                    match writer.shell_into_tenant(&name, host, reporter) {
-                        Ok(code) => code.clamp(0, 255) as u8,
+                    match writer.shell_into_tenant(&name, host, &argv, resolved_mode, reporter) {
+                        Ok(code) => {
+                            // Closing surface only for the command
+                            // form. Interactive form returns from
+                            // `login` after the operator typed exit;
+                            // there's no terminal context to render
+                            // into (cycle-4 doctrine). Argv presence
+                            // is the discriminator.
+                            if !argv.is_empty() {
+                                reporter.shell_command_done(code, resolved_mode);
+                            }
+                            code.clamp(0, 255) as u8
+                        }
                         Err(accounts::ShellError::Account(e)) => {
                             reporter.shell_failed(&name, &e);
                             EX_IOERR
@@ -177,6 +197,25 @@ pub(crate) fn dispatch(
                         Err(accounts::ShellError::Mode(e)) => {
                             surface_shell_mode_error(reporter, &name, &e);
                             EX_IOERR
+                        }
+                        Err(accounts::ShellError::NarrowFailed {
+                            child_exit,
+                            narrow_err,
+                        }) => {
+                            // Per option (a) lock: child exit wins. The
+                            // yellow ⚠ stderr warning surfaces the
+                            // narrow failure but does NOT override the
+                            // child's outcome — operator's $? matches
+                            // what the command itself returned. The
+                            // closing line still fires (child ran),
+                            // but with no "(firewall narrowed back ...)"
+                            // suffix — that would be a lie when the
+                            // narrow just failed. Pass Runtime to elide
+                            // the suffix; the warning above carries the
+                            // real signal about firewall state.
+                            reporter.shell_narrow_failed(&name, &narrow_err);
+                            reporter.shell_command_done(child_exit, ModeLevel::Runtime);
+                            child_exit.clamp(0, 255) as u8
                         }
                     }
                 }
@@ -487,7 +526,7 @@ fn surface_mode_error(reporter: &mut Reporter, name: &str, error: &accounts::Mod
 fn surface_shell_mode_error(reporter: &mut Reporter, name: &str, error: &accounts::ModeError) {
     match error {
         accounts::ModeError::Profile(e) => reporter.shell_narrow_profile_failed(name, e),
-        accounts::ModeError::Firewall(e) => reporter.shell_narrow_failed(name, e),
+        accounts::ModeError::Firewall(e) => reporter.shell_narrow_firewall_failed(name, e),
         accounts::ModeError::Acl(e) => reporter.shell_narrow_acl_failed(name, e),
         accounts::ModeError::Account(e) => reporter.shell_narrow_account_failed(name, e),
         accounts::ModeError::Probe(e) => reporter.shell_narrow_probe_failed(name, e),

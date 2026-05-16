@@ -27,6 +27,9 @@ impl Executor for NeverExecutor {
     fn login(&self, name: &str) -> Result<i32, AccountError> {
         panic!("executor unexpectedly invoked (login) with name: {name:?}");
     }
+    fn exec_as_tenant(&self, name: &str, argv: &[String]) -> Result<i32, AccountError> {
+        panic!("executor unexpectedly invoked (exec_as_tenant): name={name:?} argv={argv:?}");
+    }
     fn describe_profile(&self, op: &ProfileOp) -> String {
         panic!("executor unexpectedly invoked (describe_profile) with op: {op:?}");
     }
@@ -512,6 +515,49 @@ pub fn shell_summary_block(name: &str) -> String {
          Sudo needed for: firewall narrow, share reapply, login.\n\
          \n",
     )
+}
+
+/// Pre-exec summary block for `tenant shell <name> [--mode <m>] -- <argv>`
+/// (cycle-17 command form). Same `show_summary` gating as the
+/// interactive form's `shell_summary_block`; no confirm prompt
+/// parenthetical (Q3 lock: command form is uniform with interactive
+/// shell on prompting).
+///
+/// `mode` is "runtime" or "install"; `argv` is the joined argv string
+/// the operator typed after `--`. Runtime tier collapses the entry
+/// bullet to the auto-narrow phrasing; install tier expands to the
+/// widen + narrow-on-finally pair. Sudo footer expands one phrase on
+/// install.
+pub fn shell_command_summary_block(name: &str, mode: &str, argv: &str) -> String {
+    let (headline_suffix, entry_bullet, finally_bullet, sudo_line) = if mode == "install" {
+        (
+            " (mode: install)",
+            "widen the firewall to install tier (narrows back to runtime on completion)",
+            Some("narrow the firewall to runtime tier (always \u{2014} even if the command fails)"),
+            "Sudo needed for: firewall install, share reapply, exec, firewall narrow.",
+        )
+    } else {
+        (
+            "",
+            "ensure the firewall is at runtime tier (auto-narrow; idempotent if already there)",
+            None,
+            "Sudo needed for: firewall install, share reapply, exec.",
+        )
+    };
+    let mut s = format!(
+        "About to run a command as tenant '{name}'{headline_suffix}.\n\
+         \n\
+         This will:\n  \
+         \u{2022} {entry_bullet}\n  \
+         \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
+         \u{2022} re-apply each declared share from [[shares]] in the profile\n  \
+         \u{2022} run as '{name}': {argv}\n",
+    );
+    if let Some(finally) = finally_bullet {
+        s.push_str(&format!("  \u{2022} {finally}\n"));
+    }
+    s.push_str(&format!("\n{sudo_line}\n\n"));
+    s
 }
 
 /// Dry-run summary block for single-tenant `tenant reload <name>`.

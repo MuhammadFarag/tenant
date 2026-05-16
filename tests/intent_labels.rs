@@ -88,6 +88,31 @@ fn intent_login_as_user() {
 }
 
 #[test]
+fn intent_exec_as_user() {
+    let op = AccountOp::ExecAsUser {
+        name: "dev".into(),
+        argv: vec!["ls".into(), "/tmp".into()],
+    };
+    assert_eq!(Op::Account(&op).intent_label(), "Run as 'dev': ls /tmp");
+}
+
+#[test]
+fn business_exec_as_user_uses_basename() {
+    // business_label uses the basename of argv[0] for the ✓ progress
+    // line — argv[0] may be an absolute path, but the operator's
+    // mental model is "the command 'ls' ran", not "the command
+    // '/usr/bin/ls' ran".
+    let op = AccountOp::ExecAsUser {
+        name: "dev".into(),
+        argv: vec!["/usr/local/bin/curl".into(), "https://x".into()],
+    };
+    assert_eq!(
+        Op::Account(&op).business_label(),
+        "Command 'curl' executed as 'dev'"
+    );
+}
+
+#[test]
 fn intent_ensure_dir_as_user() {
     let op = AccountOp::EnsureDirAsUser {
         name: "dev".into(),
@@ -295,5 +320,22 @@ fn intent_label_differs_from_business_label_for_delete_user_record() {
         Op::Account(&op).intent_label(),
         Op::Account(&op).business_label(),
         "intent_label and business_label should be distinct for DeleteUserRecord"
+    );
+}
+
+#[test]
+fn intent_label_differs_from_business_label_for_exec_as_user() {
+    // intent_label is the full operator-display ("Run as 'dev': ls /tmp"),
+    // business_label is the basename-only past-tense ✓ progress line
+    // ("Command 'ls' executed as 'dev'"). The alias-regression pin
+    // guards against future refactor that would collapse the two arms.
+    let op = AccountOp::ExecAsUser {
+        name: "dev".into(),
+        argv: vec!["ls".into(), "/tmp".into()],
+    };
+    assert_ne!(
+        Op::Account(&op).intent_label(),
+        Op::Account(&op).business_label(),
+        "intent_label and business_label should be distinct for ExecAsUser"
     );
 }

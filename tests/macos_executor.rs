@@ -92,6 +92,44 @@ fn macos_describes_login_as_user() {
 }
 
 #[test]
+fn macos_describes_exec_as_user() {
+    // sudo -iu <name> -- <argv joined with spaces>. `-i` (login shell)
+    // sources /etc/zprofile + ~/.zprofile so PATH and tooling env match
+    // the interactive `tenant shell <name>` posture. `--` separator
+    // ensures sudo doesn't interpret argv[0] as a sudo flag. The display
+    // is operator-facing (no shell-quoting); execution argv is the
+    // already-tokenized vector so a pipe inside one element survives.
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_account(&AccountOp::ExecAsUser {
+            name: "dev".into(),
+            argv: vec!["ls".into(), "/tmp".into()],
+        }),
+        "sudo -iu dev -- ls /tmp",
+    );
+}
+
+#[test]
+fn macos_describes_exec_as_user_preserves_quoted_argv_element() {
+    // A single argv element carrying shell metacharacters (here a pipe
+    // inside `bash -c '<...>'`) MUST survive intact through the display
+    // — operator's mental model: "the command I typed after `--` arrives
+    // at the tenant unchanged". Substrate-side, clap collected the
+    // element verbatim and `account_argv` passes it through to sudo as
+    // one argv entry; sudo's -i then -c-quotes when handing off to the
+    // login shell. Display joins with a single space; no per-element
+    // shell-escaping (the operator can read what they typed).
+    let s = MacosExecutor;
+    assert_eq!(
+        s.describe_account(&AccountOp::ExecAsUser {
+            name: "dev".into(),
+            argv: vec!["bash".into(), "-c".into(), "curl https://x | bash".into(),],
+        }),
+        "sudo -iu dev -- bash -c curl https://x | bash",
+    );
+}
+
+#[test]
 fn macos_describes_ensure_dir_as_user() {
     // Run-as-tenant `sudo -n -u <name> /bin/mkdir -p <path>`. Mirror
     // of the `LoginAsUser` "run as the tenant" mechanism — Account

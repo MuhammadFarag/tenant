@@ -139,6 +139,19 @@ pub enum AccountOp {
     /// prompt and the login shell can drive the controlling terminal.
     LoginAsUser { name: String },
 
+    /// Run a single command as the tenant inside a login shell. Used by
+    /// the `tenant shell <name> -- <cmd>` command form. Sibling to
+    /// `LoginAsUser` under the `sudo -iu` mechanism family — same login
+    /// shell semantics (sources `/etc/zprofile` + `~/.zprofile` so PATH
+    /// and tooling env match the interactive form), same stdio carve-out
+    /// (execution goes through `Executor::exec_as_tenant`, not
+    /// `execute_account`, because stdio inherits and the return type is
+    /// the child's exit code). Substrate: `sudo -iu <name> -- <argv>` —
+    /// the `--` separator prevents sudo from interpreting argv[0] as a
+    /// sudo flag. `argv` must be non-empty (dispatch routes empty argv
+    /// to the interactive branch before any `ExecAsUser` is constructed).
+    ExecAsUser { name: String, argv: Vec<String> },
+
     /// Ensure a directory exists at `path`, created by the tenant `name`.
     /// The shares substrate uses this to pre-create
     /// `parent(tenant_path)` before symlinking — e.g.
@@ -509,6 +522,14 @@ pub trait Executor {
     /// passes through.
     fn login(&self, name: &str) -> Result<i32, AccountError>;
 
+    /// Run a single command as the tenant inside a login shell. Sibling
+    /// carve-out to `login` — same stdio posture (inherit), same return
+    /// shape (child exit code), different argv (`sudo -iu <name> -- <argv>`).
+    /// Used by `tenant shell <name> -- <cmd>`. `argv` must be non-empty;
+    /// callers route empty argv to `login` before reaching this method.
+    /// Stub records via `exec_calls()`; production uses `Command::status`.
+    fn exec_as_tenant(&self, name: &str, argv: &[String]) -> Result<i32, AccountError>;
+
     fn describe_profile(&self, op: &ProfileOp) -> String;
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), ProfileError>;
 
@@ -748,6 +769,16 @@ fn account_business_label(op: &AccountOp) -> String {
             format!("Residual user record '{name}' cleaned up")
         }
         AccountOp::LoginAsUser { name } => format!("Entering shell as '{name}'"),
+        AccountOp::ExecAsUser { name, argv } => {
+            // basename of argv[0] for the ✓ progress line. argv[0]
+            // may be an absolute path; the operator's mental model is
+            // "the command 'ls' ran", not "the command '/usr/bin/ls' ran".
+            let bin = argv
+                .first()
+                .map(|s| s.rsplit('/').next().unwrap_or(s.as_str()))
+                .unwrap_or("?");
+            format!("Command '{bin}' executed as '{name}'")
+        }
         AccountOp::EnsureDirAsUser { path, .. } => {
             format!("Parent directory {} ensured", path.display())
         }
@@ -846,6 +877,14 @@ fn account_intent_label(op: &AccountOp) -> String {
             format!("Clean up residue user record '{name}'")
         }
         AccountOp::LoginAsUser { name } => format!("Log in as '{name}'"),
+        AccountOp::ExecAsUser { name, argv } => {
+            // Full argv joined with single spaces for the operator-display
+            // plan bullet. No shell-escaping — the operator typed it; they
+            // can read it. Substrate-side, argv is preserved as the
+            // already-tokenized vector so a metachar-bearing element
+            // arrives at the tenant unchanged.
+            format!("Run as '{name}': {}", argv.join(" "))
+        }
         AccountOp::EnsureDirAsUser { path, .. } => {
             format!("Ensure directory {} exists (as tenant)", path.display())
         }
@@ -995,6 +1034,9 @@ impl Executor for MacosExecutor {
             AccountOp::LookupUserRecord { name } => format!("dscl . -read /Users/{name}"),
             AccountOp::DeleteUserRecord { name } => format!("sudo dscl . -delete /Users/{name}"),
             AccountOp::LoginAsUser { name } => format!("sudo -iu {name}"),
+            AccountOp::ExecAsUser { name, argv } => {
+                format!("sudo -iu {name} -- {}", argv.join(" "))
+            }
             AccountOp::EnsureDirAsUser { name, path } => {
                 format!("sudo -n -u {name} /bin/mkdir -p {}", path.display())
             }
@@ -1036,6 +1078,11 @@ impl Executor for MacosExecutor {
                     "AccountOp::LoginAsUser must go through Executor::login, not execute_account"
                 )
             }
+            AccountOp::ExecAsUser { .. } => {
+                panic!(
+                    "AccountOp::ExecAsUser must go through Executor::exec_as_tenant, not execute_account"
+                )
+            }
             _ => account_argv(op),
         };
         spawn_capturing(&argv)
@@ -1049,6 +1096,25 @@ impl Executor for MacosExecutor {
             name: name.to_string(),
         });
         let (program, rest) = argv
+            .split_first()
+            .ok_or_else(|| AccountError::Spawn(io::Error::other("argv is empty")))?;
+        let status = Command::new(program)
+            .args(rest)
+            .status()
+            .map_err(AccountError::Spawn)?;
+        Ok(status.code().unwrap_or(1))
+    }
+
+    fn exec_as_tenant(&self, name: &str, argv: &[String]) -> Result<i32, AccountError> {
+        // Same stdio + return-code posture as `login`. argv shape:
+        // `sudo -iu <name> -- <argv...>`. The `--` separator is
+        // load-bearing — without it, an argv[0] starting with `-`
+        // would be interpreted as a sudo flag.
+        let full = account_argv(&AccountOp::ExecAsUser {
+            name: name.to_string(),
+            argv: argv.to_vec(),
+        });
+        let (program, rest) = full
             .split_first()
             .ok_or_else(|| AccountError::Spawn(io::Error::other("argv is empty")))?;
         let status = Command::new(program)
@@ -1704,6 +1770,14 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
         AccountOp::LoginAsUser { name } => {
             vec!["sudo".into(), "-iu".into(), name.clone()]
         }
+        AccountOp::ExecAsUser { name, argv } => {
+            // sudo -iu <name> -- <argv...>. Each argv element passes
+            // through as a separate process-argv entry; shell
+            // metacharacters inside a single element survive intact.
+            let mut full = vec!["sudo".into(), "-iu".into(), name.clone(), "--".into()];
+            full.extend(argv.iter().cloned());
+            full
+        }
         AccountOp::EnsureDirAsUser { name, path } => vec![
             "sudo".into(),
             "-n".into(),
@@ -1791,6 +1865,9 @@ impl Executor for DryRunExecutor {
         Ok(())
     }
     fn login(&self, _name: &str) -> Result<i32, AccountError> {
+        Ok(0)
+    }
+    fn exec_as_tenant(&self, _name: &str, _argv: &[String]) -> Result<i32, AccountError> {
         Ok(0)
     }
     fn describe_profile(&self, op: &ProfileOp) -> String {
@@ -1931,6 +2008,22 @@ pub struct StubExecutor {
     profile_ops: RefCell<Vec<ProfileOp>>,
     firewall_ops: RefCell<Vec<FirewallOp>>,
     logins: RefCell<Vec<String>>,
+
+    /// Recorded `exec_as_tenant` invocations. Each entry is `(name,
+    /// argv)`. Tests assert on this list to pin the command-form
+    /// substrate contract (verb dispatch invokes exec_as_tenant
+    /// exactly once with the operator's argv intact).
+    exec_calls: RefCell<Vec<(String, Vec<String>)>>,
+
+    /// Exit code returned by `exec_as_tenant`. Default 0; tests set
+    /// this to pin the command-form exit-code propagation contract.
+    exec_exit_code: Cell<i32>,
+
+    /// Spawn-failure override for `exec_as_tenant`. When `Some`, the
+    /// next call returns this error instead of `exec_exit_code`. Lets
+    /// tests pin the `ShellError::Account` path on a substrate-spawn
+    /// failure (analogous to `with_response_to` for `execute_account`).
+    exec_failure: RefCell<Option<AccountError>>,
 
     /// Per-op failure overrides for `execute_account`. First match (by full
     /// equality on the op value) wins. Replaces the pre-refactor argv-prefix
@@ -2197,6 +2290,21 @@ impl StubExecutor {
         self
     }
 
+    /// Configure the value returned by `exec_as_tenant`. Pins the
+    /// command-form shell verb's exit-code propagation contract.
+    pub fn exec_exit_code(self, code: i32) -> Self {
+        self.exec_exit_code.set(code);
+        self
+    }
+
+    /// Configure the next `exec_as_tenant` call to fail with `err`
+    /// instead of returning an exit code. One-shot — cleared after
+    /// firing. Mirrors `fail_next_profile` / `fail_next_firewall`.
+    pub fn fail_next_exec(self, err: AccountError) -> Self {
+        *self.exec_failure.borrow_mut() = Some(err);
+        self
+    }
+
     pub fn account_ops(&self) -> Vec<AccountOp> {
         self.account_ops.borrow().clone()
     }
@@ -2211,6 +2319,10 @@ impl StubExecutor {
 
     pub fn logins(&self) -> Vec<String> {
         self.logins.borrow().clone()
+    }
+
+    pub fn exec_calls(&self) -> Vec<(String, Vec<String>)> {
+        self.exec_calls.borrow().clone()
     }
 
     /// Pre-load a profile (e.g. for destroy tests that need to assert
@@ -2484,6 +2596,16 @@ impl Executor for StubExecutor {
     fn login(&self, name: &str) -> Result<i32, AccountError> {
         self.logins.borrow_mut().push(name.to_string());
         Ok(self.login_exit_code.get())
+    }
+
+    fn exec_as_tenant(&self, name: &str, argv: &[String]) -> Result<i32, AccountError> {
+        self.exec_calls
+            .borrow_mut()
+            .push((name.to_string(), argv.to_vec()));
+        if let Some(err) = self.exec_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self.exec_exit_code.get())
     }
 
     fn describe_profile(&self, op: &ProfileOp) -> String {

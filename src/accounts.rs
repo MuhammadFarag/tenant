@@ -500,19 +500,29 @@ pub(crate) enum ModeError {
     Share(ShareError),
 }
 
-/// Failure surface for the `shell` verb. The login spawn itself can
-/// fail with `Account`; the narrow-on-shell-entry can fail with
-/// `Mode` (read/parse the profile, or InstallAnchor / Reload).
-/// Abort-on-narrow-failure — the shell is NOT launched if the narrow
-/// can't complete, because doing so would leave the operator inside
-/// a session that might still be at the previous (potentially
-/// install-tier-widened) firewall posture. Operator recovery is
-/// `tenant mode <name> runtime` to narrow manually, then retry
-/// `tenant shell <name>`.
+/// Failure surface for the `shell` verb (both interactive and
+/// command forms). The login / exec spawn itself can fail with
+/// `Account`; the reapply at entry can fail with `Mode` (read/parse
+/// the profile, or InstallAnchor / Reload / share substrate).
+///
+/// `NarrowFailed` is exercised ONLY by the command form. The child
+/// ran (zero or non-zero exit), then the always-narrow-on-finally
+/// reapply at runtime tier failed. The dispatcher emits the warning
+/// AND returns the child's exit code — operator's $? sees the
+/// command's outcome; the narrow failure is a stderr signal for
+/// follow-up (`tenant mode <name> runtime` recovers; the failure
+/// most often means the host's sudo cache expired between widen
+/// and narrow). Interactive form aborts pre-login on any reapply
+/// failure (today's behavior preserved), so the third arm is dead
+/// for the empty-argv branch.
 #[derive(Debug)]
 pub(crate) enum ShellError {
     Account(AccountError),
     Mode(ModeError),
+    NarrowFailed {
+        child_exit: i32,
+        narrow_err: ModeError,
+    },
 }
 
 /// Pre-built op list for a profile-to-tenant reapply. Construction
@@ -1158,6 +1168,24 @@ impl<'a> Writer<'a> {
         &self,
         name: &str,
         host: &str,
+        argv: &[String],
+        mode: ModeLevel,
+        reporter: &mut Reporter,
+    ) -> Result<i32, ShellError> {
+        if argv.is_empty() {
+            return self.shell_interactive(name, host, reporter);
+        }
+        self.shell_command(name, host, argv, mode, reporter)
+    }
+
+    /// Interactive form (today's flow, preserved exactly). Empty argv
+    /// branch from `shell_into_tenant`. Auto-narrows to runtime,
+    /// reapplies shares, then hands off to `Executor::login` which
+    /// inherits stdio so the operator becomes the launched login shell.
+    fn shell_interactive(
+        &self,
+        name: &str,
+        host: &str,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
         // Intent emitted BEFORE the narrow tries, so the operator
@@ -1177,6 +1205,89 @@ impl<'a> Writer<'a> {
             .map_err(ShellError::Mode)?;
         reporter.step(Op::Account(&login));
         self.executor.login(name).map_err(ShellError::Account)
+    }
+
+    /// Command form. Build + execute the entry reapply at the
+    /// requested tier; run the child via `Executor::exec_as_tenant`
+    /// (stdio inherits like `login`); ALWAYS reapply at runtime tier
+    /// on completion to reset on-disk state (idempotent if entry was
+    /// already Runtime). Composition rules:
+    ///
+    /// - widen-build-failure (profile read / parse / share pre-flight
+    ///   error BEFORE any substrate fires) → `ShellError::Mode`, no
+    ///   narrow attempted. Q4 lock: nothing to undo.
+    /// - widen-execute-failure (Reload failed after InstallAnchor wrote
+    ///   the on-disk anchor body) → best-effort narrow inline, then
+    ///   `ShellError::Mode`. The best-effort narrow's own failures are
+    ///   dropped on the floor: the operator's primary signal is the
+    ///   widen failure, and the dispatcher's `surface_shell_mode_error`
+    ///   frame already names recovery.
+    /// - child-spawn-failure → `ShellError::Account`. No narrow runs:
+    ///   the child never ran, so the entry reapply IS the current
+    ///   tier; no cleanup needed. (Future: revisit if `--mode install`
+    ///   with a spawn-failure case proves to leave widening behind.)
+    /// - child-ran + narrow-OK → `Ok(child_exit)`.
+    /// - child-ran + narrow-failed → `ShellError::NarrowFailed` carrying
+    ///   both the child's exit code (for propagation per option (a))
+    ///   and the narrow error (for the operator-facing ⚠ warning).
+    fn shell_command(
+        &self,
+        name: &str,
+        host: &str,
+        argv: &[String],
+        mode: ModeLevel,
+        reporter: &mut Reporter,
+    ) -> Result<i32, ShellError> {
+        reporter.shell_command_intent(name, mode);
+
+        // (1) Build the entry reapply plan. Profile-read / parse / share
+        //     pre-flight failures land here BEFORE any substrate fires;
+        //     skip the narrow per Q4 (nothing to undo).
+        let entry_plan = self
+            .build_reapply_plan(name, host, mode)
+            .map_err(ShellError::Mode)?;
+
+        // (2) Execute the entry reapply. From here on, on-disk state
+        //     may have diverged (InstallAnchor wrote the new body; Reload
+        //     may have failed). Best-effort narrow inline so the on-disk
+        //     anchor returns to runtime tier; drop any secondary failure
+        //     on the floor — operator's primary signal is the entry
+        //     failure.
+        if let Err(entry_err) = self.execute_reapply_plan(&entry_plan, reporter) {
+            let _ = self
+                .build_reapply_plan(name, host, ModeLevel::Runtime)
+                .and_then(|p| self.execute_reapply_plan(&p, reporter));
+            return Err(ShellError::Mode(entry_err));
+        }
+
+        // (3) Run the child. Capture the result; don't early-return.
+        //     A spawn-failure here means the entry reapply landed but
+        //     exec never started; mode is whatever the operator
+        //     requested, so on-disk state is correct relative to intent.
+        let child_result = self.executor.exec_as_tenant(name, argv);
+
+        // (4) Narrow-on-finally — ONLY when the entry widened. For
+        //     mode == Runtime, the entry reapply IS the runtime
+        //     posture; a second reapply would write the same bytes
+        //     and reload pf to the same ruleset (three extra ✓ lines
+        //     + an extra pfctl round for zero on-disk delta). Skip
+        //     it; matches the prime's Flow 1 spec.
+        let narrow_result = if mode == ModeLevel::Runtime {
+            Ok(())
+        } else {
+            self.build_reapply_plan(name, host, ModeLevel::Runtime)
+                .and_then(|p| self.execute_reapply_plan(&p, reporter))
+        };
+
+        // (5) Compose: child exit code wins (option (a) lock).
+        match (child_result, narrow_result) {
+            (Ok(code), Ok(())) => Ok(code),
+            (Ok(code), Err(narrow_err)) => Err(ShellError::NarrowFailed {
+                child_exit: code,
+                narrow_err,
+            }),
+            (Err(spawn_err), _) => Err(ShellError::Account(spawn_err)),
+        }
     }
 
     /// Run a single op: emit the `$` echo line (in real+verbose),

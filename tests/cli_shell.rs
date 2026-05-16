@@ -1012,3 +1012,702 @@ fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
         "substrate failure surfaces via doctor_firewall_failed frame; stderr={stderr:?}"
     );
 }
+
+// ================================================================
+// Command form (`tenant shell <name> [--mode install|runtime] -- <cmd>`)
+//
+// Argv presence after `--` flips the verb between today's interactive
+// login flow (empty argv) and the new command form (non-empty argv).
+// Command form invokes `Executor::exec_as_tenant` (sibling carve-out
+// to `login`); on the success path it ALWAYS runs a runtime-tier
+// reapply on completion (idempotent if entry was Runtime; narrows
+// back to runtime if --mode install widened).
+//
+// Locks (per cycle-17 prime):
+// - Q1: `--` separator (clap `last = true`).
+// - Q2: `--mode` rejected without argv (clap `requires = "argv"`).
+// - Q3: no confirm prompt on either form.
+// - Q4: narrow-on-finally gated on widen-execution. If widen failed
+//   at `build_reapply_plan` (no substrate fired), no narrow attempt;
+//   if widen-execute fired any substrate, best-effort narrow runs
+//   inline before the Mode error surfaces.
+// - Option (a): child exit code propagates; narrow-failure stderr
+//   warning does NOT override it.
+// ================================================================
+
+#[test]
+fn shell_command_form_default_runtime_invokes_exec_as_tenant() {
+    // `tenant shell dev -- ls /tmp`: no --mode (defaults to Runtime).
+    // Entry reapply at Runtime; child runs via exec_as_tenant; NO
+    // post-child narrow (mode == Runtime → entry reapply IS the
+    // runtime posture; the redundant second reapply is gated off
+    // per F2 from cycle-17 smoke).
+    let exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls", "/tmp"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let expected_body = tenant::firewall::render_anchor("dev", &[]);
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: expected_body,
+            },
+            FirewallOp::Reload,
+        ],
+        "runtime-mode command form fires ONE reapply round (entry only); no redundant post-child narrow"
+    );
+    assert_eq!(
+        exec.exec_calls(),
+        vec![(
+            "dev".to_string(),
+            vec!["ls".to_string(), "/tmp".to_string()]
+        )],
+        "command form invokes exec_as_tenant exactly once with the operator's argv"
+    );
+    assert!(
+        exec.logins().is_empty(),
+        "command form does NOT invoke the interactive login carve-out: {:?}",
+        exec.logins()
+    );
+}
+
+#[test]
+fn shell_command_form_install_mode_widens_then_narrows() {
+    // `tenant shell dev --mode install -- bash -c 'echo hi'`. Entry
+    // widens to install tier (install body includes both runtime +
+    // install hosts); child runs; finally narrows to runtime tier.
+    // The install-tier and runtime-tier InstallAnchor bodies differ
+    // when the profile carries install hosts, so the firewall_ops
+    // pin captures the asymmetric pair shape.
+    let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
+    let exec = StubExecutor::new().with_existing_profile("dev", &profile);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &[
+            "shell", "dev", "--mode", "install", "--", "bash", "-c", "echo hi",
+        ],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let install_body = tenant::firewall::render_anchor(
+        "dev",
+        &["runtime.example".to_string(), "install.example".to_string()],
+    );
+    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: install_body,
+            },
+            FirewallOp::Reload,
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: runtime_body,
+            },
+            FirewallOp::Reload,
+        ],
+        "entry widens to install tier; finally narrows to runtime tier"
+    );
+    assert_eq!(
+        exec.exec_calls(),
+        vec![(
+            "dev".to_string(),
+            vec!["bash".into(), "-c".into(), "echo hi".into()],
+        )],
+    );
+}
+
+#[test]
+fn shell_command_form_propagates_child_exit_code() {
+    // Option (a) lock: child exit code propagates to the verb's exit.
+    // exec_exit_code(7) → verb exits 7. Mirrors today's
+    // shell_propagates_child_exit_code (which targets login).
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .exec_exit_code(7);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "false"],
+    );
+    assert_eq!(code, 7, "child's exit propagates; stderr={stderr:?}");
+    assert!(stderr.is_empty(), "no warning on clean narrow: {stderr:?}");
+    assert_eq!(exec.exec_calls().len(), 1);
+}
+
+#[test]
+fn shell_command_form_does_not_invoke_login_carveout() {
+    // Negative pin: command form must NOT reach `Executor::login`.
+    // The two carve-outs serve different forms; routing must split
+    // cleanly at the empty-argv check.
+    let exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, _stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "echo", "hello"],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        exec.logins().is_empty(),
+        "login carve-out must not fire on command form: {:?}",
+        exec.logins()
+    );
+    assert_eq!(
+        exec.exec_calls().len(),
+        1,
+        "exec carve-out fires exactly once on the command form"
+    );
+}
+
+#[test]
+fn shell_interactive_form_unchanged_when_argv_empty() {
+    // Regression pin: cycle-17 verb signature change must not
+    // disturb today's interactive flow. Empty argv routes to
+    // shell_interactive which calls Executor::login (NOT
+    // exec_as_tenant); only the entry reapply fires (no
+    // narrow-on-finally for the interactive form).
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .login_exit_code(5);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(
+        code, 5,
+        "child shell exit code propagates: stderr={stderr:?}"
+    );
+    let expected_body = tenant::firewall::render_anchor("dev", &[]);
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: expected_body,
+            },
+            FirewallOp::Reload,
+        ],
+        "interactive form fires entry reapply only (no finally narrow)"
+    );
+    assert_eq!(exec.logins(), vec!["dev".to_string()]);
+    assert!(
+        exec.exec_calls().is_empty(),
+        "interactive form must NOT invoke exec_as_tenant: {:?}",
+        exec.exec_calls()
+    );
+}
+
+#[test]
+fn shell_command_form_install_mode_narrow_on_finally_runs_when_child_fails() {
+    // Q4 + F2: when --mode install widened the entry, narrow-on-finally
+    // is mandatory regardless of child outcome — otherwise on-disk
+    // anchor stays at install tier after a non-zero exit (silent
+    // persistent widening, the very thing the verb exists to prevent).
+    // Verb returns child's exit code per option (a). The narrow installs
+    // the runtime-tier body, not a re-widen.
+    let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .exec_exit_code(42);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "false"],
+    );
+    assert_eq!(code, 42, "child exit code; stderr={stderr:?}");
+    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let ops = exec.firewall_ops();
+    assert_eq!(
+        ops.iter()
+            .filter(|o| matches!(o, FirewallOp::Reload))
+            .count(),
+        2,
+        "narrow-on-finally fires even when child failed: {ops:?}"
+    );
+    let last_install = ops
+        .iter()
+        .rfind(|op| matches!(op, FirewallOp::InstallAnchor { .. }))
+        .unwrap();
+    if let FirewallOp::InstallAnchor { body, .. } = last_install {
+        assert_eq!(
+            body, &runtime_body,
+            "finally narrow installs the runtime-tier body, not install-tier"
+        );
+    }
+}
+
+#[test]
+fn shell_command_form_runtime_mode_no_post_child_narrow() {
+    // F2 negative pin: runtime-mode command form must NOT fire a
+    // redundant post-child reapply. The entry reapply IS the runtime
+    // posture; a second reapply would write the same bytes + reload
+    // pf to the same ruleset for zero on-disk delta. Pin: exactly
+    // ONE Reload op on the runtime-mode path.
+    let exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, _stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "true"],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        exec.firewall_ops()
+            .iter()
+            .filter(|o| matches!(o, FirewallOp::Reload))
+            .count(),
+        1,
+        "runtime-mode command form fires ONE Reload (entry only): {:?}",
+        exec.firewall_ops()
+    );
+}
+
+#[test]
+fn shell_command_form_narrow_failure_surfaces_warning_and_child_exit_wins() {
+    // Option (a) + cycle-17 NarrowFailed arm: child runs cleanly
+    // (exit 0); narrow-on-finally fails. The verb returns child's
+    // exit code (0); stderr carries the yellow ⚠ warning naming
+    // `tenant mode dev runtime` for recovery. Without this pin, a
+    // future change that returned EX_IOERR on narrow-failure would
+    // surface as a silent regression in the operator's $?.
+    //
+    // Stub setup: with --mode install, entry InstallAnchor body
+    // contains runtime + install hosts; finally InstallAnchor body
+    // contains only runtime hosts. The two InstallAnchor ops have
+    // distinct `body` fields, so `fail_firewall_op` matching on the
+    // runtime-body op tags ONLY the finally narrow.
+    let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
+    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .fail_firewall_op(
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: runtime_body,
+            },
+            FirewallError::NonZero {
+                code: 1,
+                stderr: "anchor write failed".into(),
+            },
+        );
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "true"],
+    );
+    assert_eq!(
+        code, 0,
+        "child's exit (0) wins over narrow failure; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("firewall not narrowed"),
+        "yellow ⚠ warning surfaces narrow-failure on stderr: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("tenant mode dev runtime"),
+        "warning names the recovery command: {stderr:?}"
+    );
+    assert_eq!(exec.exec_calls().len(), 1, "child ran exactly once");
+}
+
+#[test]
+fn shell_command_form_widen_failure_at_build_skips_narrow() {
+    // Q4 lock: widen-build-failure (profile-read fails BEFORE any
+    // substrate fires) → no narrow attempt. The Mode error surfaces;
+    // firewall_ops stays empty; exec_calls stays empty.
+    let exec = StubExecutor::new(); // no profile pre-loaded → read_profile fails
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+    );
+    assert_eq!(code, 74, "EX_IOERR on Mode error; stderr={stderr:?}");
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "no firewall substrate fires when widen-build failed: {:?}",
+        exec.firewall_ops()
+    );
+    assert!(
+        exec.exec_calls().is_empty(),
+        "child never spawns when widen-build failed: {:?}",
+        exec.exec_calls()
+    );
+}
+
+#[test]
+fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
+    // Q4 lock: InstallAnchor succeeded (on-disk body now diverged);
+    // Reload failed. The best-effort narrow runs inline so on-disk
+    // state returns to runtime, then ModeError surfaces. We pin that
+    // a SECOND InstallAnchor (runtime body) attempt followed the
+    // failed entry Reload.
+    let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .fail_next_firewall(FirewallError::NonZero {
+            code: 1,
+            stderr: "pf reload failed".into(),
+        });
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "ls"],
+    );
+    assert_eq!(code, 74, "EX_IOERR on widen-Mode error; stderr={stderr:?}");
+    // After the entry Reload failed (op #2), the best-effort narrow
+    // builds + executes a runtime-tier reapply. fail_next_firewall is
+    // one-shot, so the narrow's ops should land cleanly. Pin: a
+    // runtime-body InstallAnchor appears after the failed Reload.
+    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let ops = exec.firewall_ops();
+    assert!(
+        ops.iter().any(|op| matches!(
+            op,
+            FirewallOp::InstallAnchor { name, body }
+                if name == "dev" && body == &runtime_body
+        )),
+        "best-effort narrow runtime-body InstallAnchor must fire after widen-execute failure: {ops:?}"
+    );
+    assert!(
+        exec.exec_calls().is_empty(),
+        "child must not spawn when widen-execute failed: {:?}",
+        exec.exec_calls()
+    );
+}
+
+#[test]
+fn shell_command_form_negative_pin_no_flush_anchor() {
+    // Doctrine pin (mirrors cycle-4's shell negative pin): the command
+    // form is convergent like the interactive form; no FlushAnchor
+    // ever fires. FlushAnchor is destroy-side load-bearing because the
+    // parent `load anchor` directive gets removed there; the command
+    // form preserves the parent directive across widen + narrow.
+    let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
+    let exec = StubExecutor::new().with_existing_profile("dev", &profile);
+    let (_code, _stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "ls"],
+    );
+    assert!(
+        !exec
+            .firewall_ops()
+            .iter()
+            .any(|op| matches!(op, FirewallOp::FlushAnchor { .. })),
+        "FlushAnchor must not fire on the command form: {:?}",
+        exec.firewall_ops()
+    );
+}
+
+#[test]
+fn shell_command_form_share_substrate_reapplies_before_exec() {
+    // Share substrate (cycle-14 AddHostToShareGroup + cycle-13
+    // AclOp::Grant + EnsureDirAsUser + EnsureSymlinkAsUser) runs as
+    // part of the entry reapply BEFORE exec_as_tenant. Pin: account
+    // ops include AddHost; profile is read.
+    let exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let add_host = AccountOp::AddHostToShareGroup {
+        name: "dev".into(),
+        host: "operator".into(),
+    };
+    // AddHost fires twice (entry + finally narrow), and BEFORE exec.
+    // Pin: AddHost is in account_ops at least once.
+    assert!(
+        exec.account_ops().contains(&add_host),
+        "AddHostToShareGroup fires as part of the entry reapply: {:?}",
+        exec.account_ops()
+    );
+    assert_eq!(exec.exec_calls().len(), 1);
+}
+
+// ================================================================
+// SC3 — Reporter byte-form pins for the command form
+// ================================================================
+
+#[test]
+fn shell_command_dry_run_default_shows_intent() {
+    // Flow 1 from the prime (default-runtime command form, standard mode):
+    // summary block + dry-run preamble line (`Would run command as
+    // tenant 'dev' (runtime tier).`). No plan in standard dry-run.
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--dry-run", "--", "ls", "/tmp"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let want = format!(
+        "{}Would run command as tenant 'dev' (runtime tier).\n",
+        shell_command_summary_block("dev", "runtime", "ls /tmp"),
+    );
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn shell_command_dry_run_install_mode_includes_widen_and_narrow_bullets() {
+    // Flow 2 from the prime (install-mode command form, standard mode):
+    // headline carries `(mode: install)`; entry bullet says "widen",
+    // extra finally-narrow bullet; sudo line names firewall narrow.
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &[
+            "shell",
+            "dev",
+            "--dry-run",
+            "--mode",
+            "install",
+            "--",
+            "bash",
+            "-c",
+            "echo hi",
+        ],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let want = format!(
+        "{}Would run command as tenant 'dev' (install tier).\n",
+        shell_command_summary_block("dev", "install", "bash -c echo hi"),
+    );
+    assert_eq!(stdout, want);
+}
+
+#[test]
+fn shell_command_real_mode_section_divider_includes_tier_when_install() {
+    // Real-mode section header: runtime → "Running command as tenant 'dev'";
+    // install → "Running command as tenant 'dev' (install tier)". Pin the
+    // exact header bytes for both via section_line so a future width
+    // tweak moves both sides together.
+    let runtime_profile = tenant::profile::default_profile_toml();
+    let exec = StubExecutor::new().with_existing_profile("dev", &runtime_profile);
+    let (_code, stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "true"],
+    );
+    assert!(
+        stdout.contains(&section_line("Running command as tenant 'dev'")),
+        "runtime-tier section header missing: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("(install tier)"),
+        "runtime-tier header must NOT carry tier suffix: {stdout:?}"
+    );
+
+    let install_profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
+    let exec2 = StubExecutor::new().with_existing_profile("dev", &install_profile);
+    let (_code, stdout2, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec2,
+        &["shell", "dev", "--mode", "install", "--", "true"],
+    );
+    assert!(
+        stdout2.contains(&section_line(
+            "Running command as tenant 'dev' (install tier)"
+        )),
+        "install-tier section header missing: {stdout2:?}"
+    );
+}
+
+#[test]
+fn shell_command_no_confirm_prompt() {
+    // Q3 lock: command form does NOT prompt, even on TTY. We simulate
+    // a TTY via run_with_stdin with empty stdin content; if the verb
+    // ever started prompting, the empty stdin would cause it to abort
+    // (default-N for destroy; default-Y elsewhere). Either way, the
+    // shape would change. Pin: clean execution + no "Proceed?" in
+    // stdout.
+    let exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "true"],
+        b"",
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("Proceed?"),
+        "command form must not emit a confirm prompt on TTY: {stdout:?}"
+    );
+    assert_eq!(exec.exec_calls().len(), 1, "child runs without prompt gate");
+}
+
+#[test]
+fn shell_command_narrow_failure_warning_uses_warning_glyph() {
+    // SC3 byte-form pin for the yellow ⚠ stderr warning. Default
+    // Colors (off) renders the glyph plain; the colored shape is
+    // verified at the Reporter level. The warning line names the
+    // tenant, the failure summary, and the recovery command.
+    let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
+    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .fail_firewall_op(
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: runtime_body,
+            },
+            FirewallError::NonZero {
+                code: 1,
+                stderr: "anchor write failed".into(),
+            },
+        );
+    let (_code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "true"],
+    );
+    let want = "\u{26a0} tenant 'dev': firewall not narrowed after command \u{2014} install-tier widening still in effect; run `tenant mode dev runtime` to recover\n";
+    assert_eq!(stderr, want);
+}
+
+#[test]
+fn shell_command_closing_runtime_mode_bare_exit_line() {
+    // F1: runtime-mode command form ends with `─── Done ───` + bare
+    // `Command exited with code N.` line — no narrow-back suffix
+    // because runtime mode doesn't widen and doesn't narrow on
+    // finally (per F2). Matches the prime's Flow 1 spec.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .exec_exit_code(7);
+    let (code, stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "false"],
+    );
+    assert_eq!(code, 7);
+    assert!(
+        stdout.contains(&section_line("Done")),
+        "closing `─── Done ───` separator missing: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Command exited with code 7.\n"),
+        "runtime-mode closing line must be bare (no narrow-back suffix): {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("(firewall narrowed back to runtime tier)"),
+        "runtime-mode closing line must NOT carry the narrow-back suffix: {stdout:?}"
+    );
+}
+
+#[test]
+fn shell_command_closing_install_mode_includes_narrow_back_suffix() {
+    // F1: install-mode command form ends with `─── Done ───` +
+    // `Command exited with code N (firewall narrowed back to runtime
+    // tier).` — the suffix names the narrow as the load-bearing
+    // operator-visible cue that on-disk state returned to runtime.
+    let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &profile)
+        .exec_exit_code(0);
+    let (code, stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "true"],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains(&section_line("Done")),
+        "closing `─── Done ───` separator missing: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Command exited with code 0 (firewall narrowed back to runtime tier).\n"),
+        "install-mode closing line must carry the narrow-back suffix: {stdout:?}"
+    );
+}
+
+#[test]
+fn shell_command_closing_does_not_emit_on_interactive_form() {
+    // Doctrine pin: closing surface fires for the command form only.
+    // Interactive form returns from `Executor::login` after operator
+    // typed exit; the parent shell's terminal context is gone (or
+    // already showed the closing). Cycle-4 doctrine: no "Shelled into
+    // …" line afterwards. Empty argv is the discriminator in dispatch.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .login_exit_code(0);
+    let (_code, stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert!(
+        !stdout.contains(&section_line("Done")),
+        "interactive form must NOT emit a closing Done separator: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Command exited with code"),
+        "interactive form must NOT emit a Command-exited closing line: {stdout:?}"
+    );
+}
+
+#[test]
+fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
+    // DoctorScope::Shell covers both forms. Same stub (PfDisabled
+    // host-wide) → same critical-finding inline emission for both
+    // interactive and command forms. The Reporter wiring is shared;
+    // dispatch routes through `pre_exec_doctor_summary` with
+    // DoctorScope::Shell regardless of argv presence.
+    let make_exec = || {
+        StubExecutor::new()
+            .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+            .with_pf_status_content("Status: Disabled\n")
+    };
+
+    // Interactive form (regression baseline).
+    let exec_a = make_exec();
+    let (_code, stdout_a, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec_a, &["shell", "dev"], b"");
+
+    // Command form.
+    let exec_b = make_exec();
+    let (_code, stdout_b, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec_b,
+        &["shell", "dev", "--", "true"],
+        b"",
+    );
+
+    // Both forms surface the same PfDisabled critical via the cycle-16
+    // doctor_finding_one_liner inline emission ("critical: pf is
+    // globally disabled" — same byte form across both verb shapes).
+    assert!(
+        stdout_a.contains("critical: pf is globally disabled"),
+        "interactive form's pre-exec audit surfaces PfDisabled: {stdout_a:?}"
+    );
+    assert!(
+        stdout_b.contains("critical: pf is globally disabled"),
+        "command form's pre-exec audit surfaces PfDisabled: {stdout_b:?}"
+    );
+}
+
+#[test]
+fn shell_clap_rejects_mode_without_argv() {
+    // Q2 lock: --mode requires argv. `tenant shell dev --mode install`
+    // (no `--` separator, no command) → clap parse error at dispatch.
+    // Exit code is clap's default (2); no substrate fires.
+    let exec = StubExecutor::new();
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install"],
+    );
+    assert_ne!(code, 0, "clap rejects parse: stderr={stderr:?}");
+    assert!(
+        exec.firewall_ops().is_empty()
+            && exec.account_ops().is_empty()
+            && exec.exec_calls().is_empty()
+            && exec.logins().is_empty(),
+        "no substrate fires on clap parse rejection"
+    );
+}
