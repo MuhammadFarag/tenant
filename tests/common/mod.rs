@@ -493,6 +493,27 @@ pub fn mode_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -
     )
 }
 
+/// Pre-exec summary block for `tenant shell <name>`. Emitted whenever
+/// `show_summary` is true (dry-run OR TTY). Unlike the other verbs'
+/// summaries, shell has no prompt, so there's no
+/// `(Real run would prompt: …)` parenthetical to append. Tests splice
+/// this block in BEFORE the shell-intent line (`Would shell into 'X'.`
+/// in dry-run, or the section divider in real mode).
+pub fn shell_summary_block(name: &str) -> String {
+    format!(
+        "About to enter tenant '{name}'.\n\
+         \n\
+         This will:\n  \
+         \u{2022} narrow the firewall to runtime tier (auto-narrow)\n  \
+         \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
+         \u{2022} re-apply each declared share from [[shares]] in the profile\n  \
+         \u{2022} launch an interactive login shell as '{name}'\n\
+         \n\
+         Sudo needed for: firewall narrow, share reapply, login.\n\
+         \n",
+    )
+}
+
 /// Dry-run summary block for single-tenant `tenant reload <name>`.
 /// `plan_section` optionally splices the verbose plan block.
 pub fn reload_dry_run_block(name: &str, plan_section: Option<&str>) -> String {

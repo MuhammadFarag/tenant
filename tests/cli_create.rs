@@ -1428,3 +1428,82 @@ fn create_with_invalid_input_reprompts_then_accepts() {
     );
     assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }
+
+// ================================================================
+// Pre-exec doctor audit (cycle 16): create scope
+// ================================================================
+//
+// Create's audit considers PfDisabled only (host-wide). No tenant
+// exists yet, so per-tenant checks are out of scope. EnvLeak is also
+// out (shell-specific operator impact).
+
+#[test]
+fn create_pre_exec_doctor_silent_when_host_is_clean() {
+    let exec = StubExecutor::new();
+    let (code, stdout, stderr) =
+        run_with_stdin(StubReader::default(), &exec, &["create", "dev", "-y"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:"),
+        "clean host must not emit the aggregate warning line; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("critical:"),
+        "clean host must not emit a critical finding; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn create_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
+    let exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, stderr) =
+        run_with_stdin(StubReader::default(), &exec, &["create", "dev", "-y"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("critical: pf is globally disabled"),
+        "PfDisabled critical must emit inline; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn create_pre_exec_doctor_scope_excludes_env_leak() {
+    // EnvLeak is Shell-only — even with `env_delete` missing,
+    // create's audit must NOT emit a warning. The leak doesn't
+    // apply to the create flow's substrate (no `sudo -u` happens
+    // in create).
+    let exec = StubExecutor::new().with_env_policy_content("");
+    let (code, stdout, stderr) =
+        run_with_stdin(StubReader::default(), &exec, &["create", "dev", "-y"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:"),
+        "EnvLeak must NOT propagate to create scope; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn create_pre_exec_doctor_silent_in_scripted_mode() {
+    // No TTY, no --dry-run → no summary, no audit (Q3 lock).
+    let exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, _stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:") && !stdout.contains("critical:"),
+        "scripted real-mode must not emit audit; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn create_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
+    let exec = StubExecutor::new().fail_next_pf_status(FirewallError::NonZero {
+        code: 1,
+        stderr: "sudo: a password is required".into(),
+    });
+    let (code, _stdout, stderr) =
+        run_with_stdin(StubReader::default(), &exec, &["create", "dev", "-y"], b"");
+    assert_eq!(code, 0, "verb proceeds despite audit substrate failure");
+    assert!(
+        stderr.contains("failed to read pf state"),
+        "substrate failure surfaces via doctor_firewall_failed frame; stderr={stderr:?}"
+    );
+}

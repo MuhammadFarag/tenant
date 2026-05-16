@@ -420,6 +420,45 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(self.stdout);
     }
 
+    /// Pre-execution summary for `shell`. Unlike the other mutating
+    /// verbs, shell has no confirm prompt — interactive entry; the
+    /// operator becomes the shell after `login` returns. The summary
+    /// exists so the pre-exec doctor audit (cycle-16) has visual
+    /// context above it (otherwise the operator sees a bare warning
+    /// line before the section divider and `$ sudo -iu` echo). Ends
+    /// with a blank line; no `(Real run would prompt: …)` parenthetical
+    /// because no prompt fires. Same gating as the other summaries —
+    /// only emits when `show_summary` (TTY OR dry-run) is true in
+    /// dispatch.
+    pub fn shell_summary(&mut self, name: &str, host: &str) {
+        let group = tenant_share_group_name(name);
+        let _ = writeln!(self.stdout, "About to enter tenant '{name}'.");
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} narrow the firewall to runtime tier (auto-narrow)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} re-apply each declared share from [[shares]] in the profile"
+        );
+        let _ = writeln!(
+            self.stdout,
+            "  \u{2022} launch an interactive login shell as '{name}'"
+        );
+        let _ = writeln!(self.stdout);
+        let _ = writeln!(
+            self.stdout,
+            "Sudo needed for: firewall narrow, share reapply, login."
+        );
+        let _ = writeln!(self.stdout);
+    }
+
     /// Pre-execution summary for no-arg `tenant reload` (walks all
     /// tenants). Names the count + comma-separated list so the operator
     /// can confirm the scope before any substrate fires.
@@ -788,8 +827,7 @@ impl<'a> Reporter<'a> {
     /// verbose mode — per-path-category guidance belongs to the future
     /// remediation surface, not the detection surface.
     pub fn doctor_finding(&mut self, finding: &Finding) {
-        let rendered = self.color_finding_prefix(finding);
-        let _ = writeln!(self.stdout, "{rendered}");
+        self.doctor_finding_one_liner(finding);
         if self.verbose
             && let Some(guidance) = finding.guidance()
         {
@@ -802,6 +840,17 @@ impl<'a> Reporter<'a> {
                 }
             }
         }
+    }
+
+    /// Emit just the colored one-liner — the guidance body is skipped
+    /// regardless of verbose. Used by cycle-16 `pre_exec_doctor_summary`
+    /// for inline critical findings on mutating verbs: the operator
+    /// sees the danger, but the full multi-paragraph body lives behind
+    /// `tenant doctor -v` (Q4 lock — verb output is about what the
+    /// verb is doing; the audit's full guidance is doctor's job).
+    pub fn doctor_finding_one_liner(&mut self, finding: &Finding) {
+        let rendered = self.color_finding_prefix(finding);
+        let _ = writeln!(self.stdout, "{rendered}");
     }
 
     /// Severity coloring on the finding's leading prefix. Critical →
@@ -903,6 +952,33 @@ impl<'a> Reporter<'a> {
     /// operator sees which machinery tripped.
     pub fn doctor_firewall_failed(&mut self, err: &FirewallError) {
         let _ = writeln!(self.stderr, "tenant: failed to read pf state: {err}");
+    }
+
+    /// Aggregate hint line for non-critical findings the mutating-verb
+    /// inline pre-exec audit collected. Emits one yellow ⚠ line naming
+    /// the count + the `tenant doctor` command the operator can run for
+    /// detail. `target` is `Some(name)` for per-tenant verbs (shell /
+    /// mode / reload) and `None` for the create flow (no tenant yet).
+    /// Singular/plural agreement on the count. Skipped entirely when
+    /// `count == 0` so a healthy host stays silent. Output goes to
+    /// stdout next to the critical inline lines, not stderr — these
+    /// are advisory, not failures.
+    pub fn doctor_summary_pending(&mut self, count: usize, target: Option<&str>) {
+        if count == 0 {
+            return;
+        }
+        let noun = if count == 1 { "warning" } else { "warnings" };
+        let (scope, command) = match target {
+            Some(name) => (
+                format!(" for tenant '{name}'"),
+                format!("tenant doctor {name}"),
+            ),
+            None => (String::new(), "tenant doctor".to_string()),
+        };
+        let line =
+            format!("\u{26a0} Doctor: {count} {noun}{scope} \u{2014} run `{command}` for details");
+        let painted = self.paint_stdout(&line, ansi::yellow);
+        let _ = writeln!(self.stdout, "{painted}");
     }
 
     // ============================================================

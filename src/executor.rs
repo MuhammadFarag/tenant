@@ -2085,10 +2085,13 @@ pub struct StubExecutor {
     acl_failure: RefCell<Option<AclError>>,
 
     /// Per-(name, path) override for `tenant_path_kind`. First match
-    /// wins; unmatched lookups default to `PathKind::Absent` (the
-    /// expected case for an unprovisioned tenant_path — substrate will
-    /// freely install the symlink). Tests use this to exercise the
-    /// Q12 `TenantPathOccupied` refusal path.
+    /// wins; unmatched lookups consult `profile_state[name]` and
+    /// return `Symlink(host_path)` when the queried path matches a
+    /// declared share's expanded tenant_path (the doctor-passing
+    /// "shares already reapplied" state); otherwise `PathKind::Absent`
+    /// (the unprovisioned-path case where the substrate freely
+    /// installs the symlink). Tests use the override to exercise the
+    /// Q12 `TenantPathOccupied` refusal path or other drift cases.
     tenant_path_kinds: RefCell<HashMap<(String, PathBuf), PathKind>>,
 
     /// One-shot `tenant_path_kind` failure. Mirrors `probe_failure`.
@@ -2647,13 +2650,30 @@ impl Executor for StubExecutor {
         if let Some(err) = self.tenant_path_kind_failure.borrow_mut().take() {
             return Err(err);
         }
-        let kind = self
+        if let Some(kind) = self
             .tenant_path_kinds
             .borrow()
             .get(&(name.to_string(), path.to_path_buf()))
             .cloned()
-            .unwrap_or(PathKind::Absent);
-        Ok(kind)
+        {
+            return Ok(kind);
+        }
+        // Default: if the profile declares a share whose expanded
+        // tenant_path matches `path`, return Symlink(host_path) — the
+        // doctor-passing state where shares are already reapplied.
+        // Otherwise Absent (the unprovisioned-path case the substrate
+        // freely installs into).
+        if let Some(toml) = self.profile_state.borrow().get(name)
+            && let Ok(profile) = crate::profile::parse(toml)
+        {
+            for share in &profile.shares {
+                let expanded = crate::profile::expand_tenant_path(name, &share.tenant_path);
+                if expanded == path {
+                    return Ok(PathKind::Symlink(share.host_path.clone()));
+                }
+            }
+        }
+        Ok(PathKind::Absent)
     }
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {

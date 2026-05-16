@@ -16,7 +16,8 @@ fn shell_dry_run_default_shows_intent() {
     // shell out.
     let (code, stdout, stderr) = run_with(stub_with_tenant("dev"), &["shell", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, "Would shell into 'dev'.\n");
+    let want = format!("{}Would shell into 'dev'.\n", shell_summary_block("dev"));
+    assert_eq!(stdout, want);
 }
 
 #[test]
@@ -38,8 +39,9 @@ fn shell_dry_run_verbose_shows_mechanism() {
     // moving into a summary). 4 entries: Install + Reload + AddHost
     // (catch-up) + LoginAsUser.
     let want = format!(
-        "Would shell into 'dev'.\n\
+        "{}Would shell into 'dev'.\n\
          {}",
+        shell_summary_block("dev"),
         verbose_plan_section(&[
             (
                 "Install firewall anchor at /etc/pf.anchors/tenant-dev",
@@ -320,7 +322,8 @@ fn shell_dry_run_bypasses_injected_executor() {
         &["shell", "dev", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, "Would shell into 'dev'.\n");
+    let want = format!("{}Would shell into 'dev'.\n", shell_summary_block("dev"));
+    assert_eq!(stdout, want);
     assert!(
         exec.account_ops().is_empty() && exec.firewall_ops().is_empty() && exec.logins().is_empty(),
         "executor should not be invoked in dry-run; account_ops={:?}, firewall_ops={:?}, logins={:?}",
@@ -820,4 +823,192 @@ fn shell_negative_pin_share_substrate_does_not_emit_firewall_recovery_ops() {
             "shell narrow with shares should not emit firewall recovery / setup ops; saw {op:?}"
         );
     }
+}
+
+// ================================================================
+// Pre-exec doctor audit (cycle 16): shell scope
+// ================================================================
+//
+// Shell's audit considers PfDisabled + EnvLeak (host-wide) plus
+// per-tenant PfRuleDrift, AnchorBodyDrift, AclDrift, SymlinkDrift,
+// HostNotInShareGroup. Critical findings inline (full one-liner);
+// warning/info findings aggregate into a single
+// `⚠ Doctor: N warning(s) for tenant 'X' — run `tenant doctor X` for details` line.
+// Healthy host emits nothing extra. Audit fires between summary and
+// confirm (shell has no confirm; the audit lands between summary and
+// the shell intent / login). The `show_summary` gate (dry-run OR TTY)
+// controls audit emission too — scripted real-mode callers stay silent.
+
+#[test]
+fn shell_pre_exec_doctor_silent_when_host_is_clean() {
+    // Default stub state is the doctor-passing baseline (SC1):
+    // PF enabled, env_delete includes SSH_AUTH_SOCK, kernel anchor
+    // has pass + block, anchor body matches profile render, host
+    // is in share group. Real-mode TTY emits summary + section + ✓
+    // progress; no ⚠ Doctor: line, no inline critical.
+    //
+    // Uses `run_with_stdin` to simulate a TTY so the audit gating
+    // fires (show_summary = TTY OR dry-run; dry-run swaps to
+    // DryRunExecutor whose mocks return clean defaults regardless of
+    // stub injection — the audit tests pin behavior through real
+    // mode + TTY which exercises the actual StubExecutor reads).
+    let exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:"),
+        "clean host must not emit the aggregate warning line; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("critical:"),
+        "clean host must not emit a critical finding; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
+    // PfDisabled is the only Critical-tier finding today (host-wide).
+    // The audit emits it inline as the full one-liner via the existing
+    // `doctor_finding` framing — critical: prefix + the finding text.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("critical: pf is globally disabled"),
+        "PfDisabled critical must emit inline; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_doctor_aggregates_warnings_into_single_line() {
+    // EnvLeak (shell scope; warning) → one warning. Aggregate line
+    // names the count + the per-tenant `tenant doctor dev` command.
+    // Inline finding one-liner is NOT emitted for warnings — the
+    // operator runs doctor for detail.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_env_policy_content("");
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"),
+        "warning aggregate line must name singular count + recovery command; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("warning: env-leak"),
+        "individual warning one-liner must NOT emit inline (warnings aggregate); stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_doctor_critical_plus_warnings_emits_both_lines() {
+    // PfDisabled (critical) AND EnvLeak (warning) AND
+    // HostNotInShareGroup (warning) — expect 1 inline critical + 1
+    // aggregate line counting 2 warnings (plural).
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_status_content("Status: Disabled\n")
+        .with_env_policy_content("")
+        .with_host_in_group("operator", "dev-tenant-share", false);
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("critical: pf is globally disabled"),
+        "PfDisabled critical must emit inline; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("\u{26a0} Doctor: 2 warnings for tenant 'dev'"),
+        "2 warnings must aggregate with plural noun; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_doctor_verbose_does_not_emit_guidance_for_inline_critical() {
+    // Q4 lock: verb-verbose does NOT enable the doctor-verbose
+    // guidance body for inline critical findings. The aggregate line
+    // already points the operator at `tenant doctor` for detail; the
+    // inline critical stays a one-liner.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("critical: pf is globally disabled"),
+        "critical inline still emits; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Why this matters"),
+        "verb-verbose must NOT emit doctor's guidance block inline; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_doctor_silent_in_scripted_mode_no_summary() {
+    // Q3 lock: scripted callers (non-TTY, no --dry-run) skip the
+    // summary AND the audit. Real-mode-no-TTY emits only the
+    // section divider + ✓ progress + nothing extra above.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:"),
+        "scripted real-mode must not emit audit; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("critical:"),
+        "scripted real-mode must not emit critical inline; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("About to enter tenant"),
+        "scripted real-mode must not emit summary; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_doctor_exit_code_unaffected_by_findings() {
+    // Mutating verbs' exit codes don't depend on whether doctor
+    // findings emit. PfDisabled is critical — but shell still exits 0
+    // on successful login. `--strict` stays doctor-only.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_status_content("Status: Disabled\n")
+        .with_env_policy_content("")
+        .login_exit_code(0);
+    let (code, _stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(
+        code, 0,
+        "shell exit must be login child's exit (0), not affected by doctor findings"
+    );
+}
+
+#[test]
+fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
+    // Q1 lock: read_pf_status fails → frame the failure on stderr,
+    // continue with the verb. The shell verb still proceeds to
+    // shell_intent + login.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .fail_next_pf_status(FirewallError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".into(),
+        });
+    let (code, _stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0, "verb proceeds despite audit substrate failure");
+    assert!(
+        stderr.contains("failed to read pf state"),
+        "substrate failure surfaces via doctor_firewall_failed frame; stderr={stderr:?}"
+    );
 }

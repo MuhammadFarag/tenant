@@ -8,7 +8,7 @@ use crate::ModeLevel;
 use crate::allocation::TENANT_UID_FLOOR;
 use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, curated_paths, has_env_delete_for,
-    has_group_acl_entry, has_pam_tid, pf_status_enabled,
+    has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
 };
 use crate::executor::{
     self, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp,
@@ -1579,6 +1579,226 @@ impl<'a> Writer<'a> {
             tenant: name.to_string(),
         }))
     }
+
+    /// Run the verb-relevant subset of doctor's checks before the
+    /// confirm prompt fires on a mutating verb. Critical findings
+    /// emit inline via `reporter.doctor_finding` (full one-liner;
+    /// same severity coloring as the dedicated doctor verb). Warning
+    /// and Info findings count toward a single aggregate hint line
+    /// (`doctor_summary_pending`) that points the operator at `tenant
+    /// doctor` for detail. Healthy host emits nothing.
+    ///
+    /// `scope` selects which subset of checks runs — see [`DoctorScope`]
+    /// for the per-verb matrix. `name` is `None` for `create` (no
+    /// tenant exists yet) and `Some(&str)` for the other mutating verbs.
+    ///
+    /// Substrate-machinery failures (sudoers cache miss, pfctl can't
+    /// run) surface as the existing `doctor_*_failed` stderr frames
+    /// and the function returns — the audit is a courtesy and never
+    /// aborts the verb. The operator can still type `n` at the
+    /// upcoming confirm prompt to back out manually.
+    pub(crate) fn pre_exec_doctor_summary(
+        &self,
+        name: Option<&str>,
+        host: &str,
+        scope: DoctorScope,
+        reporter: &mut Reporter,
+    ) {
+        let mut criticals: Vec<Finding> = Vec::new();
+        let mut warning_count: usize = 0;
+        let mut record = |finding: Finding| {
+            if finding.severity() == crate::doctor::Severity::Critical {
+                criticals.push(finding);
+            } else {
+                warning_count += 1;
+            }
+        };
+
+        // PfDisabled is host-wide and considered on every scope: pf
+        // off means NO tenant anchor enforces, regardless of which
+        // verb the operator typed.
+        match self.executor.read_pf_status() {
+            Ok(text) => {
+                if !pf_status_enabled(&text) {
+                    record(Finding::PfDisabled);
+                }
+            }
+            Err(e) => reporter.doctor_firewall_failed(&e),
+        }
+
+        // EnvLeak is shell-only: only the interactive entry path
+        // materializes the operator's ssh-agent socket inside the
+        // tenant session. mkdir + ln from the share substrate don't
+        // reach for the var.
+        if matches!(scope, DoctorScope::Shell) {
+            match self.executor.read_env_policy() {
+                Ok(text) => {
+                    if !has_env_delete_for(&text, "SSH_AUTH_SOCK") {
+                        record(Finding::EnvLeak {
+                            var: "SSH_AUTH_SOCK".to_string(),
+                        });
+                    }
+                }
+                Err(e) => reporter.doctor_host_file_failed(&e),
+            }
+        }
+
+        if let Some(tenant) = name {
+            // PF-side per-tenant drift — relevant on every per-tenant
+            // verb (mode, shell, reload). The kernel rules + on-disk
+            // anchor body are independent axes.
+            if matches!(
+                scope,
+                DoctorScope::Shell | DoctorScope::Mode | DoctorScope::Reload
+            ) {
+                match self.executor.read_kernel_pf_rules(tenant) {
+                    Ok(rules) => {
+                        for drift in pf_rule_presence_check(&rules, tenant) {
+                            record(drift);
+                        }
+                    }
+                    Err(e) => reporter.doctor_firewall_failed(&e),
+                }
+                match self.check_anchor_body_drift(tenant) {
+                    Ok(Some(drift)) => record(drift),
+                    Ok(None) => {}
+                    Err(e) => reporter.doctor_host_file_failed(&e),
+                }
+            }
+
+            // Share-substrate drift — shell + reload only. Mode's
+            // operator focus is the firewall tier; reload is the verb
+            // whose job IS share convergence, and shell auto-reapplies
+            // shares on entry so the operator should know about drift
+            // before committing.
+            if matches!(scope, DoctorScope::Shell | DoctorScope::Reload) {
+                self.collect_share_drift(tenant, reporter, &mut record);
+                match self
+                    .executor
+                    .host_in_group(host, &tenant_share_group_name(tenant))
+                {
+                    Ok(true) => {}
+                    Ok(false) => record(Finding::HostNotInShareGroup {
+                        tenant: tenant.to_string(),
+                        host: host.to_string(),
+                        group: tenant_share_group_name(tenant),
+                    }),
+                    Err(e) => {
+                        // Re-use the doctor-failed stderr frame; the
+                        // underlying surface is the dseditgroup probe.
+                        reporter.doctor_failed(&ProbeError::NonZero {
+                            code: -1,
+                            stderr: format!("dseditgroup -o checkmember failed: {e}"),
+                        });
+                    }
+                }
+            }
+        }
+
+        for finding in &criticals {
+            // Q4 lock: one-liner only, no guidance body inline. The
+            // aggregate hint already points the operator at `tenant
+            // doctor` for detail; verb-verbose mirroring the doctor
+            // verbose body would clutter the verb's primary output.
+            reporter.doctor_finding_one_liner(finding);
+        }
+        reporter.doctor_summary_pending(warning_count, name);
+    }
+
+    /// Read the profile + walk its declared `[[shares]]` for
+    /// AclDrift + SymlinkDrift findings, calling `record` with each.
+    /// Quiet counterpart to `check_share_drift` — same substrate
+    /// reads, no inline `reporter.doctor_finding` emission, since the
+    /// pre-exec aggregator decides emission policy. A profile that
+    /// can't be read or parsed is silently skipped (no spurious drift
+    /// when the profile is absent); a per-share substrate failure on
+    /// `read_host_acl` or `tenant_path_kind` surfaces via the doctor
+    /// frame and the walk continues.
+    fn collect_share_drift<F: FnMut(Finding)>(
+        &self,
+        name: &str,
+        reporter: &mut Reporter,
+        record: &mut F,
+    ) {
+        let profile_content = match self.executor.read_profile(name) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let parsed = match parse(&profile_content) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let group = tenant_share_group_name(name);
+        for share in &parsed.shares {
+            match self.executor.read_host_acl(&share.host_path) {
+                Ok(listing) => {
+                    if !has_group_acl_entry(&listing, &group) {
+                        record(Finding::AclDrift {
+                            tenant: name.to_string(),
+                            host_path: share.host_path.clone(),
+                            group: group.clone(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    reporter.doctor_failed(&e);
+                    continue;
+                }
+            }
+            let tenant_path = expand_tenant_path(name, &share.tenant_path);
+            match self.executor.tenant_path_kind(name, &tenant_path) {
+                Ok(kind) => {
+                    let actual_opt = match kind {
+                        PathKind::Absent => Some(SymlinkActual::Absent),
+                        PathKind::Other => Some(SymlinkActual::NotSymlink),
+                        PathKind::Symlink(target) => {
+                            if target == share.host_path {
+                                None
+                            } else {
+                                Some(SymlinkActual::WrongTarget(target))
+                            }
+                        }
+                    };
+                    if let Some(actual) = actual_opt {
+                        record(Finding::SymlinkDrift {
+                            tenant: name.to_string(),
+                            tenant_path,
+                            expected_target: share.host_path.clone(),
+                            actual,
+                        });
+                    }
+                }
+                Err(e) => {
+                    reporter.doctor_failed(&e);
+                }
+            }
+        }
+    }
+}
+
+/// Per-verb scope for `Writer::pre_exec_doctor_summary`. Each variant
+/// names the relevance matrix the dispatcher applies before deciding
+/// which doctor checks to run. See the CLAUDE.md "Pre-exec doctor
+/// summary on mutating verbs" doctrine block for the full per-verb
+/// matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DoctorScope {
+    /// Create — no tenant exists yet; only the host-wide
+    /// `PfDisabled` check is considered.
+    Create,
+    /// Shell — broadest scope: host-wide `PfDisabled` + `EnvLeak`,
+    /// plus every per-tenant drift category. Shell launches the
+    /// interactive session that materializes both the firewall
+    /// posture and the ssh-agent leak risk.
+    Shell,
+    /// Mode — firewall-tier focus: host-wide `PfDisabled`, per-tenant
+    /// `PfRuleDrift` + `AnchorBodyDrift`. Share drift is OUT (reload
+    /// is the verb whose job is share convergence).
+    Mode,
+    /// Reload — share-convergence focus: same per-tenant set as
+    /// Shell, host-wide is `PfDisabled` only (no `EnvLeak`; reload's
+    /// share substrate doesn't materialize the leak operator-visibly).
+    Reload,
 }
 
 /// Combined error surface for the doctor verb. `Probe` covers the

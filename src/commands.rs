@@ -80,6 +80,12 @@ pub(crate) fn dispatch(
             let create_plan = create_plan_entries(&create_plan_ops);
             if show_summary {
                 reporter.create_summary(&name, host, uid, gid, Some(&create_plan));
+                // Cycle-16 inline audit: surface verb-relevant doctor
+                // findings BEFORE the operator confirms — critical
+                // findings inline, warnings aggregated to a single
+                // hint line pointing at `tenant doctor`. Same gating
+                // as the summary itself; scripted callers stay silent.
+                writer.pre_exec_doctor_summary(None, host, accounts::DoctorScope::Create, reporter);
             }
             if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
                 reporter.aborted();
@@ -148,6 +154,20 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
+                    // Shell has no confirm prompt (interactive entry,
+                    // auto-narrow is convergent + idempotent), but the
+                    // pre-exec audit still wants visual context — the
+                    // summary supplies it. Same `show_summary` gate as
+                    // the other verbs; scripted callers stay silent.
+                    if show_summary {
+                        reporter.shell_summary(&name, host);
+                        writer.pre_exec_doctor_summary(
+                            Some(&name),
+                            host,
+                            accounts::DoctorScope::Shell,
+                            reporter,
+                        );
+                    }
                     match writer.shell_into_tenant(&name, host, reporter) {
                         Ok(code) => code.clamp(0, 255) as u8,
                         Err(accounts::ShellError::Account(e)) => {
@@ -204,6 +224,12 @@ pub(crate) fn dispatch(
                     // reversible via the other mode).
                     if show_summary {
                         reporter.mode_summary(&name, host, level, Some(&plan_entries));
+                        writer.pre_exec_doctor_summary(
+                            Some(&name),
+                            host,
+                            accounts::DoctorScope::Mode,
+                            reporter,
+                        );
                     }
                     if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
                         == ConfirmOutcome::Abort
@@ -302,6 +328,12 @@ pub(crate) fn dispatch(
                         // Default Y (convergent, idempotent).
                         if show_summary {
                             reporter.reload_summary(&n, host, Some(&plan_entries));
+                            writer.pre_exec_doctor_summary(
+                                Some(&n),
+                                host,
+                                accounts::DoctorScope::Reload,
+                                reporter,
+                            );
                         }
                         if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
                             == ConfirmOutcome::Abort

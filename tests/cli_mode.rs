@@ -979,3 +979,107 @@ fn mode_install_tier_does_not_change_share_substrate() {
         "share substrate should fire at install tier same as runtime"
     );
 }
+
+// ================================================================
+// Pre-exec doctor audit (cycle 16): mode scope
+// ================================================================
+//
+// Mode's audit considers PfDisabled (host-wide) + PfRuleDrift +
+// AnchorBodyDrift (per-tenant). Share drift is NOT in scope (mode's
+// operator focus is the firewall tier; reload owns share-drift
+// surfacing). EnvLeak is out (shell-only).
+
+#[test]
+fn mode_pre_exec_doctor_silent_when_host_is_clean() {
+    let exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:") && !stdout.contains("critical:"),
+        "clean host must not emit audit; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn mode_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("critical: pf is globally disabled"),
+        "PfDisabled critical must emit inline; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn mode_pre_exec_doctor_aggregates_pf_rule_drift_warning() {
+    // PfRuleDrift fires when kernel anchor is missing pass or block.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_kernel_pf_rules("dev", "");
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("\u{26a0} Doctor: 2 warnings for tenant 'dev'"),
+        "empty kernel anchor → 2 warnings (missing pass + missing block); stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn mode_pre_exec_doctor_scope_excludes_share_drift() {
+    // Share drift is out of mode's scope. Even with HostNotInShareGroup
+    // injected, mode's audit must not aggregate any warning.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_in_group("operator", "dev-tenant-share", false);
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:"),
+        "HostNotInShareGroup must NOT propagate to mode scope; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn mode_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .fail_next_pf_status(FirewallError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".into(),
+        });
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "verb proceeds despite audit substrate failure");
+    assert!(
+        stderr.contains("failed to read pf state"),
+        "substrate failure surfaces; stderr={stderr:?}"
+    );
+}

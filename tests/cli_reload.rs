@@ -576,3 +576,109 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
         "AddHost recorded before the share-substrate ops"
     );
 }
+
+// ================================================================
+// Pre-exec doctor audit (cycle 16): reload scope
+// ================================================================
+//
+// Reload's audit considers PfDisabled host-wide + the full per-tenant
+// drift set (PfRuleDrift, AnchorBodyDrift, AclDrift, SymlinkDrift,
+// HostNotInShareGroup) — same per-tenant set as Shell because reload
+// is the verb whose job IS share convergence. EnvLeak is OUT
+// (shell-specific operator impact; reload's share substrate is
+// mkdir/ln/chmod, no ssh-agent reach).
+
+#[test]
+fn reload_pre_exec_doctor_silent_when_host_is_clean() {
+    let exec =
+        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:") && !stdout.contains("critical:"),
+        "clean host must not emit audit; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_status_content("Status: Disabled\n");
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("critical: pf is globally disabled"),
+        "PfDisabled critical must emit inline; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_aggregates_host_not_in_share_group_warning() {
+    // HostNotInShareGroup → 1 warning aggregate. Singular noun.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_in_group("operator", "dev-tenant-share", false);
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"),
+        "HostNotInShareGroup → aggregate with singular noun; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_scope_excludes_env_leak() {
+    // EnvLeak is Shell-only — reload's share substrate doesn't reach
+    // for ssh-agent socket. Audit must not aggregate any warning.
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_env_policy_content("");
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:"),
+        "EnvLeak must NOT propagate to reload scope; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
+    let exec = StubExecutor::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .fail_next_pf_status(FirewallError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".into(),
+        });
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "verb proceeds despite audit substrate failure");
+    assert!(
+        stderr.contains("failed to read pf state"),
+        "substrate failure surfaces; stderr={stderr:?}"
+    );
+}
