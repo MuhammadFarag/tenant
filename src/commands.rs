@@ -1,6 +1,8 @@
 use std::io::BufRead;
 
+use crate::ModeLevel;
 use crate::doctor::Severity;
+use crate::executor::{AccountOp, FirewallOp, Op, ProfileOp};
 use crate::reporter::ConfirmOutcome;
 use crate::{Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, reporter::Reporter};
 
@@ -69,8 +71,17 @@ pub(crate) fn dispatch(
             // BEFORE any substrate fires. Default Y for create (the
             // operator typed the verb; abort is cheap; idempotent
             // on re-run).
+            //
+            // Cycle 15: the plan slice the verbose summary renders is
+            // built here in dispatch, mirroring the substrate flow the
+            // verb fires. The placeholder InstallAnchor / UpdateConfig
+            // bodies are empty strings — `describe_via` ignores those
+            // fields, so plan + echo lines come out identical to the
+            // real-bodied ops the verb constructs after profile-read.
+            let create_plan_ops = build_create_plan_ops(&name, host, uid, gid);
+            let create_plan = create_plan_entries(&create_plan_ops);
             if show_summary {
-                reporter.create_summary(&name, host, uid, gid);
+                reporter.create_summary(&name, host, uid, gid, Some(&create_plan));
             }
             if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
                 reporter.aborted();
@@ -177,10 +188,25 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
+                    // Cycle 15: build the reapply plan BEFORE the
+                    // summary so profile-read / share pre-flight
+                    // failures surface pre-prompt (Q3 lock — don't
+                    // ask the operator to confirm something already
+                    // doomed). The verbose summary renders the plan
+                    // upfront; the verb then receives the same plan
+                    // for execution.
+                    let plan = match writer.build_reapply_plan(&name, host, level) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            surface_mode_error(reporter, &name, &e);
+                            return EX_IOERR;
+                        }
+                    };
+                    let plan_entries = plan.as_plan_entries();
                     // Cycle 12 confirm prompt; default Y (convergent
                     // reapply, reversible via the other mode).
                     if show_summary {
-                        reporter.mode_summary(&name, host, level);
+                        reporter.mode_summary(&name, host, level, Some(&plan_entries));
                     }
                     if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
                         == ConfirmOutcome::Abort
@@ -188,7 +214,7 @@ pub(crate) fn dispatch(
                         reporter.aborted();
                         return 0;
                     }
-                    match writer.apply_tenant_mode(&name, host, level, reporter) {
+                    match writer.apply_tenant_mode(&name, level, &plan, reporter) {
                         Ok(()) => 0,
                         Err(e) => {
                             surface_mode_error(reporter, &name, &e);
@@ -265,10 +291,21 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     accounts::Eligibility::Destroyable => {
+                        // Cycle 15: build the reapply plan BEFORE the
+                        // summary so profile-read / share pre-flight
+                        // failures surface pre-prompt (Q3 lock).
+                        let plan = match writer.build_reapply_plan(&n, host, ModeLevel::Runtime) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                surface_reload_error(reporter, &n, &e);
+                                return EX_IOERR;
+                            }
+                        };
+                        let plan_entries = plan.as_plan_entries();
                         // Cycle 12 confirm; default Y (convergent,
                         // idempotent).
                         if show_summary {
-                            reporter.reload_summary(&n, host);
+                            reporter.reload_summary(&n, host, Some(&plan_entries));
                         }
                         if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
                             == ConfirmOutcome::Abort
@@ -276,7 +313,7 @@ pub(crate) fn dispatch(
                             reporter.aborted();
                             return 0;
                         }
-                        match writer.reload_tenant(&n, host, reporter) {
+                        match writer.reload_tenant(&n, &plan, reporter) {
                             Ok(()) => 0,
                             Err(e) => {
                                 surface_reload_error(reporter, &n, &e);
@@ -323,8 +360,10 @@ pub(crate) fn dispatch(
                     // the suffixed group survived a prior partial
                     // failure. Cycle 12 confirm; default N — same
                     // destructive-action posture as the full destroy.
+                    let orphan_plan_ops = build_orphan_plan_ops(&name, host);
+                    let orphan_plan = orphan_plan_entries(&orphan_plan_ops);
                     if show_summary {
-                        reporter.destroy_orphan_summary(&name, host);
+                        reporter.destroy_orphan_summary(&name, host, Some(&orphan_plan));
                     }
                     if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
                         == ConfirmOutcome::Abort
@@ -352,9 +391,11 @@ pub(crate) fn dispatch(
                 accounts::Eligibility::Destroyable => {
                     // Cycle 12 confirm; default N (destructive,
                     // muscle-memory ENTER must not delete).
+                    let destroy_plan_ops = build_destroy_plan_ops(&name, host);
+                    let destroy_plan = destroy_plan_entries(&destroy_plan_ops);
                     if show_summary {
                         let uid = accounts.uid_for(&name).unwrap_or(0);
-                        reporter.destroy_summary(&name, host, uid);
+                        reporter.destroy_summary(&name, host, uid, Some(&destroy_plan));
                     }
                     if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
                         == ConfirmOutcome::Abort
@@ -441,6 +482,181 @@ fn surface_reload_error(reporter: &mut Reporter, name: &str, error: &accounts::M
         accounts::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
         accounts::ModeError::Share(e) => reporter.refuse_reload_share(name, e),
     }
+}
+
+// ============================================================
+// Cycle 15 — plan-slice construction for prompt-having verbs
+//
+// Dispatch builds the plan-side op list BEFORE the summary so the
+// verbose plan block can render before the confirm prompt (Q3 lock).
+// `*_plan_ops` owns the ops; `*_plan_entries` flattens them into the
+// borrowed-slice shape the Reporter expects.
+//
+// The placeholder InstallAnchor / UpdateConfig bodies are empty
+// strings — `describe_via` ignores those fields, so plan + echo lines
+// come out identical to the real-bodied ops the verb constructs after
+// profile-read.
+// ============================================================
+
+pub(crate) struct CreatePlanOps {
+    pub(crate) create_group: AccountOp,
+    pub(crate) add_host: AccountOp,
+    pub(crate) add_user: AccountOp,
+    pub(crate) rollback_group: AccountOp,
+    pub(crate) create_profile: ProfileOp,
+    pub(crate) backup: FirewallOp,
+    pub(crate) install_anchor: FirewallOp,
+    pub(crate) update_conf: FirewallOp,
+    pub(crate) reload: FirewallOp,
+    pub(crate) restore: FirewallOp,
+    pub(crate) remove_anchor: FirewallOp,
+    pub(crate) flush_anchor: FirewallOp,
+    pub(crate) enable: FirewallOp,
+}
+
+fn build_create_plan_ops(name: &str, host: &str, uid: u32, gid: u32) -> CreatePlanOps {
+    CreatePlanOps {
+        create_group: AccountOp::CreateShareGroup {
+            name: name.into(),
+            gid,
+        },
+        add_host: AccountOp::AddHostToShareGroup {
+            name: name.into(),
+            host: host.into(),
+        },
+        add_user: AccountOp::CreateTenantUser {
+            name: name.into(),
+            uid,
+            gid,
+        },
+        rollback_group: AccountOp::DeleteShareGroup { name: name.into() },
+        create_profile: ProfileOp::Create { name: name.into() },
+        backup: FirewallOp::BackupConfig,
+        install_anchor: FirewallOp::InstallAnchor {
+            name: name.into(),
+            body: String::new(),
+        },
+        update_conf: FirewallOp::UpdateConfig {
+            content: String::new(),
+        },
+        reload: FirewallOp::Reload,
+        restore: FirewallOp::RestoreConfigFromBackup,
+        remove_anchor: FirewallOp::RemoveAnchor { name: name.into() },
+        flush_anchor: FirewallOp::FlushAnchor { name: name.into() },
+        enable: FirewallOp::Enable,
+    }
+}
+
+fn create_plan_entries(ops: &CreatePlanOps) -> Vec<(Op<'_>, Option<&'static str>)> {
+    vec![
+        (Op::Account(&ops.create_group), None),
+        (Op::Account(&ops.add_host), None),
+        (Op::Account(&ops.add_user), None),
+        (Op::Account(&ops.rollback_group), Some("on rollback")),
+        (Op::Profile(&ops.create_profile), None),
+        (Op::Firewall(&ops.backup), None),
+        (Op::Firewall(&ops.install_anchor), None),
+        (Op::Firewall(&ops.update_conf), None),
+        (Op::Firewall(&ops.reload), None),
+        (Op::Firewall(&ops.restore), Some("on reload failure")),
+        (Op::Firewall(&ops.remove_anchor), Some("on reload failure")),
+        (Op::Firewall(&ops.reload), Some("on reload failure")),
+        (Op::Firewall(&ops.flush_anchor), Some("on reload failure")),
+        (Op::Firewall(&ops.enable), None),
+    ]
+}
+
+pub(crate) struct DestroyPlanOps {
+    pub(crate) delete_user: AccountOp,
+    pub(crate) probe: AccountOp,
+    pub(crate) cleanup: AccountOp,
+    pub(crate) remove_host: AccountOp,
+    pub(crate) delete_group: AccountOp,
+    pub(crate) delete_profile: ProfileOp,
+    pub(crate) backup: FirewallOp,
+    pub(crate) remove_anchor: FirewallOp,
+    pub(crate) update_conf: FirewallOp,
+    pub(crate) reload: FirewallOp,
+    pub(crate) flush_anchor: FirewallOp,
+}
+
+fn build_destroy_plan_ops(name: &str, host: &str) -> DestroyPlanOps {
+    DestroyPlanOps {
+        delete_user: AccountOp::DeleteTenantUser { name: name.into() },
+        probe: AccountOp::LookupUserRecord { name: name.into() },
+        cleanup: AccountOp::DeleteUserRecord { name: name.into() },
+        remove_host: AccountOp::RemoveHostFromShareGroup {
+            name: name.into(),
+            host: host.into(),
+        },
+        delete_group: AccountOp::DeleteShareGroup { name: name.into() },
+        delete_profile: ProfileOp::Delete { name: name.into() },
+        backup: FirewallOp::BackupConfig,
+        remove_anchor: FirewallOp::RemoveAnchor { name: name.into() },
+        update_conf: FirewallOp::UpdateConfig {
+            content: String::new(),
+        },
+        reload: FirewallOp::Reload,
+        flush_anchor: FirewallOp::FlushAnchor { name: name.into() },
+    }
+}
+
+fn destroy_plan_entries(ops: &DestroyPlanOps) -> Vec<(Op<'_>, Option<&'static str>)> {
+    vec![
+        (Op::Account(&ops.delete_user), None),
+        (Op::Account(&ops.probe), None),
+        (Op::Account(&ops.cleanup), None),
+        (Op::Account(&ops.remove_host), None),
+        (Op::Account(&ops.delete_group), None),
+        (Op::Profile(&ops.delete_profile), None),
+        (Op::Firewall(&ops.backup), None),
+        (Op::Firewall(&ops.remove_anchor), None),
+        (Op::Firewall(&ops.update_conf), None),
+        (Op::Firewall(&ops.reload), None),
+        (Op::Firewall(&ops.flush_anchor), None),
+    ]
+}
+
+pub(crate) struct OrphanGroupPlanOps {
+    pub(crate) remove_host: AccountOp,
+    pub(crate) delete_group: AccountOp,
+    pub(crate) delete_profile: ProfileOp,
+    pub(crate) backup: FirewallOp,
+    pub(crate) remove_anchor: FirewallOp,
+    pub(crate) update_conf: FirewallOp,
+    pub(crate) reload: FirewallOp,
+    pub(crate) flush_anchor: FirewallOp,
+}
+
+fn build_orphan_plan_ops(name: &str, host: &str) -> OrphanGroupPlanOps {
+    OrphanGroupPlanOps {
+        remove_host: AccountOp::RemoveHostFromShareGroup {
+            name: name.into(),
+            host: host.into(),
+        },
+        delete_group: AccountOp::DeleteShareGroup { name: name.into() },
+        delete_profile: ProfileOp::Delete { name: name.into() },
+        backup: FirewallOp::BackupConfig,
+        remove_anchor: FirewallOp::RemoveAnchor { name: name.into() },
+        update_conf: FirewallOp::UpdateConfig {
+            content: String::new(),
+        },
+        reload: FirewallOp::Reload,
+        flush_anchor: FirewallOp::FlushAnchor { name: name.into() },
+    }
+}
+
+fn orphan_plan_entries(ops: &OrphanGroupPlanOps) -> Vec<(Op<'_>, Option<&'static str>)> {
+    vec![
+        (Op::Account(&ops.remove_host), None),
+        (Op::Account(&ops.delete_group), None),
+        (Op::Profile(&ops.delete_profile), None),
+        (Op::Firewall(&ops.backup), None),
+        (Op::Firewall(&ops.remove_anchor), None),
+        (Op::Firewall(&ops.update_conf), None),
+        (Op::Firewall(&ops.reload), None),
+        (Op::Firewall(&ops.flush_anchor), None),
+    ]
 }
 
 /// Route a `CreateError::PostProvision(ModeError)` to the right

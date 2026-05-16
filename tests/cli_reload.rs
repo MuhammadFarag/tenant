@@ -35,7 +35,7 @@ fn reload_single_tenant_dry_run_default_emits_intent_only() {
     // dry-run emits the intent line only (no plan).
     let (code, stdout, stderr) = run_with(stub_with_tenant("dev"), &["reload", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, reload_dry_run_block("dev"));
+    assert_eq!(stdout, reload_dry_run_block("dev", None));
 }
 
 #[test]
@@ -194,46 +194,77 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
 }
 
 #[test]
-fn reload_verbose_emits_intent_before_profile_read_failure() {
-    // Round-2 review parity fix: `reload dev -v` against a missing
-    // profile should emit "Reloading tenant 'dev'." before the read
-    // failure surfaces. Mirrors shell + mode.
+fn reload_profile_read_failure_surfaces_before_prompt() {
+    // Cycle 15 (Q3 lock) — behavior pin: dispatch builds the reapply
+    // plan BEFORE the confirm prompt, so a missing profile surfaces
+    // pre-prompt with no stdout output. Replaces the cycle-4 invariant
+    // (which had `reload_intent` emit before profile-read).
     let exec = StubExecutor::new(); // no profile preloaded
-    let (code, stdout, _stderr) = run_with_exec(
+    let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
         &["reload", "dev", "--verbose"],
     );
     assert_eq!(code, 74);
+    assert_eq!(stdout, "", "no stdout pre-prompt; got {stdout:?}");
     assert!(
-        stdout.starts_with(&format!("{}\n", section_line("Reloading tenant 'dev'"))),
-        "intent should emit before the profile-read failure: {stdout:?}"
+        stderr.contains("failed to read profile"),
+        "stderr should frame the failure; got {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("Proceed?"),
+        "no confirm prompt should be emitted; got {stdout:?}"
     );
 }
 
 #[test]
 fn reload_verbose_plan_block_includes_share_ops() {
-    // Round-1 review fix: the upfront plan block must include the
-    // share ops alongside PF ops, not just echo them later.
+    // Cycle 15: the verbose plan block lives in the summary, rendered
+    // only when the operator is interactive OR in dry-run. Scripted
+    // real-mode drops the plan (Q1 lock). Dry-run can't be used here
+    // because `DryRunExecutor::read_profile` returns the default
+    // empty-shares TOML regardless of the underlying stub's seeded
+    // profile, so the plan would render PF-only. Solve by simulating
+    // an interactive (TTY=true) operator who answers `y`; the live
+    // executor reads the share-bearing profile, the summary renders
+    // the share ops in cycle-15's intent-leads layout, the prompt
+    // is consumed, and execution proceeds.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new().with_existing_profile("dev", &toml);
-    let (code, stdout, _stderr) = run_with_exec(
+    let (code, stdout, _stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
         &["reload", "dev", "--verbose"],
+        b"y\n",
     );
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("  sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
-        "plan must list InstallAnchor: {stdout:?}"
+        stdout.contains("Plan (commands to execute):"),
+        "verbose interactive should emit the plan section header: {stdout:?}"
     );
     assert!(
-        stdout.contains("  chmod +a \"group:dev-tenant-share allow"),
-        "plan must list Grant: {stdout:?}"
+        stdout.contains("Install firewall anchor at /etc/pf.anchors/tenant-dev"),
+        "plan must list InstallAnchor intent: {stdout:?}"
     );
     assert!(
-        stdout.contains("  sudo -n -u dev /bin/ln -sfn /tmp /Users/dev/src\n"),
-        "plan must list EnsureSymlinkAsUser: {stdout:?}"
+        stdout.contains("      sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
+        "plan must list InstallAnchor shell line: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Grant 'dev-tenant-share' ACL access to /tmp"),
+        "plan must list Grant intent: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("      chmod +a \"group:dev-tenant-share allow"),
+        "plan must list Grant shell line: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Install symlink /Users/dev/src \u{2192} /tmp (as tenant)"),
+        "plan must list EnsureSymlinkAsUser intent: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("      sudo -n -u dev /bin/ln -sfn /tmp /Users/dev/src\n"),
+        "plan must list EnsureSymlinkAsUser shell line: {stdout:?}"
     );
 }
 
@@ -255,9 +286,11 @@ fn reload_single_tenant_with_existing_symlink_at_tenant_path_succeeds_idempotent
 }
 
 #[test]
-fn reload_single_tenant_verbose_emits_plan_and_per_op_echo() {
-    // Plan shows PF ops; `$` echo shows them plus per-share ops as
-    // they fire.
+fn reload_single_tenant_verbose_emits_per_op_echo() {
+    // Cycle 15: scripted-real-verbose drops the upfront plan (Q1
+    // lock); section divider opens, `$` echo + ✓ progress lines
+    // fire per substrate op, Done section + closing line. PF ops +
+    // per-share ops both appear in the echo block.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new().with_existing_profile("dev", &toml);
     let (code, stdout, _stderr) = run_with_exec(
@@ -268,18 +301,13 @@ fn reload_single_tenant_verbose_emits_plan_and_per_op_echo() {
     assert_eq!(code, 0);
     assert!(
         stdout.starts_with(&format!("{}\n", section_line("Reloading tenant 'dev'"))),
-        "verbose intent first: {stdout:?}"
-    );
-    // Plan lists InstallAnchor + Reload.
-    assert!(
-        stdout.contains("  sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
-        "plan should list InstallAnchor: {stdout:?}"
-    );
-    assert!(
-        stdout.contains("  sudo pfctl -f /etc/pf.conf\n"),
-        "plan should list Reload: {stdout:?}"
+        "section divider first: {stdout:?}"
     );
     // Echo: PF ops + per-share ops (AclOp + EnsureSymlinkAsUser).
+    assert!(
+        stdout.contains("$ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
+        "echo should show InstallAnchor: {stdout:?}"
+    );
     assert!(
         stdout.contains("$ chmod +a \"group:dev-tenant-share allow"),
         "echo should show chmod +a: {stdout:?}"

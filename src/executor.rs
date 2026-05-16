@@ -713,6 +713,24 @@ impl<'a> Op<'a> {
             Op::Acl(op) => acl_business_label(op),
         }
     }
+
+    /// Operator-facing future-tense capability label for the op. Leads
+    /// each step in the verbose pre-prompt plan block (cycle 15) as a
+    /// `• <intent>` bullet, with the shell line indented underneath.
+    /// Sibling to `business_label` (past-tense; drives the `✓` progress
+    /// lines emitted post-execution). Substrate-agnostic — no
+    /// `dseditgroup` / `sysadminctl` / `pfctl` jargon. Cycle 15 sharpens
+    /// the probe variants (`LookupUserRecord` / `DeleteUserRecord`)
+    /// whose business_label past-tense doesn't read naturally as a
+    /// future-tense bullet.
+    pub fn intent_label(&self) -> String {
+        match self {
+            Op::Account(op) => account_intent_label(op),
+            Op::Profile(op) => profile_intent_label(op),
+            Op::Firewall(op) => firewall_intent_label(op),
+            Op::Acl(op) => acl_intent_label(op),
+        }
+    }
 }
 
 fn account_business_label(op: &AccountOp) -> String {
@@ -809,6 +827,98 @@ fn acl_business_label(op: &AclOp) -> String {
         }
         AclOp::Revoke { path, group, .. } => {
             format!("ACL revoked from group '{group}' on {}", path.display())
+        }
+    }
+}
+
+fn account_intent_label(op: &AccountOp) -> String {
+    match op {
+        AccountOp::CreateShareGroup { name, gid } => {
+            format!("Create share group '{name}-tenant-share' (GID {gid})")
+        }
+        AccountOp::DeleteShareGroup { name } => {
+            format!("Remove share group '{name}-tenant-share'")
+        }
+        AccountOp::CreateTenantUser { name, uid, gid } => {
+            format!("Create user account '{name}' (UID {uid}, GID {gid})")
+        }
+        AccountOp::DeleteTenantUser { name } => {
+            format!("Remove user account '{name}' (home moved to /Users/Deleted Users/{name})")
+        }
+        AccountOp::LookupUserRecord { name } => {
+            format!("Probe for residue user record '{name}'")
+        }
+        AccountOp::DeleteUserRecord { name } => {
+            format!("Clean up residue user record '{name}'")
+        }
+        AccountOp::LoginAsUser { name } => format!("Log in as '{name}'"),
+        AccountOp::EnsureDirAsUser { path, .. } => {
+            format!("Ensure directory {} exists (as tenant)", path.display())
+        }
+        AccountOp::EnsureSymlinkAsUser { link, target, .. } => {
+            format!(
+                "Install symlink {} \u{2192} {} (as tenant)",
+                link.display(),
+                target.display()
+            )
+        }
+        AccountOp::AddHostToShareGroup { name, host } => {
+            format!("Add host '{host}' to share group '{name}-tenant-share'")
+        }
+        AccountOp::RemoveHostFromShareGroup { name, host } => {
+            format!("Remove host '{host}' from share group '{name}-tenant-share'")
+        }
+    }
+}
+
+fn profile_intent_label(op: &ProfileOp) -> String {
+    match op {
+        ProfileOp::Create { name } => format!(
+            "Write profile config at {}",
+            crate::profile::display_path_for(name)
+        ),
+        ProfileOp::Delete { name } => format!(
+            "Remove profile config at {}",
+            crate::profile::display_path_for(name)
+        ),
+    }
+}
+
+fn firewall_intent_label(op: &FirewallOp) -> String {
+    match op {
+        FirewallOp::InstallAnchor { name, .. } => format!(
+            "Install firewall anchor at {}",
+            crate::firewall::tenant_anchor_path(name)
+        ),
+        FirewallOp::RemoveAnchor { name } => format!(
+            "Remove firewall anchor at {}",
+            crate::firewall::tenant_anchor_path(name)
+        ),
+        FirewallOp::BackupConfig => format!(
+            "Back up {} to {}",
+            crate::firewall::PF_CONF,
+            crate::firewall::PF_CONF_BACKUP
+        ),
+        FirewallOp::RestoreConfigFromBackup => {
+            format!("Restore {} from backup", crate::firewall::PF_CONF)
+        }
+        FirewallOp::UpdateConfig { .. } => format!("Update {}", crate::firewall::PF_CONF),
+        FirewallOp::Reload => "Reload pf ruleset".to_string(),
+        FirewallOp::FlushAnchor { name } => format!(
+            "Flush kernel rules under anchor '{}'",
+            crate::firewall::tenant_anchor_name(name)
+        ),
+        FirewallOp::Enable => "Enable pf host-wide".to_string(),
+    }
+}
+
+fn acl_intent_label(op: &AclOp) -> String {
+    match op {
+        AclOp::Grant { path, group, .. } => {
+            format!("Grant '{group}' ACL access to {}", path.display())
+        }
+        AclOp::Revoke { path, group, .. } => {
+            format!("Revoke '{group}' ACL access from {}", path.display())
         }
     }
 }

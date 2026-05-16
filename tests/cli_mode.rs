@@ -42,7 +42,7 @@ fn mode_runtime_dry_run_default_shows_intent() {
         &["mode", "dev", "runtime", "--dry-run"],
     );
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, mode_dry_run_block("dev", "runtime"));
+    assert_eq!(stdout, mode_dry_run_block("dev", "runtime", None));
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn mode_install_dry_run_default_shows_intent() {
         &["mode", "dev", "install", "--dry-run"],
     );
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, mode_dry_run_block("dev", "install"));
+    assert_eq!(stdout, mode_dry_run_block("dev", "install", None));
 }
 
 #[test]
@@ -463,11 +463,10 @@ fn mode_real_verbose_shows_plan_and_echo() {
         &["mode", "dev", "runtime", "-v"],
     );
     assert_eq!(code, 0);
+    // Cycle 15: scripted-real-verbose drops the verbose plan
+    // (Q1 lock).
     let want = format!(
-        "{}\n  \
-         sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-         sudo pfctl -f /etc/pf.conf\n  \
-         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
+        "{}\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          $ sudo pfctl -f /etc/pf.conf\n\
@@ -495,11 +494,9 @@ fn mode_install_real_verbose_shows_install_level_text() {
         &["mode", "dev", "install", "-v"],
     );
     assert_eq!(code, 0);
+    // Cycle 15: scripted-real-verbose drops the verbose plan (Q1).
     let want = format!(
-        "{}\n  \
-         sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-         sudo pfctl -f /etc/pf.conf\n  \
-         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
+        "{}\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          $ sudo pfctl -f /etc/pf.conf\n\
@@ -523,11 +520,23 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
         &["mode", "dev", "runtime", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    let plan = "  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n";
-    assert_eq!(stdout, mode_dry_run_block("dev", "runtime") + plan);
+    // Cycle 15: verbose plan moves into the summary in intent-leads-
+    // shell-follows layout (3 entries: InstallAnchor, Reload,
+    // AddHostToShareGroup; default profile has no `[[shares]]`).
+    let plan = verbose_plan_section(&[
+        (
+            "Install firewall anchor at /etc/pf.anchors/tenant-dev",
+            "sudo tee /etc/pf.anchors/tenant-dev < anchor.body",
+            None,
+        ),
+        ("Reload pf ruleset", "sudo pfctl -f /etc/pf.conf", None),
+        (
+            "Add host 'operator' to share group 'dev-tenant-share'",
+            "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
+            None,
+        ),
+    ]);
+    assert_eq!(stdout, mode_dry_run_block("dev", "runtime", Some(&plan)));
 }
 
 #[test]
@@ -542,7 +551,7 @@ fn mode_dry_run_bypasses_injected_executor() {
         &["mode", "dev", "runtime", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, mode_dry_run_block("dev", "runtime"));
+    assert_eq!(stdout, mode_dry_run_block("dev", "runtime", None));
     assert!(
         exec.firewall_ops().is_empty()
             && exec.account_ops().is_empty()
@@ -563,19 +572,17 @@ fn mode_read_profile_failure_surfaces() {
     // No `with_existing_profile` → StubExecutor::read_profile returns
     // a "not found" ProfileError. Mode should surface this through
     // mode_profile_failed with the profile path framed for the operator.
+    //
+    // Cycle 15 (Q3 lock): dispatch builds the reapply plan BEFORE
+    // mode_intent emits, so a profile-read failure exits the verb
+    // pre-section-divider. Stdout stays empty; stderr carries the
+    // failure framing. Don't ask the operator to confirm something
+    // doomed to fail.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Cycle 12: intent section divider lands BEFORE the profile read;
-    // verb-context visible even on profile-read failure.
-    assert_eq!(
-        stdout,
-        format!(
-            "{}\n",
-            section_line("Applying mode 'runtime' to tenant 'dev'")
-        ),
-    );
+    assert_eq!(stdout, "");
     assert_eq!(
         stderr,
         "tenant: failed to read profile '~/.config/tenant/profiles/dev.toml' for 'dev': profile 'dev' not found\n"
@@ -716,25 +723,31 @@ fn mode_reload_failure_surfaces_without_recovery() {
 // the layer boundary.
 
 #[test]
-fn mode_verbose_emits_intent_before_profile_read_failure() {
-    // Round-2 review parity fix: `mode dev runtime -v` against a
-    // missing profile should emit the "Applying mode 'runtime' to
-    // tenant 'dev'." intent line BEFORE the read failure surfaces.
-    // Mirrors `shell`'s `shell_intent` posture; `mode_intent` runs
-    // first, then `build_reapply_plan` attempts the read.
+fn mode_profile_read_failure_surfaces_before_prompt() {
+    // Cycle 15 (Q3 lock) — behavior pin: dispatch builds the reapply
+    // plan BEFORE the confirm prompt, so a missing profile surfaces
+    // pre-prompt with no stdout output (no section divider, no
+    // bullets, no plan). Don't ask the operator to confirm an action
+    // already known to fail. Stderr carries the framed failure.
+    //
+    // This pin replaces the cycle-4 `mode_verbose_emits_intent_before_profile_read_failure`
+    // — that earlier invariant ("intent emits before read failure")
+    // was reversed when cycle 15 moved plan-build to dispatch.
     let exec = StubExecutor::new(); // no profile preloaded
-    let (code, stdout, _stderr) = run_with_exec(
+    let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
         &["mode", "dev", "runtime", "--verbose"],
     );
     assert_eq!(code, 74, "EX_IOERR expected");
+    assert_eq!(stdout, "", "no stdout pre-prompt; got {stdout:?}");
     assert!(
-        stdout.starts_with(&format!(
-            "{}\n",
-            section_line("Applying mode 'runtime' to tenant 'dev'")
-        )),
-        "intent should emit before the profile-read failure surfaces: {stdout:?}"
+        stderr.contains("failed to read profile"),
+        "stderr should frame the failure; got {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("Proceed?"),
+        "no confirm prompt should be emitted; got {stdout:?}"
     );
 }
 

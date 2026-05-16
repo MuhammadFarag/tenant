@@ -210,10 +210,20 @@ impl<'a> Reporter<'a> {
     // ============================================================
 
     /// Pre-execution summary for `create`. Emits the headline +
-    /// capability bullets + sudo-needed-for line. Caller follows with
-    /// `confirm(true, …)` for real mode; dry-run's confirm emits the
-    /// preview parenthetical (Q13).
-    pub fn create_summary(&mut self, name: &str, host: &str, uid: u32, gid: u32) {
+    /// capability bullets + (verbose, when `plan` is Some) plan block +
+    /// sudo-needed-for line. Caller follows with `confirm(true, …)` for
+    /// real mode; dry-run's confirm emits the preview parenthetical
+    /// (Q13). Cycle 15: the verbose plan block moved from `_starting`
+    /// into the summary so the operator sees the literal commands
+    /// BEFORE the prompt.
+    pub fn create_summary(
+        &mut self,
+        name: &str,
+        host: &str,
+        uid: u32,
+        gid: u32,
+        plan: Option<&[(Op<'_>, Option<&'static str>)]>,
+    ) {
         let group = tenant_share_group_name(name);
         let _ = writeln!(
             self.stdout,
@@ -243,6 +253,7 @@ impl<'a> Reporter<'a> {
             "  \u{2022} enable pf host-wide if not already enabled"
         );
         let _ = writeln!(self.stdout);
+        self.emit_plan_section(plan);
         let _ = writeln!(
             self.stdout,
             "Sudo needed for: user provisioning, firewall install."
@@ -254,7 +265,13 @@ impl<'a> Reporter<'a> {
     /// framing on the home-directory move (recoverable until Deleted
     /// Users is emptied). Caller follows with `confirm(false, …)` —
     /// destroy's default is N per Q2 lock.
-    pub fn destroy_summary(&mut self, name: &str, host: &str, uid: u32) {
+    pub fn destroy_summary(
+        &mut self,
+        name: &str,
+        host: &str,
+        uid: u32,
+        plan: Option<&[(Op<'_>, Option<&'static str>)]>,
+    ) {
         let group = tenant_share_group_name(name);
         let _ = writeln!(self.stdout, "About to destroy tenant '{name}' (UID {uid}).");
         let _ = writeln!(self.stdout);
@@ -279,6 +296,7 @@ impl<'a> Reporter<'a> {
             display_path_for(name)
         );
         let _ = writeln!(self.stdout);
+        self.emit_plan_section(plan);
         let _ = writeln!(
             self.stdout,
             "Sudo needed for: user removal, firewall teardown."
@@ -290,7 +308,12 @@ impl<'a> Reporter<'a> {
     /// `destroy`. No user present, but the suffixed group + any
     /// firewall + profile residue remain. Same default-N posture as
     /// the full destroy summary.
-    pub fn destroy_orphan_summary(&mut self, name: &str, host: &str) {
+    pub fn destroy_orphan_summary(
+        &mut self,
+        name: &str,
+        host: &str,
+        plan: Option<&[(Op<'_>, Option<&'static str>)]>,
+    ) {
         let group = tenant_share_group_name(name);
         let _ = writeln!(
             self.stdout,
@@ -313,6 +336,7 @@ impl<'a> Reporter<'a> {
             display_path_for(name)
         );
         let _ = writeln!(self.stdout);
+        self.emit_plan_section(plan);
         let _ = writeln!(
             self.stdout,
             "Sudo needed for: group removal, firewall teardown."
@@ -322,7 +346,13 @@ impl<'a> Reporter<'a> {
 
     /// Pre-execution summary for `mode`. Same shape as create/destroy
     /// — headline + bullets + sudo. Names the tier the operator chose.
-    pub fn mode_summary(&mut self, name: &str, host: &str, level: ModeLevel) {
+    pub fn mode_summary(
+        &mut self,
+        name: &str,
+        host: &str,
+        level: ModeLevel,
+        plan: Option<&[(Op<'_>, Option<&'static str>)]>,
+    ) {
         let level_str = level.as_str();
         let group = tenant_share_group_name(name);
         let _ = writeln!(
@@ -359,12 +389,18 @@ impl<'a> Reporter<'a> {
             );
         }
         let _ = writeln!(self.stdout);
+        self.emit_plan_section(plan);
         let _ = writeln!(self.stdout, "Sudo needed for: firewall install.");
         let _ = writeln!(self.stdout);
     }
 
     /// Pre-execution summary for single-tenant `reload <name>`.
-    pub fn reload_summary(&mut self, name: &str, host: &str) {
+    pub fn reload_summary(
+        &mut self,
+        name: &str,
+        host: &str,
+        plan: Option<&[(Op<'_>, Option<&'static str>)]>,
+    ) {
         let group = tenant_share_group_name(name);
         let _ = writeln!(self.stdout, "About to reload tenant '{name}' from profile.");
         let _ = writeln!(self.stdout);
@@ -382,6 +418,7 @@ impl<'a> Reporter<'a> {
             "  \u{2022} re-apply each declared share from [[shares]] in the profile"
         );
         let _ = writeln!(self.stdout);
+        self.emit_plan_section(plan);
         let _ = writeln!(self.stdout, "Sudo needed for: firewall install.");
         let _ = writeln!(self.stdout);
     }
@@ -427,18 +464,15 @@ impl<'a> Reporter<'a> {
     // Create verb
     // ============================================================
 
-    /// Pre-exec disclosure for `create`. Real mode (standard and
-    /// verbose): emits a `─── Creating tenant 'X' ───` section divider
-    /// (cycle 12 — operator-visible "the verb is now running"). Verbose
-    /// adds the indented plan block underneath. Dry-run skips the
-    /// divider — the cycle-12 `create_summary` already framed the verb
-    /// for the operator (Q13 lock); only the verbose plan block emits.
-    pub fn create_starting(&mut self, _name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
+    /// Pre-exec disclosure for `create`. Real mode emits a
+    /// `─── Creating tenant 'X' ───` section divider (cycle 12 — operator-
+    /// visible "the verb is now running"). Dry-run skips the divider; the
+    /// cycle-12 `create_summary` already framed the verb (Q13 lock).
+    /// Cycle 15: the verbose plan block moved into `create_summary`, so
+    /// this method is now section-only.
+    pub fn create_starting(&mut self, name: &str) {
         if !self.dry_run {
-            self.section(&format!("Creating tenant '{_name}'"));
-        }
-        if self.verbose {
-            self.render_plan(plan);
+            self.section(&format!("Creating tenant '{name}'"));
         }
     }
 
@@ -466,14 +500,11 @@ impl<'a> Reporter<'a> {
 
     /// Pre-exec disclosure for `destroy`. Real mode emits the
     /// `─── Destroying tenant 'X' ───` section divider (cycle 12).
-    /// Verbose adds the indented plan block. Dry-run skips the
-    /// divider; `destroy_summary` already framed the verb (Q13 lock).
-    pub fn destroy_starting(&mut self, name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
+    /// Dry-run skips the divider; `destroy_summary` already framed the
+    /// verb (Q13 lock). Cycle 15: verbose plan moved into the summary.
+    pub fn destroy_starting(&mut self, name: &str) {
         if !self.dry_run {
             self.section(&format!("Destroying tenant '{name}'"));
-        }
-        if self.verbose {
-            self.render_plan(plan);
         }
     }
 
@@ -492,19 +523,15 @@ impl<'a> Reporter<'a> {
     // ============================================================
 
     /// Pre-exec disclosure for the orphan-group convergence path.
-    /// Standard mode names the tenant; verbose adds the literal group
-    /// name. The four mode/verbosity cells produce distinct phrasings —
-    /// this is the verb where the dry+verbose phrasing diverges from
-    /// dry+standard (group name appears only in verbose).
-    pub fn orphan_group_starting(&mut self, name: &str, plan: &[(Op<'_>, Option<&'static str>)]) {
+    /// Real mode emits the section divider; dry-run is silent
+    /// (`destroy_orphan_summary` covers the framing). Cycle 15:
+    /// verbose plan moved into the summary.
+    pub fn orphan_group_starting(&mut self, name: &str) {
         if !self.dry_run {
             let group = tenant_share_group_name(name);
             self.section(&format!(
                 "Destroying orphan group '{group}' for tenant '{name}'"
             ));
-        }
-        if self.verbose {
-            self.render_plan(plan);
         }
     }
 
@@ -551,10 +578,18 @@ impl<'a> Reporter<'a> {
 
     /// Render the shell verb's plan block in real+verbose mode.
     /// Called after `shell_intent` and after the plan has been built
-    /// from the profile + share entries.
+    /// from the profile + share entries. Shell has no pre-exec
+    /// confirmation (the operator becomes the shell after `login`
+    /// returns), so the plan stays here rather than moving into a
+    /// summary (cycle 15 only relocates plan emission for prompt-
+    /// having verbs). Layout matches the cycle-15 intent-leads-shell-
+    /// follows rendering used by the prompt-having verbs' summaries.
     pub fn shell_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         if self.verbose {
-            self.render_plan(plan);
+            let _ = writeln!(self.stdout, "Plan (commands to execute):");
+            let _ = writeln!(self.stdout);
+            self.render_plan_block(plan);
+            let _ = writeln!(self.stdout);
         }
     }
 
@@ -567,23 +602,14 @@ impl<'a> Reporter<'a> {
     /// silent (the post-exec `mode_done` does the talking); real+verbose
     /// emits the "Applying" intent + indented plan; dry-run (any
     /// verbosity) emits "Would apply" + (verbose: plan).
-    /// Emit just the mode intent line (no plan). Called BEFORE
-    /// `build_reapply_plan` so the operator sees verb context even
-    /// if the pre-flight profile read fails (parity with
-    /// `shell_intent` and `reload_intent`). The plan-render half
-    /// lives in `mode_plan`. Standard real is silent; dry-run and
-    /// real+verbose emit the "Would apply" / "Applying" line.
+    /// Emit the mode intent line (section divider; real mode only).
+    /// Cycle 15: the verbose plan now lives in `mode_summary` (rendered
+    /// before the prompt); this method no longer renders plan, and the
+    /// cycle-10 `mode_plan` sibling has been removed.
     pub fn mode_intent(&mut self, name: &str, level: ModeLevel) {
         if !self.dry_run {
             let level_str = level.as_str();
             self.section(&format!("Applying mode '{level_str}' to tenant '{name}'"));
-        }
-    }
-
-    /// Render the mode verb's plan block in verbose mode.
-    pub fn mode_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
-        if self.verbose {
-            self.render_plan(plan);
         }
     }
 
@@ -1182,21 +1208,13 @@ impl<'a> Reporter<'a> {
     // identical to the mode-verb arms in shape; the firewall + share
     // arms get reload-specific wording where "mode" would mislead.
 
-    /// Emit just the reload intent line (no plan). Called BEFORE
-    /// `build_reapply_plan` so the operator sees verb context even
-    /// if the pre-flight profile read fails (parity with
-    /// `shell_intent` and `mode_intent`). The plan-render half lives
-    /// in `reload_plan`.
+    /// Emit the reload intent line (section divider; real mode only).
+    /// Cycle 15: the verbose plan now lives in `reload_summary` (rendered
+    /// before the prompt); this method no longer renders plan, and the
+    /// cycle-10 `reload_plan` sibling has been removed.
     pub fn reload_intent(&mut self, name: &str) {
         if !self.dry_run {
             self.section(&format!("Reloading tenant '{name}'"));
-        }
-    }
-
-    /// Render the reload verb's plan block in verbose mode.
-    pub fn reload_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
-        if self.verbose {
-            self.render_plan(plan);
         }
     }
 
@@ -1304,19 +1322,77 @@ impl<'a> Reporter<'a> {
     // Plan rendering helper (private)
     // ============================================================
 
-    /// Render the upfront plan block: each step on its own line with
-    /// `  ` two-space indentation; annotated steps get a trailing
-    /// `  # <note>` suffix. Display dispatch goes through
-    /// `Op::describe_via` so this single helper works for any mix of
-    /// account-domain and profile-domain ops.
-    fn render_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
+    /// Emit the verbose "Plan (commands to execute):" section that
+    /// lives inside each prompt-having verb's `*_summary` (cycle 15).
+    /// Silent in standard mode (verbose-only disclosure). Silent when
+    /// `plan` is `None` (no-arg `reload`, where bulk-summary doesn't
+    /// pre-render per-tenant plans — Q5 lock).
+    fn emit_plan_section(&mut self, plan: Option<&[(Op<'_>, Option<&'static str>)]>) {
+        if !self.verbose {
+            return;
+        }
+        let Some(entries) = plan else { return };
+        if entries.is_empty() {
+            return;
+        }
+        let _ = writeln!(self.stdout, "Plan (commands to execute):");
+        let _ = writeln!(self.stdout);
+        self.render_plan_block(entries);
+        let _ = writeln!(self.stdout);
+    }
+
+    /// Render the upfront plan block in cycle-15's intent-leads-shell-
+    /// follows layout. Each entry emits:
+    ///
+    /// ```text
+    ///   • <intent>[  # <annotation>]
+    ///       <shell>
+    /// ```
+    ///
+    /// with NO blank line between entries — the column-2 `•` + column-6
+    /// shell indent give enough visual contrast to pair intent and
+    /// shell unambiguously; on a 14-entry create plan the cycle-15-
+    /// initial inter-entry breathing room added more vertical fatigue
+    /// than visual help. `intent` comes from `Op::intent_label()`
+    /// (future-tense capability headline); `shell` from
+    /// `Op::describe_via` (substrate echo line). Conditional
+    /// annotations (`# on rollback`, `# on reload failure`) hang off
+    /// the END of the intent line, not the shell line — operator reads
+    /// WHAT + WHEN at headline level.
+    ///
+    /// Privilege-aware rendering on the shell line when `colors.stdout`
+    /// is on: shell lines starting with `sudo` render as bold `sudo`
+    /// followed by a dim remainder (visual cue: privileged + state-
+    /// changing); shell lines starting with anything else render fully
+    /// dim (visual cue: probe or operator-owned non-privileged). Bold-
+    /// not-color for the sudo accent keeps the cycle-12 severity color
+    /// budget intact. Colors off (tests pass `Colors::default()`): plain
+    /// text in both arms.
+    fn render_plan_block(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         for (op, annotation) in plan {
-            let line = op.describe_via(self.executor);
-            let formatted = match annotation {
-                Some(note) => format!("  {line}  # {note}"),
-                None => format!("  {line}"),
+            let intent = op.intent_label();
+            let shell = op.describe_via(self.executor);
+            let intent_line = match annotation {
+                Some(note) => format!("  \u{2022} {intent}  # {note}"),
+                None => format!("  \u{2022} {intent}"),
             };
-            let _ = writeln!(self.stdout, "{formatted}");
+            let shell_line = self.format_shell_line(&shell);
+            let _ = writeln!(self.stdout, "{intent_line}");
+            let _ = writeln!(self.stdout, "      {shell_line}");
+        }
+    }
+
+    /// Apply the cycle-15 privilege-aware accent to a shell line.
+    /// `sudo` first token → bold `sudo` + dim rest; anything else →
+    /// dim whole line. Colors off short-circuits to the raw line.
+    fn format_shell_line(&self, line: &str) -> String {
+        if !self.colors.stdout {
+            return line.to_string();
+        }
+        if let Some(rest) = line.strip_prefix("sudo ") {
+            format!("{} {}", ansi::bold("sudo"), ansi::dim(rest))
+        } else {
+            ansi::dim(line)
         }
     }
 }

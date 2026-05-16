@@ -32,11 +32,28 @@ fn shell_dry_run_verbose_shows_mechanism() {
         &["shell", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    let want = "Would shell into 'dev'.\n  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
-                sudo -iu dev\n";
+    // Cycle 15: shell's verbose plan adopts the intent-leads-shell-
+    // follows layout (shell has no prompt, so the plan stays in the
+    // verb rather than moving into a summary). 4 entries: Install +
+    // Reload + AddHost (cycle-14 catch-up) + LoginAsUser.
+    let want = format!(
+        "Would shell into 'dev'.\n\
+         {}",
+        verbose_plan_section(&[
+            (
+                "Install firewall anchor at /etc/pf.anchors/tenant-dev",
+                "sudo tee /etc/pf.anchors/tenant-dev < anchor.body",
+                None,
+            ),
+            ("Reload pf ruleset", "sudo pfctl -f /etc/pf.conf", None),
+            (
+                "Add host 'operator' to share group 'dev-tenant-share'",
+                "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
+                None,
+            ),
+            ("Log in as 'dev'", "sudo -iu dev", None),
+        ]),
+    );
     assert_eq!(stdout, want);
 }
 
@@ -81,12 +98,26 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"]);
     assert_eq!(code, 0);
+    // Cycle 15: shell's verbose plan adopts the intent-leads-shell-
+    // follows layout (shell has no prompt, so the plan stays in the
+    // verb rather than moving into a summary).
+    let plan = verbose_plan_section(&[
+        (
+            "Install firewall anchor at /etc/pf.anchors/tenant-dev",
+            "sudo tee /etc/pf.anchors/tenant-dev < anchor.body",
+            None,
+        ),
+        ("Reload pf ruleset", "sudo pfctl -f /etc/pf.conf", None),
+        (
+            "Add host 'operator' to share group 'dev-tenant-share'",
+            "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
+            None,
+        ),
+        ("Log in as 'dev'", "sudo -iu dev", None),
+    ]);
     let want = format!(
-        "{}\n  \
-         sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-         sudo pfctl -f /etc/pf.conf\n  \
-         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
-         sudo -iu dev\n\
+        "{}\n\
+         {plan}\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          $ sudo pfctl -f /etc/pf.conf\n\

@@ -82,7 +82,7 @@ fn destroy_dry_run_default_shows_intent() {
     let (code, stdout, stderr) =
         run_with(stub_with_tenant("dev"), &["destroy", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, destroy_dry_run_block("dev", 600));
+    assert_eq!(stdout, destroy_dry_run_block("dev", 600, None));
 }
 
 #[test]
@@ -100,19 +100,10 @@ fn destroy_dry_run_verbose_shows_mechanism() {
         &["destroy", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    let plan = "  \
-                sudo sysadminctl -deleteUser dev\n  \
-                dscl . -read /Users/dev\n  \
-                sudo dscl . -delete /Users/dev\n  \
-                sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo pfctl -a tenant-dev -F all\n";
-    assert_eq!(stdout, destroy_dry_run_block("dev", 600) + plan);
+    // Cycle 15: verbose plan moves into the summary (intent-leads-
+    // shell-follows layout).
+    let plan = destroy_verbose_plan_block("dev");
+    assert_eq!(stdout, destroy_dry_run_block("dev", 600, Some(&plan)));
 }
 
 #[test]
@@ -174,23 +165,14 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
     // → all four commands echo (dseditgroup-delete is the load-bearing
     // 4th step Phase 3 adds). The trailing post-exec confirmation closes
     // the block.
+    // Cycle 15: scripted-real-verbose (TTY=false) drops the plan
+    // block entirely (Q1 lock). Section + $ echo + ✓ + Done.
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
     let want = format!(
-        "{}\n  \
-         sudo sysadminctl -deleteUser dev\n  \
-         dscl . -read /Users/dev\n  \
-         sudo dscl . -delete /Users/dev\n  \
-         sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
-         sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-         rm -f ~/.config/tenant/profiles/dev.toml\n  \
-         sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-         sudo rm -f /etc/pf.anchors/tenant-dev\n  \
-         sudo tee /etc/pf.conf < updated.conf\n  \
-         sudo pfctl -f /etc/pf.conf\n  \
-         sudo pfctl -a tenant-dev -F all\n\
+        "{}\n\
          $ sudo sysadminctl -deleteUser dev\n\
          ✓ User account 'dev' removed (home moved to /Users/Deleted Users/dev)\n\
          $ dscl . -read /Users/dev\n\
@@ -368,19 +350,12 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
+    // Cycle 15: scripted-real-verbose drops the plan block (Q1
+    // lock). The $ echo block still skips dscl-delete because the
+    // probe cleared the DS state; that's the operator's signal that
+    // the dscl path was clean.
     let want = format!(
-        "{}\n  \
-         sudo sysadminctl -deleteUser dev\n  \
-         dscl . -read /Users/dev\n  \
-         sudo dscl . -delete /Users/dev\n  \
-         sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
-         sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-         rm -f ~/.config/tenant/profiles/dev.toml\n  \
-         sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-         sudo rm -f /etc/pf.anchors/tenant-dev\n  \
-         sudo tee /etc/pf.conf < updated.conf\n  \
-         sudo pfctl -f /etc/pf.conf\n  \
-         sudo pfctl -a tenant-dev -F all\n\
+        "{}\n\
          $ sudo sysadminctl -deleteUser dev\n\
          ✓ User account 'dev' removed (home moved to /Users/Deleted Users/dev)\n\
          $ dscl . -read /Users/dev\n\
@@ -689,7 +664,7 @@ fn destroy_dry_run_bypasses_injected_executor() {
         &["destroy", "dev", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, destroy_dry_run_block("dev", 600));
+    assert_eq!(stdout, destroy_dry_run_block("dev", 600, None));
     assert!(
         exec.account_ops().is_empty() && exec.profile_ops().is_empty(),
         "executor should not be invoked in dry-run mode; account_ops={:?}, profile_ops={:?}",
@@ -795,7 +770,7 @@ fn destroy_dry_run_for_orphan_group() {
     };
     let (code, stdout, stderr) = run_with(stub, &["destroy", "dev", "--dry-run"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, destroy_orphan_dry_run_block("dev"));
+    assert_eq!(stdout, destroy_orphan_dry_run_block("dev", None));
 }
 
 #[test]
@@ -811,16 +786,11 @@ fn destroy_dry_run_verbose_for_orphan_group() {
     };
     let (code, stdout, _stderr) = run_with(stub, &["destroy", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    let plan = "  \
-                sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-                rm -f ~/.config/tenant/profiles/dev.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo pfctl -a tenant-dev -F all\n";
-    assert_eq!(stdout, destroy_orphan_dry_run_block("dev") + plan);
+    // Cycle 15: verbose plan moves into the orphan-group summary
+    // (intent-leads-shell-follows layout; 8 entries since the user
+    // is already absent).
+    let plan = orphan_verbose_plan_block("dev");
+    assert_eq!(stdout, destroy_orphan_dry_run_block("dev", Some(&plan)));
 }
 
 #[test]
@@ -828,6 +798,8 @@ fn destroy_real_mode_verbose_for_orphan_group() {
     // Real-mode verbose: same three-section shape as the regular destroy
     // (pre-exec intent + plan, `$` echo for each command, post-exec
     // confirmation), just with one argv in each block instead of four.
+    // Cycle 15: scripted-real-verbose drops the plan block (Q1
+    // lock). Orphan path has 8 steps — no user-removal.
     let stub = StubReader {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -836,15 +808,7 @@ fn destroy_real_mode_verbose_for_orphan_group() {
     let (code, stdout, _stderr) = run_with_exec(stub, &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
     let want = format!(
-        "{}\n  \
-         sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n  \
-         sudo dseditgroup -o delete -n . dev-tenant-share\n  \
-         rm -f ~/.config/tenant/profiles/dev.toml\n  \
-         sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-         sudo rm -f /etc/pf.anchors/tenant-dev\n  \
-         sudo tee /etc/pf.conf < updated.conf\n  \
-         sudo pfctl -f /etc/pf.conf\n  \
-         sudo pfctl -a tenant-dev -F all\n\
+        "{}\n\
          $ sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n\
          ✓ Host 'operator' removed from share group 'dev-tenant-share'\n\
          $ sudo dseditgroup -o delete -n . dev-tenant-share\n\

@@ -141,11 +141,266 @@ pub fn real_failure_stdout(opening_title: &str, checks: &[&str]) -> String {
     out
 }
 
+/// Render the cycle-15 verbose plan section as it appears inside a
+/// summary (after the bullets, before "Sudo needed for:"). Each
+/// `(intent, shell, annotation)` entry becomes:
+///
+/// ```text
+///   • <intent>[  # <annotation>]
+///       <shell>
+/// ```
+///
+/// with no blank line between entries (the column-2 `•` + column-6
+/// shell indent give enough visual contrast). The block is wrapped in
+/// `Plan (commands to execute):\n\n<entries>\n` and a trailing newline
+/// so the caller can splice it directly between the summary bullets
+/// and the "Sudo needed for:" line. Tests pass `Colors::default()` so
+/// the privilege-aware dim escapes don't enter the byte form — this
+/// helper renders only the colors-off shape.
+pub fn verbose_plan_section(entries: &[(&str, &str, Option<&str>)]) -> String {
+    let mut out = String::from("Plan (commands to execute):\n\n");
+    for (intent, shell, annotation) in entries {
+        match annotation {
+            Some(note) => out.push_str(&format!("  \u{2022} {intent}  # {note}\n")),
+            None => out.push_str(&format!("  \u{2022} {intent}\n")),
+        }
+        out.push_str(&format!("      {shell}\n"));
+    }
+    out.push('\n');
+    out
+}
+
+/// Pre-built plan entries for the `create` verb in the cycle-15
+/// intent-leads-shell-follows layout. Returns the 14-entry list every
+/// `tenant create <name> -v` invocation expects (UID/GID substituted),
+/// for splicing into a verbose summary via `verbose_plan_section`.
+pub fn create_verbose_plan_entries(
+    name: &str,
+    uid: u32,
+    gid: u32,
+) -> Vec<(String, String, Option<&'static str>)> {
+    vec![
+        (
+            format!("Create share group '{name}-tenant-share' (GID {gid})"),
+            format!("sudo dseditgroup -o create -n . -i {gid} {name}-tenant-share"),
+            None,
+        ),
+        (
+            format!("Add host '{TEST_HOST}' to share group '{name}-tenant-share'"),
+            format!("sudo dseditgroup -o edit -n . -a {TEST_HOST} -t user {name}-tenant-share"),
+            None,
+        ),
+        (
+            format!("Create user account '{name}' (UID {uid}, GID {gid})"),
+            format!(
+                "sudo sysadminctl -addUser {name} -fullName \"Tenant: {name}\" -shell /bin/zsh -UID {uid} -GID {gid}"
+            ),
+            None,
+        ),
+        (
+            format!("Remove share group '{name}-tenant-share'"),
+            format!("sudo dseditgroup -o delete -n . {name}-tenant-share"),
+            Some("on rollback"),
+        ),
+        (
+            format!("Write profile config at ~/.config/tenant/profiles/{name}.toml"),
+            format!("tee ~/.config/tenant/profiles/{name}.toml < default.toml"),
+            None,
+        ),
+        (
+            "Back up /etc/pf.conf to /etc/pf.conf.tenant-backup".to_string(),
+            "sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup".to_string(),
+            None,
+        ),
+        (
+            format!("Install firewall anchor at /etc/pf.anchors/tenant-{name}"),
+            format!("sudo tee /etc/pf.anchors/tenant-{name} < anchor.body"),
+            None,
+        ),
+        (
+            "Update /etc/pf.conf".to_string(),
+            "sudo tee /etc/pf.conf < updated.conf".to_string(),
+            None,
+        ),
+        (
+            "Reload pf ruleset".to_string(),
+            "sudo pfctl -f /etc/pf.conf".to_string(),
+            None,
+        ),
+        (
+            "Restore /etc/pf.conf from backup".to_string(),
+            "sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf".to_string(),
+            Some("on reload failure"),
+        ),
+        (
+            format!("Remove firewall anchor at /etc/pf.anchors/tenant-{name}"),
+            format!("sudo rm -f /etc/pf.anchors/tenant-{name}"),
+            Some("on reload failure"),
+        ),
+        (
+            "Reload pf ruleset".to_string(),
+            "sudo pfctl -f /etc/pf.conf".to_string(),
+            Some("on reload failure"),
+        ),
+        (
+            format!("Flush kernel rules under anchor 'tenant-{name}'"),
+            format!("sudo pfctl -a tenant-{name} -F all"),
+            Some("on reload failure"),
+        ),
+        (
+            "Enable pf host-wide".to_string(),
+            "sudo pfctl -e".to_string(),
+            None,
+        ),
+    ]
+}
+
+/// Borrow-shape adapter: `verbose_plan_section` takes `&[(&str, &str, Option<&str>)]`
+/// for shared use across owned (above) and literal-borrowed call sites.
+/// Helper that converts the owned vec from `create_verbose_plan_entries`
+/// into the borrowed-slice shape `verbose_plan_section` accepts.
+pub fn verbose_plan_section_owned(entries: &[(String, String, Option<&'static str>)]) -> String {
+    let borrowed: Vec<(&str, &str, Option<&str>)> = entries
+        .iter()
+        .map(|(i, s, a)| (i.as_str(), s.as_str(), *a))
+        .collect();
+    verbose_plan_section(&borrowed)
+}
+
+/// Pre-built `create_verbose_plan_entries` already spliced into a
+/// `verbose_plan_section` block — convenience for the common case.
+pub fn create_verbose_plan_block(name: &str, uid: u32, gid: u32) -> String {
+    verbose_plan_section_owned(&create_verbose_plan_entries(name, uid, gid))
+}
+
+/// Pre-built plan entries for the `destroy` verb in cycle-15 layout
+/// (11 entries).
+pub fn destroy_verbose_plan_entries(name: &str) -> Vec<(String, String, Option<&'static str>)> {
+    vec![
+        (
+            format!("Remove user account '{name}' (home moved to /Users/Deleted Users/{name})"),
+            format!("sudo sysadminctl -deleteUser {name}"),
+            None,
+        ),
+        (
+            format!("Probe for residue user record '{name}'"),
+            format!("dscl . -read /Users/{name}"),
+            None,
+        ),
+        (
+            format!("Clean up residue user record '{name}'"),
+            format!("sudo dscl . -delete /Users/{name}"),
+            None,
+        ),
+        (
+            format!("Remove host '{TEST_HOST}' from share group '{name}-tenant-share'"),
+            format!("sudo dseditgroup -o edit -n . -d {TEST_HOST} -t user {name}-tenant-share"),
+            None,
+        ),
+        (
+            format!("Remove share group '{name}-tenant-share'"),
+            format!("sudo dseditgroup -o delete -n . {name}-tenant-share"),
+            None,
+        ),
+        (
+            format!("Remove profile config at ~/.config/tenant/profiles/{name}.toml"),
+            format!("rm -f ~/.config/tenant/profiles/{name}.toml"),
+            None,
+        ),
+        (
+            "Back up /etc/pf.conf to /etc/pf.conf.tenant-backup".to_string(),
+            "sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup".to_string(),
+            None,
+        ),
+        (
+            format!("Remove firewall anchor at /etc/pf.anchors/tenant-{name}"),
+            format!("sudo rm -f /etc/pf.anchors/tenant-{name}"),
+            None,
+        ),
+        (
+            "Update /etc/pf.conf".to_string(),
+            "sudo tee /etc/pf.conf < updated.conf".to_string(),
+            None,
+        ),
+        (
+            "Reload pf ruleset".to_string(),
+            "sudo pfctl -f /etc/pf.conf".to_string(),
+            None,
+        ),
+        (
+            format!("Flush kernel rules under anchor 'tenant-{name}'"),
+            format!("sudo pfctl -a tenant-{name} -F all"),
+            None,
+        ),
+    ]
+}
+
+pub fn destroy_verbose_plan_block(name: &str) -> String {
+    verbose_plan_section_owned(&destroy_verbose_plan_entries(name))
+}
+
+/// Pre-built plan entries for the orphan-group convergence path (8
+/// entries; no user-removal steps).
+pub fn orphan_verbose_plan_entries(name: &str) -> Vec<(String, String, Option<&'static str>)> {
+    vec![
+        (
+            format!("Remove host '{TEST_HOST}' from share group '{name}-tenant-share'"),
+            format!("sudo dseditgroup -o edit -n . -d {TEST_HOST} -t user {name}-tenant-share"),
+            None,
+        ),
+        (
+            format!("Remove share group '{name}-tenant-share'"),
+            format!("sudo dseditgroup -o delete -n . {name}-tenant-share"),
+            None,
+        ),
+        (
+            format!("Remove profile config at ~/.config/tenant/profiles/{name}.toml"),
+            format!("rm -f ~/.config/tenant/profiles/{name}.toml"),
+            None,
+        ),
+        (
+            "Back up /etc/pf.conf to /etc/pf.conf.tenant-backup".to_string(),
+            "sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup".to_string(),
+            None,
+        ),
+        (
+            format!("Remove firewall anchor at /etc/pf.anchors/tenant-{name}"),
+            format!("sudo rm -f /etc/pf.anchors/tenant-{name}"),
+            None,
+        ),
+        (
+            "Update /etc/pf.conf".to_string(),
+            "sudo tee /etc/pf.conf < updated.conf".to_string(),
+            None,
+        ),
+        (
+            "Reload pf ruleset".to_string(),
+            "sudo pfctl -f /etc/pf.conf".to_string(),
+            None,
+        ),
+        (
+            format!("Flush kernel rules under anchor 'tenant-{name}'"),
+            format!("sudo pfctl -a tenant-{name} -F all"),
+            None,
+        ),
+    ]
+}
+
+pub fn orphan_verbose_plan_block(name: &str) -> String {
+    verbose_plan_section_owned(&orphan_verbose_plan_entries(name))
+}
+
 /// Cycle-12 dry-run summary block for `tenant create <name> --dry-run`.
 /// Matches `Reporter::create_summary` byte-for-byte, then appends the
 /// "(Real run would prompt: Proceed? [Y/n])" preview line that
 /// `Reporter::confirm` emits in dry-run mode (Q13 lock).
-pub fn create_dry_run_block(name: &str, uid: u32, gid: u32) -> String {
+///
+/// Cycle 15: `plan_section` splices the verbose "Plan (commands to
+/// execute):" block in BEFORE the "Sudo needed for:" line. Pass
+/// `None` for the standard-mode dry-run (no plan); pass
+/// `Some(verbose_plan_section(&entries))` for the verbose-mode shape.
+pub fn create_dry_run_block(name: &str, uid: u32, gid: u32, plan_section: Option<&str>) -> String {
+    let plan = plan_section.unwrap_or("");
     format!(
         "About to create tenant '{name}' \u{2014} an isolated macOS account with restricted network egress.\n\
          \n\
@@ -156,6 +411,7 @@ pub fn create_dry_run_block(name: &str, uid: u32, gid: u32) -> String {
          \u{2022} write profile config at ~/.config/tenant/profiles/{name}.toml\n  \
          \u{2022} enable pf host-wide if not already enabled\n\
          \n\
+         {plan}\
          Sudo needed for: user provisioning, firewall install.\n\
          \n\
          (Real run would prompt: Proceed? [Y/n])\n",
@@ -163,8 +419,10 @@ pub fn create_dry_run_block(name: &str, uid: u32, gid: u32) -> String {
 }
 
 /// Dry-run summary block for `tenant destroy <name> --dry-run` (full
-/// destroy path, default-N prompt preview).
-pub fn destroy_dry_run_block(name: &str, uid: u32) -> String {
+/// destroy path, default-N prompt preview). Cycle 15: `plan_section`
+/// optionally splices the verbose plan block (Q3 lock pattern).
+pub fn destroy_dry_run_block(name: &str, uid: u32, plan_section: Option<&str>) -> String {
+    let plan = plan_section.unwrap_or("");
     format!(
         "About to destroy tenant '{name}' (UID {uid}).\n\
          \n\
@@ -176,14 +434,17 @@ pub fn destroy_dry_run_block(name: &str, uid: u32) -> String {
          \u{2022} remove the firewall anchor and flush its kernel rules\n  \
          \u{2022} remove profile config at ~/.config/tenant/profiles/{name}.toml\n\
          \n\
+         {plan}\
          Sudo needed for: user removal, firewall teardown.\n\
          \n\
          (Real run would prompt: Proceed? [y/N])\n",
     )
 }
 
-/// Dry-run summary block for the orphan-group convergence path.
-pub fn destroy_orphan_dry_run_block(name: &str) -> String {
+/// Dry-run summary block for the orphan-group convergence path. Cycle
+/// 15: `plan_section` optionally splices the verbose plan block.
+pub fn destroy_orphan_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
+    let plan = plan_section.unwrap_or("");
     format!(
         "About to destroy orphan group '{name}-tenant-share' for tenant '{name}'.\n\
          \n\
@@ -193,6 +454,7 @@ pub fn destroy_orphan_dry_run_block(name: &str) -> String {
          \u{2022} remove the firewall anchor and flush its kernel rules\n  \
          \u{2022} remove profile config at ~/.config/tenant/profiles/{name}.toml\n\
          \n\
+         {plan}\
          Sudo needed for: group removal, firewall teardown.\n\
          \n\
          (Real run would prompt: Proceed? [y/N])\n",
@@ -200,7 +462,9 @@ pub fn destroy_orphan_dry_run_block(name: &str) -> String {
 }
 
 /// Dry-run summary block for `tenant mode <name> <level> --dry-run`.
-pub fn mode_dry_run_block(name: &str, level: &str) -> String {
+/// Cycle 15: `plan_section` optionally splices the verbose plan block.
+pub fn mode_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -> String {
+    let plan = plan_section.unwrap_or("");
     let re_render = if level == "install" {
         "re-render the firewall anchor with install-tier hosts added to the allowlist"
     } else {
@@ -222,6 +486,7 @@ pub fn mode_dry_run_block(name: &str, level: &str) -> String {
          \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
          \u{2022} re-apply declared shares from the profile (idempotent)\n{install_tail}\
          \n\
+         {plan}\
          Sudo needed for: firewall install.\n\
          \n\
          (Real run would prompt: Proceed? [Y/n])\n",
@@ -229,7 +494,9 @@ pub fn mode_dry_run_block(name: &str, level: &str) -> String {
 }
 
 /// Dry-run summary block for single-tenant `tenant reload <name>`.
-pub fn reload_dry_run_block(name: &str) -> String {
+/// Cycle 15: `plan_section` optionally splices the verbose plan block.
+pub fn reload_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
+    let plan = plan_section.unwrap_or("");
     format!(
         "About to reload tenant '{name}' from profile.\n\
          \n\
@@ -238,6 +505,7 @@ pub fn reload_dry_run_block(name: &str) -> String {
          \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
          \u{2022} re-apply each declared share from [[shares]] in the profile\n\
          \n\
+         {plan}\
          Sudo needed for: firewall install.\n\
          \n\
          (Real run would prompt: Proceed? [Y/n])\n",

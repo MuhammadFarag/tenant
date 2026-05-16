@@ -657,40 +657,7 @@ impl<'a> Writer<'a> {
         let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
         let flush_anchor = FirewallOp::FlushAnchor { name: name.into() };
 
-        // Plan-time placeholder firewall ops. The describe arms for
-        // InstallAnchor and UpdateConfig don't include `body` /
-        // `content` in their rendered text, so plan + echo lines come
-        // out identical to the real-body ops constructed below — but
-        // we can't build the real bodies yet, because that needs a
-        // read of the not-yet-written profile and the host's current
-        // pf.conf.
-        let install_anchor_plan = FirewallOp::InstallAnchor {
-            name: name.into(),
-            body: String::new(),
-        };
-        let update_conf_plan = FirewallOp::UpdateConfig {
-            content: String::new(),
-        };
-
-        reporter.create_starting(
-            name,
-            &[
-                (Op::Account(&create_group), None),
-                (Op::Account(&add_host), None),
-                (Op::Account(&add_user), None),
-                (Op::Account(&rollback_group), Some("on rollback")),
-                (Op::Profile(&create_profile), None),
-                (Op::Firewall(&backup), None),
-                (Op::Firewall(&install_anchor_plan), None),
-                (Op::Firewall(&update_conf_plan), None),
-                (Op::Firewall(&reload), None),
-                (Op::Firewall(&restore), Some("on reload failure")),
-                (Op::Firewall(&remove_anchor), Some("on reload failure")),
-                (Op::Firewall(&reload), Some("on reload failure")),
-                (Op::Firewall(&flush_anchor), Some("on reload failure")),
-                (Op::Firewall(&enable), None),
-            ],
-        );
+        reporter.create_starting(name);
 
         self.run(&create_group, reporter)
             .map_err(CreateError::Group)?;
@@ -839,29 +806,8 @@ impl<'a> Writer<'a> {
         let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
         let reload = FirewallOp::Reload;
         let flush_anchor = FirewallOp::FlushAnchor { name: name.into() };
-        // Plan-time placeholder for UpdateConfig — describe text
-        // ignores the `content` field, so this matches the real op
-        // built below for execution.
-        let update_conf_plan = FirewallOp::UpdateConfig {
-            content: String::new(),
-        };
 
-        reporter.destroy_starting(
-            name,
-            &[
-                (Op::Account(&delete_user), None),
-                (Op::Account(&probe), None),
-                (Op::Account(&cleanup), None),
-                (Op::Account(&remove_host), None),
-                (Op::Account(&delete_group), None),
-                (Op::Profile(&delete_profile), None),
-                (Op::Firewall(&backup), None),
-                (Op::Firewall(&remove_anchor), None),
-                (Op::Firewall(&update_conf_plan), None),
-                (Op::Firewall(&reload), None),
-                (Op::Firewall(&flush_anchor), None),
-            ],
-        );
+        reporter.destroy_starting(name);
 
         self.run(&delete_user, reporter)?;
         match self.run(&probe, reporter) {
@@ -944,23 +890,8 @@ impl<'a> Writer<'a> {
         let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
         let reload = FirewallOp::Reload;
         let flush_anchor = FirewallOp::FlushAnchor { name: name.into() };
-        let update_conf_plan = FirewallOp::UpdateConfig {
-            content: String::new(),
-        };
 
-        reporter.orphan_group_starting(
-            name,
-            &[
-                (Op::Account(&remove_host), None),
-                (Op::Account(&delete_group), None),
-                (Op::Profile(&delete_profile), None),
-                (Op::Firewall(&backup), None),
-                (Op::Firewall(&remove_anchor), None),
-                (Op::Firewall(&update_conf_plan), None),
-                (Op::Firewall(&reload), None),
-                (Op::Firewall(&flush_anchor), None),
-            ],
-        );
+        reporter.orphan_group_starting(name);
 
         // Cycle 14: symmetric with destroy_tenant. Substrate-idempotent
         // (the OrphanGroup eligibility state can include hosts created
@@ -1013,22 +944,20 @@ impl<'a> Writer<'a> {
     /// reflects the new body but the kernel rules still match the
     /// old body — operator reruns `tenant mode <name> <level>` to
     /// retry. The verb is idempotent at the substrate.
+    /// Apply a pre-built reapply plan at the given tier. Cycle 15:
+    /// dispatch calls `build_reapply_plan` BEFORE the confirm prompt
+    /// (Q3 lock — profile-read failures surface pre-prompt rather
+    /// than mid-substrate); this verb takes the constructed plan as
+    /// a parameter rather than building it internally.
     pub(crate) fn apply_tenant_mode(
         &self,
         name: &str,
-        host: &str,
         level: ModeLevel,
+        plan: &ReapplyPlan,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
-        // Intent emitted BEFORE plan-build so the operator sees verb
-        // context even if the profile-read fails (parity with shell's
-        // `shell_intent` + `shell_plan` split). Plan rendering
-        // happens after build so share ops appear in the plan block
-        // alongside the PF ops, matching what fires via `$` echo.
         reporter.mode_intent(name, level);
-        let plan = self.build_reapply_plan(name, host, level)?;
-        reporter.mode_plan(&plan.as_plan_entries());
-        self.execute_reapply_plan(&plan, reporter)?;
+        self.execute_reapply_plan(plan, reporter)?;
         reporter.mode_done(name, level);
         Ok(())
     }
@@ -1045,7 +974,7 @@ impl<'a> Writer<'a> {
     /// struct lets the verb methods render the upfront plan
     /// (`mode_starting` / `shell_starting` / `reload_starting`) and
     /// then execute the same ops — plan/echo asymmetry-free.
-    fn build_reapply_plan(
+    pub(crate) fn build_reapply_plan(
         &self,
         name: &str,
         host: &str,
@@ -1269,21 +1198,19 @@ impl<'a> Writer<'a> {
     /// substrate. Cycle 10's headline verb's per-tenant arm. Reuses
     /// `build_reapply_plan` + `execute_reapply_plan` under runtime
     /// tier; the verb's distinct framing lives on the Reporter.
+    /// Reload a single tenant from a pre-built plan. Cycle 15:
+    /// dispatch (or the no-arg reload walk) builds the plan upfront
+    /// via `build_reapply_plan` and passes it in. Profile-read /
+    /// share-pre-flight failures surface at the build site, not
+    /// here.
     pub(crate) fn reload_tenant(
         &self,
         name: &str,
-        host: &str,
+        plan: &ReapplyPlan,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
-        // Intent emitted BEFORE plan-build so the operator sees verb
-        // context even if the profile-read fails (parity with shell's
-        // `shell_intent` + `shell_plan` split). Plan rendering
-        // happens after the plan is built so share ops appear in the
-        // plan block alongside the PF ops.
         reporter.reload_intent(name);
-        let plan = self.build_reapply_plan(name, host, ModeLevel::Runtime)?;
-        reporter.reload_plan(&plan.as_plan_entries());
-        self.execute_reapply_plan(&plan, reporter)?;
+        self.execute_reapply_plan(plan, reporter)?;
         reporter.reload_done(name);
         Ok(())
     }
@@ -1308,24 +1235,32 @@ impl<'a> Writer<'a> {
         }
         let mut failed = 0;
         for name in &names {
-            match self.reload_tenant(name, host, reporter) {
-                Ok(()) => {}
-                Err(err) => {
-                    failed += 1;
-                    // Per-tenant failure routes through the same
-                    // Reporter methods the verb-level dispatch uses
-                    // (mirror of `surface_reload_error` in
-                    // commands.rs). The operator sees inline failure
-                    // framing during the walk; the end-of-walk
-                    // summary counts how many tripped.
-                    match &err {
-                        ModeError::Profile(e) => reporter.reload_profile_failed(name, e),
-                        ModeError::Firewall(e) => reporter.reload_firewall_failed(name, e),
-                        ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
-                        ModeError::Account(e) => reporter.mode_account_failed(name, e),
-                        ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
-                        ModeError::Share(e) => reporter.refuse_reload_share(name, e),
-                    }
+            // Per-tenant build + execute. Cycle 15: the no-arg walk
+            // doesn't pre-build plans in dispatch (Q5 lock — no
+            // per-tenant plans in the bulk summary), so the
+            // build_reapply_plan call lives here. A build failure
+            // (profile read / share pre-flight) routes through the
+            // same per-tenant Reporter methods as an execute
+            // failure.
+            let outcome = match self.build_reapply_plan(name, host, ModeLevel::Runtime) {
+                Ok(plan) => self.reload_tenant(name, &plan, reporter),
+                Err(err) => Err(err),
+            };
+            if let Err(err) = outcome {
+                failed += 1;
+                // Per-tenant failure routes through the same Reporter
+                // methods the verb-level dispatch uses (mirror of
+                // `surface_reload_error` in commands.rs). The
+                // operator sees inline failure framing during the
+                // walk; the end-of-walk summary counts how many
+                // tripped.
+                match &err {
+                    ModeError::Profile(e) => reporter.reload_profile_failed(name, e),
+                    ModeError::Firewall(e) => reporter.reload_firewall_failed(name, e),
+                    ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
+                    ModeError::Account(e) => reporter.mode_account_failed(name, e),
+                    ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
+                    ModeError::Share(e) => reporter.refuse_reload_share(name, e),
                 }
             }
         }

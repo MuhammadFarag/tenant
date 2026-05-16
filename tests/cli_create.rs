@@ -12,7 +12,7 @@ use common::*;
 fn create_dry_run_default_shows_intent() {
     let (code, stdout, stderr) = run_with(StubReader::default(), &["create", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, create_dry_run_block("dev", 600, 600));
+    assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
 }
 
 #[test]
@@ -20,14 +20,14 @@ fn create_accepts_max_length_name() {
     let name = "a".repeat(31);
     let (code, stdout, stderr) = run_with(StubReader::default(), &["create", &name, "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, create_dry_run_block(&name, 600, 600));
+    assert_eq!(stdout, create_dry_run_block(&name, 600, 600, None));
 }
 
 #[test]
 fn create_accepts_single_letter_name() {
     let (code, stdout, stderr) = run_with(StubReader::default(), &["create", "x", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, create_dry_run_block("x", 600, 600));
+    assert_eq!(stdout, create_dry_run_block("x", 600, 600, None));
 }
 
 #[test]
@@ -46,22 +46,11 @@ fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
     let (code, stdout, _stderr) =
         run_with(StubReader::default(), &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    let plan = "  \
-                sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
-                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
-                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
-                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
-                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
-                sudo pfctl -e\n";
-    assert_eq!(stdout, create_dry_run_block("dev", 600, 600) + plan);
+    // Cycle 15: the verbose plan section lives inside the summary
+    // (between the bullets and "Sudo needed for:"), rendered in
+    // intent-leads-shell-follows layout via `create_verbose_plan_block`.
+    let plan = create_verbose_plan_block("dev", 600, 600);
+    assert_eq!(stdout, create_dry_run_block("dev", 600, 600, Some(&plan)));
 }
 
 /// Stub whose `used_uids()` reports the given UIDs as taken (by synthetic
@@ -89,22 +78,8 @@ fn verbose_shows_lowest_free_uid_with_gap_and_gid_at_floor() {
         &["create", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    let plan = "  \
-                sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
-                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
-                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 602 -GID 600\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
-                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
-                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
-                sudo pfctl -e\n";
-    assert_eq!(stdout, create_dry_run_block("dev", 602, 600) + plan);
+    let plan = create_verbose_plan_block("dev", 602, 600);
+    assert_eq!(stdout, create_dry_run_block("dev", 602, 600, Some(&plan)));
 }
 
 #[test]
@@ -165,22 +140,8 @@ fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
     };
     let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    let plan = "  \
-                sudo dseditgroup -o create -n . -i 601 dev-tenant-share\n  \
-                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
-                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 601\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
-                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
-                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
-                sudo pfctl -e\n";
-    assert_eq!(stdout, create_dry_run_block("dev", 600, 601) + plan);
+    let plan = create_verbose_plan_block("dev", 600, 601);
+    assert_eq!(stdout, create_dry_run_block("dev", 600, 601, Some(&plan)));
 }
 
 #[test]
@@ -201,22 +162,8 @@ fn verbose_uid_and_gid_allocators_cross_over() {
     };
     let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    let plan = "  \
-                sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
-                sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
-                sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 601 -GID 600\n  \
-                sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-                tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
-                sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-                sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-                sudo tee /etc/pf.conf < updated.conf\n  \
-                sudo pfctl -f /etc/pf.conf\n  \
-                sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
-                sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
-                sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
-                sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
-                sudo pfctl -e\n";
-    assert_eq!(stdout, create_dry_run_block("dev", 601, 600) + plan);
+    let plan = create_verbose_plan_block("dev", 601, 600);
+    assert_eq!(stdout, create_dry_run_block("dev", 601, 600, Some(&plan)));
 }
 
 #[test]
@@ -305,7 +252,7 @@ fn create_accepts_name_with_reserved_prefix() {
         let (code, stdout, stderr) =
             run_with(StubReader::default(), &["create", name, "--dry-run"]);
         assert_eq!(code, 0, "want success for {name:?}; stderr={stderr:?}");
-        assert_eq!(stdout, create_dry_run_block(name, 600, 600));
+        assert_eq!(stdout, create_dry_run_block(name, 600, 600, None));
     }
 }
 
@@ -371,7 +318,7 @@ fn create_accepts_when_bare_name_group_exists_but_not_suffix() {
     };
     let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, create_dry_run_block("dev", 600, 600));
+    assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
 }
 
 #[test]
@@ -382,7 +329,7 @@ fn create_succeeds_when_unrelated_user_exists() {
     };
     let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    assert_eq!(stdout, create_dry_run_block("dev", 600, 600));
+    assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
 }
 
 #[test]
@@ -435,7 +382,7 @@ fn create_dry_run_does_not_write_profile() {
         &["create", "dev", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, create_dry_run_block("dev", 600, 600));
+    assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
     assert!(
         !exec.has_profile("dev"),
         "profile should not be written in dry-run; state={:?}",
@@ -500,32 +447,18 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
 
 #[test]
 fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
-    // Real+verbose under cycle 12: section divider opens the verb,
-    // plan block prints upfront (verbose-only retention from cycle 3),
-    // then per-substrate $ echo + ✓ progress interleave, then Done
-    // section + single enriched closing line. The plan block stays
-    // verbose-only as the "what would run" preview; ✓ lines confirm
-    // what actually ran.
+    // Cycle 15: scripted-real-verbose (TTY=false) drops the verbose
+    // plan from output entirely (Q1 lock — solo-Mac scope; cleaner
+    // log trace). The section divider opens the verb, per-substrate
+    // $ echo + ✓ progress interleave, then Done section + single
+    // enriched closing line. The plan-before-prompt move lives on
+    // the TTY path; this test pins the scripted-mode shape.
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
         run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 0);
     let want = format!(
-        "{}\n  \
-         sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
-         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
-         sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
-         sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-         tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
-         sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-         sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-         sudo tee /etc/pf.conf < updated.conf\n  \
-         sudo pfctl -f /etc/pf.conf\n  \
-         sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
-         sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
-         sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
-         sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
-         sudo pfctl -e\n\
+        "{}\n\
          $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
@@ -610,7 +543,7 @@ fn dry_run_bypasses_injected_executor() {
         &["create", "dev", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, create_dry_run_block("dev", 600, 600));
+    assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
     assert!(
         exec.account_ops().is_empty() && exec.profile_ops().is_empty(),
         "executor should not be invoked in dry-run mode; account_ops={:?}, profile_ops={:?}",
@@ -754,13 +687,12 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
 
 #[test]
 fn create_real_mode_verbose_shows_rollback_echo() {
-    // Verbose counterpart: the pre-exec plan still shows 3 lines including
-    // the `# on rollback` annotation (same plan as the success case — the
-    // plan is the algorithm, not the trace). The `$` echo block grows to
-    // 3 lines because the rollback actually fires. No post-exec
-    // confirmation — the create failed. Stderr carries the original
-    // sysadminctl error; the rollback's success is signaled implicitly
-    // by the absence of a rollback-failed line.
+    // Cycle 15: scripted-real-verbose (TTY=false) drops the verbose
+    // plan from output (Q1 lock). The section divider opens, the
+    // substrate's $ echo + ✓ progress lines interleave through the
+    // CreateShareGroup + AddHost + CreateTenantUser steps, then the
+    // rollback fires. No Done section + closing line because create
+    // failed; stderr carries the original sysadminctl error.
     let exec = StubExecutor::new().fail_account_op(
         AccountOp::CreateTenantUser {
             name: "dev".into(),
@@ -775,28 +707,8 @@ fn create_real_mode_verbose_shows_rollback_echo() {
     let (code, stdout, stderr) =
         run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Plan still has 4 lines (the algorithm — profile-write is the
-    // success-path 4th step), but the echo block omits the profile-write
-    // because sysadminctl failed before profile-write would have been
-    // attempted. The asymmetry between plan (line 4 present) and echo
-    // (no profile echo) is the operator's signal that profile-write
-    // never happened.
     let want_stdout = format!(
-        "{}\n  \
-         sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n  \
-         sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n  \
-         sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n  \
-         sudo dseditgroup -o delete -n . dev-tenant-share  # on rollback\n  \
-         tee ~/.config/tenant/profiles/dev.toml < default.toml\n  \
-         sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n  \
-         sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n  \
-         sudo tee /etc/pf.conf < updated.conf\n  \
-         sudo pfctl -f /etc/pf.conf\n  \
-         sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf  # on reload failure\n  \
-         sudo rm -f /etc/pf.anchors/tenant-dev  # on reload failure\n  \
-         sudo pfctl -f /etc/pf.conf  # on reload failure\n  \
-         sudo pfctl -a tenant-dev -F all  # on reload failure\n  \
-         sudo pfctl -e\n\
+        "{}\n\
          $ sudo dseditgroup -o create -n . -i 600 dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
@@ -1204,7 +1116,7 @@ fn create_dry_run_bypasses_firewall_executor() {
         &["create", "dev", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert_eq!(stdout, create_dry_run_block("dev", 600, 600));
+    assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
     assert!(
         exec.firewall_ops().is_empty(),
         "firewall executor should not be invoked in dry-run; got: {:?}",
@@ -1356,6 +1268,64 @@ fn create_post_provision_refusal_carries_recovery_hint() {
 // ================================================================
 // Cycle 12: pre-execution confirmation prompt (SC5)
 // ================================================================
+
+#[test]
+fn create_real_verbose_interactive_emits_plan_before_prompt() {
+    // Cycle 15 — headline behavior pin: under verbose + TTY, the
+    // operator sees the plan BEFORE the confirm prompt. The plan
+    // section header "Plan (commands to execute):" must appear between
+    // the "Sudo needed for:" line and the "Proceed? [Y/n]" prompt;
+    // the section divider must only appear AFTER the operator answers
+    // (so an n-answer leaves zero verb-section state in the output).
+    let exec = StubExecutor::new();
+    let (code, stdout, _stderr) = run_with_stdin(
+        StubReader::default(),
+        &exec,
+        &["create", "dev", "-v"],
+        b"y\n",
+    );
+    assert_eq!(code, 0);
+    // Emit order inside the summary: bullets → Plan (commands) →
+    // Sudo line → blank → Proceed? prompt → section divider (after
+    // operator answers) → $ echo + ✓ progress → Done section.
+    let sudo_idx = stdout
+        .find("Sudo needed for: user provisioning, firewall install.")
+        .expect("summary should emit Sudo line");
+    let plan_idx = stdout
+        .find("Plan (commands to execute):")
+        .expect("verbose plan section should emit");
+    let prompt_idx = stdout
+        .find("Proceed? [Y/n]")
+        .expect("confirm prompt should emit on TTY");
+    let section_idx = stdout
+        .find(&section_line("Creating tenant 'dev'"))
+        .expect("section divider should emit after the operator answers");
+    assert!(
+        plan_idx < sudo_idx,
+        "Plan section should appear before 'Sudo needed for' inside the summary; \
+         plan={plan_idx} sudo={sudo_idx} in {stdout:?}"
+    );
+    assert!(
+        sudo_idx < prompt_idx,
+        "Proceed? prompt should follow the Sudo line; \
+         sudo={sudo_idx} prompt={prompt_idx} in {stdout:?}"
+    );
+    assert!(
+        section_idx > prompt_idx,
+        "Section divider should land AFTER the confirm prompt — operator \
+         commits to the verb after seeing the plan + prompt, not before; \
+         prompt={prompt_idx} section={section_idx} in {stdout:?}"
+    );
+    // Plan layout uses the cycle-15 intent-leads-shell-follows shape.
+    assert!(
+        stdout.contains("  \u{2022} Create share group 'dev-tenant-share' (GID 600)"),
+        "plan should carry the intent bullet for CreateShareGroup: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("      sudo dseditgroup -o create -n . -i 600 dev-tenant-share"),
+        "plan should carry the indented shell line under the bullet: {stdout:?}"
+    );
+}
 
 #[test]
 fn create_with_tty_proceeds_on_y() {
