@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use tenant::executor::{AccountOp, AclMode, AclOp, FirewallOp, Op, ProfileOp};
+use tenant::ids::{GroupId, UserId};
 
 // ============================================================
 // Account-domain variants
@@ -24,7 +25,7 @@ use tenant::executor::{AccountOp, AclMode, AclOp, FirewallOp, Op, ProfileOp};
 fn intent_create_share_group() {
     let op = AccountOp::CreateShareGroup {
         name: "dev".into(),
-        gid: 600,
+        gid: GroupId(600),
     };
     assert_eq!(
         Op::Account(&op).intent_label(),
@@ -45,8 +46,8 @@ fn intent_delete_share_group() {
 fn intent_create_tenant_user() {
     let op = AccountOp::CreateTenantUser {
         name: "dev".into(),
-        uid: 600,
-        gid: 600,
+        uid: UserId(600),
+        gid: GroupId(600),
     };
     assert_eq!(
         Op::Account(&op).intent_label(),

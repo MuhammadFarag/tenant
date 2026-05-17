@@ -29,6 +29,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
+use crate::ids::{GroupId, UserId};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
 /// Which filesystem access predicate doctor's probe checks. `Read` maps to
@@ -100,7 +101,7 @@ pub enum AccountOp {
     /// Create the `<name>-tenant-share` primary group with the given GID.
     /// Maps to `sudo dseditgroup -o create -n . -i <gid> <name>-tenant-share`
     /// on macOS.
-    CreateShareGroup { name: String, gid: u32 },
+    CreateShareGroup { name: String, gid: GroupId },
 
     /// Delete the `<name>-tenant-share` group. Used as the create-side
     /// rollback step and the destroy-side cleanup step. Maps to `sudo
@@ -110,7 +111,11 @@ pub enum AccountOp {
     /// Create the tenant user with the given UID + GID. Maps to `sudo
     /// sysadminctl -addUser <name> -fullName "Tenant: <name>" -shell
     /// /bin/zsh -UID <uid> -GID <gid>` on macOS.
-    CreateTenantUser { name: String, uid: u32, gid: u32 },
+    CreateTenantUser {
+        name: String,
+        uid: UserId,
+        gid: GroupId,
+    },
 
     /// Delete the tenant user via the OD-aware tool. Maps to `sudo
     /// sysadminctl -deleteUser <name>` on macOS. Distinct from

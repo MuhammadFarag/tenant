@@ -18,6 +18,7 @@ use tenant::accounts::StubReader;
 use tenant::executor::{
     AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, PathKind, StubExecutor,
 };
+use tenant::ids::UserId;
 
 mod common;
 use common::*;
@@ -99,7 +100,7 @@ fn reload_refuses_when_only_orphan_group_present() {
 fn reload_refuses_below_floor() {
     let stub = StubReader {
         users: vec!["legacyusr".to_string()],
-        uid_by_name: [("legacyusr".to_string(), 0)].into_iter().collect(),
+        uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
         ..Default::default()
     };
     let (code, _stdout, stderr) = run_with(stub, &["reload", "legacyusr"]);

@@ -11,6 +11,7 @@ use tenant::accounts::StubReader;
 use tenant::executor::{
     AccountError, AccountOp, Executor, FirewallError, FirewallOp, ProfileOp, StubExecutor,
 };
+use tenant::ids::{GroupId, UserId};
 
 /// Default executor for tests that should not reach the exec stage —
 /// validation failures, conflicts, and dry-run paths. Panics on any
@@ -668,7 +669,7 @@ pub fn run_with_stdin(
 pub fn stub_with_tenant(name: &str) -> StubReader {
     StubReader {
         users: vec![name.to_string()],
-        uid_by_name: [(name.to_string(), 600)].into_iter().collect(),
+        uid_by_name: [(name.to_string(), UserId(600))].into_iter().collect(),
         ..Default::default()
     }
 }
@@ -737,8 +738,8 @@ pub fn make_tenant_stub_reader(name: &str) -> StubReader {
     StubReader {
         users: vec![name.to_string()],
         groups: vec![format!("{name}-tenant-share")],
-        uid_by_name: [(name.to_string(), 600)].into_iter().collect(),
-        gid_by_name: [(format!("{name}-tenant-share"), 600)]
+        uid_by_name: [(name.to_string(), UserId(600))].into_iter().collect(),
+        gid_by_name: [(format!("{name}-tenant-share"), GroupId(600))]
             .into_iter()
             .collect(),
     }
@@ -751,12 +752,15 @@ pub fn make_two_tenant_stub_reader() -> StubReader {
             "dev-tenant-share".to_string(),
             "staging-tenant-share".to_string(),
         ],
-        uid_by_name: [("dev".to_string(), 600), ("staging".to_string(), 601)]
-            .into_iter()
-            .collect(),
+        uid_by_name: [
+            ("dev".to_string(), UserId(600)),
+            ("staging".to_string(), UserId(601)),
+        ]
+        .into_iter()
+        .collect(),
         gid_by_name: [
-            ("dev-tenant-share".to_string(), 600),
-            ("staging-tenant-share".to_string(), 601),
+            ("dev-tenant-share".to_string(), GroupId(600)),
+            ("staging-tenant-share".to_string(), GroupId(601)),
         ]
         .into_iter()
         .collect(),

@@ -4,7 +4,9 @@ use crate::ModeLevel;
 use crate::doctor::Severity;
 use crate::executor::{AccountOp, FirewallOp, Op, ProfileOp};
 use crate::reporter::ConfirmOutcome;
-use crate::{Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, reporter::Reporter};
+use crate::{
+    Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, ids, reporter::Reporter,
+};
 
 const EX_USAGE: u8 = 64;
 const EX_IOERR: u8 = 74;
@@ -460,7 +462,7 @@ pub(crate) fn dispatch(
                     let destroy_plan_ops = build_destroy_plan_ops(&name, host);
                     let destroy_plan = destroy_plan_entries(&destroy_plan_ops);
                     if show_summary {
-                        let uid = accounts.uid_for(&name).unwrap_or(0);
+                        let uid = accounts.uid_for(&name).unwrap_or(ids::UserId(0));
                         reporter.destroy_summary(&name, host, uid, Some(&destroy_plan));
                     }
                     if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
@@ -580,7 +582,12 @@ pub(crate) struct CreatePlanOps {
     pub(crate) enable: FirewallOp,
 }
 
-fn build_create_plan_ops(name: &str, host: &str, uid: u32, gid: u32) -> CreatePlanOps {
+fn build_create_plan_ops(
+    name: &str,
+    host: &str,
+    uid: ids::UserId,
+    gid: ids::GroupId,
+) -> CreatePlanOps {
     CreatePlanOps {
         create_group: AccountOp::CreateShareGroup {
             name: name.into(),

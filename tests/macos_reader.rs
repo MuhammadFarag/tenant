@@ -7,6 +7,8 @@
 
 #[cfg(target_os = "macos")]
 use tenant::accounts::Reader;
+#[cfg(target_os = "macos")]
+use tenant::ids::UserId;
 
 #[cfg(target_os = "macos")]
 #[test]
@@ -32,7 +34,7 @@ fn macos_reader_observes_host_state() {
     );
     assert_eq!(
         reader.uid_for("root"),
-        Some(0),
+        Some(UserId(0)),
         "root's UID should be 0 in the in-memory map"
     );
 }

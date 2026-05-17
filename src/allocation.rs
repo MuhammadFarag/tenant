@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::accounts::Reader;
+use crate::ids::{GroupId, UserId};
 
 /// Lower bound for tenant UIDs *and* GIDs — clear of macOS system
 /// accounts (0–500) and the human-user range (typically starting at
@@ -18,11 +19,15 @@ impl<'a> UidAllocator<'a> {
         Self { reader }
     }
 
-    pub fn lowest_free_uid(&self) -> u32 {
-        let used: HashSet<u32> = self.reader.used_uids().into_iter().collect();
-        (TENANT_UID_FLOOR..)
-            .find(|uid| !used.contains(uid))
-            .expect("u32 range exhausted searching for a free UID")
+    pub fn lowest_free_uid(&self) -> UserId {
+        let used: HashSet<UserId> = self.reader.used_uids().into_iter().collect();
+        let mut candidate = UserId(TENANT_UID_FLOOR);
+        loop {
+            if !used.contains(&candidate) {
+                return candidate;
+            }
+            candidate = candidate.next();
+        }
     }
 }
 
@@ -40,10 +45,14 @@ impl<'a> GidAllocator<'a> {
         Self { reader }
     }
 
-    pub fn lowest_free_gid(&self) -> u32 {
-        let used: HashSet<u32> = self.reader.used_gids().into_iter().collect();
-        (TENANT_UID_FLOOR..)
-            .find(|gid| !used.contains(gid))
-            .expect("u32 range exhausted searching for a free GID")
+    pub fn lowest_free_gid(&self) -> GroupId {
+        let used: HashSet<GroupId> = self.reader.used_gids().into_iter().collect();
+        let mut candidate = GroupId(TENANT_UID_FLOOR);
+        loop {
+            if !used.contains(&candidate) {
+                return candidate;
+            }
+            candidate = candidate.next();
+        }
     }
 }

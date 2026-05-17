@@ -19,6 +19,7 @@
 use std::path::PathBuf;
 
 use tenant::executor::{AccountOp, AclMode, AclOp, Executor, FirewallOp, MacosExecutor, ProfileOp};
+use tenant::ids::{GroupId, UserId};
 
 #[test]
 fn macos_describes_create_share_group() {
@@ -26,7 +27,7 @@ fn macos_describes_create_share_group() {
     assert_eq!(
         s.describe_account(&AccountOp::CreateShareGroup {
             name: "dev".into(),
-            gid: 600
+            gid: GroupId(600)
         }),
         "sudo dseditgroup -o create -n . -i 600 dev-tenant-share",
     );
@@ -47,8 +48,8 @@ fn macos_describes_create_tenant_user() {
     assert_eq!(
         s.describe_account(&AccountOp::CreateTenantUser {
             name: "dev".into(),
-            uid: 600,
-            gid: 600
+            uid: UserId(600),
+            gid: GroupId(600)
         }),
         "sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" \
          -shell /bin/zsh -UID 600 -GID 600",

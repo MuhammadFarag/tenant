@@ -1,5 +1,6 @@
 use tenant::accounts::StubReader;
 use tenant::executor::{AccountError, AccountOp, FirewallError, ProfileOp, StubExecutor};
+use tenant::ids::UserId;
 
 mod common;
 use common::*;
@@ -444,7 +445,7 @@ fn destroy_refuses_below_floor() {
     // never reach the executor.
     let stub = StubReader {
         users: vec!["legacyusr".to_string()],
-        uid_by_name: [("legacyusr".to_string(), 0)].into_iter().collect(),
+        uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["destroy", "legacyusr"]);
@@ -462,7 +463,7 @@ fn destroy_refuses_just_below_floor() {
     // see `destroy_accepts_at_floor` for the matching positive case.
     let stub = StubReader {
         users: vec!["edge".to_string()],
-        uid_by_name: [("edge".to_string(), 599)].into_iter().collect(),
+        uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["destroy", "edge"]);
@@ -483,7 +484,7 @@ fn destroy_accepts_at_floor() {
     let exec = StubExecutor::new();
     let stub = StubReader {
         users: vec!["edge".to_string()],
-        uid_by_name: [("edge".to_string(), 600)].into_iter().collect(),
+        uid_by_name: [("edge".to_string(), UserId(600))].into_iter().collect(),
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "edge"]);
@@ -551,7 +552,7 @@ fn destroy_refuses_below_floor_verbose() {
     // string before checking the guard" regressions.
     let stub = StubReader {
         users: vec!["edge".to_string()],
-        uid_by_name: [("edge".to_string(), 599)].into_iter().collect(),
+        uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["destroy", "edge", "-v"]);

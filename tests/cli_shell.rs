@@ -4,6 +4,7 @@ use tenant::accounts::StubReader;
 use tenant::executor::{
     AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, StubExecutor,
 };
+use tenant::ids::UserId;
 
 mod common;
 use common::*;
@@ -174,7 +175,7 @@ fn shell_refuses_below_floor() {
     // the state-based refusal path specifically.
     let stub = StubReader {
         users: vec!["legacyusr".to_string()],
-        uid_by_name: [("legacyusr".to_string(), 0)].into_iter().collect(),
+        uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["shell", "legacyusr"]);
@@ -212,7 +213,7 @@ fn shell_refuses_below_floor_verbose() {
     // regressions.
     let stub = StubReader {
         users: vec!["edge".to_string()],
-        uid_by_name: [("edge".to_string(), 599)].into_iter().collect(),
+        uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["shell", "edge", "-v"]);

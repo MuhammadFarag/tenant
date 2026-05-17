@@ -4,6 +4,7 @@ use tenant::accounts::StubReader;
 use tenant::executor::{
     AccountError, AccountOp, AclMode, AclOp, FirewallError, ProfileOp, StubExecutor,
 };
+use tenant::ids::{GroupId, UserId};
 
 mod common;
 use common::*;
@@ -60,7 +61,7 @@ fn stub_with_used_uids(uids: &[u32]) -> StubReader {
         uid_by_name: uids
             .iter()
             .enumerate()
-            .map(|(i, &u)| (format!("u{i}"), u))
+            .map(|(i, &u)| (format!("u{i}"), UserId(u)))
             .collect(),
         ..Default::default()
     }
@@ -135,7 +136,7 @@ fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
     // here.
     let stub = StubReader {
         groups: vec!["other".to_string()],
-        gid_by_name: [("other".to_string(), 600)].into_iter().collect(),
+        gid_by_name: [("other".to_string(), GroupId(600))].into_iter().collect(),
         ..Default::default()
     };
     let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
@@ -156,9 +157,11 @@ fn verbose_uid_and_gid_allocators_cross_over() {
     // `lowest_free_gid`.
     let stub = StubReader {
         users: vec!["legacy".to_string()],
-        uid_by_name: [("legacy".to_string(), 600)].into_iter().collect(),
+        uid_by_name: [("legacy".to_string(), UserId(600))].into_iter().collect(),
         groups: vec!["phantom".to_string()],
-        gid_by_name: [("phantom".to_string(), 601)].into_iter().collect(),
+        gid_by_name: [("phantom".to_string(), GroupId(601))]
+            .into_iter()
+            .collect(),
     };
     let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
@@ -426,7 +429,7 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
         vec![
             AccountOp::CreateShareGroup {
                 name: "dev".into(),
-                gid: 600
+                gid: GroupId(600)
             },
             AccountOp::AddHostToShareGroup {
                 name: "dev".into(),
@@ -434,8 +437,8 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
             },
             AccountOp::CreateTenantUser {
                 name: "dev".into(),
-                uid: 600,
-                gid: 600
+                uid: UserId(600),
+                gid: GroupId(600)
             },
         ],
     );
@@ -634,8 +637,8 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
     let exec = StubExecutor::new().fail_account_op(
         AccountOp::CreateTenantUser {
             name: "dev".into(),
-            uid: 600,
-            gid: 600,
+            uid: UserId(600),
+            gid: GroupId(600),
         },
         AccountError::NonZero {
             code: 78,
@@ -669,7 +672,7 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
         vec![
             AccountOp::CreateShareGroup {
                 name: "dev".into(),
-                gid: 600
+                gid: GroupId(600)
             },
             AccountOp::AddHostToShareGroup {
                 name: "dev".into(),
@@ -677,8 +680,8 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
             },
             AccountOp::CreateTenantUser {
                 name: "dev".into(),
-                uid: 600,
-                gid: 600
+                uid: UserId(600),
+                gid: GroupId(600)
             },
             AccountOp::DeleteShareGroup { name: "dev".into() },
         ],
@@ -696,8 +699,8 @@ fn create_real_mode_verbose_shows_rollback_echo() {
     let exec = StubExecutor::new().fail_account_op(
         AccountOp::CreateTenantUser {
             name: "dev".into(),
-            uid: 600,
-            gid: 600,
+            uid: UserId(600),
+            gid: GroupId(600),
         },
         AccountError::NonZero {
             code: 78,
@@ -742,8 +745,8 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
         .fail_account_op(
             AccountOp::CreateTenantUser {
                 name: "dev".into(),
-                uid: 600,
-                gid: 600,
+                uid: UserId(600),
+                gid: GroupId(600),
             },
             AccountError::NonZero {
                 code: 78,

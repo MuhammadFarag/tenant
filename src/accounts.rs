@@ -15,17 +15,18 @@ use crate::executor::{
     HostFileError, Op, PathKind, ProbeError, ProfileOp, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
+use crate::ids::{GroupId, UserId};
 use crate::profile::{
     Profile, ProfileError, ShareMode, display_path_for, expand_tenant_path, parse,
 };
 use crate::reporter::Reporter;
 
 pub trait Reader {
-    fn used_uids(&self) -> Vec<u32>;
+    fn used_uids(&self) -> Vec<UserId>;
     /// Mirror of `used_uids` for the GID space. Phase 3 allocates UID and
     /// GID independently — they may converge at the floor in fresh hosts
     /// but diverge as tenants come and go. Feeds `GidAllocator`.
-    fn used_gids(&self) -> Vec<u32>;
+    fn used_gids(&self) -> Vec<GroupId>;
     fn has_user(&self, name: &str) -> bool;
     fn has_group(&self, name: &str) -> bool;
     /// Returns the positive UID for `name`, or `None` if either (a) the
@@ -35,7 +36,7 @@ pub trait Reader {
     /// must consult `has_user` separately — `destroy_eligibility` is the
     /// canonical example: a `(has_user: true, uid_for: None)` pair is a
     /// system account, classified `Eligibility::SystemAccount`.
-    fn uid_for(&self, name: &str) -> Option<u32>;
+    fn uid_for(&self, name: &str) -> Option<UserId>;
     /// All account names with a tenant-range UID (>= `TENANT_UID_FLOOR`).
     /// Order is alphabetical for stable downstream behavior — doctor's
     /// all-tenants walk iterates this list and emits findings in the
@@ -47,18 +48,18 @@ pub trait Reader {
 
 #[derive(Default)]
 pub struct StubReader {
-    pub uid_by_name: HashMap<String, u32>,
-    pub gid_by_name: HashMap<String, u32>,
+    pub uid_by_name: HashMap<String, UserId>,
+    pub gid_by_name: HashMap<String, GroupId>,
     pub users: Vec<String>,
     pub groups: Vec<String>,
 }
 
 impl Reader for StubReader {
-    fn used_uids(&self) -> Vec<u32> {
+    fn used_uids(&self) -> Vec<UserId> {
         self.uid_by_name.values().copied().collect()
     }
 
-    fn used_gids(&self) -> Vec<u32> {
+    fn used_gids(&self) -> Vec<GroupId> {
         self.gid_by_name.values().copied().collect()
     }
 
@@ -70,7 +71,7 @@ impl Reader for StubReader {
         self.groups.iter().any(|g| g == name)
     }
 
-    fn uid_for(&self, name: &str) -> Option<u32> {
+    fn uid_for(&self, name: &str) -> Option<UserId> {
         self.uid_by_name.get(name).copied()
     }
 
@@ -78,7 +79,7 @@ impl Reader for StubReader {
         let mut out: Vec<String> = self
             .uid_by_name
             .iter()
-            .filter(|(_, uid)| **uid >= TENANT_UID_FLOOR)
+            .filter(|(_, uid)| uid.0 >= TENANT_UID_FLOOR)
             .map(|(name, _)| name.clone())
             .collect();
         out.sort();
@@ -179,7 +180,7 @@ pub enum Eligibility {
     /// converges by removing the group with `dseditgroup -o delete`.
     OrphanGroup,
     NotATenant {
-        uid: u32,
+        uid: UserId,
     },
     SystemAccount,
 }
@@ -200,7 +201,7 @@ pub fn destroy_eligibility(reader: &dyn Reader, name: &str) -> Eligibility {
         return Eligibility::NotPresent;
     }
     match reader.uid_for(name) {
-        Some(uid) if uid >= TENANT_UID_FLOOR => Eligibility::Destroyable,
+        Some(uid) if uid.0 >= TENANT_UID_FLOOR => Eligibility::Destroyable,
         Some(uid) => Eligibility::NotATenant { uid },
         None => Eligibility::SystemAccount,
     }
@@ -218,8 +219,8 @@ pub fn destroy_eligibility(reader: &dyn Reader, name: &str) -> Eligibility {
 pub struct MacosReader {
     users: HashSet<String>,
     groups: HashSet<String>,
-    uid_by_name: HashMap<String, u32>,
-    gid_by_name: HashMap<String, u32>,
+    uid_by_name: HashMap<String, UserId>,
+    gid_by_name: HashMap<String, GroupId>,
 }
 
 impl MacosReader {
@@ -245,7 +246,8 @@ impl MacosReader {
         let uid_by_name = run_dscl(&[".", "-list", "/Users", "UniqueID"])?
             .lines()
             .filter_map(parse_id_line)
-            .fold(HashMap::<String, u32>::new(), |mut map, (name, uid)| {
+            .map(|(name, uid)| (name, UserId(uid)))
+            .fold(HashMap::<String, UserId>::new(), |mut map, (name, uid)| {
                 map.entry(name)
                     .and_modify(|cur| *cur = (*cur).min(uid))
                     .or_insert(uid);
@@ -258,7 +260,8 @@ impl MacosReader {
         let gid_by_name = run_dscl(&[".", "-list", "/Groups", "PrimaryGroupID"])?
             .lines()
             .filter_map(parse_id_line)
-            .fold(HashMap::<String, u32>::new(), |mut map, (name, gid)| {
+            .map(|(name, gid)| (name, GroupId(gid)))
+            .fold(HashMap::<String, GroupId>::new(), |mut map, (name, gid)| {
                 map.entry(name)
                     .and_modify(|cur| *cur = (*cur).min(gid))
                     .or_insert(gid);
@@ -274,11 +277,11 @@ impl MacosReader {
 }
 
 impl Reader for MacosReader {
-    fn used_uids(&self) -> Vec<u32> {
+    fn used_uids(&self) -> Vec<UserId> {
         self.uid_by_name.values().copied().collect()
     }
 
-    fn used_gids(&self) -> Vec<u32> {
+    fn used_gids(&self) -> Vec<GroupId> {
         self.gid_by_name.values().copied().collect()
     }
 
@@ -290,7 +293,7 @@ impl Reader for MacosReader {
         self.groups.contains(name)
     }
 
-    fn uid_for(&self, name: &str) -> Option<u32> {
+    fn uid_for(&self, name: &str) -> Option<UserId> {
         self.uid_by_name.get(name).copied()
     }
 
@@ -298,7 +301,7 @@ impl Reader for MacosReader {
         let mut out: Vec<String> = self
             .uid_by_name
             .iter()
-            .filter(|(_, uid)| **uid >= TENANT_UID_FLOOR)
+            .filter(|(_, uid)| uid.0 >= TENANT_UID_FLOOR)
             .map(|(name, _)| name.clone())
             .collect();
         out.sort();
@@ -616,8 +619,8 @@ impl<'a> Writer<'a> {
         &self,
         name: &str,
         host: &str,
-        uid: u32,
-        gid: u32,
+        uid: UserId,
+        gid: GroupId,
         reporter: &mut Reporter,
     ) -> Result<(), CreateError> {
         // Twelve-step composition. Account + profile:

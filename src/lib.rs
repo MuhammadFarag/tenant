@@ -10,6 +10,7 @@ mod commands;
 pub mod doctor;
 pub mod executor;
 pub mod firewall;
+pub mod ids;
 pub mod profile;
 mod reporter;
 

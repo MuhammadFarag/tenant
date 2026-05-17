@@ -25,6 +25,7 @@ use crate::doctor::{Category, Finding, Severity};
 use crate::executor::{
     AccessMode, AccountError, AclError, Executor, FirewallError, Op, ProbeError,
 };
+use crate::ids::{GroupId, UserId};
 use crate::profile::{ProfileError, display_path_for};
 
 /// Outcome of the pre-execution confirmation prompt. `Proceed` covers
@@ -217,8 +218,8 @@ impl<'a> Reporter<'a> {
         &mut self,
         name: &str,
         host: &str,
-        uid: u32,
-        gid: u32,
+        uid: UserId,
+        gid: GroupId,
         plan: Option<&[(Op<'_>, Option<&'static str>)]>,
     ) {
         let group = tenant_share_group_name(name);
@@ -266,7 +267,7 @@ impl<'a> Reporter<'a> {
         &mut self,
         name: &str,
         host: &str,
-        uid: u32,
+        uid: UserId,
         plan: Option<&[(Op<'_>, Option<&'static str>)]>,
     ) {
         let group = tenant_share_group_name(name);
@@ -515,7 +516,7 @@ impl<'a> Reporter<'a> {
     /// a single enriched line naming UID, GID, and the anchor name —
     /// the pre-exec summary already structured the facts; the closing
     /// line confirms completion without duplicating bullets.
-    pub fn create_done(&mut self, name: &str, uid: u32, gid: u32) {
+    pub fn create_done(&mut self, name: &str, uid: UserId, gid: GroupId) {
         if self.dry_run {
             return;
         }
@@ -829,7 +830,7 @@ impl<'a> Reporter<'a> {
         let _ = writeln!(self.stderr, "{msg}");
     }
 
-    pub fn refuse_not_a_tenant(&mut self, name: &str, uid: u32, floor: u32) {
+    pub fn refuse_not_a_tenant(&mut self, name: &str, uid: UserId, floor: u32) {
         let _ = writeln!(
             self.stderr,
             "tenant: refusing to destroy '{name}': UID {uid} is below tenant floor {floor}"
@@ -850,7 +851,7 @@ impl<'a> Reporter<'a> {
         );
     }
 
-    pub fn refuse_shell_not_a_tenant(&mut self, name: &str, uid: u32, floor: u32) {
+    pub fn refuse_shell_not_a_tenant(&mut self, name: &str, uid: UserId, floor: u32) {
         let _ = writeln!(
             self.stderr,
             "tenant: refusing to shell into '{name}': UID {uid} is below tenant floor {floor}"
@@ -875,7 +876,7 @@ impl<'a> Reporter<'a> {
         );
     }
 
-    pub fn refuse_mode_not_a_tenant(&mut self, name: &str, uid: u32, floor: u32) {
+    pub fn refuse_mode_not_a_tenant(&mut self, name: &str, uid: UserId, floor: u32) {
         let _ = writeln!(
             self.stderr,
             "tenant: refusing to apply mode to '{name}': UID {uid} is below tenant floor {floor}"
@@ -901,7 +902,7 @@ impl<'a> Reporter<'a> {
         );
     }
 
-    pub fn refuse_doctor_not_a_tenant(&mut self, name: &str, uid: u32, floor: u32) {
+    pub fn refuse_doctor_not_a_tenant(&mut self, name: &str, uid: UserId, floor: u32) {
         let _ = writeln!(
             self.stderr,
             "tenant: refusing to run doctor on '{name}': UID {uid} is below tenant floor {floor}"
@@ -1490,7 +1491,7 @@ impl<'a> Reporter<'a> {
 
     /// Eligibility-refusal framing — UID exists but is below the
     /// tenant floor. Mirrors `refuse_mode_not_a_tenant`.
-    pub fn refuse_reload_not_a_tenant(&mut self, name: &str, uid: u32, floor: u32) {
+    pub fn refuse_reload_not_a_tenant(&mut self, name: &str, uid: UserId, floor: u32) {
         let _ = writeln!(
             self.stderr,
             "tenant: refusing to reload '{name}': UID {uid} is below tenant floor {floor}"
