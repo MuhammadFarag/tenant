@@ -63,7 +63,10 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     `HostAccounts` trait — driven port for account
                     inventory queries (`used_uids` / `used_gids` /
                     `has_user` / `has_group` / `uid_for` /
-                    `tenant_names`).
+                    `tenant_names`). `ids.rs` carries the domain
+                    newtypes (`UserId` / `GroupId` / `TenantUserName`
+                    / `HostUserName` / `GroupName`), re-exported flat
+                    from `crate::domain`.
 src/adapters/     — driven adapters. `stub_host_accounts.rs`
                     (`StubHostAccounts` for tests) +
                     `macos/host_accounts.rs` (`MacosHostAccounts` —
@@ -417,7 +420,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   short Unix abbreviations `uid` / `gid` / `host` — they're domain
   vocabulary every operator carries from the shell.
 
-- **Domain newtypes in `src/ids.rs`.** `UserId(u32)` / `GroupId(u32)`
+- **Domain newtypes in `src/domain/ids.rs`.** `UserId(u32)` / `GroupId(u32)`
   wrap the POSIX numeric identifiers; `TenantUserName(String)` /
   `HostUserName(String)` wrap the macOS short usernames in their two
   distinct roles; `GroupName(String)` wraps the macOS short group

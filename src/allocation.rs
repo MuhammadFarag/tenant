@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
-use crate::domain::HostAccounts;
-use crate::ids::{GroupId, UserId};
+use crate::domain::{GroupId, HostAccounts, UserId};
 
 /// Lower bound for tenant UIDs *and* GIDs — clear of macOS system
 /// accounts (0–500) and the human-user range (typically starting at

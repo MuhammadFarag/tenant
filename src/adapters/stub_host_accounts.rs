@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::domain::HostAccounts;
-use crate::ids::{GroupId, GroupName, TenantUserName, UserId};
+use crate::domain::{GroupId, GroupName, HostAccounts, TenantUserName, UserId};
 
 #[derive(Default)]
 pub struct StubHostAccounts {

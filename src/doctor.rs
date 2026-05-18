@@ -22,8 +22,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::domain::{GroupName, HostUserName, TenantUserName};
 use crate::executor::{AccessMode, AccessOutcome};
-use crate::ids::{GroupName, HostUserName, TenantUserName};
 
 /// Severity tier of a finding. Order is load-bearing: `--strict` exit
 /// code logic consumes `findings.iter().map(severity).max()` to decide

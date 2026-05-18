@@ -18,8 +18,8 @@
 
 use std::path::PathBuf;
 
+use tenant::domain::{GroupId, UserId};
 use tenant::executor::{AccountOp, AclMode, AclOp, Executor, FirewallOp, MacosExecutor, ProfileOp};
-use tenant::ids::{GroupId, UserId};
 
 #[test]
 fn macos_describes_create_share_group() {

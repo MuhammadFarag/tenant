@@ -1,4 +1,4 @@
-use crate::ids::{GroupId, GroupName, TenantUserName, UserId};
+use super::ids::{GroupId, GroupName, TenantUserName, UserId};
 
 pub trait HostAccounts {
     fn used_uids(&self) -> Vec<UserId>;

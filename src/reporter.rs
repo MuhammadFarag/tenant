@@ -22,10 +22,10 @@ use crate::ModeLevel;
 use crate::accounts::{ConflictError, NameError, ShareError, tenant_share_group_name};
 use crate::ansi::{self, Colors};
 use crate::doctor::{Category, Finding, Severity};
+use crate::domain::{GroupId, HostUserName, TenantUserName, UserId};
 use crate::executor::{
     AccessMode, AccountError, AclError, Executor, FirewallError, Op, ProbeError,
 };
-use crate::ids::{GroupId, HostUserName, TenantUserName, UserId};
 use crate::profile::{ProfileError, display_path_for};
 
 /// Outcome of the pre-execution confirmation prompt. `Proceed` covers

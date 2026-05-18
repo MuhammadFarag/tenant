@@ -7,13 +7,12 @@ use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, curated_paths, has_env_delete_for,
     has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
 };
-use crate::domain::HostAccounts;
+use crate::domain::{GroupId, GroupName, HostAccounts, HostUserName, TenantUserName, UserId};
 use crate::executor::{
     self, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp,
     HostFileError, Op, PathKind, ProbeError, ProfileOp, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
-use crate::ids::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 use crate::profile::{
     Profile, ProfileError, ShareMode, display_path_for, expand_tenant_path, parse,
 };

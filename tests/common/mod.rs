@@ -8,10 +8,10 @@
 #![allow(dead_code)]
 
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::domain::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 use tenant::executor::{
     AccountError, AccountOp, Executor, FirewallError, FirewallOp, ProfileOp, StubExecutor,
 };
-use tenant::ids::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 
 /// Default executor for tests that should not reach the exec stage —
 /// validation failures, conflicts, and dry-run paths. Panics on any

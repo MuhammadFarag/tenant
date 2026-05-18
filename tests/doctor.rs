@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use tenant::doctor::{
     Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify, curated_paths,
 };
+use tenant::domain::{HostUserName, TenantUserName};
 use tenant::executor::{AccessMode, AccessOutcome};
-use tenant::ids::{HostUserName, TenantUserName};
 
 // ============================================================
 // Finding display — byte-exact per combination

@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::domain::{GroupId, UserId};
 use tenant::executor::{
     AccountError, AccountOp, AclMode, AclOp, FirewallError, ProfileOp, StubExecutor,
 };
-use tenant::ids::{GroupId, UserId};
 
 mod common;
 use common::*;

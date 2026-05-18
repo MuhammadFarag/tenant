@@ -6,9 +6,7 @@
 //! platform via `StubHostAccounts`.
 
 #[cfg(target_os = "macos")]
-use tenant::domain::HostAccounts;
-#[cfg(target_os = "macos")]
-use tenant::ids::{GroupName, TenantUserName, UserId};
+use tenant::domain::{GroupName, HostAccounts, TenantUserName, UserId};
 
 #[cfg(target_os = "macos")]
 #[test]

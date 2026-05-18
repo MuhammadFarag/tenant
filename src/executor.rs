@@ -28,8 +28,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::domain::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
-use crate::ids::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
 /// Which filesystem access predicate doctor's probe checks. `Read` maps to

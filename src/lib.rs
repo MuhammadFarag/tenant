@@ -3,7 +3,7 @@ use std::io::{BufRead, Write};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::ids::{HostUserName, TenantUserName};
+use crate::domain::{HostUserName, TenantUserName};
 
 pub mod accounts;
 pub mod adapters;
@@ -14,7 +14,6 @@ pub mod doctor;
 pub mod domain;
 pub mod executor;
 pub mod firewall;
-pub mod ids;
 pub mod profile;
 mod reporter;
 

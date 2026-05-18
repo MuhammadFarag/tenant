@@ -1,6 +1,6 @@
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::domain::UserId;
 use tenant::executor::{AccountError, AccountOp, FirewallError, ProfileOp, StubExecutor};
-use tenant::ids::UserId;
 
 mod common;
 use common::*;

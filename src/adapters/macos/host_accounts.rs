@@ -3,8 +3,7 @@ use std::io;
 use std::process::Command;
 
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::domain::HostAccounts;
-use crate::ids::{GroupId, GroupName, TenantUserName, UserId};
+use crate::domain::{GroupId, GroupName, HostAccounts, TenantUserName, UserId};
 
 /// Real `HostAccounts` backed by `dscl`. Queries the local Open Directory node
 /// once at construction and serves all subsequent lookups from memory.
