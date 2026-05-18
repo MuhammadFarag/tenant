@@ -29,7 +29,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
-use crate::ids::{GroupId, UserId};
+use crate::ids::{GroupId, HostUserName, TenantUserName, UserId};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
 /// Which filesystem access predicate doctor's probe checks. `Read` maps to
@@ -101,18 +101,18 @@ pub enum AccountOp {
     /// Create the `<name>-tenant-share` primary group with the given GID.
     /// Maps to `sudo dseditgroup -o create -n . -i <gid> <name>-tenant-share`
     /// on macOS.
-    CreateShareGroup { name: String, gid: GroupId },
+    CreateShareGroup { name: TenantUserName, gid: GroupId },
 
     /// Delete the `<name>-tenant-share` group. Used as the create-side
     /// rollback step and the destroy-side cleanup step. Maps to `sudo
     /// dseditgroup -o delete -n . <name>-tenant-share` on macOS.
-    DeleteShareGroup { name: String },
+    DeleteShareGroup { name: TenantUserName },
 
     /// Create the tenant user with the given UID + GID. Maps to `sudo
     /// sysadminctl -addUser <name> -fullName "Tenant: <name>" -shell
     /// /bin/zsh -UID <uid> -GID <gid>` on macOS.
     CreateTenantUser {
-        name: String,
+        name: TenantUserName,
         uid: UserId,
         gid: GroupId,
     },
@@ -122,27 +122,27 @@ pub enum AccountOp {
     /// `DeleteUserRecord` (low-level dscl cleanup); the doctrine separates
     /// these because sysadminctl handles home-directory move-to-Deleted-Users
     /// while dscl only touches the DS record.
-    DeleteTenantUser { name: String },
+    DeleteTenantUser { name: TenantUserName },
 
     /// Probe for an OD record's presence. Maps to `dscl . -read /Users/<name>`
     /// on macOS. The substrate's `execute_account` reports `Ok(())` when the
     /// record exists and `Err(AccountError::NonZero{..})` when it doesn't —
     /// the writer uses that result to gate the conditional `DeleteUserRecord`
     /// cleanup. No sudo (reads on the local node don't require it).
-    LookupUserRecord { name: String },
+    LookupUserRecord { name: TenantUserName },
 
     /// Low-level cleanup of a stale OD record that `DeleteTenantUser` may
     /// have left behind. Maps to `sudo dscl . -delete /Users/<name>` on
     /// macOS. Belt-and-braces; runs only when `LookupUserRecord` finds the
     /// record present.
-    DeleteUserRecord { name: String },
+    DeleteUserRecord { name: TenantUserName },
 
     /// Interactive login as the tenant. Used by the `shell` verb. The
     /// describe-side renders `sudo -iu <name>`; execution goes through
     /// `Executor::login` (NOT `execute_account`) because the return type
     /// is the child shell's exit code, and stdio must inherit so sudo can
     /// prompt and the login shell can drive the controlling terminal.
-    LoginAsUser { name: String },
+    LoginAsUser { name: TenantUserName },
 
     /// Run a single command as the tenant inside a login shell. Used by
     /// the `tenant shell <name> -- <cmd>` command form. Sibling to
@@ -155,7 +155,10 @@ pub enum AccountOp {
     /// the `--` separator prevents sudo from interpreting argv[0] as a
     /// sudo flag. `argv` must be non-empty (dispatch routes empty argv
     /// to the interactive branch before any `ExecAsUser` is constructed).
-    ExecAsUser { name: String, argv: Vec<String> },
+    ExecAsUser {
+        name: TenantUserName,
+        argv: Vec<String>,
+    },
 
     /// Ensure a directory exists at `path`, created by the tenant `name`.
     /// The shares substrate uses this to pre-create
@@ -167,7 +170,7 @@ pub enum AccountOp {
     /// (default 022 → directories at 755) which is the right default for
     /// tenant-readable dirs under their home; a future need for explicit
     /// mode adds a `mode: u32` field at the variant.
-    EnsureDirAsUser { name: String, path: PathBuf },
+    EnsureDirAsUser { name: TenantUserName, path: PathBuf },
 
     /// Ensure a symlink at `link` points at `target`, created by the
     /// tenant `name`. The shares substrate uses this to install the
@@ -179,7 +182,7 @@ pub enum AccountOp {
     /// file at `link` is the `TenantPathOccupied` case the Writer
     /// guards against before the substrate runs.
     EnsureSymlinkAsUser {
-        name: String,
+        name: TenantUserName,
         link: PathBuf,
         target: PathBuf,
     },
@@ -198,7 +201,10 @@ pub enum AccountOp {
     /// dropped during the initial port, and the symptom —
     /// bidirectional-write asymmetry on RW shares — was caught in
     /// the 2026-05-15 operator setup pass.
-    AddHostToShareGroup { name: String, host: String },
+    AddHostToShareGroup {
+        name: TenantUserName,
+        host: HostUserName,
+    },
 
     /// Symmetric counter to `AddHostToShareGroup`. Maps to `sudo
     /// dseditgroup -o edit -n . -d <host> -t user <name>-tenant-share`.
@@ -208,7 +214,10 @@ pub enum AccountOp {
     /// the host is not a member (idempotence for legacy tenants
     /// without host membership and the orphan-group destroy path
     /// on a partially-created tenant).
-    RemoveHostFromShareGroup { name: String, host: String },
+    RemoveHostFromShareGroup {
+        name: TenantUserName,
+        host: HostUserName,
+    },
 }
 
 /// Profile-domain operations. The store-backed `~/.config/tenant/profiles/<name>.toml`
@@ -221,11 +230,11 @@ pub enum AccountOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileOp {
     /// Write the default profile content for `name`. Idempotent overwrite.
-    Create { name: String },
+    Create { name: TenantUserName },
 
     /// Remove the profile file. Idempotent: NotFound is success, mirroring
     /// the operator's mental model of `rm -f`.
-    Delete { name: String },
+    Delete { name: TenantUserName },
 }
 
 /// Firewall-domain operations. macOS implements per-tenant firewall rules
@@ -307,12 +316,12 @@ pub enum FirewallOp {
     /// `name` is the tenant name; the anchor file's full name
     /// (`tenant-<name>`) is constructed by `MacosExecutor` from it. `body`
     /// is the precomputed anchor content (from `firewall::render_anchor`).
-    InstallAnchor { name: String, body: String },
+    InstallAnchor { name: TenantUserName, body: String },
 
     /// Remove `/etc/pf.anchors/tenant-<name>`. Idempotent: NotFound is
     /// success on production, mirroring the operator's mental model of
     /// `rm -f`.
-    RemoveAnchor { name: String },
+    RemoveAnchor { name: TenantUserName },
 
     /// Copy `/etc/pf.conf` to `/etc/pf.conf.tenant-backup`. Fixed backup
     /// path (no timestamps) — deterministic recovery, overwritten each
@@ -343,7 +352,7 @@ pub enum FirewallOp {
     /// the same UID would silently inherit them. Symmetric counter to
     /// the create-side `InstallAnchor`. Idempotent: flushing an empty
     /// or unknown anchor is a noop on macOS.
-    FlushAnchor { name: String },
+    FlushAnchor { name: TenantUserName },
 
     /// `pfctl -e` — enable the firewall. Treated as idempotent at the
     /// substrate: "already enabled" stderr maps to `Ok(())`.
@@ -525,7 +534,7 @@ pub trait Executor {
     /// are incompatible with the non-interactive path. Stub records via
     /// `logins()`; production uses `Command::status` so the parent's stdio
     /// passes through.
-    fn login(&self, name: &str) -> Result<i32, AccountError>;
+    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError>;
 
     /// Run a single command as the tenant inside a login shell. Sibling
     /// carve-out to `login` — same stdio posture (inherit), same return
@@ -533,7 +542,7 @@ pub trait Executor {
     /// Used by `tenant shell <name> -- <cmd>`. `argv` must be non-empty;
     /// callers route empty argv to `login` before reaching this method.
     /// Stub records via `exec_calls()`; production uses `Command::status`.
-    fn exec_as_tenant(&self, name: &str, argv: &[String]) -> Result<i32, AccountError>;
+    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError>;
 
     fn describe_profile(&self, op: &ProfileOp) -> String;
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), ProfileError>;
@@ -543,7 +552,7 @@ pub trait Executor {
     /// doesn't fit `execute_profile`'s shape — same carve-out rationale
     /// as `login`. Called by the create-side firewall step to feed
     /// the anchor renderer.
-    fn read_profile(&self, name: &str) -> Result<String, ProfileError>;
+    fn read_profile(&self, name: &TenantUserName) -> Result<String, ProfileError>;
 
     /// Read the current `/etc/pf.conf` content. Used by the Writer to
     /// compute the post-edit conf via `firewall::ensure_anchor_ref` /
@@ -566,7 +575,11 @@ pub trait Executor {
     /// non-error variants). Carve-out method (same posture as the other
     /// probe-style carve-outs): return type isn't `Result<(), E>` so it
     /// doesn't fit `WritableOp`.
-    fn tenant_path_kind(&self, name: &str, path: &std::path::Path) -> Result<PathKind, ProbeError>;
+    fn tenant_path_kind(
+        &self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+    ) -> Result<PathKind, ProbeError>;
 
     /// Render an `AclOp` as an operator-facing `chmod +a/-a` line. The
     /// rendered ACL entry string (`"group:<g> allow <bits>"`) is the
@@ -596,7 +609,7 @@ pub trait Executor {
     /// rendering doesn't apply.
     fn probe_access_as_tenant(
         &self,
-        name: &str,
+        name: &TenantUserName,
         path: &std::path::Path,
         mode: AccessMode,
     ) -> Result<AccessOutcome, ProbeError>;
@@ -617,7 +630,7 @@ pub trait Executor {
     /// looks for `pass` + `block` lines (structural check, not
     /// line-by-line comparison). Reuses `FirewallError` because pfctl
     /// is the substrate. Carve-out: content return, not unit.
-    fn read_kernel_pf_rules(&self, name: &str) -> Result<String, FirewallError>;
+    fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError>;
 
     /// Read `/etc/pam.d/sudo` so doctor can check for an active
     /// `pam_tid.so` line (Touch-ID-for-sudo). The file is mode 0644
@@ -640,7 +653,7 @@ pub trait Executor {
     fn read_pf_status(&self) -> Result<String, FirewallError>;
 
     /// Read the on-disk per-tenant anchor file
-    /// (`firewall::tenant_anchor_path(name)`). Mode 0644 root-owned
+    /// (`firewall::tenant_anchor_path(name.as_str())`). Mode 0644 root-owned
     /// (the install flow sets this) — direct `fs::read_to_string`,
     /// no sudo. Reuses `HostFileError` (same shape and substrate
     /// posture as `read_pam_sudo`). Carve-out: content return, not
@@ -652,7 +665,7 @@ pub trait Executor {
     /// `read_kernel_pf_rules`'s "kernel" side — neither alone is
     /// sufficient, since the two can drift independently (operator
     /// hand-edit on the file, or a `pfctl -f` race on the kernel).
-    fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError>;
+    fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError>;
 
     /// Read the host-side ACL state on `path`. Substrate is `ls -lde
     /// <path>` from the operator process (no sudo — operator owns or
@@ -686,7 +699,7 @@ pub trait Executor {
     /// `RemoveHostFromShareGroup` to short-circuit the `-d` edit
     /// when the host isn't currently a member (substrate-side
     /// idempotence).
-    fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError>;
+    fn host_in_group(&self, host: &HostUserName, group: &str) -> Result<bool, AccountError>;
 }
 
 /// Top-level ADT wrapper for "any op, regardless of domain." Used by the
@@ -808,12 +821,12 @@ fn profile_business_label(op: &ProfileOp) -> String {
         ProfileOp::Create { name } => {
             format!(
                 "Profile written to {}",
-                crate::profile::display_path_for(name)
+                crate::profile::display_path_for(name.as_str())
             )
         }
         ProfileOp::Delete { name } => format!(
             "Profile removed at {}",
-            crate::profile::display_path_for(name)
+            crate::profile::display_path_for(name.as_str())
         ),
     }
 }
@@ -822,11 +835,11 @@ fn firewall_business_label(op: &FirewallOp) -> String {
     match op {
         FirewallOp::InstallAnchor { name, .. } => format!(
             "Firewall anchor installed at {}",
-            crate::firewall::tenant_anchor_path(name)
+            crate::firewall::tenant_anchor_path(name.as_str())
         ),
         FirewallOp::RemoveAnchor { name } => format!(
             "Firewall anchor removed at {}",
-            crate::firewall::tenant_anchor_path(name)
+            crate::firewall::tenant_anchor_path(name.as_str())
         ),
         FirewallOp::BackupConfig => {
             format!(
@@ -844,7 +857,7 @@ fn firewall_business_label(op: &FirewallOp) -> String {
         FirewallOp::Reload => "Firewall ruleset reloaded".to_string(),
         FirewallOp::FlushAnchor { name } => format!(
             "Kernel rules under anchor '{}' flushed",
-            crate::firewall::tenant_anchor_name(name)
+            crate::firewall::tenant_anchor_name(name.as_str())
         ),
         FirewallOp::Enable => "Firewall enabled host-wide".to_string(),
     }
@@ -913,11 +926,11 @@ fn profile_intent_label(op: &ProfileOp) -> String {
     match op {
         ProfileOp::Create { name } => format!(
             "Write profile config at {}",
-            crate::profile::display_path_for(name)
+            crate::profile::display_path_for(name.as_str())
         ),
         ProfileOp::Delete { name } => format!(
             "Remove profile config at {}",
-            crate::profile::display_path_for(name)
+            crate::profile::display_path_for(name.as_str())
         ),
     }
 }
@@ -926,11 +939,11 @@ fn firewall_intent_label(op: &FirewallOp) -> String {
     match op {
         FirewallOp::InstallAnchor { name, .. } => format!(
             "Install firewall anchor at {}",
-            crate::firewall::tenant_anchor_path(name)
+            crate::firewall::tenant_anchor_path(name.as_str())
         ),
         FirewallOp::RemoveAnchor { name } => format!(
             "Remove firewall anchor at {}",
-            crate::firewall::tenant_anchor_path(name)
+            crate::firewall::tenant_anchor_path(name.as_str())
         ),
         FirewallOp::BackupConfig => format!(
             "Back up {} to {}",
@@ -944,7 +957,7 @@ fn firewall_intent_label(op: &FirewallOp) -> String {
         FirewallOp::Reload => "Reload pf ruleset".to_string(),
         FirewallOp::FlushAnchor { name } => format!(
             "Flush kernel rules under anchor '{}'",
-            crate::firewall::tenant_anchor_name(name)
+            crate::firewall::tenant_anchor_name(name.as_str())
         ),
         FirewallOp::Enable => "Enable pf host-wide".to_string(),
     }
@@ -1093,13 +1106,11 @@ impl Executor for MacosExecutor {
         spawn_capturing(&argv)
     }
 
-    fn login(&self, name: &str) -> Result<i32, AccountError> {
+    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
         // Stdio inherits so sudo can prompt for the host password and the
         // launched login shell can drive the controlling terminal. Mirrors
         // the pre-refactor `Executor::exec_into`.
-        let argv = account_argv(&AccountOp::LoginAsUser {
-            name: name.to_string(),
-        });
+        let argv = account_argv(&AccountOp::LoginAsUser { name: name.clone() });
         let (program, rest) = argv
             .split_first()
             .ok_or_else(|| AccountError::Spawn(io::Error::other("argv is empty")))?;
@@ -1110,13 +1121,13 @@ impl Executor for MacosExecutor {
         Ok(status.code().unwrap_or(1))
     }
 
-    fn exec_as_tenant(&self, name: &str, argv: &[String]) -> Result<i32, AccountError> {
+    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
         // Same stdio + return-code posture as `login`. argv shape:
         // `sudo -iu <name> -- <argv...>`. The `--` separator is
         // load-bearing — without it, an argv[0] starting with `-`
         // would be interpreted as a sudo flag.
         let full = account_argv(&AccountOp::ExecAsUser {
-            name: name.to_string(),
+            name: name.clone(),
             argv: argv.to_vec(),
         });
         let (program, rest) = full
@@ -1136,12 +1147,12 @@ impl Executor for MacosExecutor {
                 // operator — there's no actual tee invocation, but the
                 // shape signals "a file landed here" and matches today's
                 // verbose-mode bytes exactly.
-                format!("tee {} < default.toml", display_path_for(name))
+                format!("tee {} < default.toml", display_path_for(name.as_str()))
             }
             ProfileOp::Delete { name } => {
                 // `rm -f` reflects the idempotent semantics — NotFound is
                 // success on both the production fs side and the stub.
-                format!("rm -f {}", display_path_for(name))
+                format!("rm -f {}", display_path_for(name.as_str()))
             }
         }
     }
@@ -1170,7 +1181,7 @@ impl Executor for MacosExecutor {
         }
     }
 
-    fn read_profile(&self, name: &str) -> Result<String, ProfileError> {
+    fn read_profile(&self, name: &TenantUserName) -> Result<String, ProfileError> {
         let path = profile_path(name)?;
         fs::read_to_string(&path).map_err(|e| ProfileError {
             message: e.to_string(),
@@ -1215,7 +1226,7 @@ impl Executor for MacosExecutor {
 
     fn probe_access_as_tenant(
         &self,
-        name: &str,
+        name: &TenantUserName,
         path: &std::path::Path,
         mode: AccessMode,
     ) -> Result<AccessOutcome, ProbeError> {
@@ -1237,7 +1248,7 @@ impl Executor for MacosExecutor {
         };
         let path_str = path.to_string_lossy().into_owned();
         let output = Command::new("sudo")
-            .args(["-n", "-u", name, "/bin/test", flag, &path_str])
+            .args(["-n", "-u", name.as_str(), "/bin/test", flag, &path_str])
             .output()
             .map_err(ProbeError::Spawn)?;
         match output.status.code() {
@@ -1307,7 +1318,7 @@ impl Executor for MacosExecutor {
     fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
         match op {
             FirewallOp::InstallAnchor { name, body } => {
-                write_privileged(&tenant_anchor_path(name), body)
+                write_privileged(&tenant_anchor_path(name.as_str()), body)
             }
             FirewallOp::RemoveAnchor { name } => {
                 // `sudo rm -f <path>` — idempotent on the macOS side
@@ -1317,7 +1328,7 @@ impl Executor for MacosExecutor {
                     "sudo".into(),
                     "rm".into(),
                     "-f".into(),
-                    tenant_anchor_path(name),
+                    tenant_anchor_path(name.as_str()),
                 ])
             }
             FirewallOp::BackupConfig => spawn_firewall(&[
@@ -1372,7 +1383,7 @@ impl Executor for MacosExecutor {
         }
     }
 
-    fn read_kernel_pf_rules(&self, name: &str) -> Result<String, FirewallError> {
+    fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError> {
         let output = Command::new("sudo")
             .args(["-n", "pfctl", "-a", &format!("tenant-{name}"), "-sr"])
             .output()
@@ -1416,19 +1427,23 @@ impl Executor for MacosExecutor {
         Ok(combined)
     }
 
-    fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError> {
+    fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
         // Mode 0644 root-owned — direct fs read, no sudo. Same
         // substrate posture as `read_pam_sudo`. Path centralized via
         // `firewall::tenant_anchor_path` so a future anchor-dir move
         // flows through here without inline edits.
-        let path = crate::firewall::tenant_anchor_path(name);
+        let path = crate::firewall::tenant_anchor_path(name.as_str());
         fs::read_to_string(&path).map_err(|e| HostFileError::Fs {
             path,
             message: e.to_string(),
         })
     }
 
-    fn tenant_path_kind(&self, name: &str, path: &std::path::Path) -> Result<PathKind, ProbeError> {
+    fn tenant_path_kind(
+        &self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+    ) -> Result<PathKind, ProbeError> {
         // Probes:
         //   `sudo -n -u <name> /bin/test -L <path>` → exit 0 = symlink
         //   On symlink-hit: `sudo -n -u <name> /usr/bin/readlink <path>`
@@ -1449,13 +1464,13 @@ impl Executor for MacosExecutor {
         // answer is per-utility.
         let path_str = path.to_string_lossy().into_owned();
         let symlink_out = Command::new("sudo")
-            .args(["-n", "-u", name, "/bin/test", "-L", &path_str])
+            .args(["-n", "-u", name.as_str(), "/bin/test", "-L", &path_str])
             .output()
             .map_err(ProbeError::Spawn)?;
         if let Some(code) = symlink_out.status.code() {
             if code == 0 {
                 let readlink_out = Command::new("sudo")
-                    .args(["-n", "-u", name, "/usr/bin/readlink", &path_str])
+                    .args(["-n", "-u", name.as_str(), "/usr/bin/readlink", &path_str])
                     .output()
                     .map_err(ProbeError::Spawn)?;
                 match readlink_out.status.code() {
@@ -1493,7 +1508,7 @@ impl Executor for MacosExecutor {
             });
         }
         let exists_out = Command::new("sudo")
-            .args(["-n", "-u", name, "/bin/test", "-e", &path_str])
+            .args(["-n", "-u", name.as_str(), "/bin/test", "-e", &path_str])
             .output()
             .map_err(ProbeError::Spawn)?;
         match exists_out.status.code() {
@@ -1595,7 +1610,7 @@ impl Executor for MacosExecutor {
         Ok(())
     }
 
-    fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError> {
+    fn host_in_group(&self, host: &HostUserName, group: &str) -> Result<bool, AccountError> {
         // Read-only directory-service membership probe. Exit 0 ⇒ member;
         // any non-zero exit (host absent from group, group absent) ⇒
         // false. Machinery failure (dseditgroup not on PATH, fork
@@ -1604,7 +1619,7 @@ impl Executor for MacosExecutor {
         // contract treats any non-zero as "not a member" so the
         // substrate isn't tied to the tool's exact stderr wording.
         let output = Command::new("dseditgroup")
-            .args(["-o", "checkmember", "-m", host, group])
+            .args(["-o", "checkmember", "-m", host.as_str(), group])
             .output()
             .map_err(AccountError::Spawn)?;
         Ok(output.status.success())
@@ -1691,7 +1706,7 @@ fn spawn_firewall(argv: &[String]) -> Result<(), FirewallError> {
 
 /// Extract the tenant name from any `ProfileOp` variant. Centralizes the
 /// pattern-match so future variants (e.g. a `Read` op) just slot in.
-fn op_name(op: &ProfileOp) -> &str {
+fn op_name(op: &ProfileOp) -> &TenantUserName {
     match op {
         ProfileOp::Create { name } | ProfileOp::Delete { name } => name,
     }
@@ -1701,7 +1716,7 @@ fn op_name(op: &ProfileOp) -> &str {
 /// `$HOME/.config/tenant/profiles/<name>.toml`. The display form (with a
 /// literal `~`) lives in `profile::display_path_for`; the absolute form
 /// is what the fs ops need.
-fn profile_path(name: &str) -> Result<PathBuf, ProfileError> {
+fn profile_path(name: &TenantUserName) -> Result<PathBuf, ProfileError> {
     let home = env::var("HOME").map_err(|_| ProfileError {
         message: "HOME environment variable is not set".to_string(),
     })?;
@@ -1743,7 +1758,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             "sudo".into(),
             "sysadminctl".into(),
             "-addUser".into(),
-            name.clone(),
+            name.0.clone(),
             "-fullName".into(),
             format!("Tenant: {name}"),
             "-shell".into(),
@@ -1757,7 +1772,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             "sudo".into(),
             "sysadminctl".into(),
             "-deleteUser".into(),
-            name.clone(),
+            name.0.clone(),
         ],
         AccountOp::LookupUserRecord { name } => vec![
             "dscl".into(),
@@ -1773,13 +1788,13 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             format!("/Users/{name}"),
         ],
         AccountOp::LoginAsUser { name } => {
-            vec!["sudo".into(), "-iu".into(), name.clone()]
+            vec!["sudo".into(), "-iu".into(), name.0.clone()]
         }
         AccountOp::ExecAsUser { name, argv } => {
             // sudo -iu <name> -- <argv...>. Each argv element passes
             // through as a separate process-argv entry; shell
             // metacharacters inside a single element survive intact.
-            let mut full = vec!["sudo".into(), "-iu".into(), name.clone(), "--".into()];
+            let mut full = vec!["sudo".into(), "-iu".into(), name.0.clone(), "--".into()];
             full.extend(argv.iter().cloned());
             full
         }
@@ -1787,7 +1802,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             "sudo".into(),
             "-n".into(),
             "-u".into(),
-            name.clone(),
+            name.0.clone(),
             "/bin/mkdir".into(),
             "-p".into(),
             path.display().to_string(),
@@ -1796,7 +1811,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             "sudo".into(),
             "-n".into(),
             "-u".into(),
-            name.clone(),
+            name.0.clone(),
             "/bin/ln".into(),
             "-sfn".into(),
             target.display().to_string(),
@@ -1810,7 +1825,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             "-n".into(),
             ".".into(),
             "-a".into(),
-            host.clone(),
+            host.0.clone(),
             "-t".into(),
             "user".into(),
             format!("{name}-tenant-share"),
@@ -1823,7 +1838,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             "-n".into(),
             ".".into(),
             "-d".into(),
-            host.clone(),
+            host.0.clone(),
             "-t".into(),
             "user".into(),
             format!("{name}-tenant-share"),
@@ -1869,10 +1884,14 @@ impl Executor for DryRunExecutor {
     fn execute_account(&self, _op: &AccountOp) -> Result<(), AccountError> {
         Ok(())
     }
-    fn login(&self, _name: &str) -> Result<i32, AccountError> {
+    fn login(&self, _name: &TenantUserName) -> Result<i32, AccountError> {
         Ok(0)
     }
-    fn exec_as_tenant(&self, _name: &str, _argv: &[String]) -> Result<i32, AccountError> {
+    fn exec_as_tenant(
+        &self,
+        _name: &TenantUserName,
+        _argv: &[String],
+    ) -> Result<i32, AccountError> {
         Ok(0)
     }
     fn describe_profile(&self, op: &ProfileOp) -> String {
@@ -1887,7 +1906,7 @@ impl Executor for DryRunExecutor {
     /// the scaffolded default", so the dry-run read returns exactly that.
     /// No verb reads the profile outside the create flow, so this default
     /// covers every dry-run path that hits `read_profile`.
-    fn read_profile(&self, _name: &str) -> Result<String, ProfileError> {
+    fn read_profile(&self, _name: &TenantUserName) -> Result<String, ProfileError> {
         Ok(default_profile_toml())
     }
     /// Dry-run reads return an empty pf.conf — the plan focuses on what
@@ -1910,7 +1929,7 @@ impl Executor for DryRunExecutor {
     /// rather than fabricating a misleading Allowed/Denied answer.
     fn probe_access_as_tenant(
         &self,
-        _name: &str,
+        _name: &TenantUserName,
         _path: &std::path::Path,
         _mode: AccessMode,
     ) -> Result<AccessOutcome, ProbeError> {
@@ -1930,7 +1949,7 @@ impl Executor for DryRunExecutor {
     /// preview doesn't fire spurious `PfRuleDrift` findings. Same
     /// posture as `read_env_policy`: the plan is about what tenant
     /// WOULD do, not about flagging unrelated host state.
-    fn read_kernel_pf_rules(&self, _name: &str) -> Result<String, FirewallError> {
+    fn read_kernel_pf_rules(&self, _name: &TenantUserName) -> Result<String, FirewallError> {
         Ok(
             "block return inet from any to any\npass inet from 192.0.2.1 to <allowed> keep state\n"
                 .to_string(),
@@ -1959,8 +1978,8 @@ impl Executor for DryRunExecutor {
     /// is exactly `render_anchor(name, &[])`. Same posture as the
     /// other read_* carve-outs: avoid actionable warnings in the
     /// would-do preview.
-    fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError> {
-        Ok(crate::firewall::render_anchor(name, &[]))
+    fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
+        Ok(crate::firewall::render_anchor(name.as_str(), &[]))
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
@@ -1977,7 +1996,7 @@ impl Executor for DryRunExecutor {
     /// the real run might encounter on different host state.
     fn tenant_path_kind(
         &self,
-        _name: &str,
+        _name: &TenantUserName,
         _path: &std::path::Path,
     ) -> Result<PathKind, ProbeError> {
         Ok(PathKind::Absent)
@@ -1997,7 +2016,7 @@ impl Executor for DryRunExecutor {
     /// doctor's `HostNotInShareGroup` finding — same "no actionable
     /// warnings in dry-run" posture as `read_host_acl` and
     /// `tenant_path_kind`.
-    fn host_in_group(&self, _host: &str, _group: &str) -> Result<bool, AccountError> {
+    fn host_in_group(&self, _host: &HostUserName, _group: &str) -> Result<bool, AccountError> {
         Ok(true)
     }
 }
@@ -2598,12 +2617,12 @@ impl Executor for StubExecutor {
         Ok(())
     }
 
-    fn login(&self, name: &str) -> Result<i32, AccountError> {
+    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
         self.logins.borrow_mut().push(name.to_string());
         Ok(self.login_exit_code.get())
     }
 
-    fn exec_as_tenant(&self, name: &str, argv: &[String]) -> Result<i32, AccountError> {
+    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
         self.exec_calls
             .borrow_mut()
             .push((name.to_string(), argv.to_vec()));
@@ -2631,22 +2650,22 @@ impl Executor for StubExecutor {
                 let content = self
                     .create_profile_overrides
                     .borrow()
-                    .get(name)
+                    .get(name.as_str())
                     .cloned()
                     .unwrap_or_else(default_profile_toml);
                 self.profile_state
                     .borrow_mut()
-                    .insert(name.clone(), content);
+                    .insert(name.0.clone(), content);
             }
             ProfileOp::Delete { name } => {
-                self.profile_state.borrow_mut().remove(name);
+                self.profile_state.borrow_mut().remove(name.as_str());
             }
         }
         Ok(())
     }
 
-    fn read_profile(&self, name: &str) -> Result<String, ProfileError> {
-        match self.profile_state.borrow().get(name) {
+    fn read_profile(&self, name: &TenantUserName) -> Result<String, ProfileError> {
+        match self.profile_state.borrow().get(name.as_str()) {
             Some(content) => Ok(content.clone()),
             None => Err(ProfileError {
                 message: format!("profile '{name}' not found"),
@@ -2678,20 +2697,20 @@ impl Executor for StubExecutor {
 
     fn probe_access_as_tenant(
         &self,
-        name: &str,
+        name: &TenantUserName,
         path: &std::path::Path,
         mode: AccessMode,
     ) -> Result<AccessOutcome, ProbeError> {
         self.probes
             .borrow_mut()
-            .push((name.to_string(), path.to_path_buf(), mode));
+            .push((name.0.clone(), path.to_path_buf(), mode));
         if let Some(err) = self.probe_failure.borrow_mut().take() {
             return Err(err);
         }
         let outcome = self
             .probe_outcomes
             .borrow()
-            .get(&(name.to_string(), path.to_path_buf(), mode))
+            .get(&(name.0.clone(), path.to_path_buf(), mode))
             .copied()
             .unwrap_or(AccessOutcome::Denied);
         Ok(outcome)
@@ -2704,11 +2723,11 @@ impl Executor for StubExecutor {
         Ok(self.env_policy_content.borrow().clone())
     }
 
-    fn read_kernel_pf_rules(&self, name: &str) -> Result<String, FirewallError> {
+    fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError> {
         if let Some(err) = self.kernel_pf_rules_failure.borrow_mut().take() {
             return Err(err);
         }
-        match self.kernel_pf_rules.borrow().get(name) {
+        match self.kernel_pf_rules.borrow().get(name.as_str()) {
             Some(content) => Ok(content.clone()),
             // Default to a "happy" rules string (both `pass` + `block`
             // present) so tests that don't care about PF-drift don't
@@ -2734,25 +2753,25 @@ impl Executor for StubExecutor {
         Ok(self.pf_status_content.borrow().clone())
     }
 
-    fn read_anchor_body(&self, name: &str) -> Result<String, HostFileError> {
+    fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
         if let Some(err) = self.anchor_body_failure.borrow_mut().take() {
             return Err(err);
         }
-        if let Some(content) = self.anchor_body_state.borrow().get(name) {
+        if let Some(content) = self.anchor_body_state.borrow().get(name.as_str()) {
             return Ok(content.clone());
         }
         // Default: render from the profile state if present, else
         // empty-allowlist render. Both shapes match what doctor would
         // compute as "expected" so tests that don't care about
         // anchor-body drift don't see spurious findings.
-        let hosts: Vec<String> = match self.profile_state.borrow().get(name) {
+        let hosts: Vec<String> = match self.profile_state.borrow().get(name.as_str()) {
             Some(toml) => match crate::profile::parse(toml) {
                 Ok(profile) => profile.allowlist.runtime.hosts.clone(),
                 Err(_) => Vec::new(),
             },
             None => Vec::new(),
         };
-        Ok(crate::firewall::render_anchor(name, &hosts))
+        Ok(crate::firewall::render_anchor(name.as_str(), &hosts))
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
@@ -2773,14 +2792,18 @@ impl Executor for StubExecutor {
         Ok(())
     }
 
-    fn tenant_path_kind(&self, name: &str, path: &std::path::Path) -> Result<PathKind, ProbeError> {
+    fn tenant_path_kind(
+        &self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+    ) -> Result<PathKind, ProbeError> {
         if let Some(err) = self.tenant_path_kind_failure.borrow_mut().take() {
             return Err(err);
         }
         if let Some(kind) = self
             .tenant_path_kinds
             .borrow()
-            .get(&(name.to_string(), path.to_path_buf()))
+            .get(&(name.0.clone(), path.to_path_buf()))
             .cloned()
         {
             return Ok(kind);
@@ -2790,11 +2813,12 @@ impl Executor for StubExecutor {
         // doctor-passing state where shares are already reapplied.
         // Otherwise Absent (the unprovisioned-path case the substrate
         // freely installs into).
-        if let Some(toml) = self.profile_state.borrow().get(name)
+        if let Some(toml) = self.profile_state.borrow().get(name.as_str())
             && let Ok(profile) = crate::profile::parse(toml)
         {
             for share in &profile.shares {
-                let expanded = crate::profile::expand_tenant_path(name, &share.tenant_path);
+                let expanded =
+                    crate::profile::expand_tenant_path(name.as_str(), &share.tenant_path);
                 if expanded == path {
                     return Ok(PathKind::Symlink(share.host_path.clone()));
                 }
@@ -2825,7 +2849,7 @@ impl Executor for StubExecutor {
         Ok(listing)
     }
 
-    fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError> {
+    fn host_in_group(&self, host: &HostUserName, group: &str) -> Result<bool, AccountError> {
         self.host_in_group_invocations
             .borrow_mut()
             .push((host.to_string(), group.to_string()));

@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use tenant::accounts::MacosReader;
 use tenant::executor::MacosExecutor;
+use tenant::ids::HostUserName;
 
 fn main() -> ExitCode {
     let accounts = match MacosReader::new() {
@@ -22,9 +23,11 @@ fn main() -> ExitCode {
     // `/Users/root/*`. Final fallback is a placeholder so a missing-
     // env edge case surfaces as "the path probes look weird" rather
     // than a hard crash.
-    let host = std::env::var("SUDO_USER")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "operator".to_string());
+    let host = HostUserName(
+        std::env::var("SUDO_USER")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "operator".to_string()),
+    );
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     let stdin_handle = io::stdin();
@@ -36,6 +39,7 @@ fn main() -> ExitCode {
         &accounts,
         &executor,
         &host,
+        // (HostUserName) borrowed from the owned wrap above.
         &mut stdout,
         &mut stderr,
         &mut stdin,

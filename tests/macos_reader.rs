@@ -8,7 +8,7 @@
 #[cfg(target_os = "macos")]
 use tenant::accounts::Reader;
 #[cfg(target_os = "macos")]
-use tenant::ids::UserId;
+use tenant::ids::{TenantUserName, UserId};
 
 #[cfg(target_os = "macos")]
 #[test]
@@ -25,7 +25,7 @@ fn macos_reader_observes_host_state() {
     // path is already extensively covered via StubReader.
     let reader = tenant::accounts::MacosReader::new().expect("dscl should be available on macOS");
     assert!(
-        reader.has_user("root"),
+        reader.has_user(&TenantUserName::from("root")),
         "MacosReader should see 'root' user"
     );
     assert!(
@@ -33,7 +33,7 @@ fn macos_reader_observes_host_state() {
         "MacosReader should see 'wheel' group"
     );
     assert_eq!(
-        reader.uid_for("root"),
+        reader.uid_for(&TenantUserName::from("root")),
         Some(UserId(0)),
         "root's UID should be 0 in the in-memory map"
     );

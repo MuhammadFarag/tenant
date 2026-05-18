@@ -23,6 +23,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::executor::{AccessMode, AccessOutcome};
+use crate::ids::{HostUserName, TenantUserName};
 
 /// Severity tier of a finding. Order is load-bearing: `--strict` exit
 /// code logic consumes `findings.iter().map(severity).max()` to decide
@@ -157,7 +158,7 @@ pub enum Category {
 pub enum Finding {
     FilesystemExposure {
         severity: Severity,
-        tenant: String,
+        tenant: TenantUserName,
         path: PathBuf,
         access: AccessMode,
     },
@@ -165,21 +166,21 @@ pub enum Finding {
         var: String,
     },
     PfRuleDrift {
-        tenant: String,
+        tenant: TenantUserName,
         detail: &'static str,
     },
     TouchIdMissing,
     PfDisabled,
     AnchorBodyDrift {
-        tenant: String,
+        tenant: TenantUserName,
     },
     AclDrift {
-        tenant: String,
+        tenant: TenantUserName,
         host_path: PathBuf,
         group: String,
     },
     SymlinkDrift {
-        tenant: String,
+        tenant: TenantUserName,
         tenant_path: PathBuf,
         expected_target: PathBuf,
         actual: SymlinkActual,
@@ -191,8 +192,8 @@ pub enum Finding {
     /// `dseditgroup -o edit -d`. Warning-tier; recovery is `tenant
     /// reload <name>` (the substrate's catch-up path re-adds the host).
     HostNotInShareGroup {
-        tenant: String,
-        host: String,
+        tenant: TenantUserName,
+        host: HostUserName,
         group: String,
     },
 }
@@ -987,13 +988,13 @@ pub fn pf_rule_presence_check(rules: &str, tenant: &str) -> Vec<Finding> {
     }
     if !has_pass {
         out.push(Finding::PfRuleDrift {
-            tenant: tenant.to_string(),
+            tenant: TenantUserName(tenant.to_string()),
             detail: "no `pass` rule in kernel anchor",
         });
     }
     if !has_block {
         out.push(Finding::PfRuleDrift {
-            tenant: tenant.to_string(),
+            tenant: TenantUserName(tenant.to_string()),
             detail: "no `block` rule in kernel anchor",
         });
     }

@@ -15,7 +15,7 @@ use crate::executor::{
     HostFileError, Op, PathKind, ProbeError, ProfileOp, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
-use crate::ids::{GroupId, UserId};
+use crate::ids::{GroupId, HostUserName, TenantUserName, UserId};
 use crate::profile::{
     Profile, ProfileError, ShareMode, display_path_for, expand_tenant_path, parse,
 };
@@ -27,7 +27,7 @@ pub trait Reader {
     /// GID independently — they may converge at the floor in fresh hosts
     /// but diverge as tenants come and go. Feeds `GidAllocator`.
     fn used_gids(&self) -> Vec<GroupId>;
-    fn has_user(&self, name: &str) -> bool;
+    fn has_user(&self, name: &TenantUserName) -> bool;
     fn has_group(&self, name: &str) -> bool;
     /// Returns the positive UID for `name`, or `None` if either (a) the
     /// account doesn't exist, or (b) the account exists with a non-positive
@@ -36,14 +36,14 @@ pub trait Reader {
     /// must consult `has_user` separately — `destroy_eligibility` is the
     /// canonical example: a `(has_user: true, uid_for: None)` pair is a
     /// system account, classified `Eligibility::SystemAccount`.
-    fn uid_for(&self, name: &str) -> Option<UserId>;
+    fn uid_for(&self, name: &TenantUserName) -> Option<UserId>;
     /// All account names with a tenant-range UID (>= `TENANT_UID_FLOOR`).
     /// Order is alphabetical for stable downstream behavior — doctor's
     /// all-tenants walk iterates this list and emits findings in the
     /// same order across runs, so an operator's diff between two
     /// `tenant doctor` invocations stays meaningful. System accounts
     /// and below-floor accounts are excluded.
-    fn tenant_names(&self) -> Vec<String>;
+    fn tenant_names(&self) -> Vec<TenantUserName>;
 }
 
 #[derive(Default)]
@@ -63,24 +63,24 @@ impl Reader for StubReader {
         self.gid_by_name.values().copied().collect()
     }
 
-    fn has_user(&self, name: &str) -> bool {
-        self.users.iter().any(|u| u == name)
+    fn has_user(&self, name: &TenantUserName) -> bool {
+        self.users.iter().any(|u| u == name.as_str())
     }
 
     fn has_group(&self, name: &str) -> bool {
         self.groups.iter().any(|g| g == name)
     }
 
-    fn uid_for(&self, name: &str) -> Option<UserId> {
-        self.uid_by_name.get(name).copied()
+    fn uid_for(&self, name: &TenantUserName) -> Option<UserId> {
+        self.uid_by_name.get(name.as_str()).copied()
     }
 
-    fn tenant_names(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
+    fn tenant_names(&self) -> Vec<TenantUserName> {
+        let mut out: Vec<TenantUserName> = self
             .uid_by_name
             .iter()
             .filter(|(_, uid)| uid.0 >= TENANT_UID_FLOOR)
-            .map(|(name, _)| name.clone())
+            .map(|(name, _)| TenantUserName(name.clone()))
             .collect();
         out.sort();
         out
@@ -147,8 +147,8 @@ pub fn tenant_share_group_name(name: &str) -> String {
 /// because tenant no longer creates bare-name groups (the suffixed name is
 /// the only group identity Phase 3 owns) so a stray bare-name group on
 /// the host is no longer in conflict territory.
-pub fn check_conflict(reader: &dyn Reader, name: &str) -> Result<(), ConflictError> {
-    let group = tenant_share_group_name(name);
+pub fn check_conflict(reader: &dyn Reader, name: &TenantUserName) -> Result<(), ConflictError> {
+    let group = tenant_share_group_name(name.as_str());
     match (reader.has_user(name), reader.has_group(&group)) {
         (false, false) => Ok(()),
         (true, false) => Err(ConflictError::UserExists),
@@ -193,9 +193,9 @@ pub enum Eligibility {
 /// When the user is absent, the suffixed group's presence determines
 /// whether destroy converges through the `OrphanGroup` path or is a true
 /// `NotPresent` noop.
-pub fn destroy_eligibility(reader: &dyn Reader, name: &str) -> Eligibility {
+pub fn destroy_eligibility(reader: &dyn Reader, name: &TenantUserName) -> Eligibility {
     if !reader.has_user(name) {
-        if reader.has_group(&tenant_share_group_name(name)) {
+        if reader.has_group(&tenant_share_group_name(name.as_str())) {
             return Eligibility::OrphanGroup;
         }
         return Eligibility::NotPresent;
@@ -285,24 +285,24 @@ impl Reader for MacosReader {
         self.gid_by_name.values().copied().collect()
     }
 
-    fn has_user(&self, name: &str) -> bool {
-        self.users.contains(name)
+    fn has_user(&self, name: &TenantUserName) -> bool {
+        self.users.contains(name.as_str())
     }
 
     fn has_group(&self, name: &str) -> bool {
         self.groups.contains(name)
     }
 
-    fn uid_for(&self, name: &str) -> Option<UserId> {
-        self.uid_by_name.get(name).copied()
+    fn uid_for(&self, name: &TenantUserName) -> Option<UserId> {
+        self.uid_by_name.get(name.as_str()).copied()
     }
 
-    fn tenant_names(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
+    fn tenant_names(&self) -> Vec<TenantUserName> {
+        let mut out: Vec<TenantUserName> = self
             .uid_by_name
             .iter()
             .filter(|(_, uid)| uid.0 >= TENANT_UID_FLOOR)
-            .map(|(name, _)| name.clone())
+            .map(|(name, _)| TenantUserName(name.clone()))
             .collect();
         out.sort();
         out
@@ -617,8 +617,8 @@ impl<'a> Writer<'a> {
 
     pub(crate) fn create_tenant(
         &self,
-        name: &str,
-        host: &str,
+        name: &TenantUserName,
+        host: &HostUserName,
         uid: UserId,
         gid: GroupId,
         reporter: &mut Reporter,
@@ -693,13 +693,13 @@ impl<'a> Writer<'a> {
                 // the firewall step from the operator's POV.
                 let profile_content = self.executor.read_profile(name).map_err(|e| {
                     CreateError::Firewall(FirewallError::Fs {
-                        path: display_path_for(name),
+                        path: display_path_for(name.as_str()),
                         message: format!("read failed: {e}"),
                     })
                 })?;
                 let parsed_profile = parse(&profile_content).map_err(|e| {
                     CreateError::Firewall(FirewallError::Fs {
-                        path: display_path_for(name),
+                        path: display_path_for(name.as_str()),
                         message: format!("parse failed: {e}"),
                     })
                 })?;
@@ -709,10 +709,10 @@ impl<'a> Writer<'a> {
                     .map_err(CreateError::Firewall)?;
                 let install_anchor = FirewallOp::InstallAnchor {
                     name: name.into(),
-                    body: render_anchor(name, &parsed_profile.allowlist.runtime.hosts),
+                    body: render_anchor(name.as_str(), &parsed_profile.allowlist.runtime.hosts),
                 };
                 let update_conf = FirewallOp::UpdateConfig {
-                    content: ensure_anchor_ref(&pf_conf_current, name),
+                    content: ensure_anchor_ref(&pf_conf_current, name.as_str()),
                 };
                 // Firewall normal flow.
                 self.run(&backup, reporter).map_err(CreateError::Firewall)?;
@@ -781,8 +781,8 @@ impl<'a> Writer<'a> {
 
     pub(crate) fn destroy_tenant(
         &self,
-        name: &str,
-        host: &str,
+        name: &TenantUserName,
+        host: &HostUserName,
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
         // Ten-step composition:
@@ -852,7 +852,7 @@ impl<'a> Writer<'a> {
             .read_pf_conf()
             .map_err(DestroyError::Firewall)?;
         let update_conf = FirewallOp::UpdateConfig {
-            content: remove_anchor_ref(&pf_conf_current, name),
+            content: remove_anchor_ref(&pf_conf_current, name.as_str()),
         };
         self.run(&backup, reporter)
             .map_err(DestroyError::Firewall)?;
@@ -879,8 +879,8 @@ impl<'a> Writer<'a> {
     /// convergence path.
     pub(crate) fn destroy_orphan_group(
         &self,
-        name: &str,
-        host: &str,
+        name: &TenantUserName,
+        host: &HostUserName,
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
         // Seven-step convergence path: DeleteShareGroup + ProfileOp::Delete
@@ -918,7 +918,7 @@ impl<'a> Writer<'a> {
             .read_pf_conf()
             .map_err(DestroyError::Firewall)?;
         let update_conf = FirewallOp::UpdateConfig {
-            content: remove_anchor_ref(&pf_conf_current, name),
+            content: remove_anchor_ref(&pf_conf_current, name.as_str()),
         };
         self.run(&backup, reporter)
             .map_err(DestroyError::Firewall)?;
@@ -963,7 +963,7 @@ impl<'a> Writer<'a> {
     /// parameter rather than building it internally.
     pub(crate) fn apply_tenant_mode(
         &self,
-        name: &str,
+        name: &TenantUserName,
         level: ModeLevel,
         plan: &ReapplyPlan,
         reporter: &mut Reporter,
@@ -988,8 +988,8 @@ impl<'a> Writer<'a> {
     /// then execute the same ops — plan/echo asymmetry-free.
     pub(crate) fn build_reapply_plan(
         &self,
-        name: &str,
-        host: &str,
+        name: &TenantUserName,
+        host: &HostUserName,
         level: ModeLevel,
     ) -> Result<ReapplyPlan, ModeError> {
         let profile_content = self
@@ -1000,7 +1000,7 @@ impl<'a> Writer<'a> {
         let hosts = hosts_for_level(&parsed_profile, level);
         let install_anchor = FirewallOp::InstallAnchor {
             name: name.into(),
-            body: render_anchor(name, &hosts),
+            body: render_anchor(name.as_str(), &hosts),
         };
         let reload = FirewallOp::Reload;
         let add_host = AccountOp::AddHostToShareGroup {
@@ -1026,13 +1026,13 @@ impl<'a> Writer<'a> {
     /// plan over the constructed ops first.
     fn build_share_ops(
         &self,
-        name: &str,
+        name: &TenantUserName,
         parsed_profile: &Profile,
     ) -> Result<Vec<ShareOps>, ModeError> {
         if parsed_profile.shares.is_empty() {
             return Ok(Vec::new());
         }
-        let group = tenant_share_group_name(name);
+        let group = tenant_share_group_name(name.as_str());
         let home_dir = PathBuf::from(format!("/Users/{name}"));
         let mut out = Vec::with_capacity(parsed_profile.shares.len());
         for share in &parsed_profile.shares {
@@ -1042,7 +1042,7 @@ impl<'a> Writer<'a> {
                     path: share.host_path.clone(),
                 }));
             }
-            let tenant_path = expand_tenant_path(name, &share.tenant_path);
+            let tenant_path = expand_tenant_path(name.as_str(), &share.tenant_path);
             // Q12: tenant_path must be absent or an existing symlink.
             let kind = self
                 .executor
@@ -1117,7 +1117,7 @@ impl<'a> Writer<'a> {
     /// create-time firewall sequence.
     fn reapply_shares_post_provision(
         &self,
-        name: &str,
+        name: &TenantUserName,
         parsed_profile: &Profile,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
@@ -1169,8 +1169,8 @@ impl<'a> Writer<'a> {
     /// redundant and at worst land in a different terminal context.
     pub(crate) fn shell_into_tenant(
         &self,
-        name: &str,
-        host: &str,
+        name: &TenantUserName,
+        host: &HostUserName,
         argv: &[String],
         mode: ModeLevel,
         reporter: &mut Reporter,
@@ -1187,8 +1187,8 @@ impl<'a> Writer<'a> {
     /// inherits stdio so the operator becomes the launched login shell.
     fn shell_interactive(
         &self,
-        name: &str,
-        host: &str,
+        name: &TenantUserName,
+        host: &HostUserName,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
         // Intent emitted BEFORE the narrow tries, so the operator
@@ -1235,8 +1235,8 @@ impl<'a> Writer<'a> {
     ///   and the narrow error (for the operator-facing ⚠ warning).
     fn shell_command(
         &self,
-        name: &str,
-        host: &str,
+        name: &TenantUserName,
+        host: &HostUserName,
         argv: &[String],
         mode: ModeLevel,
         reporter: &mut Reporter,
@@ -1317,7 +1317,7 @@ impl<'a> Writer<'a> {
     /// at the build site, not here.
     pub(crate) fn reload_tenant(
         &self,
-        name: &str,
+        name: &TenantUserName,
         plan: &ReapplyPlan,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
@@ -1336,7 +1336,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn reload_all_tenants(
         &self,
         accounts: &dyn Reader,
-        host: &str,
+        host: &HostUserName,
         reporter: &mut Reporter,
     ) -> ReloadAllOutcome {
         let names = accounts.tenant_names();
@@ -1398,9 +1398,9 @@ impl<'a> Writer<'a> {
     /// tenant-artifact probes).
     pub(crate) fn doctor_tenant(
         &self,
-        host: &str,
-        name: &str,
-        others: &[&str],
+        host: &HostUserName,
+        name: &TenantUserName,
+        others: &[&TenantUserName],
         reporter: &mut Reporter,
     ) -> Result<DoctorOutcome, DoctorError> {
         let mut findings: Vec<Finding> = Vec::new();
@@ -1431,7 +1431,7 @@ impl<'a> Writer<'a> {
     /// posture is fail-fast: any `DoctorError` aborts the walk.
     pub(crate) fn doctor_all_tenants(
         &self,
-        host: &str,
+        host: &HostUserName,
         accounts: &dyn Reader,
         reporter: &mut Reporter,
     ) -> Result<DoctorOutcome, DoctorError> {
@@ -1451,11 +1451,7 @@ impl<'a> Writer<'a> {
             return Ok(DoctorOutcome { findings });
         }
         for name in &tenants {
-            let others: Vec<&str> = tenants
-                .iter()
-                .filter(|n| *n != name)
-                .map(String::as_str)
-                .collect();
+            let others: Vec<&TenantUserName> = tenants.iter().filter(|n| *n != name).collect();
             findings.extend(self.probe_tenant_paths(host, name, &others, reporter)?);
         }
         Ok(DoctorOutcome { findings })
@@ -1520,12 +1516,13 @@ impl<'a> Writer<'a> {
     /// responsibility.
     fn probe_tenant_paths(
         &self,
-        host: &str,
-        name: &str,
-        others: &[&str],
+        host: &HostUserName,
+        name: &TenantUserName,
+        others: &[&TenantUserName],
         reporter: &mut Reporter,
     ) -> Result<Vec<Finding>, DoctorError> {
-        let curated = curated_paths(host, name, others);
+        let others_str: Vec<&str> = others.iter().map(|n| n.as_str()).collect();
+        let curated = curated_paths(host.as_str(), name.as_str(), &others_str);
         reporter.doctor_starting(name, &curated);
         let mut findings: Vec<Finding> = Vec::new();
         for (category, mode, path) in &curated {
@@ -1533,7 +1530,7 @@ impl<'a> Writer<'a> {
             if let Some(severity) = crate::doctor::classify(*category, outcome) {
                 let finding = Finding::FilesystemExposure {
                     severity,
-                    tenant: name.to_string(),
+                    tenant: name.clone(),
                     path: path.clone(),
                     access: *mode,
                 };
@@ -1542,7 +1539,7 @@ impl<'a> Writer<'a> {
             }
         }
         let rules = self.executor.read_kernel_pf_rules(name)?;
-        for drift in crate::doctor::pf_rule_presence_check(&rules, name) {
+        for drift in crate::doctor::pf_rule_presence_check(&rules, name.as_str()) {
             reporter.doctor_finding(&drift);
             findings.push(drift);
         }
@@ -1567,11 +1564,11 @@ impl<'a> Writer<'a> {
     /// route — same fail-fast posture as the other doctor checks.
     fn check_host_in_share_group(
         &self,
-        name: &str,
-        host: &str,
+        name: &TenantUserName,
+        host: &HostUserName,
         reporter: &mut Reporter,
     ) -> Result<Option<Finding>, DoctorError> {
-        let group = tenant_share_group_name(name);
+        let group = tenant_share_group_name(name.as_str());
         let is_member = self.executor.host_in_group(host, &group).map_err(|e| {
             DoctorError::Probe(ProbeError::NonZero {
                 code: -1,
@@ -1582,8 +1579,8 @@ impl<'a> Writer<'a> {
             return Ok(None);
         }
         let finding = Finding::HostNotInShareGroup {
-            tenant: name.to_string(),
-            host: host.to_string(),
+            tenant: name.clone(),
+            host: host.clone(),
             group,
         };
         reporter.doctor_finding(&finding);
@@ -1609,7 +1606,7 @@ impl<'a> Writer<'a> {
     /// the `DoctorOutcome`.
     fn check_share_drift(
         &self,
-        name: &str,
+        name: &TenantUserName,
         reporter: &mut Reporter,
     ) -> Result<Vec<Finding>, DoctorError> {
         let profile_content = match self.executor.read_profile(name) {
@@ -1620,7 +1617,7 @@ impl<'a> Writer<'a> {
             Ok(p) => p,
             Err(_) => return Ok(Vec::new()),
         };
-        let group = tenant_share_group_name(name);
+        let group = tenant_share_group_name(name.as_str());
         let mut findings: Vec<Finding> = Vec::new();
         for share in &parsed.shares {
             // AclDrift check: read host-side ACL listing and grep for
@@ -1628,7 +1625,7 @@ impl<'a> Writer<'a> {
             let listing = self.executor.read_host_acl(&share.host_path)?;
             if !has_group_acl_entry(&listing, &group) {
                 let finding = Finding::AclDrift {
-                    tenant: name.to_string(),
+                    tenant: name.clone(),
                     host_path: share.host_path.clone(),
                     group: group.clone(),
                 };
@@ -1639,7 +1636,7 @@ impl<'a> Writer<'a> {
             // against the declared host_path target. String-exact
             // comparison (no canonicalize) — the profile names the
             // operator's declared intent.
-            let tenant_path = expand_tenant_path(name, &share.tenant_path);
+            let tenant_path = expand_tenant_path(name.as_str(), &share.tenant_path);
             let kind = self.executor.tenant_path_kind(name, &tenant_path)?;
             let actual_opt = match kind {
                 PathKind::Absent => Some(SymlinkActual::Absent),
@@ -1654,7 +1651,7 @@ impl<'a> Writer<'a> {
             };
             if let Some(actual) = actual_opt {
                 let finding = Finding::SymlinkDrift {
-                    tenant: name.to_string(),
+                    tenant: name.clone(),
                     tenant_path,
                     expected_target: share.host_path.clone(),
                     actual,
@@ -1675,7 +1672,10 @@ impl<'a> Writer<'a> {
     /// is against the runtime tier only — install-tier widening
     /// outside a shell session IS drift, since `tenant shell <name>`
     /// auto-narrows on entry.
-    fn check_anchor_body_drift(&self, name: &str) -> Result<Option<Finding>, HostFileError> {
+    fn check_anchor_body_drift(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<Option<Finding>, HostFileError> {
         let profile_content = match self.executor.read_profile(name) {
             Ok(c) => c,
             Err(_) => return Ok(None),
@@ -1685,12 +1685,12 @@ impl<'a> Writer<'a> {
             Err(_) => return Ok(None),
         };
         let actual = self.executor.read_anchor_body(name)?;
-        let expected = render_anchor(name, &parsed.allowlist.runtime.hosts);
+        let expected = render_anchor(name.as_str(), &parsed.allowlist.runtime.hosts);
         if anchor_body_matches(&actual, &expected) {
             return Ok(None);
         }
         Ok(Some(Finding::AnchorBodyDrift {
-            tenant: name.to_string(),
+            tenant: name.clone(),
         }))
     }
 
@@ -1713,8 +1713,8 @@ impl<'a> Writer<'a> {
     /// upcoming confirm prompt to back out manually.
     pub(crate) fn pre_exec_doctor_summary(
         &self,
-        name: Option<&str>,
-        host: &str,
+        name: Option<&TenantUserName>,
+        host: &HostUserName,
         scope: DoctorScope,
         reporter: &mut Reporter,
     ) {
@@ -1767,7 +1767,7 @@ impl<'a> Writer<'a> {
             ) {
                 match self.executor.read_kernel_pf_rules(tenant) {
                     Ok(rules) => {
-                        for drift in pf_rule_presence_check(&rules, tenant) {
+                        for drift in pf_rule_presence_check(&rules, tenant.as_str()) {
                             record(drift);
                         }
                     }
@@ -1789,13 +1789,13 @@ impl<'a> Writer<'a> {
                 self.collect_share_drift(tenant, reporter, &mut record);
                 match self
                     .executor
-                    .host_in_group(host, &tenant_share_group_name(tenant))
+                    .host_in_group(host, &tenant_share_group_name(tenant.as_str()))
                 {
                     Ok(true) => {}
                     Ok(false) => record(Finding::HostNotInShareGroup {
-                        tenant: tenant.to_string(),
-                        host: host.to_string(),
-                        group: tenant_share_group_name(tenant),
+                        tenant: tenant.clone(),
+                        host: host.clone(),
+                        group: tenant_share_group_name(tenant.as_str()),
                     }),
                     Err(e) => {
                         // Re-use the doctor-failed stderr frame; the
@@ -1830,7 +1830,7 @@ impl<'a> Writer<'a> {
     /// frame and the walk continues.
     fn collect_share_drift<F: FnMut(Finding)>(
         &self,
-        name: &str,
+        name: &TenantUserName,
         reporter: &mut Reporter,
         record: &mut F,
     ) {
@@ -1842,13 +1842,13 @@ impl<'a> Writer<'a> {
             Ok(p) => p,
             Err(_) => return,
         };
-        let group = tenant_share_group_name(name);
+        let group = tenant_share_group_name(name.as_str());
         for share in &parsed.shares {
             match self.executor.read_host_acl(&share.host_path) {
                 Ok(listing) => {
                     if !has_group_acl_entry(&listing, &group) {
                         record(Finding::AclDrift {
-                            tenant: name.to_string(),
+                            tenant: name.clone(),
                             host_path: share.host_path.clone(),
                             group: group.clone(),
                         });
@@ -1859,7 +1859,7 @@ impl<'a> Writer<'a> {
                     continue;
                 }
             }
-            let tenant_path = expand_tenant_path(name, &share.tenant_path);
+            let tenant_path = expand_tenant_path(name.as_str(), &share.tenant_path);
             match self.executor.tenant_path_kind(name, &tenant_path) {
                 Ok(kind) => {
                     let actual_opt = match kind {
@@ -1875,7 +1875,7 @@ impl<'a> Writer<'a> {
                     };
                     if let Some(actual) = actual_opt {
                         record(Finding::SymlinkDrift {
-                            tenant: name.to_string(),
+                            tenant: name.clone(),
                             tenant_path,
                             expected_target: share.host_path.clone(),
                             actual,
@@ -1985,7 +1985,8 @@ fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<String> {
 /// (no Reader call needed). `len` is byte length, which equals character
 /// length for valid input since the charset is ASCII; non-ASCII input
 /// trips `InvalidCharacter` after the length check.
-pub fn validate_name(name: &str) -> Result<(), NameError> {
+pub fn validate_name(name: &TenantUserName) -> Result<(), NameError> {
+    let name = name.as_str();
     let len = name.len();
     if len == 0 {
         return Err(NameError::Empty);

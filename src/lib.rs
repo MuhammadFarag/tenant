@@ -3,6 +3,8 @@ use std::io::{BufRead, Write};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::ids::{HostUserName, TenantUserName};
+
 pub mod accounts;
 pub mod allocation;
 pub mod ansi;
@@ -38,10 +40,10 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Verb {
     Create {
-        name: String,
+        name: TenantUserName,
     },
     Destroy {
-        name: String,
+        name: TenantUserName,
     },
     /// Enter the tenant context. Two forms gated on argv presence:
     ///
@@ -66,7 +68,7 @@ pub(crate) enum Verb {
     /// is POSIX-canonical and matches `sudo` / `kubectl exec` /
     /// `docker exec`.
     Shell {
-        name: String,
+        name: TenantUserName,
         /// Firewall tier for the command-form reapply. `install` widens
         /// for the call; runtime narrow always fires on completion.
         /// Requires `-- <cmd>` — clap rejects `--mode` without argv.
@@ -84,7 +86,7 @@ pub(crate) enum Verb {
     /// non-persistent; `tenant shell <name>` auto-narrows to runtime
     /// tier on entry.
     Mode {
-        name: String,
+        name: TenantUserName,
         #[arg(value_enum)]
         level: ModeLevel,
     },
@@ -103,7 +105,7 @@ pub(crate) enum Verb {
     /// Pass `--strict` to exit non-zero when findings are present (1
     /// for warnings only, 2 for any critical finding).
     Doctor {
-        name: Option<String>,
+        name: Option<TenantUserName>,
         #[arg(long)]
         strict: bool,
     },
@@ -122,7 +124,7 @@ pub(crate) enum Verb {
     /// Always lands at runtime tier — install-tier widening stays the
     /// explicit `tenant mode <name> install` operator action.
     Reload {
-        name: Option<String>,
+        name: Option<TenantUserName>,
     },
 }
 
@@ -157,7 +159,7 @@ pub fn run(
     args: &[String],
     accounts: &dyn accounts::Reader,
     executor: &dyn executor::Executor,
-    host: &str,
+    host: &HostUserName,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     stdin: &mut dyn BufRead,

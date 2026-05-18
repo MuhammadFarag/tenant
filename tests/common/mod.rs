@@ -11,7 +11,7 @@ use tenant::accounts::StubReader;
 use tenant::executor::{
     AccountError, AccountOp, Executor, FirewallError, FirewallOp, ProfileOp, StubExecutor,
 };
-use tenant::ids::{GroupId, UserId};
+use tenant::ids::{GroupId, HostUserName, TenantUserName, UserId};
 
 /// Default executor for tests that should not reach the exec stage —
 /// validation failures, conflicts, and dry-run paths. Panics on any
@@ -25,10 +25,10 @@ impl Executor for NeverExecutor {
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError> {
         panic!("executor unexpectedly invoked (execute_account) with op: {op:?}");
     }
-    fn login(&self, name: &str) -> Result<i32, AccountError> {
+    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
         panic!("executor unexpectedly invoked (login) with name: {name:?}");
     }
-    fn exec_as_tenant(&self, name: &str, argv: &[String]) -> Result<i32, AccountError> {
+    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
         panic!("executor unexpectedly invoked (exec_as_tenant): name={name:?} argv={argv:?}");
     }
     fn describe_profile(&self, op: &ProfileOp) -> String {
@@ -37,7 +37,7 @@ impl Executor for NeverExecutor {
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), tenant::profile::ProfileError> {
         panic!("executor unexpectedly invoked (execute_profile) with op: {op:?}");
     }
-    fn read_profile(&self, name: &str) -> Result<String, tenant::profile::ProfileError> {
+    fn read_profile(&self, name: &TenantUserName) -> Result<String, tenant::profile::ProfileError> {
         panic!("executor unexpectedly invoked (read_profile) with name: {name:?}");
     }
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
@@ -51,7 +51,7 @@ impl Executor for NeverExecutor {
     }
     fn probe_access_as_tenant(
         &self,
-        name: &str,
+        name: &TenantUserName,
         path: &std::path::Path,
         mode: tenant::executor::AccessMode,
     ) -> Result<tenant::executor::AccessOutcome, tenant::executor::ProbeError> {
@@ -62,7 +62,10 @@ impl Executor for NeverExecutor {
     fn read_env_policy(&self) -> Result<String, tenant::executor::HostFileError> {
         panic!("executor unexpectedly invoked (read_env_policy)");
     }
-    fn read_kernel_pf_rules(&self, name: &str) -> Result<String, tenant::executor::FirewallError> {
+    fn read_kernel_pf_rules(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<String, tenant::executor::FirewallError> {
         panic!("executor unexpectedly invoked (read_kernel_pf_rules): name={name:?}");
     }
     fn read_pam_sudo(&self) -> Result<String, tenant::executor::HostFileError> {
@@ -71,7 +74,10 @@ impl Executor for NeverExecutor {
     fn read_pf_status(&self) -> Result<String, tenant::executor::FirewallError> {
         panic!("executor unexpectedly invoked (read_pf_status)");
     }
-    fn read_anchor_body(&self, name: &str) -> Result<String, tenant::executor::HostFileError> {
+    fn read_anchor_body(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<String, tenant::executor::HostFileError> {
         panic!("executor unexpectedly invoked (read_anchor_body): name={name:?}");
     }
     fn describe_acl(&self, op: &tenant::executor::AclOp) -> String {
@@ -82,7 +88,7 @@ impl Executor for NeverExecutor {
     }
     fn tenant_path_kind(
         &self,
-        name: &str,
+        name: &TenantUserName,
         path: &std::path::Path,
     ) -> Result<tenant::executor::PathKind, tenant::executor::ProbeError> {
         panic!("executor unexpectedly invoked (tenant_path_kind): name={name:?} path={path:?}");
@@ -93,7 +99,7 @@ impl Executor for NeverExecutor {
     ) -> Result<String, tenant::executor::ProbeError> {
         panic!("executor unexpectedly invoked (read_host_acl): path={path:?}");
     }
-    fn host_in_group(&self, host: &str, group: &str) -> Result<bool, AccountError> {
+    fn host_in_group(&self, host: &HostUserName, group: &str) -> Result<bool, AccountError> {
         panic!("executor unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
     }
 }
@@ -586,11 +592,12 @@ pub fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let host = HostUserName::from(TEST_HOST);
     let code = tenant::run(
         &args,
         &stub,
         &exec,
-        TEST_HOST,
+        &host,
         &mut stdout,
         &mut stderr,
         &mut stdin,
@@ -609,11 +616,12 @@ pub fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let host = HostUserName::from(TEST_HOST);
     let code = tenant::run(
         &args,
         &stub,
         exec,
-        TEST_HOST,
+        &host,
         &mut stdout,
         &mut stderr,
         &mut stdin,
@@ -644,11 +652,12 @@ pub fn run_with_stdin(
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(stdin_content.to_vec());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let host = HostUserName::from(TEST_HOST);
     let code = tenant::run(
         &args,
         &stub,
         exec,
-        TEST_HOST,
+        &host,
         &mut stdout,
         &mut stderr,
         &mut stdin,

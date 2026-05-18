@@ -404,7 +404,31 @@ it from scratch wastes a cycle and risks getting it wrong.
 
 - **Acronym casing.** Rust convention treats acronyms as words: `Uid`
   not `UID`, `Macos` not `MacOS`. Method `lowest_free_uid`; struct
-  `UidAllocator`.
+  `UidAllocator`. Identifiers (variables, fields, methods) keep the
+  short Unix abbreviations `uid` / `gid` / `host` — they're domain
+  vocabulary every operator carries from the shell.
+
+- **Domain newtypes in `src/ids.rs`.** `UserId(u32)` / `GroupId(u32)`
+  wrap the POSIX numeric identifiers; `TenantUserName(String)` /
+  `HostUserName(String)` wrap the macOS short usernames in their two
+  distinct roles. The `UserName` qualifier on the name pair is
+  deliberate: bare `HostName` is a polyseme with the networking term
+  (DNS hostname / `uname -n`); the qualifier disambiguates and the
+  symmetric `TenantUserName` keeps the pair parallel. The bare nouns
+  `host` and `tenant` persist in prose, in variable names, and in
+  user-facing output strings. Validation for `TenantUserName` lives
+  outside the constructor (`validate_name` at dispatch); the newtype
+  is a tag, not a validity proof.
+
+- **Pure string formatters take `&str`, not the newtype.** `firewall::
+  tenant_anchor_name(name: &str)`, `profile::display_path_for(name:
+  &str)`, `doctor::pf_rule_presence_check(rules, tenant: &str)`, etc.,
+  stay as `&str` parameters. Callers pass `name.as_str()` from a
+  `&TenantUserName`. The type-safety win is realized at the Writer /
+  Reader / Reporter method boundaries and at ADT variants
+  (`AccountOp::CreateTenantUser { name: TenantUserName, ... }`); pure
+  helpers stay simple. Tests of pure helpers continue to use string
+  literals directly.
 
 - **Clap flag scoping.** `-v / --verbose`, `--dry-run`, `-y / --yes`
   are `global = true` on `Cli`. Per-subcommand flags (e.g.

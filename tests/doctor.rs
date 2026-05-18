@@ -12,6 +12,7 @@ use tenant::doctor::{
     Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify, curated_paths,
 };
 use tenant::executor::{AccessMode, AccessOutcome};
+use tenant::ids::{HostUserName, TenantUserName};
 
 // ============================================================
 // Finding display — byte-exact per combination
@@ -21,7 +22,7 @@ use tenant::executor::{AccessMode, AccessOutcome};
 fn finding_display_critical_read() {
     let f = Finding::FilesystemExposure {
         severity: Severity::Critical,
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         path: PathBuf::from("/Users/host/.ssh/id_rsa"),
         access: AccessMode::Read,
     };
@@ -35,7 +36,7 @@ fn finding_display_critical_read() {
 fn finding_display_warning_list() {
     let f = Finding::FilesystemExposure {
         severity: Severity::Warning,
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         path: PathBuf::from("/Users/staging"),
         access: AccessMode::List,
     };
@@ -49,7 +50,7 @@ fn finding_display_warning_list() {
 fn finding_display_info_read() {
     let f = Finding::FilesystemExposure {
         severity: Severity::Info,
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         path: PathBuf::from("/etc/pf.anchors/tenant-staging"),
         access: AccessMode::Read,
     };
@@ -300,7 +301,7 @@ fn anchor_body_matches_empty_strings_true() {
 #[test]
 fn finding_display_anchor_body_drift() {
     let f = Finding::AnchorBodyDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
     };
     assert_eq!(
         format!("{f}"),
@@ -312,7 +313,7 @@ fn finding_display_anchor_body_drift() {
 #[test]
 fn finding_anchor_body_drift_severity_is_warning() {
     let f = Finding::AnchorBodyDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
     };
     assert_eq!(f.severity(), Severity::Warning);
 }
@@ -336,7 +337,7 @@ fn guidance_filesystem_exposure_returns_none() {
     // renders the one-liner alone even in verbose mode.
     let f = Finding::FilesystemExposure {
         severity: Severity::Critical,
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         path: std::path::PathBuf::from("/Users/host/.ssh/id_rsa"),
         access: tenant::executor::AccessMode::Read,
     };
@@ -346,7 +347,7 @@ fn guidance_filesystem_exposure_returns_none() {
 #[test]
 fn guidance_anchor_body_drift_byte_form() {
     let f = Finding::AnchorBodyDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
     };
     let expected = "Why this matters
   The on-disk file at /etc/pf.anchors/tenant-dev is the source of
@@ -381,7 +382,7 @@ Alternative
 #[test]
 fn guidance_pf_rule_drift_byte_form() {
     let f = Finding::PfRuleDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         detail: "no `pass` rule in kernel anchor",
     };
     let expected = "Why this matters
@@ -568,7 +569,7 @@ fn severity_ordering_critical_max() {
 #[test]
 fn finding_display_acl_drift() {
     let f = Finding::AclDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         host_path: std::path::PathBuf::from("/Users/Shared/src"),
         group: "dev-tenant-share".to_string(),
     };
@@ -582,7 +583,7 @@ fn finding_display_acl_drift() {
 #[test]
 fn finding_acl_drift_severity_is_warning() {
     let f = Finding::AclDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         host_path: std::path::PathBuf::from("/Users/Shared/src"),
         group: "dev-tenant-share".to_string(),
     };
@@ -592,7 +593,7 @@ fn finding_acl_drift_severity_is_warning() {
 #[test]
 fn guidance_acl_drift_byte_form() {
     let f = Finding::AclDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         host_path: std::path::PathBuf::from("/Users/Shared/src"),
         group: "dev-tenant-share".to_string(),
     };
@@ -640,7 +641,7 @@ Alternative
 #[test]
 fn finding_display_symlink_drift_absent() {
     let f = Finding::SymlinkDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         tenant_path: std::path::PathBuf::from("/Users/dev/src"),
         expected_target: std::path::PathBuf::from("/Users/Shared/src"),
         actual: SymlinkActual::Absent,
@@ -656,7 +657,7 @@ fn finding_display_symlink_drift_absent() {
 #[test]
 fn finding_display_symlink_drift_wrong_target() {
     let f = Finding::SymlinkDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         tenant_path: std::path::PathBuf::from("/Users/dev/src"),
         expected_target: std::path::PathBuf::from("/Users/Shared/src"),
         actual: SymlinkActual::WrongTarget(std::path::PathBuf::from("/tmp/old")),
@@ -672,7 +673,7 @@ fn finding_display_symlink_drift_wrong_target() {
 #[test]
 fn finding_display_symlink_drift_not_symlink() {
     let f = Finding::SymlinkDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         tenant_path: std::path::PathBuf::from("/Users/dev/src"),
         expected_target: std::path::PathBuf::from("/Users/Shared/src"),
         actual: SymlinkActual::NotSymlink,
@@ -693,7 +694,7 @@ fn finding_symlink_drift_severity_is_warning_all_sub_cases() {
         SymlinkActual::NotSymlink,
     ] {
         let f = Finding::SymlinkDrift {
-            tenant: "dev".to_string(),
+            tenant: TenantUserName::from("dev"),
             tenant_path: std::path::PathBuf::from("/Users/dev/src"),
             expected_target: std::path::PathBuf::from("/Users/Shared/src"),
             actual,
@@ -705,7 +706,7 @@ fn finding_symlink_drift_severity_is_warning_all_sub_cases() {
 #[test]
 fn guidance_symlink_drift_absent_byte_form() {
     let f = Finding::SymlinkDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         tenant_path: std::path::PathBuf::from("/Users/dev/src"),
         expected_target: std::path::PathBuf::from("/Users/Shared/src"),
         actual: SymlinkActual::Absent,
@@ -742,7 +743,7 @@ Alternative
 #[test]
 fn guidance_symlink_drift_wrong_target_byte_form() {
     let f = Finding::SymlinkDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         tenant_path: std::path::PathBuf::from("/Users/dev/src"),
         expected_target: std::path::PathBuf::from("/Users/Shared/src"),
         actual: SymlinkActual::WrongTarget(std::path::PathBuf::from("/tmp/old")),
@@ -778,7 +779,7 @@ Alternative
 #[test]
 fn guidance_symlink_drift_not_symlink_byte_form() {
     let f = Finding::SymlinkDrift {
-        tenant: "dev".to_string(),
+        tenant: TenantUserName::from("dev"),
         tenant_path: std::path::PathBuf::from("/Users/dev/src"),
         expected_target: std::path::PathBuf::from("/Users/Shared/src"),
         actual: SymlinkActual::NotSymlink,
@@ -818,8 +819,8 @@ Alternative
 #[test]
 fn finding_display_host_not_in_share_group() {
     let f = Finding::HostNotInShareGroup {
-        tenant: "dev".to_string(),
-        host: "operator".to_string(),
+        tenant: TenantUserName::from("dev"),
+        host: HostUserName::from("operator"),
         group: "dev-tenant-share".to_string(),
     };
     assert_eq!(
@@ -833,8 +834,8 @@ fn finding_display_host_not_in_share_group() {
 #[test]
 fn finding_host_not_in_share_group_severity_is_warning() {
     let f = Finding::HostNotInShareGroup {
-        tenant: "dev".to_string(),
-        host: "operator".to_string(),
+        tenant: TenantUserName::from("dev"),
+        host: HostUserName::from("operator"),
         group: "dev-tenant-share".to_string(),
     };
     assert_eq!(f.severity(), Severity::Warning);
@@ -843,8 +844,8 @@ fn finding_host_not_in_share_group_severity_is_warning() {
 #[test]
 fn guidance_host_not_in_share_group_byte_form() {
     let f = Finding::HostNotInShareGroup {
-        tenant: "dev".to_string(),
-        host: "operator".to_string(),
+        tenant: TenantUserName::from("dev"),
+        host: HostUserName::from("operator"),
         group: "dev-tenant-share".to_string(),
     };
     let expected = "Why this matters

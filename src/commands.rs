@@ -38,7 +38,7 @@ pub(crate) fn dispatch(
     cli: Cli,
     accounts: &dyn accounts::Reader,
     writer: &accounts::Writer<'_>,
-    host: &str,
+    host: &ids::HostUserName,
     reporter: &mut Reporter,
     stdin: &mut dyn BufRead,
     stdin_is_tty: bool,
@@ -485,7 +485,11 @@ pub(crate) fn dispatch(
 /// Route a `DestroyError` to the appropriate Reporter failure method.
 /// Centralized so both destroy arms (`Destroyable` and `OrphanGroup`)
 /// surface account-domain and profile-domain failures consistently.
-fn surface_destroy_error(reporter: &mut Reporter, name: &str, error: &accounts::DestroyError) {
+fn surface_destroy_error(
+    reporter: &mut Reporter,
+    name: &ids::TenantUserName,
+    error: &accounts::DestroyError,
+) {
     match error {
         accounts::DestroyError::Account(e) => reporter.destroy_failed(name, e),
         accounts::DestroyError::Profile(e) => reporter.destroy_profile_failed(name, e),
@@ -510,7 +514,11 @@ fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) 
 /// The share-reapply substrate adds four arms beyond the Profile +
 /// Firewall pair; centralizing the dispatch keeps the verb arm in
 /// `dispatch` thin.
-fn surface_mode_error(reporter: &mut Reporter, name: &str, error: &accounts::ModeError) {
+fn surface_mode_error(
+    reporter: &mut Reporter,
+    name: &ids::TenantUserName,
+    error: &accounts::ModeError,
+) {
     match error {
         accounts::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
         accounts::ModeError::Firewall(e) => reporter.mode_failed(name, e),
@@ -525,7 +533,11 @@ fn surface_mode_error(reporter: &mut Reporter, name: &str, error: &accounts::Mod
 /// Parallel to `surface_mode_error` with shell-entry context phrasing
 /// on each arm — operator typed `tenant shell`, not `tenant mode`, so
 /// the failure frame names the narrow as a step within the shell verb.
-fn surface_shell_mode_error(reporter: &mut Reporter, name: &str, error: &accounts::ModeError) {
+fn surface_shell_mode_error(
+    reporter: &mut Reporter,
+    name: &ids::TenantUserName,
+    error: &accounts::ModeError,
+) {
     match error {
         accounts::ModeError::Profile(e) => reporter.shell_narrow_profile_failed(name, e),
         accounts::ModeError::Firewall(e) => reporter.shell_narrow_firewall_failed(name, e),
@@ -541,7 +553,11 @@ fn surface_shell_mode_error(reporter: &mut Reporter, name: &str, error: &account
 /// on Firewall + Share arms ("reload firewall" / "cannot reload");
 /// substrate arms (Acl / Account / Probe / Profile) reuse the
 /// mode-named methods whose wording is verb-agnostic.
-fn surface_reload_error(reporter: &mut Reporter, name: &str, error: &accounts::ModeError) {
+fn surface_reload_error(
+    reporter: &mut Reporter,
+    name: &ids::TenantUserName,
+    error: &accounts::ModeError,
+) {
     match error {
         accounts::ModeError::Profile(e) => reporter.reload_profile_failed(name, e),
         accounts::ModeError::Firewall(e) => reporter.reload_firewall_failed(name, e),
@@ -583,8 +599,8 @@ pub(crate) struct CreatePlanOps {
 }
 
 fn build_create_plan_ops(
-    name: &str,
-    host: &str,
+    name: &ids::TenantUserName,
+    host: &ids::HostUserName,
     uid: ids::UserId,
     gid: ids::GroupId,
 ) -> CreatePlanOps {
@@ -653,7 +669,7 @@ pub(crate) struct DestroyPlanOps {
     pub(crate) flush_anchor: FirewallOp,
 }
 
-fn build_destroy_plan_ops(name: &str, host: &str) -> DestroyPlanOps {
+fn build_destroy_plan_ops(name: &ids::TenantUserName, host: &ids::HostUserName) -> DestroyPlanOps {
     DestroyPlanOps {
         delete_user: AccountOp::DeleteTenantUser { name: name.into() },
         probe: AccountOp::LookupUserRecord { name: name.into() },
@@ -701,7 +717,10 @@ pub(crate) struct OrphanGroupPlanOps {
     pub(crate) flush_anchor: FirewallOp,
 }
 
-fn build_orphan_plan_ops(name: &str, host: &str) -> OrphanGroupPlanOps {
+fn build_orphan_plan_ops(
+    name: &ids::TenantUserName,
+    host: &ids::HostUserName,
+) -> OrphanGroupPlanOps {
     OrphanGroupPlanOps {
         remove_host: AccountOp::RemoveHostFromShareGroup {
             name: name.into(),
@@ -745,7 +764,7 @@ fn orphan_plan_entries(ops: &OrphanGroupPlanOps) -> Vec<(Op<'_>, Option<&'static
 /// completeness.
 fn surface_create_post_provision_error(
     reporter: &mut Reporter,
-    name: &str,
+    name: &ids::TenantUserName,
     error: &accounts::ModeError,
 ) {
     match error {
