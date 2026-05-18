@@ -5,7 +5,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use super::accounts::{ConflictError, NameError, ShareError, tenant_share_group_name};
+use super::tenants::{ConflictError, NameError, ShareError, tenant_share_group_name};
 use super::{
     AccessMode, AccountError, AclError, FirewallError, GroupId, HostMachine, HostUserName, Op,
     ProbeError, TenantUserName, UserId,
@@ -578,11 +578,7 @@ impl<'a> Reporter<'a> {
 
     /// Yellow `⚠` stderr one-liner for narrow-on-finally failure (command
     /// form only). Does NOT override the child's exit code.
-    pub fn shell_narrow_failed(
-        &mut self,
-        name: &TenantUserName,
-        _err: &super::accounts::ModeError,
-    ) {
+    pub fn shell_narrow_failed(&mut self, name: &TenantUserName, _err: &super::tenants::ModeError) {
         let prefix = if self.colors.stderr {
             "\x1b[33m\u{26a0}\x1b[0m"
         } else {

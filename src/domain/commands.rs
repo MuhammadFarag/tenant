@@ -1,7 +1,7 @@
 use std::io::BufRead;
 
 use super::reporter::{ConfirmOutcome, Reporter};
-use super::{AccountOp, FirewallOp, Op, ProfileOp, accounts};
+use super::{AccountOp, FirewallOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
 use crate::{Cli, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR};
 
@@ -25,7 +25,7 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
 pub(crate) fn dispatch(
     cli: Cli,
     accounts: &dyn super::HostAccounts,
-    tenants: &accounts::Tenants<'_>,
+    tenants: &tenants::Tenants<'_>,
     host: &super::HostUserName,
     reporter: &mut Reporter,
     stdin: &mut dyn BufRead,
@@ -37,11 +37,11 @@ pub(crate) fn dispatch(
     let show_summary = cli.dry_run || stdin_is_tty;
     match cli.verb {
         Verb::Create { name } => {
-            if let Err(e) = accounts::validate_name(&name) {
+            if let Err(e) = tenants::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            if let Err(e) = accounts::check_conflict(accounts, &name) {
+            if let Err(e) = tenants::check_conflict(accounts, &name) {
                 reporter.refuse_name_conflict(&name, &e);
                 return EX_USAGE;
             }
@@ -51,12 +51,7 @@ pub(crate) fn dispatch(
             let create_plan = create_plan_entries(&create_plan_ops);
             if show_summary {
                 reporter.create_summary(&name, host, uid, gid, Some(&create_plan));
-                tenants.pre_exec_doctor_summary(
-                    None,
-                    host,
-                    accounts::DoctorScope::Create,
-                    reporter,
-                );
+                tenants.pre_exec_doctor_summary(None, host, tenants::DoctorScope::Create, reporter);
             }
             if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
                 reporter.aborted();
@@ -64,19 +59,19 @@ pub(crate) fn dispatch(
             }
             match tenants.create(&name, host, uid, gid, reporter) {
                 Ok(()) => 0,
-                Err(accounts::CreateError::Group(e)) => {
+                Err(tenants::CreateError::Group(e)) => {
                     reporter.create_group_failed(&name, &e);
                     EX_IOERR
                 }
-                Err(accounts::CreateError::HostMembership(e)) => {
+                Err(tenants::CreateError::HostMembership(e)) => {
                     reporter.create_host_membership_failed(&name, host, &e);
                     EX_IOERR
                 }
-                Err(accounts::CreateError::User(e)) => {
+                Err(tenants::CreateError::User(e)) => {
                     reporter.create_failed(&name, &e);
                     EX_IOERR
                 }
-                Err(accounts::CreateError::UserWithRollback { user, rollback }) => {
+                Err(tenants::CreateError::UserWithRollback { user, rollback }) => {
                     // Emit the original failure first so log-grep regexes
                     // matching the single-failure shape keep working; the
                     // rollback-failed line follows with its recovery hint.
@@ -84,41 +79,41 @@ pub(crate) fn dispatch(
                     reporter.create_rollback_failed(&name, &rollback);
                     EX_IOERR
                 }
-                Err(accounts::CreateError::Profile(e)) => {
+                Err(tenants::CreateError::Profile(e)) => {
                     reporter.create_profile_failed(&name, &e);
                     EX_IOERR
                 }
-                Err(accounts::CreateError::Firewall(e)) => {
+                Err(tenants::CreateError::Firewall(e)) => {
                     reporter.create_firewall_failed(&name, &e);
                     EX_IOERR
                 }
-                Err(accounts::CreateError::PostProvision(e)) => {
+                Err(tenants::CreateError::PostProvision(e)) => {
                     surface_create_post_provision_error(reporter, &name, &e);
                     EX_IOERR
                 }
             }
         }
         Verb::Shell { name, mode, argv } => {
-            if let Err(e) = accounts::validate_name(&name) {
+            if let Err(e) = tenants::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
             // NotPresent + OrphanGroup collapse to one refusal: shell can't
             // run against a lingering group; convergence belongs to destroy.
-            match accounts::destroy_eligibility(accounts, &name) {
-                accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+            match tenants::destroy_eligibility(accounts, &name) {
+                tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
                     reporter.refuse_shell_absent(&name);
                     EX_USAGE
                 }
-                accounts::Eligibility::NotATenant { uid } => {
+                tenants::Eligibility::NotATenant { uid } => {
                     reporter.refuse_shell_not_a_tenant(&name, uid, TENANT_UID_FLOOR);
                     EX_USAGE
                 }
-                accounts::Eligibility::SystemAccount => {
+                tenants::Eligibility::SystemAccount => {
                     reporter.refuse_shell_system_account(&name);
                     EX_USAGE
                 }
-                accounts::Eligibility::Destroyable => {
+                tenants::Eligibility::Destroyable => {
                     let resolved_mode = mode.unwrap_or(ModeLevel::Runtime);
                     if show_summary {
                         if argv.is_empty() {
@@ -129,7 +124,7 @@ pub(crate) fn dispatch(
                         tenants.pre_exec_doctor_summary(
                             Some(&name),
                             host,
-                            accounts::DoctorScope::Shell,
+                            tenants::DoctorScope::Shell,
                             reporter,
                         );
                     }
@@ -143,15 +138,15 @@ pub(crate) fn dispatch(
                             }
                             code.clamp(0, 255) as u8
                         }
-                        Err(accounts::ShellError::Account(e)) => {
+                        Err(tenants::ShellError::Account(e)) => {
                             reporter.shell_failed(&name, &e);
                             EX_IOERR
                         }
-                        Err(accounts::ShellError::Mode(e)) => {
+                        Err(tenants::ShellError::Mode(e)) => {
                             surface_shell_mode_error(reporter, &name, &e);
                             EX_IOERR
                         }
-                        Err(accounts::ShellError::NarrowFailed {
+                        Err(tenants::ShellError::NarrowFailed {
                             child_exit,
                             narrow_err,
                         }) => {
@@ -168,24 +163,24 @@ pub(crate) fn dispatch(
             }
         }
         Verb::Mode { name, level } => {
-            if let Err(e) = accounts::validate_name(&name) {
+            if let Err(e) = tenants::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            match accounts::destroy_eligibility(accounts, &name) {
-                accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+            match tenants::destroy_eligibility(accounts, &name) {
+                tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
                     reporter.refuse_mode_absent(&name);
                     EX_USAGE
                 }
-                accounts::Eligibility::NotATenant { uid } => {
+                tenants::Eligibility::NotATenant { uid } => {
                     reporter.refuse_mode_not_a_tenant(&name, uid, TENANT_UID_FLOOR);
                     EX_USAGE
                 }
-                accounts::Eligibility::SystemAccount => {
+                tenants::Eligibility::SystemAccount => {
                     reporter.refuse_mode_system_account(&name);
                     EX_USAGE
                 }
-                accounts::Eligibility::Destroyable => {
+                tenants::Eligibility::Destroyable => {
                     // Build the reapply plan BEFORE the summary so
                     // profile-read / share pre-flight failures surface
                     // pre-prompt — don't ask the operator to confirm
@@ -203,7 +198,7 @@ pub(crate) fn dispatch(
                         tenants.pre_exec_doctor_summary(
                             Some(&name),
                             host,
-                            accounts::DoctorScope::Mode,
+                            tenants::DoctorScope::Mode,
                             reporter,
                         );
                     }
@@ -225,24 +220,24 @@ pub(crate) fn dispatch(
         }
         Verb::Doctor { name, strict } => match name {
             Some(n) => {
-                if let Err(e) = accounts::validate_name(&n) {
+                if let Err(e) = tenants::validate_name(&n) {
                     reporter.refuse_invalid_name(&n, &e);
                     return EX_USAGE;
                 }
-                match accounts::destroy_eligibility(accounts, &n) {
-                    accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+                match tenants::destroy_eligibility(accounts, &n) {
+                    tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
                         reporter.refuse_doctor_absent(&n);
                         EX_USAGE
                     }
-                    accounts::Eligibility::NotATenant { uid } => {
+                    tenants::Eligibility::NotATenant { uid } => {
                         reporter.refuse_doctor_not_a_tenant(&n, uid, TENANT_UID_FLOOR);
                         EX_USAGE
                     }
-                    accounts::Eligibility::SystemAccount => {
+                    tenants::Eligibility::SystemAccount => {
                         reporter.refuse_doctor_system_account(&n);
                         EX_USAGE
                     }
-                    accounts::Eligibility::Destroyable => {
+                    tenants::Eligibility::Destroyable => {
                         match tenants.doctor(host, &n, &[], reporter) {
                             Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
                             Err(e) => {
@@ -263,24 +258,24 @@ pub(crate) fn dispatch(
         },
         Verb::Reload { name } => match name {
             Some(n) => {
-                if let Err(e) = accounts::validate_name(&n) {
+                if let Err(e) = tenants::validate_name(&n) {
                     reporter.refuse_invalid_name(&n, &e);
                     return EX_USAGE;
                 }
-                match accounts::destroy_eligibility(accounts, &n) {
-                    accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+                match tenants::destroy_eligibility(accounts, &n) {
+                    tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
                         reporter.refuse_reload_absent(&n);
                         EX_USAGE
                     }
-                    accounts::Eligibility::NotATenant { uid } => {
+                    tenants::Eligibility::NotATenant { uid } => {
                         reporter.refuse_reload_not_a_tenant(&n, uid, TENANT_UID_FLOOR);
                         EX_USAGE
                     }
-                    accounts::Eligibility::SystemAccount => {
+                    tenants::Eligibility::SystemAccount => {
                         reporter.refuse_reload_system_account(&n);
                         EX_USAGE
                     }
-                    accounts::Eligibility::Destroyable => {
+                    tenants::Eligibility::Destroyable => {
                         // Build plan pre-summary so profile-read / share
                         // pre-flight failures surface pre-prompt.
                         let plan = match tenants.build_reapply_plan(&n, host, ModeLevel::Runtime) {
@@ -296,7 +291,7 @@ pub(crate) fn dispatch(
                             tenants.pre_exec_doctor_summary(
                                 Some(&n),
                                 host,
-                                accounts::DoctorScope::Reload,
+                                tenants::DoctorScope::Reload,
                                 reporter,
                             );
                         }
@@ -336,16 +331,16 @@ pub(crate) fn dispatch(
             }
         },
         Verb::Destroy { name } => {
-            if let Err(e) = accounts::validate_name(&name) {
+            if let Err(e) = tenants::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            match accounts::destroy_eligibility(accounts, &name) {
-                accounts::Eligibility::NotPresent => {
+            match tenants::destroy_eligibility(accounts, &name) {
+                tenants::Eligibility::NotPresent => {
                     reporter.destroy_absent(&name);
                     0
                 }
-                accounts::Eligibility::OrphanGroup => {
+                tenants::Eligibility::OrphanGroup => {
                     // Convergence path: tenant user is gone but the
                     // suffixed group survived a prior partial failure.
                     let orphan_plan_ops = build_orphan_plan_ops(&name, host);
@@ -365,15 +360,15 @@ pub(crate) fn dispatch(
                     }
                     0
                 }
-                accounts::Eligibility::NotATenant { uid } => {
+                tenants::Eligibility::NotATenant { uid } => {
                     reporter.refuse_not_a_tenant(&name, uid, TENANT_UID_FLOOR);
                     EX_USAGE
                 }
-                accounts::Eligibility::SystemAccount => {
+                tenants::Eligibility::SystemAccount => {
                     reporter.refuse_system_account(&name);
                     EX_USAGE
                 }
-                accounts::Eligibility::Destroyable => {
+                tenants::Eligibility::Destroyable => {
                     let destroy_plan_ops = build_destroy_plan_ops(&name, host);
                     let destroy_plan = destroy_plan_entries(&destroy_plan_ops);
                     if show_summary {
@@ -400,35 +395,35 @@ pub(crate) fn dispatch(
 fn surface_destroy_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
-    error: &accounts::DestroyError,
+    error: &tenants::DestroyError,
 ) {
     match error {
-        accounts::DestroyError::Account(e) => reporter.destroy_failed(name, e),
-        accounts::DestroyError::Profile(e) => reporter.destroy_profile_failed(name, e),
-        accounts::DestroyError::Firewall(e) => reporter.destroy_firewall_failed(name, e),
+        tenants::DestroyError::Account(e) => reporter.destroy_failed(name, e),
+        tenants::DestroyError::Profile(e) => reporter.destroy_profile_failed(name, e),
+        tenants::DestroyError::Firewall(e) => reporter.destroy_firewall_failed(name, e),
     }
 }
 
-fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) {
+fn surface_doctor_error(reporter: &mut Reporter, error: &tenants::DoctorError) {
     match error {
-        accounts::DoctorError::Probe(e) => reporter.doctor_failed(e),
-        accounts::DoctorError::HostFile(e) => reporter.doctor_host_file_failed(e),
-        accounts::DoctorError::Firewall(e) => reporter.doctor_firewall_failed(e),
+        tenants::DoctorError::Probe(e) => reporter.doctor_failed(e),
+        tenants::DoctorError::HostFile(e) => reporter.doctor_host_file_failed(e),
+        tenants::DoctorError::Firewall(e) => reporter.doctor_firewall_failed(e),
     }
 }
 
 fn surface_mode_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
-    error: &accounts::ModeError,
+    error: &tenants::ModeError,
 ) {
     match error {
-        accounts::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
-        accounts::ModeError::Firewall(e) => reporter.mode_failed(name, e),
-        accounts::ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
-        accounts::ModeError::Account(e) => reporter.mode_account_failed(name, e),
-        accounts::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
-        accounts::ModeError::Share(e) => reporter.refuse_mode_share(name, e),
+        tenants::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
+        tenants::ModeError::Firewall(e) => reporter.mode_failed(name, e),
+        tenants::ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
+        tenants::ModeError::Account(e) => reporter.mode_account_failed(name, e),
+        tenants::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
+        tenants::ModeError::Share(e) => reporter.refuse_mode_share(name, e),
     }
 }
 
@@ -438,15 +433,15 @@ fn surface_mode_error(
 fn surface_shell_mode_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
-    error: &accounts::ModeError,
+    error: &tenants::ModeError,
 ) {
     match error {
-        accounts::ModeError::Profile(e) => reporter.shell_narrow_profile_failed(name, e),
-        accounts::ModeError::Firewall(e) => reporter.shell_narrow_firewall_failed(name, e),
-        accounts::ModeError::Acl(e) => reporter.shell_narrow_acl_failed(name, e),
-        accounts::ModeError::Account(e) => reporter.shell_narrow_account_failed(name, e),
-        accounts::ModeError::Probe(e) => reporter.shell_narrow_probe_failed(name, e),
-        accounts::ModeError::Share(e) => reporter.refuse_shell_share(name, e),
+        tenants::ModeError::Profile(e) => reporter.shell_narrow_profile_failed(name, e),
+        tenants::ModeError::Firewall(e) => reporter.shell_narrow_firewall_failed(name, e),
+        tenants::ModeError::Acl(e) => reporter.shell_narrow_acl_failed(name, e),
+        tenants::ModeError::Account(e) => reporter.shell_narrow_account_failed(name, e),
+        tenants::ModeError::Probe(e) => reporter.shell_narrow_probe_failed(name, e),
+        tenants::ModeError::Share(e) => reporter.refuse_shell_share(name, e),
     }
 }
 
@@ -456,15 +451,15 @@ fn surface_shell_mode_error(
 fn surface_reload_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
-    error: &accounts::ModeError,
+    error: &tenants::ModeError,
 ) {
     match error {
-        accounts::ModeError::Profile(e) => reporter.reload_profile_failed(name, e),
-        accounts::ModeError::Firewall(e) => reporter.reload_firewall_failed(name, e),
-        accounts::ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
-        accounts::ModeError::Account(e) => reporter.mode_account_failed(name, e),
-        accounts::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
-        accounts::ModeError::Share(e) => reporter.refuse_reload_share(name, e),
+        tenants::ModeError::Profile(e) => reporter.reload_profile_failed(name, e),
+        tenants::ModeError::Firewall(e) => reporter.reload_firewall_failed(name, e),
+        tenants::ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
+        tenants::ModeError::Account(e) => reporter.mode_account_failed(name, e),
+        tenants::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
+        tenants::ModeError::Share(e) => reporter.refuse_reload_share(name, e),
     }
 }
 
@@ -496,7 +491,7 @@ fn build_create_plan_ops(
     uid: super::UserId,
     gid: super::GroupId,
 ) -> CreatePlanOps {
-    let group = accounts::tenant_share_group_name(name.as_str());
+    let group = tenants::tenant_share_group_name(name.as_str());
     CreatePlanOps {
         create_group: AccountOp::CreateShareGroup {
             group: group.clone(),
@@ -566,7 +561,7 @@ fn build_destroy_plan_ops(
     name: &super::TenantUserName,
     host: &super::HostUserName,
 ) -> DestroyPlanOps {
-    let group = accounts::tenant_share_group_name(name.as_str());
+    let group = tenants::tenant_share_group_name(name.as_str());
     DestroyPlanOps {
         delete_user: AccountOp::DeleteTenantUser { name: name.into() },
         probe: AccountOp::LookupUserRecord { name: name.into() },
@@ -618,7 +613,7 @@ fn build_orphan_plan_ops(
     name: &super::TenantUserName,
     host: &super::HostUserName,
 ) -> OrphanGroupPlanOps {
-    let group = accounts::tenant_share_group_name(name.as_str());
+    let group = tenants::tenant_share_group_name(name.as_str());
     OrphanGroupPlanOps {
         remove_host: AccountOp::RemoveHostFromShareGroup {
             group: group.clone(),
@@ -657,14 +652,14 @@ fn orphan_plan_entries(ops: &OrphanGroupPlanOps) -> Vec<(Op<'_>, Option<&'static
 fn surface_create_post_provision_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
-    error: &accounts::ModeError,
+    error: &tenants::ModeError,
 ) {
     match error {
-        accounts::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
-        accounts::ModeError::Firewall(e) => reporter.mode_failed(name, e),
-        accounts::ModeError::Acl(e) => reporter.create_post_provision_acl_failed(name, e),
-        accounts::ModeError::Account(e) => reporter.create_post_provision_account_failed(name, e),
-        accounts::ModeError::Probe(e) => reporter.create_post_provision_probe_failed(name, e),
-        accounts::ModeError::Share(e) => reporter.refuse_create_post_provision_share(name, e),
+        tenants::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
+        tenants::ModeError::Firewall(e) => reporter.mode_failed(name, e),
+        tenants::ModeError::Acl(e) => reporter.create_post_provision_acl_failed(name, e),
+        tenants::ModeError::Account(e) => reporter.create_post_provision_account_failed(name, e),
+        tenants::ModeError::Probe(e) => reporter.create_post_provision_probe_failed(name, e),
+        tenants::ModeError::Share(e) => reporter.refuse_create_post_provision_share(name, e),
     }
 }

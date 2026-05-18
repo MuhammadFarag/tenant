@@ -140,7 +140,7 @@ pub fn run(
     } else {
         machine
     };
-    let tenants = domain::accounts::Tenants::new(active_machine);
+    let tenants = domain::Tenants::new(active_machine);
     let yes = cli.yes;
     let mut reporter = Reporter::new(
         stdout,

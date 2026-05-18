@@ -70,7 +70,7 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     the domain newtypes (`UserId` / `GroupId` /
                     `TenantUserName` / `HostUserName` / `GroupName`),
                     re-exported flat from `crate::domain`.
-src/domain/accounts.rs / accounts/
+src/domain/tenants.rs / tenants/
                   — facade: `Tenants` struct + `new()` + the generic
                     `run<O: WritableOp>` narrate-execute-narrate
                     dispatcher + `tenant_share_group_name`. Each
@@ -216,7 +216,7 @@ it from scratch wastes a cycle and risks getting it wrong.
 ### Layering + DI
 
 - **No I/O in command logic.** `commands::dispatch` and
-  `accounts::Tenants` call Reporter's verb-named methods; neither
+  `tenants::Tenants` call Reporter's verb-named methods; neither
   touches raw writers nor checks `cli.verbose` / `cli.dry_run`. Mode
   / verbosity branching lives inside Reporter.
 
@@ -247,7 +247,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   teardown (each step idempotent), so partial-firewall state from a
   failed earlier create also converges.
 
-- **Centralized name builders.** `accounts::tenant_share_group_name(name)`
+- **Centralized name builders.** `tenants::tenant_share_group_name(name)`
   for the group suffix; `firewall::tenant_anchor_name(name)` /
   `tenant_anchor_path(name)` for the anchor. Don't inline `format!`
   at call sites.
@@ -462,7 +462,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   `HostUserName(String)` wrap the macOS short usernames in their two
   distinct roles; `GroupName(String)` wraps the macOS short group
   name (today always `<tenant>-tenant-share`, built at the Tenants
-  boundary by `accounts::tenant_share_group_name`). The `UserName`
+  boundary by `tenants::tenant_share_group_name`). The `UserName`
   qualifier on the name pair is deliberate: bare `HostName` is a
   polyseme with the networking term (DNS hostname / `uname -n`); the
   qualifier disambiguates and the symmetric `TenantUserName` keeps
