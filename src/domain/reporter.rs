@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use super::tenants::{ConflictError, NameError, ShareError, tenant_share_group_name};
 use super::{
-    AccessMode, AccountError, AclError, FirewallError, GroupId, HostMachine, HostUserName, Op,
-    ProbeError, TenantUserName, UserId,
+    AccessMode, AccountError, AccountsError, AclError, FirewallError, GroupId, HostMachine,
+    HostUserName, Op, ProbeError, TenantUserName, UserId,
 };
 use crate::ModeLevel;
 use crate::ansi::{self};
@@ -890,6 +890,90 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(
             self.terminal.stderr,
             "tenant: failed to read pf state: {err}"
+        );
+    }
+
+    // HostAccounts (dscl) failure frames, one per call site. The five
+    // `*_eligibility_probe_failed` frames carry near-identical Display
+    // strings; they stay split per verb to match the sibling pattern
+    // already paid for by `mode_failed` / `reload_firewall_failed` /
+    // `shell_narrow_firewall_failed` — verb-named frames let log-grep
+    // bind to the verb without parsing the message body.
+
+    pub fn create_conflict_probe_failed(&mut self, name: &TenantUserName, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check existing accounts for '{name}': {err}"
+        );
+    }
+
+    pub fn create_uid_allocation_failed(&mut self, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to allocate UID: {err}"
+        );
+    }
+
+    pub fn create_gid_allocation_failed(&mut self, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to allocate GID: {err}"
+        );
+    }
+
+    pub fn destroy_eligibility_probe_failed(&mut self, name: &TenantUserName, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check destroy eligibility for '{name}': {err}"
+        );
+    }
+
+    pub fn destroy_uid_lookup_failed(&mut self, name: &TenantUserName, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to look up UID for '{name}': {err}"
+        );
+    }
+
+    pub fn shell_eligibility_probe_failed(&mut self, name: &TenantUserName, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check shell eligibility for '{name}': {err}"
+        );
+    }
+
+    pub fn mode_eligibility_probe_failed(&mut self, name: &TenantUserName, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check mode eligibility for '{name}': {err}"
+        );
+    }
+
+    pub fn doctor_eligibility_probe_failed(&mut self, name: &TenantUserName, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check doctor eligibility for '{name}': {err}"
+        );
+    }
+
+    pub fn reload_eligibility_probe_failed(&mut self, name: &TenantUserName, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check reload eligibility for '{name}': {err}"
+        );
+    }
+
+    pub fn reload_all_enumeration_failed(&mut self, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to enumerate tenants for reload: {err}"
+        );
+    }
+
+    pub fn doctor_enumeration_failed(&mut self, err: &AccountsError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to enumerate tenants for doctor: {err}"
         );
     }
 

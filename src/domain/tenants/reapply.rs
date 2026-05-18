@@ -5,8 +5,8 @@
 use crate::ModeLevel;
 use crate::domain::reporter::Reporter;
 use crate::domain::{
-    AccountError, AccountOp, AclError, FirewallError, FirewallOp, HostAccounts, HostUserName, Op,
-    ProbeError, TenantUserName,
+    AccountError, AccountOp, AccountsError, AclError, FirewallError, FirewallOp, HostAccounts,
+    HostUserName, Op, ProbeError, TenantUserName,
 };
 use crate::firewall::render_anchor;
 use crate::profile::{Profile, ProfileError, parse};
@@ -15,7 +15,11 @@ use super::shares::ShareOps;
 use super::{ShareError, Tenants, tenant_share_group_name};
 
 /// Failure surface for `mode` and (by reuse) the `shell` auto-narrow,
-/// `reload`, and the create-side post-provision share step.
+/// `reload`, and the create-side post-provision share step. ModeError
+/// does NOT carry an `AccountsLookup` variant: no method on this
+/// surface queries `HostAccounts`, so directory failures can only
+/// reach dispatch via the dedicated `tenant_names()` call in
+/// `reload_all` (which returns `AccountsError` directly).
 #[derive(Debug)]
 pub(crate) enum ModeError {
     Profile(ProfileError),
@@ -162,12 +166,12 @@ impl<'a> Tenants<'a> {
         accounts: &dyn HostAccounts,
         host: &HostUserName,
         reporter: &mut Reporter,
-    ) -> ReloadAllOutcome {
-        let names = accounts.tenant_names();
+    ) -> Result<ReloadAllOutcome, AccountsError> {
+        let names = accounts.tenant_names()?;
         reporter.reload_all_starting(names.len());
         if names.is_empty() {
             reporter.reload_all_done_summary(0, 0);
-            return ReloadAllOutcome { failed: 0 };
+            return Ok(ReloadAllOutcome { failed: 0 });
         }
         let mut failed = 0;
         for name in &names {
@@ -188,6 +192,6 @@ impl<'a> Tenants<'a> {
             }
         }
         reporter.reload_all_done_summary(names.len() - failed as usize, failed as usize);
-        ReloadAllOutcome { failed }
+        Ok(ReloadAllOutcome { failed })
     }
 }

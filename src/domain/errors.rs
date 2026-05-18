@@ -23,6 +23,32 @@ impl fmt::Display for AccountError {
     }
 }
 
+/// Failure surface for `HostAccounts` queries. Mirrors the substrate-
+/// shaped convention used by the other domain error types. The macOS
+/// adapter runs per-call dscl on every trait method, so any of them
+/// can spawn-fail or exit nonzero on a substrate-level error.
+#[derive(Debug)]
+pub enum AccountsError {
+    Spawn(io::Error),
+    NonZero { code: i32, stderr: String },
+}
+
+impl fmt::Display for AccountsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AccountsError::Spawn(e) => write!(f, "failed to spawn dscl: {e}"),
+            AccountsError::NonZero { code, stderr } => {
+                let trimmed = stderr.trim();
+                if trimmed.is_empty() {
+                    write!(f, "dscl exited with code {code}")
+                } else {
+                    write!(f, "dscl exited with code {code}: {trimmed}")
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum HostFileError {
     Spawn(io::Error),

@@ -4,13 +4,9 @@ use tenant::adapters::macos::{MacosHostAccounts, MacosHostMachine};
 use tenant::domain::HostUserName;
 
 fn main() -> ExitCode {
-    let accounts = match MacosHostAccounts::new() {
-        Ok(accounts) => accounts,
-        Err(e) => {
-            eprintln!("tenant: failed to query account state: {e}");
-            return ExitCode::from(74); // EX_IOERR
-        }
-    };
+    // Per-call dscl now lives inside each `HostAccounts` trait method,
+    // so both adapters are ZSTs and construction is infallible.
+    let accounts = MacosHostAccounts;
     let machine = MacosHostMachine;
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Under sudo, USER becomes `root` but SUDO_USER preserves the

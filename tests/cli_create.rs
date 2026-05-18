@@ -167,6 +167,7 @@ fn verbose_uid_and_gid_allocators_cross_over() {
         gid_by_name: [("phantom".to_string(), GroupId(601))]
             .into_iter()
             .collect(),
+        ..Default::default()
     };
     let (code, stdout, _stderr) = run_with(stub, &["create", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
@@ -276,6 +277,26 @@ fn create_rejects_when_user_exists() {
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: user 'dev' already exists\n");
+}
+
+#[test]
+fn create_surfaces_accounts_error_when_conflict_probe_fails() {
+    // A dscl-substrate failure during the conflict probe (has_user /
+    // has_group) routes to `create_conflict_probe_failed` and exits 74.
+    // The frame's Display string carries the verb-named action ("check
+    // existing accounts") and the tenant name so log-grep can bind to
+    // the verb without parsing the AccountsError body.
+    let stub = StubHostAccounts {
+        fail_has_user: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
+    assert_eq!(code, 74);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert!(
+        stderr.starts_with("tenant: failed to check existing accounts for 'dev': "),
+        "expected create_conflict_probe_failed frame; stderr={stderr:?}"
+    );
 }
 
 #[test]
@@ -1569,5 +1590,40 @@ fn create_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
     assert!(
         stderr.contains("failed to read pf state"),
         "substrate failure surfaces via doctor_firewall_failed frame; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn create_surfaces_accounts_error_when_uid_allocation_fails() {
+    // After the conflict probe passes, `UidAllocator::lowest_free_uid`
+    // calls `used_uids()`; a dscl failure here routes to
+    // `create_uid_allocation_failed` (verb-agnostic Display — no name).
+    let stub = StubHostAccounts {
+        fail_used_uids: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
+    assert_eq!(code, 74);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert!(
+        stderr.starts_with("tenant: failed to allocate UID: "),
+        "expected create_uid_allocation_failed frame; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn create_surfaces_accounts_error_when_gid_allocation_fails() {
+    // UID allocation succeeds (used_uids() returns empty); GID allocation
+    // fails via the parallel `fail_used_gids` injector.
+    let stub = StubHostAccounts {
+        fail_used_gids: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["create", "dev", "--dry-run"]);
+    assert_eq!(code, 74);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert!(
+        stderr.starts_with("tenant: failed to allocate GID: "),
+        "expected create_gid_allocation_failed frame; stderr={stderr:?}"
     );
 }

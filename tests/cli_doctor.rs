@@ -1902,3 +1902,40 @@ fn doctor_host_not_in_share_group_verbose_emits_guidance_block() {
         "Alternative should name the manual dseditgroup command; stdout={stdout:?}"
     );
 }
+
+#[test]
+fn doctor_single_tenant_surfaces_accounts_error_when_eligibility_probe_fails() {
+    // Single-tenant doctor uses `destroy_eligibility`; a dscl failure
+    // routes to `doctor_eligibility_probe_failed` with doctor-named
+    // action wording.
+    let stub = StubHostAccounts {
+        fail_has_user: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, _stdout, stderr) = run_with(stub, &["doctor", "dev"]);
+    assert_eq!(code, 74);
+    assert!(
+        stderr.starts_with("tenant: failed to check doctor eligibility for 'dev': "),
+        "expected doctor_eligibility_probe_failed frame; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_all_surfaces_accounts_error_when_tenant_enumeration_fails() {
+    // No-arg `doctor` reaches `accounts.tenant_names()` after host-wide
+    // checks. The pre-walk checks need a host machine that doesn't
+    // fail, so the test wires an empty `StubHostMachine` and lets the
+    // walk reach the enumeration step. A dscl failure surfaces as
+    // `doctor_enumeration_failed`.
+    let exec = StubHostMachine::new();
+    let stub = StubHostAccounts {
+        fail_tenant_names: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, _stdout, stderr) = run_with_exec(stub, &exec, &["doctor"]);
+    assert_eq!(code, 74);
+    assert!(
+        stderr.contains("tenant: failed to enumerate tenants for doctor: "),
+        "expected doctor_enumeration_failed frame; stderr={stderr:?}"
+    );
+}

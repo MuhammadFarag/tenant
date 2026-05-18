@@ -33,12 +33,31 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            if let Err(e) = tenants::check_conflict(accounts, &name) {
-                reporter.refuse_name_conflict(&name, &e);
-                return EX_USAGE;
+            match tenants::check_conflict(accounts, &name) {
+                Ok(None) => {}
+                Ok(Some(conflict)) => {
+                    reporter.refuse_name_conflict(&name, &conflict);
+                    return EX_USAGE;
+                }
+                Err(e) => {
+                    reporter.create_conflict_probe_failed(&name, &e);
+                    return EX_IOERR;
+                }
             }
-            let uid = allocation::UidAllocator::new(accounts).lowest_free_uid();
-            let gid = allocation::GidAllocator::new(accounts).lowest_free_gid();
+            let uid = match allocation::UidAllocator::new(accounts).lowest_free_uid() {
+                Ok(uid) => uid,
+                Err(e) => {
+                    reporter.create_uid_allocation_failed(&e);
+                    return EX_IOERR;
+                }
+            };
+            let gid = match allocation::GidAllocator::new(accounts).lowest_free_gid() {
+                Ok(gid) => gid,
+                Err(e) => {
+                    reporter.create_gid_allocation_failed(&e);
+                    return EX_IOERR;
+                }
+            };
             let create_plan_ops = build_create_plan_ops(&name, host, uid, gid);
             let create_plan = create_plan_entries(&create_plan_ops);
             if show_summary {
@@ -92,7 +111,14 @@ pub(crate) fn dispatch(
             }
             // NotPresent + OrphanGroup collapse to one refusal: shell can't
             // run against a lingering group; convergence belongs to destroy.
-            match tenants::destroy_eligibility(accounts, &name) {
+            let eligibility = match tenants::destroy_eligibility(accounts, &name) {
+                Ok(e) => e,
+                Err(e) => {
+                    reporter.shell_eligibility_probe_failed(&name, &e);
+                    return EX_IOERR;
+                }
+            };
+            match eligibility {
                 tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
                     reporter.refuse_shell_absent(&name);
                     EX_USAGE
@@ -159,7 +185,14 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            match tenants::destroy_eligibility(accounts, &name) {
+            let eligibility = match tenants::destroy_eligibility(accounts, &name) {
+                Ok(e) => e,
+                Err(e) => {
+                    reporter.mode_eligibility_probe_failed(&name, &e);
+                    return EX_IOERR;
+                }
+            };
+            match eligibility {
                 tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
                     reporter.refuse_mode_absent(&name);
                     EX_USAGE
@@ -214,7 +247,14 @@ pub(crate) fn dispatch(
                     reporter.refuse_invalid_name(&n, &e);
                     return EX_USAGE;
                 }
-                match tenants::destroy_eligibility(accounts, &n) {
+                let eligibility = match tenants::destroy_eligibility(accounts, &n) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        reporter.doctor_eligibility_probe_failed(&n, &e);
+                        return EX_IOERR;
+                    }
+                };
+                match eligibility {
                     tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
                         reporter.refuse_doctor_absent(&n);
                         EX_USAGE
@@ -252,7 +292,14 @@ pub(crate) fn dispatch(
                     reporter.refuse_invalid_name(&n, &e);
                     return EX_USAGE;
                 }
-                match tenants::destroy_eligibility(accounts, &n) {
+                let eligibility = match tenants::destroy_eligibility(accounts, &n) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        reporter.reload_eligibility_probe_failed(&n, &e);
+                        return EX_IOERR;
+                    }
+                };
+                match eligibility {
                     tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
                         reporter.refuse_reload_absent(&n);
                         EX_USAGE
@@ -302,10 +349,22 @@ pub(crate) fn dispatch(
             None => {
                 // Show scope before the prompt; empty host has nothing
                 // to confirm, so skip straight to the no-op summary.
-                let names = accounts.tenant_names();
+                let names = match accounts.tenant_names() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        reporter.reload_all_enumeration_failed(&e);
+                        return EX_IOERR;
+                    }
+                };
                 if names.is_empty() {
-                    let outcome = tenants.reload_all(accounts, host, reporter);
-                    return if outcome.failed == 0 { 0 } else { EX_IOERR };
+                    return match tenants.reload_all(accounts, host, reporter) {
+                        Ok(outcome) if outcome.failed == 0 => 0,
+                        Ok(_) => EX_IOERR,
+                        Err(e) => {
+                            reporter.reload_all_enumeration_failed(&e);
+                            EX_IOERR
+                        }
+                    };
                 }
                 if show_summary {
                     reporter.reload_all_summary(host, &names);
@@ -314,8 +373,14 @@ pub(crate) fn dispatch(
                     reporter.aborted();
                     return 0;
                 }
-                let outcome = tenants.reload_all(accounts, host, reporter);
-                if outcome.failed == 0 { 0 } else { EX_IOERR }
+                match tenants.reload_all(accounts, host, reporter) {
+                    Ok(outcome) if outcome.failed == 0 => 0,
+                    Ok(_) => EX_IOERR,
+                    Err(e) => {
+                        reporter.reload_all_enumeration_failed(&e);
+                        EX_IOERR
+                    }
+                }
             }
         },
         Verb::Destroy { name } => {
@@ -323,7 +388,14 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            match tenants::destroy_eligibility(accounts, &name) {
+            let eligibility = match tenants::destroy_eligibility(accounts, &name) {
+                Ok(e) => e,
+                Err(e) => {
+                    reporter.destroy_eligibility_probe_failed(&name, &e);
+                    return EX_IOERR;
+                }
+            };
+            match eligibility {
                 tenants::Eligibility::NotPresent => {
                     reporter.destroy_absent(&name);
                     0
@@ -358,7 +430,13 @@ pub(crate) fn dispatch(
                     let destroy_plan_ops = build_destroy_plan_ops(&name, host);
                     let destroy_plan = destroy_plan_entries(&destroy_plan_ops);
                     if show_summary {
-                        let uid = accounts.uid_for(&name).unwrap_or(super::UserId(0));
+                        let uid = match accounts.uid_for(&name) {
+                            Ok(opt) => opt.unwrap_or(super::UserId(0)),
+                            Err(e) => {
+                                reporter.destroy_uid_lookup_failed(&name, &e);
+                                return EX_IOERR;
+                            }
+                        };
                         reporter.destroy_summary(&name, host, uid, Some(&destroy_plan));
                     }
                     if reporter.confirm(false) == ConfirmOutcome::Abort {
@@ -393,6 +471,7 @@ fn surface_doctor_error(reporter: &mut Reporter, error: &tenants::DoctorError) {
         tenants::DoctorError::Probe(e) => reporter.doctor_failed(e),
         tenants::DoctorError::HostFile(e) => reporter.doctor_host_file_failed(e),
         tenants::DoctorError::Firewall(e) => reporter.doctor_firewall_failed(e),
+        tenants::DoctorError::AccountsLookup(e) => reporter.doctor_enumeration_failed(e),
     }
 }
 

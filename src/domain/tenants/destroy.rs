@@ -5,8 +5,8 @@
 use crate::allocation::TENANT_UID_FLOOR;
 use crate::domain::reporter::Reporter;
 use crate::domain::{
-    AccountError, AccountOp, FirewallError, FirewallOp, HostAccounts, HostUserName, ProfileOp,
-    TenantUserName, UserId,
+    AccountError, AccountOp, AccountsError, FirewallError, FirewallOp, HostAccounts, HostUserName,
+    ProfileOp, TenantUserName, UserId,
 };
 use crate::firewall::remove_anchor_ref;
 use crate::profile::ProfileError;
@@ -44,18 +44,21 @@ pub enum Eligibility {
     SystemAccount,
 }
 
-pub fn destroy_eligibility(reader: &dyn HostAccounts, name: &TenantUserName) -> Eligibility {
-    if !reader.has_user(name) {
-        if reader.has_group(&tenant_share_group_name(name.as_str())) {
-            return Eligibility::OrphanGroup;
+pub fn destroy_eligibility(
+    reader: &dyn HostAccounts,
+    name: &TenantUserName,
+) -> Result<Eligibility, AccountsError> {
+    if !reader.has_user(name)? {
+        if reader.has_group(&tenant_share_group_name(name.as_str()))? {
+            return Ok(Eligibility::OrphanGroup);
         }
-        return Eligibility::NotPresent;
+        return Ok(Eligibility::NotPresent);
     }
-    match reader.uid_for(name) {
+    Ok(match reader.uid_for(name)? {
         Some(uid) if uid.0 >= TENANT_UID_FLOOR => Eligibility::Destroyable,
         Some(uid) => Eligibility::NotATenant { uid },
         None => Eligibility::SystemAccount,
-    }
+    })
 }
 
 impl<'a> Tenants<'a> {

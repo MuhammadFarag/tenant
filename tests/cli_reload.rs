@@ -683,3 +683,37 @@ fn reload_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
         "substrate failure surfaces; stderr={stderr:?}"
     );
 }
+
+#[test]
+fn reload_surfaces_accounts_error_when_eligibility_probe_fails() {
+    // Single-tenant reload re-uses `destroy_eligibility`; a dscl failure
+    // routes to `reload_eligibility_probe_failed` with reload-named
+    // action wording.
+    let stub = StubHostAccounts {
+        fail_has_user: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, _stdout, stderr) = run_with(stub, &["reload", "dev"]);
+    assert_eq!(code, 74);
+    assert!(
+        stderr.starts_with("tenant: failed to check reload eligibility for 'dev': "),
+        "expected reload_eligibility_probe_failed frame; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn reload_all_surfaces_accounts_error_when_tenant_enumeration_fails() {
+    // No-arg `reload` walks `accounts.tenant_names()`; a dscl failure
+    // surfaces as `reload_all_enumeration_failed` and aborts the walk
+    // before any per-tenant work.
+    let stub = StubHostAccounts {
+        fail_tenant_names: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, _stdout, stderr) = run_with(stub, &["reload"]);
+    assert_eq!(code, 74);
+    assert!(
+        stderr.starts_with("tenant: failed to enumerate tenants for reload: "),
+        "expected reload_all_enumeration_failed frame; stderr={stderr:?}"
+    );
+}

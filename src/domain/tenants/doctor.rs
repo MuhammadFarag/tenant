@@ -8,7 +8,8 @@ use crate::doctor::{
 };
 use crate::domain::reporter::Reporter;
 use crate::domain::{
-    FirewallError, HostAccounts, HostFileError, HostUserName, PathKind, ProbeError, TenantUserName,
+    AccountsError, FirewallError, HostAccounts, HostFileError, HostUserName, PathKind, ProbeError,
+    TenantUserName,
 };
 use crate::firewall::render_anchor;
 use crate::profile::{expand_tenant_path, parse};
@@ -29,6 +30,7 @@ pub(crate) enum DoctorError {
     Probe(ProbeError),
     HostFile(HostFileError),
     Firewall(FirewallError),
+    AccountsLookup(AccountsError),
 }
 
 impl From<ProbeError> for DoctorError {
@@ -46,6 +48,12 @@ impl From<HostFileError> for DoctorError {
 impl From<FirewallError> for DoctorError {
     fn from(e: FirewallError) -> Self {
         DoctorError::Firewall(e)
+    }
+}
+
+impl From<AccountsError> for DoctorError {
+    fn from(e: AccountsError) -> Self {
+        DoctorError::AccountsLookup(e)
     }
 }
 
@@ -106,7 +114,7 @@ impl<'a> Tenants<'a> {
         if let Some(pf_disabled) = self.check_pf_status(reporter)? {
             findings.push(pf_disabled);
         }
-        let tenants = accounts.tenant_names();
+        let tenants = accounts.tenant_names()?;
         if tenants.is_empty() {
             reporter.doctor_all_tenants_noop();
             return Ok(DoctorOutcome { findings });

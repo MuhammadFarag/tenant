@@ -1145,3 +1145,45 @@ fn destroy_with_yes_flag_skips_prompt() {
     );
     assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }
+
+#[test]
+fn destroy_surfaces_accounts_error_when_eligibility_probe_fails() {
+    // `destroy_eligibility` calls has_user / has_group / uid_for; a dscl
+    // failure at has_user routes to `destroy_eligibility_probe_failed`
+    // and exits 74 before the convergent-noop or Destroyable branches.
+    let stub = StubHostAccounts {
+        fail_has_user: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, stdout, stderr) = run_with(stub, &["destroy", "dev", "--dry-run"]);
+    assert_eq!(code, 74);
+    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert!(
+        stderr.starts_with("tenant: failed to check destroy eligibility for 'dev': "),
+        "expected destroy_eligibility_probe_failed frame; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn destroy_surfaces_accounts_error_when_uid_lookup_fails() {
+    // The `destroy_uid_lookup_failed` frame fires on the SECOND
+    // `uid_for` call in the dispatch flow: `destroy_eligibility`
+    // already consumed the first to classify `Destroyable`, then the
+    // pre-summary path calls `uid_for` again. The queued injector's
+    // `[None, Some(err)]` shape skips the first call (snapshot) and
+    // fails the second. The re-lookup only fires when `show_summary`
+    // is true — driven by `--dry-run` here so stdin doesn't have to
+    // be a TTY.
+    let stub = StubHostAccounts {
+        users: vec!["dev".to_string()],
+        uid_by_name: [("dev".to_string(), UserId(600))].into_iter().collect(),
+        fail_uid_for: accounts_fail_on_second_call(),
+        ..Default::default()
+    };
+    let (code, _stdout, stderr) = run_with(stub, &["destroy", "dev", "--dry-run"]);
+    assert_eq!(code, 74);
+    assert!(
+        stderr.starts_with("tenant: failed to look up UID for 'dev': "),
+        "expected destroy_uid_lookup_failed frame; stderr={stderr:?}"
+    );
+}

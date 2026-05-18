@@ -7,12 +7,36 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::io;
+
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::adapters::stub_host_machine::StubHostMachine;
 use tenant::domain::{
-    AccountError, AccountOp, FirewallError, FirewallOp, GroupId, GroupName, HostMachine,
-    HostUserName, ProfileOp, TenantUserName, UserId,
+    AccountError, AccountOp, AccountsError, FirewallError, FirewallOp, GroupId, GroupName,
+    HostMachine, HostUserName, ProfileOp, TenantUserName, UserId,
 };
+
+/// Single-failure queue: returns Err on the first call to the matching
+/// `HostAccounts` method, snapshots thereafter. The default fixture for
+/// tests that drive Reporter's `*_eligibility_probe_failed` /
+/// `*_allocation_failed` / `*_enumeration_failed` / `*_conflict_probe_failed`
+/// frames — one call site, one failure.
+pub fn accounts_fail_once() -> RefCell<VecDeque<Option<AccountsError>>> {
+    let err = AccountsError::Spawn(io::Error::other("synthetic"));
+    RefCell::new(VecDeque::from([Some(err)]))
+}
+
+/// Pass-then-fail queue: first call succeeds (uses the snapshot), second
+/// fails. The fixture for `destroy_uid_lookup_failed` — the dispatch
+/// surface where `accounts.uid_for` is called AFTER `destroy_eligibility`
+/// already consumed its own `uid_for` call. Without skipping the first
+/// call, the failure routes to `destroy_eligibility_probe_failed`.
+pub fn accounts_fail_on_second_call() -> RefCell<VecDeque<Option<AccountsError>>> {
+    let err = AccountsError::Spawn(io::Error::other("synthetic"));
+    RefCell::new(VecDeque::from([None, Some(err)]))
+}
 
 /// Default host machine for tests that should not reach the exec stage —
 /// validation failures, conflicts, and dry-run paths. Panics on any
@@ -744,6 +768,7 @@ pub fn make_tenant_stub_reader(name: &str) -> StubHostAccounts {
         gid_by_name: [(format!("{name}-tenant-share"), GroupId(600))]
             .into_iter()
             .collect(),
+        ..Default::default()
     }
 }
 
@@ -766,5 +791,6 @@ pub fn make_two_tenant_stub_reader() -> StubHostAccounts {
         ]
         .into_iter()
         .collect(),
+        ..Default::default()
     }
 }

@@ -71,9 +71,9 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     `AccountOp` / `ProfileOp` / `FirewallOp` /
                     `AclOp` plus the four `impl WritableOp for *Op`
                     blocks. `errors.rs` carries the per-domain error
-                    types (`AccountError`, `AclError`, `FirewallError`,
-                    `HostFileError`, `ProbeError`). `ids.rs` carries
-                    the domain newtypes (`UserId` / `GroupId` /
+                    types (`AccountError`, `AccountsError`, `AclError`,
+                    `FirewallError`, `HostFileError`, `ProbeError`).
+                    `ids.rs` carries the domain newtypes (`UserId` / `GroupId` /
                     `TenantUserName` / `HostUserName` / `GroupName`),
                     re-exported flat from `crate::domain`.
 src/domain/tenants.rs / tenants/
@@ -119,9 +119,13 @@ src/domain/reporter.rs
                     `doctor_finding_one_liner` /
                     `doctor_summary_pending` drive the audit surface.
 src/adapters/     — driven adapters. `stub_host_accounts.rs`
-                    (`StubHostAccounts` for tests) +
-                    `macos/host_accounts.rs` (`MacosHostAccounts` —
-                    dscl-backed snapshot, populated once at `new()`).
+                    (`StubHostAccounts` — test substitute; HashMap-
+                    backed inventory with per-method
+                    `RefCell<VecDeque<Option<AccountsError>>>` failure-
+                    injection queues) + `macos/host_accounts.rs`
+                    (`MacosHostAccounts` — ZST driver; per-call dscl
+                    with `eDSRecordNotFound` absence detection;
+                    symmetric with `MacosHostMachine`).
                     Three `HostMachine` impls: `macos/host_machine.rs`
                     (`MacosHostMachine` — production substrate; owns
                     argv for dseditgroup / sysadminctl / dscl / pfctl
@@ -159,7 +163,8 @@ tests/macos_host_machine.rs
 tests/intent_labels.rs    — per-variant pins of `Op::intent_label()`
                             + sharpening pins (intent ≠ business label).
 tests/macos_host_accounts.rs
-                          — `MacosHostAccounts::new()` dscl smoke
+                          — `MacosHostAccounts` per-call dscl smoke +
+                            `eDSRecordNotFound` absence-detection pin
                             (`#[cfg(target_os = "macos")]`).
 tests/doctor.rs           — combinatorial: classify matrix, `Finding`
                             display, guidance, severity ordering.
@@ -197,11 +202,13 @@ it from scratch wastes a cycle and risks getting it wrong.
   render — `execute_account` panics on them. Future HostMachine method:
   if it fits `Result<(), E>`, make it an ADT variant; if not, carve out.
 
-- **Probe via HostMachine, not HostAccounts live re-read.** When a verb needs
-  to re-check OS state mid-execution (destroy's `LookupUserRecord`
-  residue probe is canonical), it's a regular substrate call whose
-  `Ok` vs `Err` drives a Tenants branch. HostAccounts stays snapshot-then-act
-  — in-memory view captured at composition-root construction.
+- **Probe via HostMachine, not HostAccounts re-read.** When a verb
+  needs to re-check OS state mid-execution (destroy's
+  `LookupUserRecord` residue probe is canonical), it's a regular
+  substrate call whose `Ok` vs `Err` drives a Tenants branch.
+  HostAccounts is for inventory queries (presence, IDs, enumeration)
+  consumed up front in dispatch; per-mutation follow-up probes
+  belong on HostMachine alongside the mutation they verify.
 
 - **Doctor doesn't fit the `WritableOp` shape.** All doctor probes
   are HostMachine carve-out methods, NOT `Op<'a>` variants. Probes are
@@ -249,12 +256,17 @@ it from scratch wastes a cycle and risks getting it wrong.
   Write)` shapes; pass `Terminal` and let the body access what it
   needs.
 
-- **Snapshot-then-act on `HostAccounts`.** `MacosHostAccounts::new()` queries
-  dscl once at composition-root construction; subsequent lookups
-  serve from the in-memory snapshot. A concurrent admin process
-  mutating `/Users` between snapshot and `sudo sysadminctl …` could
-  cause us to destroy an account whose UID changed; exploitation
-  requires concurrent root, so we accept the TOCTOU window.
+- **Per-call dscl on `HostAccounts`.** `MacosHostAccounts` is a ZST;
+  each trait method spawns dscl per call. No internal cache, no eager
+  snapshot at composition-root. A verb that calls `has_user` +
+  `uid_for` + the allocator pays N+1 dscl spawns; on a solo-Mac admin
+  CLI this latency is invisible. Absence is detected by the
+  `eDSRecordNotFound` stderr signal, not by treating any nonzero as
+  absent — preserves the conflict-probe / eligibility frames' contract
+  when dscl itself breaks (permissions, daemon hung). The TOCTOU
+  window between query and mutation is "lookup → next syscall" rather
+  than "composition root → minutes later"; still nonzero but no
+  longer doctrine-worthy.
 
 ### Verb semantics
 

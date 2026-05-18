@@ -1714,3 +1714,20 @@ fn shell_clap_rejects_mode_without_argv() {
         "no substrate fires on clap parse rejection"
     );
 }
+
+#[test]
+fn shell_surfaces_accounts_error_when_eligibility_probe_fails() {
+    // Same eligibility probe as destroy — a dscl failure on `has_user`
+    // routes to `shell_eligibility_probe_failed` with shell-named
+    // action wording.
+    let stub = StubHostAccounts {
+        fail_has_user: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, _stdout, stderr) = run_with(stub, &["shell", "dev"]);
+    assert_eq!(code, 74);
+    assert!(
+        stderr.starts_with("tenant: failed to check shell eligibility for 'dev': "),
+        "expected shell_eligibility_probe_failed frame; stderr={stderr:?}"
+    );
+}

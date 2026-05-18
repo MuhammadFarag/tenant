@@ -7,7 +7,7 @@ pub mod ops;
 pub mod reporter;
 pub mod tenants;
 
-pub use errors::{AccountError, AclError, FirewallError, HostFileError, ProbeError};
+pub use errors::{AccountError, AccountsError, AclError, FirewallError, HostFileError, ProbeError};
 pub use host_accounts::HostAccounts;
 pub use host_machine::{HostMachine, WritableOp};
 pub use ids::{GroupId, GroupName, HostUserName, TenantUserName, UserId};

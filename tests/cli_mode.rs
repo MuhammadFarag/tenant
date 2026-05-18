@@ -1084,3 +1084,19 @@ fn mode_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
         "substrate failure surfaces; stderr={stderr:?}"
     );
 }
+
+#[test]
+fn mode_surfaces_accounts_error_when_eligibility_probe_fails() {
+    // `destroy_eligibility` is shared by mode; the verb's frame names
+    // 'mode' so log-grep can bind to the verb invocation.
+    let stub = StubHostAccounts {
+        fail_has_user: accounts_fail_once(),
+        ..Default::default()
+    };
+    let (code, _stdout, stderr) = run_with(stub, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 74);
+    assert!(
+        stderr.starts_with("tenant: failed to check mode eligibility for 'dev': "),
+        "expected mode_eligibility_probe_failed frame; stderr={stderr:?}"
+    );
+}
