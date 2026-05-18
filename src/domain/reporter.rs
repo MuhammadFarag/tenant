@@ -18,14 +18,14 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use crate::ModeLevel;
-use crate::accounts::{ConflictError, NameError, ShareError, tenant_share_group_name};
-use crate::ansi::{self, Colors};
-use crate::doctor::{Category, Finding, Severity};
-use crate::domain::{
+use super::accounts::{ConflictError, NameError, ShareError, tenant_share_group_name};
+use super::{
     AccessMode, AccountError, AclError, FirewallError, GroupId, HostMachine, HostUserName, Op,
     ProbeError, TenantUserName, UserId,
 };
+use crate::ModeLevel;
+use crate::ansi::{self, Colors};
+use crate::doctor::{Category, Finding, Severity};
 use crate::profile::{ProfileError, display_path_for};
 
 /// Outcome of the pre-execution confirmation prompt. `Proceed` covers
@@ -722,7 +722,7 @@ impl<'a> Reporter<'a> {
     pub fn shell_narrow_failed(
         &mut self,
         name: &TenantUserName,
-        _err: &crate::accounts::ModeError,
+        _err: &super::accounts::ModeError,
     ) {
         let prefix = if self.colors.stderr {
             "\x1b[33m\u{26a0}\x1b[0m"
@@ -1085,7 +1085,7 @@ impl<'a> Reporter<'a> {
     /// detail; this frame adds the verb-level context. Distinct from
     /// `doctor_failed` (filesystem-probe machinery) so the operator
     /// sees which substrate tripped.
-    pub fn doctor_host_file_failed(&mut self, err: &crate::domain::HostFileError) {
+    pub fn doctor_host_file_failed(&mut self, err: &super::HostFileError) {
         let _ = writeln!(self.stderr, "tenant: failed to read host config: {err}");
     }
 

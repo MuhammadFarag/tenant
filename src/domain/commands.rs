@@ -1,12 +1,9 @@
 use std::io::BufRead;
 
-use crate::ModeLevel;
+use super::reporter::{ConfirmOutcome, Reporter};
+use super::{AccountOp, FirewallOp, Op, ProfileOp, accounts};
 use crate::doctor::Severity;
-use crate::domain::{AccountOp, FirewallOp, Op, ProfileOp};
-use crate::reporter::ConfirmOutcome;
-use crate::{
-    Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, domain, reporter::Reporter,
-};
+use crate::{Cli, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR};
 
 const EX_USAGE: u8 = 64;
 const EX_IOERR: u8 = 74;
@@ -36,9 +33,9 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch(
     cli: Cli,
-    accounts: &dyn domain::HostAccounts,
+    accounts: &dyn super::HostAccounts,
     writer: &accounts::Writer<'_>,
-    host: &domain::HostUserName,
+    host: &super::HostUserName,
     reporter: &mut Reporter,
     stdin: &mut dyn BufRead,
     stdin_is_tty: bool,
@@ -462,7 +459,7 @@ pub(crate) fn dispatch(
                     let destroy_plan_ops = build_destroy_plan_ops(&name, host);
                     let destroy_plan = destroy_plan_entries(&destroy_plan_ops);
                     if show_summary {
-                        let uid = accounts.uid_for(&name).unwrap_or(domain::UserId(0));
+                        let uid = accounts.uid_for(&name).unwrap_or(super::UserId(0));
                         reporter.destroy_summary(&name, host, uid, Some(&destroy_plan));
                     }
                     if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
@@ -487,7 +484,7 @@ pub(crate) fn dispatch(
 /// surface account-domain and profile-domain failures consistently.
 fn surface_destroy_error(
     reporter: &mut Reporter,
-    name: &domain::TenantUserName,
+    name: &super::TenantUserName,
     error: &accounts::DestroyError,
 ) {
     match error {
@@ -516,7 +513,7 @@ fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) 
 /// `dispatch` thin.
 fn surface_mode_error(
     reporter: &mut Reporter,
-    name: &domain::TenantUserName,
+    name: &super::TenantUserName,
     error: &accounts::ModeError,
 ) {
     match error {
@@ -535,7 +532,7 @@ fn surface_mode_error(
 /// the failure frame names the narrow as a step within the shell verb.
 fn surface_shell_mode_error(
     reporter: &mut Reporter,
-    name: &domain::TenantUserName,
+    name: &super::TenantUserName,
     error: &accounts::ModeError,
 ) {
     match error {
@@ -555,7 +552,7 @@ fn surface_shell_mode_error(
 /// mode-named methods whose wording is verb-agnostic.
 fn surface_reload_error(
     reporter: &mut Reporter,
-    name: &domain::TenantUserName,
+    name: &super::TenantUserName,
     error: &accounts::ModeError,
 ) {
     match error {
@@ -599,10 +596,10 @@ pub(crate) struct CreatePlanOps {
 }
 
 fn build_create_plan_ops(
-    name: &domain::TenantUserName,
-    host: &domain::HostUserName,
-    uid: domain::UserId,
-    gid: domain::GroupId,
+    name: &super::TenantUserName,
+    host: &super::HostUserName,
+    uid: super::UserId,
+    gid: super::GroupId,
 ) -> CreatePlanOps {
     let group = accounts::tenant_share_group_name(name.as_str());
     CreatePlanOps {
@@ -671,8 +668,8 @@ pub(crate) struct DestroyPlanOps {
 }
 
 fn build_destroy_plan_ops(
-    name: &domain::TenantUserName,
-    host: &domain::HostUserName,
+    name: &super::TenantUserName,
+    host: &super::HostUserName,
 ) -> DestroyPlanOps {
     let group = accounts::tenant_share_group_name(name.as_str());
     DestroyPlanOps {
@@ -723,8 +720,8 @@ pub(crate) struct OrphanGroupPlanOps {
 }
 
 fn build_orphan_plan_ops(
-    name: &domain::TenantUserName,
-    host: &domain::HostUserName,
+    name: &super::TenantUserName,
+    host: &super::HostUserName,
 ) -> OrphanGroupPlanOps {
     let group = accounts::tenant_share_group_name(name.as_str());
     OrphanGroupPlanOps {
@@ -770,7 +767,7 @@ fn orphan_plan_entries(ops: &OrphanGroupPlanOps) -> Vec<(Op<'_>, Option<&'static
 /// completeness.
 fn surface_create_post_provision_error(
     reporter: &mut Reporter,
-    name: &domain::TenantUserName,
+    name: &super::TenantUserName,
     error: &accounts::ModeError,
 ) {
     match error {

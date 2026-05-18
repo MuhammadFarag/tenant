@@ -47,18 +47,6 @@ src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`;
                     `DryRunHostMachine` when `--dry-run`.
 src/ansi.rs       — `Colors { stdout, stderr }` per-stream gate; color
                     wrappers; `rule(title, width)` section divider.
-src/commands.rs   — verb dispatch (no I/O). Per-arm `surface_*_error`
-                    helpers route domain errors to Reporter. Dispatch
-                    builds `ReapplyPlan` upfront for prompt-bearing
-                    verbs so profile-read failures surface pre-prompt.
-src/accounts.rs   — `Writer` verb methods. `shell_into_tenant`
-                    branches on argv-presence into `shell_interactive`
-                    / `shell_command`. `build_reapply_plan` +
-                    `execute_reapply_plan` shared across mode/shell/
-                    reload. `DoctorScope { Create, Shell, Mode, Reload }`
-                    selects per-verb audit relevance. Error families:
-                    `ShareError`, `ModeError`, `ShellError`, `CreateError`,
-                    `DoctorError`.
 src/domain/       — domain layer. `host_accounts.rs` defines the
                     `HostAccounts` trait — driven port for account
                     inventory queries (`used_uids` / `used_gids` /
@@ -82,6 +70,29 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     the domain newtypes (`UserId` / `GroupId` /
                     `TenantUserName` / `HostUserName` / `GroupName`),
                     re-exported flat from `crate::domain`.
+src/domain/accounts.rs
+                  — `Writer` verb methods. `shell_into_tenant`
+                    branches on argv-presence into `shell_interactive`
+                    / `shell_command`. `build_reapply_plan` +
+                    `execute_reapply_plan` shared across mode/shell/
+                    reload. `DoctorScope { Create, Shell, Mode, Reload }`
+                    selects per-verb audit relevance. Error families:
+                    `ShareError`, `ModeError`, `ShellError`, `CreateError`,
+                    `DoctorError`.
+src/domain/commands.rs
+                  — verb dispatch (no I/O). Per-arm `surface_*_error`
+                    helpers route domain errors to Reporter. Dispatch
+                    builds `ReapplyPlan` upfront for prompt-bearing
+                    verbs so profile-read failures surface pre-prompt.
+src/domain/reporter.rs
+                  — operator-facing output. `section` + `ok` (✓) +
+                    `step` ($-echo) + `progress` substrate vocab.
+                    Per-verb `_intent` / `_summary` / `_done` triples;
+                    `_summary` carries optional `Plan (commands to
+                    execute):` block in verbose. `confirm()` +
+                    `aborted()`. `doctor_finding` /
+                    `doctor_finding_one_liner` /
+                    `doctor_summary_pending` drive the audit surface.
 src/adapters/     — driven adapters. `stub_host_accounts.rs`
                     (`StubHostAccounts` for tests) +
                     `macos/host_accounts.rs` (`MacosHostAccounts` —
@@ -110,14 +121,6 @@ src/firewall.rs   — pure: `render_anchor`, `ensure_anchor_ref`,
 src/doctor.rs     — pure grep-and-classify. `Finding` + `Severity` +
                     `Category` + `SymlinkActual` shapes; the parse +
                     classify functions. All I/O lives in `Writer::doctor_*`.
-src/reporter.rs   — operator-facing output. `section` + `ok` (✓) +
-                    `step` ($-echo) + `progress` substrate vocab.
-                    Per-verb `_intent` / `_summary` / `_done` triples;
-                    `_summary` carries optional `Plan (commands to
-                    execute):` block in verbose. `confirm()` +
-                    `aborted()`. `doctor_finding` /
-                    `doctor_finding_one_liner` /
-                    `doctor_summary_pending` drive the audit surface.
 src/main.rs       — composition root: prod impls + `tenant::run`.
                     Reads `$USER`; probes stdin TTY + colors.
 

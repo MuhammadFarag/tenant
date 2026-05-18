@@ -5,18 +5,15 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::domain::{HostUserName, TenantUserName};
 
-pub mod accounts;
 pub mod adapters;
 pub mod allocation;
 pub mod ansi;
-mod commands;
 pub mod doctor;
 pub mod domain;
 pub mod firewall;
 pub mod profile;
-mod reporter;
 
-use reporter::Reporter;
+use domain::reporter::Reporter;
 
 #[derive(Parser)]
 #[command(name = "tenant")]
@@ -179,7 +176,7 @@ pub fn run(
     } else {
         machine
     };
-    let writer = accounts::Writer::new(active_machine);
+    let writer = domain::accounts::Writer::new(active_machine);
     let yes = cli.yes;
     let mut reporter = Reporter::new(
         stdout,
@@ -189,7 +186,7 @@ pub fn run(
         active_machine,
         colors,
     );
-    commands::dispatch(
+    domain::commands::dispatch(
         cli,
         accounts,
         &writer,

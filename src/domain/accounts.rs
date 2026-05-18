@@ -1,22 +1,22 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use super::reporter::Reporter;
+use super::{
+    AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp, GroupId,
+    GroupName, HostAccounts, HostFileError, HostMachine, HostUserName, Op, PathKind, ProbeError,
+    ProfileOp, TenantUserName, UserId, WritableOp,
+};
 use crate::ModeLevel;
 use crate::allocation::TENANT_UID_FLOOR;
 use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, curated_paths, has_env_delete_for,
     has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
 };
-use crate::domain::{
-    AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp, GroupId,
-    GroupName, HostAccounts, HostFileError, HostMachine, HostUserName, Op, PathKind, ProbeError,
-    ProfileOp, TenantUserName, UserId, WritableOp,
-};
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
 use crate::profile::{
     Profile, ProfileError, ShareMode, display_path_for, expand_tenant_path, parse,
 };
-use crate::reporter::Reporter;
 
 const MAX_NAME_LEN: usize = 31;
 
