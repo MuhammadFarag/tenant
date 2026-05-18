@@ -1,12 +1,12 @@
 use std::io;
 use std::process::ExitCode;
 
-use tenant::adapters::macos::MacosReader;
+use tenant::adapters::macos::MacosHostAccounts;
 use tenant::executor::MacosExecutor;
 use tenant::ids::HostUserName;
 
 fn main() -> ExitCode {
-    let accounts = match MacosReader::new() {
+    let accounts = match MacosHostAccounts::new() {
         Ok(reader) => reader,
         Err(e) => {
             eprintln!("tenant: failed to query account state: {e}");

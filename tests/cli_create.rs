@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tenant::adapters::stub_reader::StubReader;
+use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::executor::{
     AccountError, AccountOp, AclMode, AclOp, FirewallError, ProfileOp, StubExecutor,
 };
@@ -11,7 +11,8 @@ use common::*;
 
 #[test]
 fn create_dry_run_default_shows_intent() {
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["create", "dev", "--dry-run"]);
+    let (code, stdout, stderr) =
+        run_with(StubHostAccounts::default(), &["create", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
 }
@@ -19,14 +20,16 @@ fn create_dry_run_default_shows_intent() {
 #[test]
 fn create_accepts_max_length_name() {
     let name = "a".repeat(31);
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["create", &name, "--dry-run"]);
+    let (code, stdout, stderr) =
+        run_with(StubHostAccounts::default(), &["create", &name, "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     assert_eq!(stdout, create_dry_run_block(&name, 600, 600, None));
 }
 
 #[test]
 fn create_accepts_single_letter_name() {
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["create", "x", "--dry-run"]);
+    let (code, stdout, stderr) =
+        run_with(StubHostAccounts::default(), &["create", "x", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     assert_eq!(stdout, create_dry_run_block("x", 600, 600, None));
 }
@@ -44,8 +47,10 @@ fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
     // convention shipped in V1.8). UID and GID allocators are decoupled
     // post-Phase-3 but both happen to bottom-out at TENANT_UID_FLOOR=600
     // when both spaces are empty.
-    let (code, stdout, _stderr) =
-        run_with(StubReader::default(), &["create", "dev", "--dry-run", "-v"]);
+    let (code, stdout, _stderr) = run_with(
+        StubHostAccounts::default(),
+        &["create", "dev", "--dry-run", "-v"],
+    );
     assert_eq!(code, 0);
     // The verbose plan section lives inside the summary (between
     // the bullets and "Sudo needed for:"), rendered in
@@ -56,8 +61,8 @@ fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
 
 /// Stub whose `used_uids()` reports the given UIDs as taken (by synthetic
 /// user names that no test asserts about). Used by allocator-driven tests.
-fn stub_with_used_uids(uids: &[u32]) -> StubReader {
-    StubReader {
+fn stub_with_used_uids(uids: &[u32]) -> StubHostAccounts {
+    StubHostAccounts {
         uid_by_name: uids
             .iter()
             .enumerate()
@@ -134,7 +139,7 @@ fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
     // load-bearing thing tenant passes to dseditgroup, so a regression
     // that wires `-i` to `uid` would slip past UID-only tests but trips
     // here.
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         groups: vec!["other".to_string()],
         gid_by_name: [("other".to_string(), GroupId(600))].into_iter().collect(),
         ..Default::default()
@@ -155,7 +160,7 @@ fn verbose_uid_and_gid_allocators_cross_over() {
     // The strongest single-test defense against a regression that
     // wires `-i` and `-GID` to `lowest_free_uid` instead of
     // `lowest_free_gid`.
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         users: vec!["legacy".to_string()],
         uid_by_name: [("legacy".to_string(), UserId(600))].into_iter().collect(),
         groups: vec!["phantom".to_string()],
@@ -171,7 +176,8 @@ fn verbose_uid_and_gid_allocators_cross_over() {
 
 #[test]
 fn create_rejects_empty_name() {
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["create", "", "--dry-run"]);
+    let (code, stdout, stderr) =
+        run_with(StubHostAccounts::default(), &["create", "", "--dry-run"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: name cannot be empty\n");
@@ -181,7 +187,7 @@ fn create_rejects_empty_name() {
 fn create_rejects_non_letter_start() {
     for (name, offender) in [("1dev", '1'), ("_dev", '_'), ("Dev", 'D')] {
         let (code, stdout, stderr) =
-            run_with(StubReader::default(), &["create", name, "--dry-run"]);
+            run_with(StubHostAccounts::default(), &["create", name, "--dry-run"]);
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -198,7 +204,7 @@ fn create_rejects_non_letter_start() {
 fn create_rejects_invalid_character() {
     for (name, offender) in [("de v", ' '), ("de@v", '@'), ("dev.", '.')] {
         let (code, stdout, stderr) =
-            run_with(StubReader::default(), &["create", name, "--dry-run"]);
+            run_with(StubHostAccounts::default(), &["create", name, "--dry-run"]);
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -212,7 +218,8 @@ fn create_rejects_invalid_character() {
 #[test]
 fn create_rejects_overlong_name() {
     let name = "a".repeat(32);
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["create", &name, "--dry-run"]);
+    let (code, stdout, stderr) =
+        run_with(StubHostAccounts::default(), &["create", &name, "--dry-run"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -233,7 +240,7 @@ fn create_rejects_reserved_names() {
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
         let (code, stdout, stderr) =
-            run_with(StubReader::default(), &["create", name, "--dry-run"]);
+            run_with(StubHostAccounts::default(), &["create", name, "--dry-run"]);
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -253,7 +260,7 @@ fn create_accepts_name_with_reserved_prefix() {
     // intended behavior.
     for name in ["rooty", "wheelman", "admins", "daemonic"] {
         let (code, stdout, stderr) =
-            run_with(StubReader::default(), &["create", name, "--dry-run"]);
+            run_with(StubHostAccounts::default(), &["create", name, "--dry-run"]);
         assert_eq!(code, 0, "want success for {name:?}; stderr={stderr:?}");
         assert_eq!(stdout, create_dry_run_block(name, 600, 600, None));
     }
@@ -261,7 +268,7 @@ fn create_accepts_name_with_reserved_prefix() {
 
 #[test]
 fn create_rejects_when_user_exists() {
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         users: vec!["dev".to_string()],
         ..Default::default()
     };
@@ -276,7 +283,7 @@ fn create_rejects_when_tenant_share_group_exists() {
     // Phase 3 names the primary group `<name>-tenant-share` (not bare
     // `<name>`). The conflict check now refuses when that suffixed name is
     // already taken, regardless of what the bare-name group looks like.
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -291,7 +298,7 @@ fn create_rejects_when_user_and_tenant_share_group_exist() {
     // The `Both` arm — user named `dev` AND the suffixed group `dev-tenant-share`
     // both present. The message names both with the literal group name so
     // the operator can find them with `dscl` directly.
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         users: vec!["dev".to_string()],
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -315,7 +322,7 @@ fn create_accepts_when_bare_name_group_exists_but_not_suffix() {
     // Pins the new contract's specificity — a future regression that
     // swaps `has_group("<name>-tenant-share")` for `has_group(name)` (or
     // checks both) would trip this test.
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         groups: vec!["dev".to_string()],
         ..Default::default()
     };
@@ -326,7 +333,7 @@ fn create_accepts_when_bare_name_group_exists_but_not_suffix() {
 
 #[test]
 fn create_succeeds_when_unrelated_user_exists() {
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         users: vec!["ops".to_string()],
         ..Default::default()
     };
@@ -342,7 +349,8 @@ fn create_writes_default_profile_to_store() {
     // assertion lives in the dedicated TOML test below; this test only
     // pins presence via `StubExecutor::has_profile`.
     let exec = StubExecutor::new();
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         exec.has_profile("dev"),
@@ -359,7 +367,8 @@ fn create_writes_profile_with_correct_toml_shape() {
     // No `[share]` section — that's Claude-Code-specific and out of
     // scope for the generic Rust port.
     let exec = StubExecutor::new();
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let state = exec.profile_state();
     let content = state.get("dev").expect("profile 'dev' should be present");
@@ -380,7 +389,7 @@ fn create_dry_run_does_not_write_profile() {
     // `dry_run_bypasses_injected_executor` test for the executor side.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(
-        StubReader::default(),
+        StubHostAccounts::default(),
         &exec,
         &["create", "dev", "--dry-run"],
     );
@@ -404,7 +413,8 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
     // time); this test pins both the order and the operand values via
     // the ✓ stream + `account_ops()` assertions below.
     let exec = StubExecutor::new();
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let want = format!(
         "{}\n\
@@ -458,7 +468,7 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
     // path; this test pins the scripted-mode shape.
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) =
-        run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 0);
     let want = format!(
         "{}\n\
@@ -501,7 +511,8 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
     let exec = StubExecutor::new().fail_next_profile(tenant::profile::ProfileError {
         message: "disk full".into(),
     });
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
     // Pre-failure ✓ stream is operator-visible. The two account ops
     // succeeded; the profile-write substrate failed; no Done section
@@ -541,7 +552,7 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
 fn dry_run_bypasses_injected_executor() {
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(
-        StubReader::default(),
+        StubHostAccounts::default(),
         &exec,
         &["create", "dev", "--dry-run"],
     );
@@ -565,7 +576,8 @@ fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
     // emit the new `create_group_failed` shape that names the group
     // explicitly so the operator knows the user wasn't touched.
     let exec = StubExecutor::new().fail_account_blanket(78, "");
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     // Section divider lands before the substrate fires; the first
     // substrate op fails so no ✓ lines emit. Stdout carries the
@@ -605,7 +617,8 @@ fn create_add_host_failure_aborts_with_orphan_group_recovery_hint() {
             stderr: "dseditgroup: not authorized\n".into(),
         },
     );
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     let want_stdout = format!(
         "{}\n\
@@ -645,7 +658,8 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
             stderr: "sysadminctl: -addUser failed: existing record\n".into(),
         },
     );
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
     // Section + ✓ for the successful CreateShareGroup + ✓ for the
     // successful AddHostToShareGroup + ✓ for the successful rollback
@@ -710,7 +724,7 @@ fn create_real_mode_verbose_shows_rollback_echo() {
         },
     );
     let (code, stdout, stderr) =
-        run_with_exec(StubReader::default(), &exec, &["create", "dev", "-v"]);
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     let want_stdout = format!(
         "{}\n\
@@ -764,7 +778,8 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
                 stderr: "dseditgroup: not authorized\n".into(),
             },
         );
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR");
     // Section divider + ✓ for the first two successful steps
     // (CreateShareGroup + AddHostToShareGroup) lands on stdout. The
@@ -796,7 +811,8 @@ fn create_real_mode_invokes_firewall_ops_in_locked_order() {
     // Reload → Enable. Pins the order of `firewall_ops()` recorded by
     // the stub on a clean-host (empty pf.conf) success path.
     let exec = StubExecutor::new();
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let ops = exec.firewall_ops();
     let names: Vec<&'static str> = ops
@@ -832,7 +848,8 @@ fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
     // hosts) before reading, so the body's table is the empty `{ }`
     // form. Pins the read→parse→render data flow end-to-end.
     let exec = StubExecutor::new();
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let body = exec
         .firewall_ops()
@@ -871,7 +888,8 @@ fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() 
                      [allowlist.install]\n\
                      hosts = []\n";
     let exec = StubExecutor::new().with_create_profile_content("dev", populated);
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let body = exec
         .firewall_ops()
@@ -916,7 +934,8 @@ fn create_real_mode_update_conf_content_reflects_existing_pf_conf() {
     // existing-host state.
     let initial = "# host's existing pf.conf\nset block-policy drop\n";
     let exec = StubExecutor::new().with_pf_conf(initial);
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let updated = exec
         .firewall_ops()
@@ -957,7 +976,8 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
             message: "permission denied".to_string(),
         },
     );
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
     // Section + ✓ for the successful steps before the firewall
     // InstallAnchor failure (CreateShareGroup, CreateTenantUser,
@@ -1007,7 +1027,8 @@ fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence
             stderr: "syntax error".to_string(),
         },
     );
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
     // Stdout is non-empty under the ✓ progress narration; we just
     // check it starts with the section divider and never emits the
@@ -1076,7 +1097,8 @@ fn create_reload_failure_with_failed_restore_surfaces_recovery_hint_naming_backu
                 stderr: "cp: permission denied".to_string(),
             },
         );
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR");
     assert!(
         stderr.contains("pf.conf restore from /etc/pf.conf.tenant-backup failed"),
@@ -1101,7 +1123,8 @@ fn create_pf_enable_failure_surfaces_via_create_firewall_failed() {
             stderr: "pfctl: operation not permitted".to_string(),
         },
     );
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR");
     assert!(
         stderr.starts_with("tenant: failed to install firewall for 'dev':"),
@@ -1118,7 +1141,7 @@ fn create_dry_run_bypasses_firewall_executor() {
     // `create_dry_run_does_not_write_profile` for firewall.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_exec(
-        StubReader::default(),
+        StubHostAccounts::default(),
         &exec,
         &["create", "dev", "--dry-run"],
     );
@@ -1140,7 +1163,8 @@ fn create_real_mode_dseditgroup_failure_surfaces_executor_stderr() {
         78,
         "dseditgroup: cannot create group dev-tenant-share: not authorized\n",
     );
-    let (code, stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     // Section divider lands; the first substrate op fails so no ✓
     // emits; stderr carries the framing.
@@ -1164,7 +1188,8 @@ fn create_success_path_does_not_invoke_flush_anchor() {
     // into the success path would silently wipe the rules we just
     // installed.
     let exec = StubExecutor::new();
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         !exec
@@ -1193,7 +1218,8 @@ fn create_with_pre_populated_shares_runs_post_provision_substrate() {
     // post-provision step grants the ACL and installs the symlink.
     let with_share = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubExecutor::new().with_create_profile_content("dev", &with_share);
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
 
     let acl_ops = exec.acl_ops();
@@ -1225,7 +1251,8 @@ fn create_with_default_profile_emits_no_post_provision_acl_ops() {
     // tests rely on this — explicit pin so a future schema change
     // can't silently break the contract.
     let exec = StubExecutor::new();
-    let (code, _stdout, _stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, _stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0);
     assert!(
         exec.acl_ops().is_empty(),
@@ -1260,7 +1287,8 @@ fn create_post_provision_refusal_carries_recovery_hint() {
         &[("/nonexistent/cycle10/create-sentinel", "rw", "$HOME/src")],
     );
     let exec = StubExecutor::new().with_create_profile_content("dev", &bad_share);
-    let (code, _stdout, stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "EX_IOERR on share refusal; stderr={stderr:?}");
     assert!(
         stderr.contains("provisioned but share entry is invalid"),
@@ -1286,7 +1314,7 @@ fn create_real_verbose_interactive_emits_plan_before_prompt() {
     // (so an n-answer leaves zero verb-section state in the output).
     let exec = StubExecutor::new();
     let (code, stdout, _stderr) = run_with_stdin(
-        StubReader::default(),
+        StubHostAccounts::default(),
         &exec,
         &["create", "dev", "-v"],
         b"y\n",
@@ -1340,8 +1368,12 @@ fn create_with_tty_proceeds_on_y() {
     // substrate runs. Verifies the summary emits + the prompt line +
     // the post-summary section + ✓ stream + done.
     let exec = StubExecutor::new();
-    let (code, stdout, stderr) =
-        run_with_stdin(StubReader::default(), &exec, &["create", "dev"], b"y\n");
+    let (code, stdout, stderr) = run_with_stdin(
+        StubHostAccounts::default(),
+        &exec,
+        &["create", "dev"],
+        b"y\n",
+    );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         stdout.contains("About to create tenant 'dev'"),
@@ -1367,8 +1399,12 @@ fn create_with_tty_aborts_on_n() {
     // Operator types `n` + ENTER → confirm returns Abort → substrate
     // does NOT run; exit 0 (user-initiated abort is not a failure).
     let exec = StubExecutor::new();
-    let (code, stdout, stderr) =
-        run_with_stdin(StubReader::default(), &exec, &["create", "dev"], b"n\n");
+    let (code, stdout, stderr) = run_with_stdin(
+        StubHostAccounts::default(),
+        &exec,
+        &["create", "dev"],
+        b"n\n",
+    );
     assert_eq!(code, 0, "exit 0 on user-initiated abort; stderr={stderr:?}");
     assert!(
         stdout.contains("Aborted by operator. No changes made."),
@@ -1387,8 +1423,12 @@ fn create_with_tty_empty_input_uses_default_yes() {
     // Proceed. The prompt hint is `[Y/n]` (Y capitalized) signaling
     // the default.
     let exec = StubExecutor::new();
-    let (code, stdout, stderr) =
-        run_with_stdin(StubReader::default(), &exec, &["create", "dev"], b"\n");
+    let (code, stdout, stderr) = run_with_stdin(
+        StubHostAccounts::default(),
+        &exec,
+        &["create", "dev"],
+        b"\n",
+    );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         stdout.contains("Proceed? [Y/n] "),
@@ -1403,7 +1443,7 @@ fn create_with_yes_flag_skips_prompt_proceeds() {
     // Even with no stdin content, substrate fires.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_stdin(
-        StubReader::default(),
+        StubHostAccounts::default(),
         &exec,
         &["create", "dev", "--yes"],
         b"",
@@ -1423,7 +1463,7 @@ fn create_with_invalid_input_reprompts_then_accepts() {
     // `y` proceeds.
     let exec = StubExecutor::new();
     let (code, stdout, stderr) = run_with_stdin(
-        StubReader::default(),
+        StubHostAccounts::default(),
         &exec,
         &["create", "dev"],
         b"maybe\ny\n",
@@ -1447,8 +1487,12 @@ fn create_with_invalid_input_reprompts_then_accepts() {
 #[test]
 fn create_pre_exec_doctor_silent_when_host_is_clean() {
     let exec = StubExecutor::new();
-    let (code, stdout, stderr) =
-        run_with_stdin(StubReader::default(), &exec, &["create", "dev", "-y"], b"");
+    let (code, stdout, stderr) = run_with_stdin(
+        StubHostAccounts::default(),
+        &exec,
+        &["create", "dev", "-y"],
+        b"",
+    );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         !stdout.contains("\u{26a0} Doctor:"),
@@ -1463,8 +1507,12 @@ fn create_pre_exec_doctor_silent_when_host_is_clean() {
 #[test]
 fn create_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
     let exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
-    let (code, stdout, stderr) =
-        run_with_stdin(StubReader::default(), &exec, &["create", "dev", "-y"], b"");
+    let (code, stdout, stderr) = run_with_stdin(
+        StubHostAccounts::default(),
+        &exec,
+        &["create", "dev", "-y"],
+        b"",
+    );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         stdout.contains("critical: pf is globally disabled"),
@@ -1479,8 +1527,12 @@ fn create_pre_exec_doctor_scope_excludes_env_leak() {
     // apply to the create flow's substrate (no `sudo -u` happens
     // in create).
     let exec = StubExecutor::new().with_env_policy_content("");
-    let (code, stdout, stderr) =
-        run_with_stdin(StubReader::default(), &exec, &["create", "dev", "-y"], b"");
+    let (code, stdout, stderr) = run_with_stdin(
+        StubHostAccounts::default(),
+        &exec,
+        &["create", "dev", "-y"],
+        b"",
+    );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         !stdout.contains("\u{26a0} Doctor:"),
@@ -1492,7 +1544,8 @@ fn create_pre_exec_doctor_scope_excludes_env_leak() {
 fn create_pre_exec_doctor_silent_in_scripted_mode() {
     // No TTY, no --dry-run → no summary, no audit (Q3 lock).
     let exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
-    let (code, stdout, _stderr) = run_with_exec(StubReader::default(), &exec, &["create", "dev"]);
+    let (code, stdout, _stderr) =
+        run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0);
     assert!(
         !stdout.contains("\u{26a0} Doctor:") && !stdout.contains("critical:"),
@@ -1506,8 +1559,12 @@ fn create_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
         code: 1,
         stderr: "sudo: a password is required".into(),
     });
-    let (code, _stdout, stderr) =
-        run_with_stdin(StubReader::default(), &exec, &["create", "dev", "-y"], b"");
+    let (code, _stdout, stderr) = run_with_stdin(
+        StubHostAccounts::default(),
+        &exec,
+        &["create", "dev", "-y"],
+        b"",
+    );
     assert_eq!(code, 0, "verb proceeds despite audit substrate failure");
     assert!(
         stderr.contains("failed to read pf state"),

@@ -2840,7 +2840,7 @@ impl Executor for StubExecutor {
             return Ok(listing.clone());
         }
         // Default listing: emit one synthetic ACL entry per known
-        // tenant (via profile_state's keys, which the stub_reader keeps
+        // tenant (via profile_state's keys, which the stub_host_accounts keeps
         // aligned with the test's tenant set). Tests that don't
         // exercise AclDrift see the matching entry for every tenant
         // they audit; tests that DO exercise drift override via

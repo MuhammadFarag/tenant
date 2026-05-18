@@ -7,7 +7,7 @@ use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, curated_paths, has_env_delete_for,
     has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
 };
-use crate::domain::Reader;
+use crate::domain::HostAccounts;
 use crate::executor::{
     self, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp,
     HostFileError, Op, PathKind, ProbeError, ProfileOp, WritableOp,
@@ -79,7 +79,10 @@ pub fn tenant_share_group_name(name: &str) -> GroupName {
 /// because tenant no longer creates bare-name groups (the suffixed name is
 /// the only group identity Phase 3 owns) so a stray bare-name group on
 /// the host is no longer in conflict territory.
-pub fn check_conflict(reader: &dyn Reader, name: &TenantUserName) -> Result<(), ConflictError> {
+pub fn check_conflict(
+    reader: &dyn HostAccounts,
+    name: &TenantUserName,
+) -> Result<(), ConflictError> {
     let group = tenant_share_group_name(name.as_str());
     match (reader.has_user(name), reader.has_group(&group)) {
         (false, false) => Ok(()),
@@ -125,7 +128,7 @@ pub enum Eligibility {
 /// When the user is absent, the suffixed group's presence determines
 /// whether destroy converges through the `OrphanGroup` path or is a true
 /// `NotPresent` noop.
-pub fn destroy_eligibility(reader: &dyn Reader, name: &TenantUserName) -> Eligibility {
+pub fn destroy_eligibility(reader: &dyn HostAccounts, name: &TenantUserName) -> Eligibility {
     if !reader.has_user(name) {
         if reader.has_group(&tenant_share_group_name(name.as_str())) {
             return Eligibility::OrphanGroup;
@@ -386,7 +389,7 @@ impl ShareOps {
 /// Outcome of `Writer::reload_all_tenants`. Carries the per-tenant
 /// failure count; the dispatcher maps `failed > 0 → EX_IOERR (74)`,
 /// `failed == 0 → 0`. Tenant count and success count are implicit
-/// (the count comes from `Reader::tenant_names().len()`; success =
+/// (the count comes from `HostAccounts::tenant_names().len()`; success =
 /// total - failed).
 #[derive(Debug)]
 pub(crate) struct ReloadAllOutcome {
@@ -1134,11 +1137,11 @@ impl<'a> Writer<'a> {
     /// failure, accumulate, surface a single end-of-run summary.
     /// The exit code at the dispatcher reflects the worst outcome
     /// (0 if all clean; 74 if any tripped). Tenants are walked in
-    /// `Reader::tenant_names()` order (alphabetical) for deterministic
+    /// `HostAccounts::tenant_names()` order (alphabetical) for deterministic
     /// output across runs.
     pub(crate) fn reload_all_tenants(
         &self,
-        accounts: &dyn Reader,
+        accounts: &dyn HostAccounts,
         host: &HostUserName,
         reporter: &mut Reporter,
     ) -> ReloadAllOutcome {
@@ -1235,7 +1238,7 @@ impl<'a> Writer<'a> {
     pub(crate) fn doctor_all_tenants(
         &self,
         host: &HostUserName,
-        accounts: &dyn Reader,
+        accounts: &dyn HostAccounts,
         reporter: &mut Reporter,
     ) -> Result<DoctorOutcome, DoctorError> {
         let mut findings: Vec<Finding> = Vec::new();
@@ -1785,7 +1788,7 @@ fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<String> {
 /// is load-bearing — it lexically excludes the macOS `_*` service-account
 /// namespace and any `-…` argv that sysadminctl would interpret as a
 /// flag. Shared by `create` and `destroy` as the cheapest first failure
-/// (no Reader call needed). `len` is byte length, which equals character
+/// (no HostAccounts call needed). `len` is byte length, which equals character
 /// length for valid input since the charset is ASCII; non-ASCII input
 /// trips `InvalidCharacter` after the length check.
 pub fn validate_name(name: &TenantUserName) -> Result<(), NameError> {

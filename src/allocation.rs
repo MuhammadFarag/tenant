@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::domain::Reader;
+use crate::domain::HostAccounts;
 use crate::ids::{GroupId, UserId};
 
 /// Lower bound for tenant UIDs *and* GIDs — clear of macOS system
@@ -11,11 +11,11 @@ use crate::ids::{GroupId, UserId};
 pub const TENANT_UID_FLOOR: u32 = 600;
 
 pub struct UidAllocator<'a> {
-    reader: &'a dyn Reader,
+    reader: &'a dyn HostAccounts,
 }
 
 impl<'a> UidAllocator<'a> {
-    pub fn new(reader: &'a dyn Reader) -> Self {
+    pub fn new(reader: &'a dyn HostAccounts) -> Self {
         Self { reader }
     }
 
@@ -37,11 +37,11 @@ impl<'a> UidAllocator<'a> {
 /// land on (UID 613, GID 600). The single-floor convention means
 /// both numbers stay clear of macOS system ranges either way.
 pub struct GidAllocator<'a> {
-    reader: &'a dyn Reader,
+    reader: &'a dyn HostAccounts,
 }
 
 impl<'a> GidAllocator<'a> {
-    pub fn new(reader: &'a dyn Reader) -> Self {
+    pub fn new(reader: &'a dyn HostAccounts) -> Self {
         Self { reader }
     }
 

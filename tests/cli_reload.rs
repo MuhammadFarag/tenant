@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use tenant::adapters::stub_reader::StubReader;
+use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::executor::{
     AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, PathKind, StubExecutor,
 };
@@ -40,11 +40,11 @@ fn reload_single_tenant_dry_run_default_emits_intent_only() {
 
 #[test]
 fn reload_no_arg_form_dry_run_with_no_tenants_emits_summary_only() {
-    // Empty Reader → tenant_names() empty → no-tenant summary
+    // Empty HostAccounts → tenant_names() empty → no-tenant summary
     // explicitly tells the operator "nothing to do" so the output
     // isn't silent. Real-mode prints the line; dry-run is silent on
     // summaries (would_done is silent).
-    let (code, stdout, _stderr) = run_with(StubReader::default(), &["reload"]);
+    let (code, stdout, _stderr) = run_with(StubHostAccounts::default(), &["reload"]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "No tenants on this host to reload.\n");
 }
@@ -55,7 +55,7 @@ fn reload_no_arg_form_dry_run_with_no_tenants_emits_summary_only() {
 
 #[test]
 fn reload_rejects_empty_name() {
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["reload", ""]);
+    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["reload", ""]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: name cannot be empty\n");
@@ -66,7 +66,7 @@ fn reload_rejects_reserved_names() {
     for name in [
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
-        let (code, stdout, stderr) = run_with(StubReader::default(), &["reload", name]);
+        let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["reload", name]);
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -79,7 +79,7 @@ fn reload_rejects_reserved_names() {
 
 #[test]
 fn reload_refuses_when_tenant_absent() {
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["reload", "ghost"]);
+    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["reload", "ghost"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: cannot reload 'ghost': does not exist\n");
@@ -87,7 +87,7 @@ fn reload_refuses_when_tenant_absent() {
 
 #[test]
 fn reload_refuses_when_only_orphan_group_present() {
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -98,7 +98,7 @@ fn reload_refuses_when_only_orphan_group_present() {
 
 #[test]
 fn reload_refuses_below_floor() {
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
         ..Default::default()
@@ -113,7 +113,7 @@ fn reload_refuses_below_floor() {
 
 #[test]
 fn reload_refuses_system_account() {
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         users: vec!["phantom".to_string()],
         ..Default::default()
     };
@@ -516,7 +516,7 @@ fn reload_no_arg_continues_on_per_tenant_failure() {
 
 #[test]
 fn reload_no_arg_emits_no_op_summary_when_no_tenants() {
-    let (code, stdout, _stderr) = run_with(StubReader::default(), &["reload"]);
+    let (code, stdout, _stderr) = run_with(StubHostAccounts::default(), &["reload"]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "No tenants on this host to reload.\n");
 }

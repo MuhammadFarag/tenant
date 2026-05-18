@@ -3,10 +3,10 @@ use std::io;
 use std::process::Command;
 
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::domain::Reader;
+use crate::domain::HostAccounts;
 use crate::ids::{GroupId, GroupName, TenantUserName, UserId};
 
-/// Real `Reader` backed by `dscl`. Queries the local Open Directory node
+/// Real `HostAccounts` backed by `dscl`. Queries the local Open Directory node
 /// once at construction and serves all subsequent lookups from memory.
 /// `users` and `uid_by_name` are kept separate for the same reason the
 /// stub keeps them separate: macOS service accounts with negative UIDs
@@ -15,14 +15,14 @@ use crate::ids::{GroupId, GroupName, TenantUserName, UserId};
 /// as a tenant-range UID and shouldn't influence allocator state).
 /// `gid_by_name` mirrors the UID structure for the GID space, with the
 /// same negative-GID filtering rationale.
-pub struct MacosReader {
+pub struct MacosHostAccounts {
     users: HashSet<String>,
     groups: HashSet<String>,
     uid_by_name: HashMap<String, UserId>,
     gid_by_name: HashMap<String, GroupId>,
 }
 
-impl MacosReader {
+impl MacosHostAccounts {
     pub fn new() -> io::Result<Self> {
         let users = run_dscl(&[".", "-list", "/Users"])?
             .lines()
@@ -66,7 +66,7 @@ impl MacosReader {
                     .or_insert(gid);
                 map
             });
-        Ok(MacosReader {
+        Ok(MacosHostAccounts {
             users,
             groups,
             uid_by_name,
@@ -75,7 +75,7 @@ impl MacosReader {
     }
 }
 
-impl Reader for MacosReader {
+impl HostAccounts for MacosHostAccounts {
     fn used_uids(&self) -> Vec<UserId> {
         self.uid_by_name.values().copied().collect()
     }

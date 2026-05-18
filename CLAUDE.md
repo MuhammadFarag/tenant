@@ -28,7 +28,7 @@ Verbs:
 
 Rust port of an earlier Go prototype (at `/Users/plugin-dev/src/tenant/`
 for cross-reference); follows Rust idioms (clap derive,
-composition-root DI, trait-object Reader) rather than mirroring the
+composition-root DI, trait-object HostAccounts) rather than mirroring the
 Go shape.
 
 ## Scope
@@ -59,12 +59,14 @@ src/accounts.rs   — `Writer` verb methods. `shell_into_tenant`
                     selects per-verb audit relevance. Error families:
                     `ShareError`, `ModeError`, `ShellError`, `CreateError`,
                     `DoctorError`.
-src/domain/       — domain layer. `reader.rs` defines the `Reader`
-                    trait — driven port for account inventory queries
-                    (`used_uids` / `used_gids` / `has_user` /
-                    `has_group` / `uid_for` / `tenant_names`).
-src/adapters/     — driven adapters. `stub_reader.rs` (`StubReader`
-                    for tests) + `macos/reader.rs` (`MacosReader` —
+src/domain/       — domain layer. `host_accounts.rs` defines the
+                    `HostAccounts` trait — driven port for account
+                    inventory queries (`used_uids` / `used_gids` /
+                    `has_user` / `has_group` / `uid_for` /
+                    `tenant_names`).
+src/adapters/     — driven adapters. `stub_host_accounts.rs`
+                    (`StubHostAccounts` for tests) +
+                    `macos/host_accounts.rs` (`MacosHostAccounts` —
                     dscl-backed snapshot, populated once at `new()`).
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both
                     iterate from `TENANT_UID_FLOOR = 600`.
@@ -106,7 +108,8 @@ tests/macos_executor.rs   — per-variant pins of
                             `MacosExecutor::describe_*` argv contracts.
 tests/intent_labels.rs    — per-variant pins of `Op::intent_label()`
                             + sharpening pins (intent ≠ business label).
-tests/macos_reader.rs     — `MacosReader::new()` dscl smoke
+tests/macos_host_accounts.rs
+                          — `MacosHostAccounts::new()` dscl smoke
                             (`#[cfg(target_os = "macos")]`).
 tests/doctor.rs           — combinatorial: classify matrix, `Finding`
                             display, guidance, severity ordering.
@@ -144,10 +147,10 @@ it from scratch wastes a cycle and risks getting it wrong.
   render — `execute_account` panics on them. Future Executor method:
   if it fits `Result<(), E>`, make it an ADT variant; if not, carve out.
 
-- **Probe via Executor, not Reader live re-read.** When a verb needs
+- **Probe via Executor, not HostAccounts live re-read.** When a verb needs
   to re-check OS state mid-execution (destroy's `LookupUserRecord`
   residue probe is canonical), it's a regular substrate call whose
-  `Ok` vs `Err` drives a Writer branch. Reader stays snapshot-then-act
+  `Ok` vs `Err` drives a Writer branch. HostAccounts stays snapshot-then-act
   — in-memory view captured at composition-root construction.
 
 - **Doctor doesn't fit the `WritableOp` shape.** All doctor probes
@@ -177,14 +180,14 @@ it from scratch wastes a cycle and risks getting it wrong.
   touches raw writers nor checks `cli.verbose` / `cli.dry_run`. Mode
   / verbosity branching lives inside Reporter.
 
-- **Composition-root DI.** `tenant::run` takes `&dyn accounts::Reader`
+- **Composition-root DI.** `tenant::run` takes `&dyn accounts::HostAccounts`
   + `&dyn executor::Executor`. `main.rs` builds prod impls; tests
-  build `StubReader` + `StubExecutor` / `NeverExecutor`. Writer +
+  build `StubHostAccounts` + `StubExecutor` / `NeverExecutor`. Writer +
   Reporter constructed inside `run` from the active Executor; both
   swap to `DryRunExecutor` when `--dry-run`. Test seam stays at the
   Executor boundary.
 
-- **Snapshot-then-act on the Reader.** `MacosReader::new()` queries
+- **Snapshot-then-act on `HostAccounts`.** `MacosHostAccounts::new()` queries
   dscl once at composition-root construction; subsequent lookups
   serve from the in-memory snapshot. A concurrent admin process
   mutating `/Users` between snapshot and `sudo sysadminctl …` could
@@ -437,7 +440,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   `doctor::has_group_acl_entry(listing, group: &str)`, etc., stay as
   `&str` parameters. Callers pass `name.as_str()` from a
   `&TenantUserName` (or `group.as_str()` from a `&GroupName`). The
-  type-safety win is realized at the Writer / Reader / Reporter
+  type-safety win is realized at the Writer / HostAccounts / Reporter
   method boundaries and at ADT variants
   (`AccountOp::CreateTenantUser { name: TenantUserName, ... }`,
   `AccountOp::CreateShareGroup { group: GroupName, ... }`,
@@ -461,11 +464,11 @@ it from scratch wastes a cycle and risks getting it wrong.
 ## Test discipline
 
 E2E-first. Bulk in `tests/cli_<verb>.rs` drives through `tenant::run`
-with `StubReader` + `StubExecutor`. `tests/cli.rs` holds parser
+with `StubHostAccounts` + `StubExecutor`. `tests/cli.rs` holds parser
 cross-cutting. Shared helpers in `tests/common/mod.rs`. Inline
 `#[cfg(test)] mod tests` is out of style; standalone unit-test files
 need explicit justification (per-substrate boundary pins for
-`macos_executor.rs` / `macos_reader.rs`; combinatorial coverage on
+`macos_executor.rs` / `macos_host_accounts.rs`; combinatorial coverage on
 pure functions for the parse/render/classify pin files).
 
 `run_with(stub, args) -> (u8, String, String)` wires `NeverExecutor`

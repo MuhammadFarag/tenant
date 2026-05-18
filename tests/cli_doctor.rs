@@ -1,4 +1,4 @@
-use tenant::adapters::stub_reader::StubReader;
+use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::executor::StubExecutor;
 use tenant::ids::UserId;
 
@@ -16,10 +16,10 @@ use common::*;
 
 #[test]
 fn doctor_refuses_when_tenant_absent() {
-    // Empty StubReader — no user, no group. Doctor must refuse: there
+    // Empty StubHostAccounts — no user, no group. Doctor must refuse: there
     // is no tenant to audit. Exit 64 (EX_USAGE; operator gave a name
     // we can't resolve). Never reaches the executor.
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["doctor", "ghost"]);
+    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["doctor", "ghost"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -35,7 +35,7 @@ fn doctor_refuses_when_only_orphan_group_present() {
     // and a lingering `<name>-tenant-share` group with no user behind
     // it doesn't represent one. A regression that surfaced the orphan
     // group as a distinct refusal would trip this test.
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -54,7 +54,7 @@ fn doctor_refuses_below_floor() {
     // a positive UID below TENANT_UID_FLOOR (600) → refuse. `legacyusr`
     // sidesteps the reserved-name blocklist so this test exercises
     // the state-based refusal path specifically.
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(501))]
             .into_iter()
@@ -75,7 +75,7 @@ fn doctor_refuses_system_account() {
     // System-account refusal (`has_user` true, `uid_for` None — service
     // accounts whose negative UIDs were filtered by `parse_id_line`).
     // Same shape as shell/mode's system-account refusal.
-    let stub = StubReader {
+    let stub = StubHostAccounts {
         users: vec!["phantom".to_string()],
         ..Default::default()
     };
@@ -92,10 +92,10 @@ fn doctor_refuses_system_account() {
 fn doctor_rejects_invalid_start() {
     // Lexical validation runs before eligibility; an uppercase first
     // character trips `NameError::InvalidStart` and never consults the
-    // Reader. Reuses the generic `refuse_invalid_name` Reporter method
+    // HostAccounts. Reuses the generic `refuse_invalid_name` Reporter method
     // (no doctor-specific charset wording) — same shape as create /
     // destroy / shell / mode.
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["doctor", "BAD"]);
+    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["doctor", "BAD"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -324,7 +324,7 @@ fn doctor_finds_env_delete_in_drop_in_file() {
 // ----- All-tenants walk + cross-tenant probes -----
 //
 // `tenant doctor` without a positional name enumerates every
-// tenant-range account via `Reader::tenant_names()` and probes each
+// tenant-range account via `HostAccounts::tenant_names()` and probes each
 // from its own perspective. The `others` list (every other tenant)
 // drives cross-tenant + tenant-artifact probe expansion. Single-
 // tenant invocation (`tenant doctor dev`) intentionally probes ONLY
@@ -1260,7 +1260,7 @@ fn doctor_help_text_mentions_sudo_session_and_admin_requirement() {
     // `sudo -u <tenant>` is permitted on macOS) and the cached sudo
     // session pattern (one prompt up front, N probes run silently).
     // Pins load-bearing words, not byte-exact wording.
-    let (code, stdout, stderr) = run_with(StubReader::default(), &["doctor", "--help"]);
+    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["doctor", "--help"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         stdout.contains("sudo"),

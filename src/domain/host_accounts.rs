@@ -1,6 +1,6 @@
 use crate::ids::{GroupId, GroupName, TenantUserName, UserId};
 
-pub trait Reader {
+pub trait HostAccounts {
     fn used_uids(&self) -> Vec<UserId>;
     fn used_gids(&self) -> Vec<GroupId>;
     fn has_user(&self, name: &TenantUserName) -> bool;

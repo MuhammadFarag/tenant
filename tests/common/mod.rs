@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use tenant::adapters::stub_reader::StubReader;
+use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::executor::{
     AccountError, AccountOp, Executor, FirewallError, FirewallOp, ProfileOp, StubExecutor,
 };
@@ -586,7 +586,7 @@ pub fn reload_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
     )
 }
 
-pub fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
+pub fn run_with(stub: StubHostAccounts, args: &[&str]) -> (u8, String, String) {
     let exec = NeverExecutor;
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
@@ -611,7 +611,11 @@ pub fn run_with(stub: StubReader, args: &[&str]) -> (u8, String, String) {
     )
 }
 
-pub fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u8, String, String) {
+pub fn run_with_exec(
+    stub: StubHostAccounts,
+    exec: &StubExecutor,
+    args: &[&str],
+) -> (u8, String, String) {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
@@ -643,7 +647,7 @@ pub fn run_with_exec(stub: StubReader, exec: &StubExecutor, args: &[&str]) -> (u
 /// posture (stdin=empty, tty=false) so the existing test bank is
 /// unaffected.
 pub fn run_with_stdin(
-    stub: StubReader,
+    stub: StubHostAccounts,
     exec: &StubExecutor,
     args: &[&str],
     stdin_content: &[u8],
@@ -675,8 +679,8 @@ pub fn run_with_stdin(
 /// UID (for tests that drive the destroy verb's actual-destroy path rather
 /// than its noop / refusal paths). UID 600 is the canonical floor; any
 /// floor-or-above UID would do.
-pub fn stub_with_tenant(name: &str) -> StubReader {
-    StubReader {
+pub fn stub_with_tenant(name: &str) -> StubHostAccounts {
+    StubHostAccounts {
         users: vec![name.to_string()],
         uid_by_name: [(name.to_string(), UserId(600))].into_iter().collect(),
         ..Default::default()
@@ -743,8 +747,8 @@ pub fn profile_with_hosts(runtime: &[&str], install: &[&str]) -> String {
 
 /// A reader where `name` is present as a Destroyable tenant (UID at floor,
 /// group present). Lets dispatch reach `doctor_tenant`.
-pub fn make_tenant_stub_reader(name: &str) -> StubReader {
-    StubReader {
+pub fn make_tenant_stub_reader(name: &str) -> StubHostAccounts {
+    StubHostAccounts {
         users: vec![name.to_string()],
         groups: vec![format!("{name}-tenant-share")],
         uid_by_name: [(name.to_string(), UserId(600))].into_iter().collect(),
@@ -754,8 +758,8 @@ pub fn make_tenant_stub_reader(name: &str) -> StubReader {
     }
 }
 
-pub fn make_two_tenant_stub_reader() -> StubReader {
-    StubReader {
+pub fn make_two_tenant_stub_reader() -> StubHostAccounts {
+    StubHostAccounts {
         users: vec!["dev".to_string(), "staging".to_string()],
         groups: vec![
             "dev-tenant-share".to_string(),

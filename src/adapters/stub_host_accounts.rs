@@ -1,18 +1,18 @@
 use std::collections::HashMap;
 
 use crate::allocation::TENANT_UID_FLOOR;
-use crate::domain::Reader;
+use crate::domain::HostAccounts;
 use crate::ids::{GroupId, GroupName, TenantUserName, UserId};
 
 #[derive(Default)]
-pub struct StubReader {
+pub struct StubHostAccounts {
     pub uid_by_name: HashMap<String, UserId>,
     pub gid_by_name: HashMap<String, GroupId>,
     pub users: Vec<String>,
     pub groups: Vec<String>,
 }
 
-impl Reader for StubReader {
+impl HostAccounts for StubHostAccounts {
     fn used_uids(&self) -> Vec<UserId> {
         self.uid_by_name.values().copied().collect()
     }

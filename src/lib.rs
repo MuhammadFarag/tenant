@@ -159,7 +159,7 @@ impl ModeLevel {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     args: &[String],
-    accounts: &dyn domain::Reader,
+    accounts: &dyn domain::HostAccounts,
     executor: &dyn executor::Executor,
     host: &HostUserName,
     stdout: &mut dyn Write,

@@ -36,7 +36,7 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch(
     cli: Cli,
-    accounts: &dyn domain::Reader,
+    accounts: &dyn domain::HostAccounts,
     writer: &accounts::Writer<'_>,
     host: &ids::HostUserName,
     reporter: &mut Reporter,
@@ -62,7 +62,7 @@ pub(crate) fn dispatch(
             }
             // Phase 3 allocates UID and GID independently — see the
             // `Decoupled UID/GID allocation` note in the project doctrine
-            // for why these aren't fused. Both consult the same Reader
+            // for why these aren't fused. Both consult the same HostAccounts
             // but read disjoint maps, so the values may legitimately
             // diverge.
             let uid = allocation::UidAllocator::new(accounts).lowest_free_uid();
