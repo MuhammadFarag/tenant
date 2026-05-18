@@ -1,184 +1,38 @@
-use std::fmt;
 use std::path::PathBuf;
 
 use super::reporter::Reporter;
 use super::{
-    AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp, GroupId,
-    GroupName, HostAccounts, HostFileError, HostMachine, HostUserName, Op, PathKind, ProbeError,
-    ProfileOp, TenantUserName, UserId, WritableOp,
+    AccountError, AccountOp, AclMode, AclOp, FirewallError, FirewallOp, GroupId, GroupName,
+    HostAccounts, HostFileError, HostMachine, HostUserName, Op, PathKind, ProbeError, ProfileOp,
+    TenantUserName, UserId, WritableOp,
 };
 use crate::ModeLevel;
-use crate::allocation::TENANT_UID_FLOOR;
 use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, curated_paths, has_env_delete_for,
     has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
-use crate::profile::{
-    Profile, ProfileError, ShareMode, display_path_for, expand_tenant_path, parse,
-};
+use crate::profile::{Profile, ShareMode, display_path_for, expand_tenant_path, parse};
 
-const MAX_NAME_LEN: usize = 31;
+pub mod create;
+pub mod destroy;
+pub mod doctor;
+pub mod reapply;
+pub mod shares;
+pub mod shell;
+pub mod validation;
 
-/// Names that pass the lexical charset rules but alias real accounts
-/// or carry privileged semantics. The `_*` service-account namespace
-/// is already excluded by the leading-letter rule.
-const RESERVED_NAMES: &[&str] = &[
-    "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
-];
-
-#[derive(Debug)]
-pub enum NameError {
-    Empty,
-    InvalidStart(char),
-    InvalidCharacter(char),
-    TooLong { len: usize, max: usize },
-    Reserved,
-}
-
-#[derive(Debug)]
-pub enum ConflictError {
-    UserExists,
-    GroupExists,
-    Both,
-}
+pub(crate) use create::CreateError;
+pub(crate) use destroy::{DestroyError, Eligibility, destroy_eligibility};
+pub(crate) use doctor::{DoctorError, DoctorScope};
+pub(crate) use reapply::ModeError;
+pub(crate) use shares::ShareError;
+pub(crate) use shell::ShellError;
+pub use validation::{ConflictError, NameError, check_conflict, validate_name};
 
 /// Single source of truth for the `<name>-tenant-share` suffix.
 pub fn tenant_share_group_name(name: &str) -> GroupName {
     GroupName(format!("{name}-tenant-share"))
-}
-
-pub fn check_conflict(
-    reader: &dyn HostAccounts,
-    name: &TenantUserName,
-) -> Result<(), ConflictError> {
-    let group = tenant_share_group_name(name.as_str());
-    match (reader.has_user(name), reader.has_group(&group)) {
-        (false, false) => Ok(()),
-        (true, false) => Err(ConflictError::UserExists),
-        (false, true) => Err(ConflictError::GroupExists),
-        (true, true) => Err(ConflictError::Both),
-    }
-}
-
-/// Destroy-side classification. `OrphanGroup` is the user-absent /
-/// suffixed-group-present residue from a prior partial failure.
-/// `SystemAccount` is the account-present / no-positive-UID case
-/// (filtered out of `uid_by_name` upstream, so the floor predicate
-/// can't bind to a value).
-#[derive(Debug)]
-pub enum Eligibility {
-    Destroyable,
-    NotPresent,
-    OrphanGroup,
-    NotATenant { uid: UserId },
-    SystemAccount,
-}
-
-pub fn destroy_eligibility(reader: &dyn HostAccounts, name: &TenantUserName) -> Eligibility {
-    if !reader.has_user(name) {
-        if reader.has_group(&tenant_share_group_name(name.as_str())) {
-            return Eligibility::OrphanGroup;
-        }
-        return Eligibility::NotPresent;
-    }
-    match reader.uid_for(name) {
-        Some(uid) if uid.0 >= TENANT_UID_FLOOR => Eligibility::Destroyable,
-        Some(uid) => Eligibility::NotATenant { uid },
-        None => Eligibility::SystemAccount,
-    }
-}
-
-/// Failure surface for the create writer. `UserWithRollback` is the
-/// worst case where rollback itself failed and the host is left with
-/// an orphan group. `HostMembership` has no automatic rollback —
-/// the host-add step is load-bearing for tenant usability.
-#[derive(Debug)]
-pub(crate) enum CreateError {
-    Group(AccountError),
-    User(AccountError),
-    UserWithRollback {
-        user: AccountError,
-        rollback: AccountError,
-    },
-    HostMembership(AccountError),
-    Profile(ProfileError),
-    /// Read/parse failures on the just-written profile also flow here
-    /// as `FirewallError::Fs` because they surface during the firewall
-    /// composition step.
-    Firewall(FirewallError),
-    PostProvision(ModeError),
-}
-
-/// Failure surface for the destroy writers. Unlike create, destroy has
-/// no recovery path on Firewall reload failure — the symmetric "restore
-/// from backup" would re-introduce a reference to the already-removed
-/// anchor file, putting the host in a worse state.
-#[derive(Debug)]
-pub(crate) enum DestroyError {
-    Account(AccountError),
-    Profile(ProfileError),
-    Firewall(FirewallError),
-}
-
-impl From<AccountError> for DestroyError {
-    fn from(e: AccountError) -> Self {
-        DestroyError::Account(e)
-    }
-}
-
-/// Pre-flight refusals from the share-reapply substrate.
-/// `TenantPathOccupied` fires when tenant_path exists as a real
-/// directory or file (not a symlink): the substrate would silently
-/// fail to replace it.
-#[derive(Debug)]
-pub(crate) enum ShareError {
-    HostPathMissing { path: PathBuf },
-    TenantPathOccupied { path: PathBuf },
-}
-
-impl fmt::Display for ShareError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ShareError::HostPathMissing { path } => write!(
-                f,
-                "host_path {} does not exist on disk; edit the profile or create the path",
-                path.display(),
-            ),
-            ShareError::TenantPathOccupied { path } => write!(
-                f,
-                "tenant_path {} exists as a real directory or file; \
-                 remove it or edit the profile to point elsewhere",
-                path.display(),
-            ),
-        }
-    }
-}
-
-/// Failure surface for `mode` and (by reuse) the `shell` auto-narrow,
-/// `reload`, and the create-side post-provision share step.
-#[derive(Debug)]
-pub(crate) enum ModeError {
-    Profile(ProfileError),
-    Firewall(FirewallError),
-    Acl(AclError),
-    Account(AccountError),
-    Probe(ProbeError),
-    Share(ShareError),
-}
-
-/// Failure surface for `shell` (interactive + command forms).
-/// `NarrowFailed` is exercised only by the command form when the
-/// post-child narrow-on-finally reapply fails; the dispatcher emits
-/// a warning and propagates the child's exit code.
-#[derive(Debug)]
-pub(crate) enum ShellError {
-    Account(AccountError),
-    Mode(ModeError),
-    NarrowFailed {
-        child_exit: i32,
-        narrow_err: ModeError,
-    },
 }
 
 /// Pre-built op list for a profile-to-tenant reapply. Construction is
@@ -1175,40 +1029,6 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// Per-verb relevance matrix for `pre_exec_doctor_summary`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DoctorScope {
-    Create,
-    Shell,
-    Mode,
-    Reload,
-}
-
-#[derive(Debug)]
-pub(crate) enum DoctorError {
-    Probe(ProbeError),
-    HostFile(HostFileError),
-    Firewall(FirewallError),
-}
-
-impl From<ProbeError> for DoctorError {
-    fn from(e: ProbeError) -> Self {
-        DoctorError::Probe(e)
-    }
-}
-
-impl From<HostFileError> for DoctorError {
-    fn from(e: HostFileError) -> Self {
-        DoctorError::HostFile(e)
-    }
-}
-
-impl From<FirewallError> for DoctorError {
-    fn from(e: FirewallError) -> Self {
-        DoctorError::Firewall(e)
-    }
-}
-
 /// `max_severity()` feeds the `--strict` exit-code decision at dispatch.
 #[derive(Debug, Default)]
 pub(crate) struct DoctorOutcome {
@@ -1232,37 +1052,4 @@ fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<String> {
             hosts
         }
     }
-}
-
-/// Lexical name guard: `[a-z][a-z0-9_-]{0,30}`. The leading-letter rule
-/// is load-bearing — it excludes the macOS service-account namespace and
-/// any `-…` argv that the substrate would interpret as a flag.
-pub fn validate_name(name: &TenantUserName) -> Result<(), NameError> {
-    let name = name.as_str();
-    let len = name.len();
-    if len == 0 {
-        return Err(NameError::Empty);
-    }
-    if len > MAX_NAME_LEN {
-        return Err(NameError::TooLong {
-            len,
-            max: MAX_NAME_LEN,
-        });
-    }
-    let mut chars = name.chars();
-    let first = chars.next().expect("len > 0 guarantees at least one char");
-    if !first.is_ascii_lowercase() {
-        return Err(NameError::InvalidStart(first));
-    }
-    for c in chars {
-        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
-            return Err(NameError::InvalidCharacter(c));
-        }
-    }
-    // Reserved check runs last so `Wheel` trips the more-specific
-    // `InvalidStart` rather than the blunter `Reserved`.
-    if RESERVED_NAMES.contains(&name) {
-        return Err(NameError::Reserved);
-    }
-    Ok(())
 }

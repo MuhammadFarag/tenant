@@ -70,15 +70,21 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     the domain newtypes (`UserId` / `GroupId` /
                     `TenantUserName` / `HostUserName` / `GroupName`),
                     re-exported flat from `crate::domain`.
-src/domain/accounts.rs
-                  — `Writer` verb methods. `shell_into_tenant`
+src/domain/accounts.rs / accounts/
+                  — `Writer` verb methods, `ReapplyPlan` /
+                    `ShareOps` / `ReloadAllOutcome` / `DoctorOutcome`,
+                    and `tenant_share_group_name`. `shell_into_tenant`
                     branches on argv-presence into `shell_interactive`
                     / `shell_command`. `build_reapply_plan` +
                     `execute_reapply_plan` shared across mode/shell/
-                    reload. `DoctorScope { Create, Shell, Mode, Reload }`
-                    selects per-verb audit relevance. Error families:
-                    `ShareError`, `ModeError`, `ShellError`, `CreateError`,
-                    `DoctorError`.
+                    reload. Per-verb submodules carry their error types
+                    (re-exported from the facade): `validation.rs`
+                    (`NameError`, `ConflictError`, `validate_name`,
+                    `check_conflict`), `create.rs` (`CreateError`),
+                    `destroy.rs` (`DestroyError`, `Eligibility`,
+                    `destroy_eligibility`), `shares.rs` (`ShareError`),
+                    `reapply.rs` (`ModeError`), `shell.rs` (`ShellError`),
+                    `doctor.rs` (`DoctorError`, `DoctorScope`).
 src/domain/commands.rs
                   — verb dispatch (no I/O). Per-arm `surface_*_error`
                     helpers route domain errors to Reporter. Dispatch
