@@ -3,10 +3,10 @@
 //! renders display lines (the verbose dry-run plan needs them); execute
 //! is a no-op.
 
-use crate::adapters::macos::MacosExecutor;
+use crate::adapters::macos::MacosHostMachine;
 use crate::domain::{
-    AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, Executor, FirewallError,
-    FirewallOp, GroupName, HostFileError, HostUserName, PathKind, ProbeError, ProfileOp,
+    AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
+    GroupName, HostFileError, HostMachine, HostUserName, PathKind, ProbeError, ProfileOp,
     TenantUserName,
 };
 use crate::profile::{ProfileError, default_profile_toml};
@@ -15,11 +15,11 @@ use crate::profile::{ProfileError, default_profile_toml};
 /// `cli.dry_run` is set; the writer stays mode-agnostic. Describe still
 /// renders display lines (the verbose dry-run plan needs them); execute
 /// is a no-op.
-pub struct DryRunExecutor;
+pub struct DryRunHostMachine;
 
-impl Executor for DryRunExecutor {
+impl HostMachine for DryRunHostMachine {
     fn describe_account(&self, op: &AccountOp) -> String {
-        MacosExecutor.describe_account(op)
+        MacosHostMachine.describe_account(op)
     }
     fn execute_account(&self, _op: &AccountOp) -> Result<(), AccountError> {
         Ok(())
@@ -35,7 +35,7 @@ impl Executor for DryRunExecutor {
         Ok(0)
     }
     fn describe_profile(&self, op: &ProfileOp) -> String {
-        MacosExecutor.describe_profile(op)
+        MacosHostMachine.describe_profile(op)
     }
     fn execute_profile(&self, _op: &ProfileOp) -> Result<(), ProfileError> {
         Ok(())
@@ -57,14 +57,14 @@ impl Executor for DryRunExecutor {
         Ok(String::new())
     }
     fn describe_firewall(&self, op: &FirewallOp) -> String {
-        MacosExecutor.describe_firewall(op)
+        MacosHostMachine.describe_firewall(op)
     }
     fn execute_firewall(&self, _op: &FirewallOp) -> Result<(), FirewallError> {
         Ok(())
     }
 
     /// Dry-run skips probes entirely. The dispatcher's `Verb::Doctor`
-    /// arm short-circuits before calling any executor probe under
+    /// arm short-circuits before calling any host-machine probe under
     /// `--dry-run`; if anything does reach this impl, return Unknown
     /// rather than fabricating a misleading Allowed/Denied answer.
     fn probe_access_as_tenant(
@@ -123,7 +123,7 @@ impl Executor for DryRunExecutor {
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
-        MacosExecutor.describe_acl(op)
+        MacosHostMachine.describe_acl(op)
     }
 
     fn execute_acl(&self, _op: &AclOp) -> Result<(), AclError> {

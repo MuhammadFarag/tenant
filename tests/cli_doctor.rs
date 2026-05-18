@@ -1,5 +1,5 @@
-use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::adapters::stub_host_machine::StubHostMachine;
 use tenant::domain::UserId;
 
 mod common;
@@ -18,7 +18,7 @@ use common::*;
 fn doctor_refuses_when_tenant_absent() {
     // Empty StubHostAccounts — no user, no group. Doctor must refuse: there
     // is no tenant to audit. Exit 64 (EX_USAGE; operator gave a name
-    // we can't resolve). Never reaches the executor.
+    // we can't resolve). Never reaches the host machine.
     let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["doctor", "ghost"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -106,7 +106,7 @@ fn doctor_rejects_invalid_start() {
 
 // ----- Probe orchestration + finding emission -----
 //
-// The probe carve-out (`Executor::probe_access_as_tenant`) lets the
+// The probe carve-out (`HostMachine::probe_access_as_tenant`) lets the
 // Writer ask the substrate "can <tenant> read/list <path>?" without
 // the Writer knowing about `sudo -u` or `/usr/bin/test`. Findings are
 // derived from `Allowed` outcomes only; `Denied`/`Unknown` produce
@@ -122,7 +122,7 @@ fn doctor_emits_one_finding_per_accessible_path() {
     // Output must contain the critical finding line, byte-exact.
     let stub_reader = make_tenant_stub_reader("dev");
     let target = std::path::PathBuf::from(format!("/Users/{TEST_HOST}/.ssh/id_rsa"));
-    let stub_exec = StubExecutor::new().with_probe_outcome(
+    let stub_exec = StubHostMachine::new().with_probe_outcome(
         "dev",
         &target,
         tenant::domain::AccessMode::Read,
@@ -143,7 +143,7 @@ fn doctor_clean_host_emits_no_findings_summary() {
     // `Denied`. A clean host produces no findings; the operator
     // sees the convergent summary line.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
@@ -156,7 +156,7 @@ fn doctor_probes_full_curated_list_per_tenant() {
     // regression that silently dropped one curated path would trip
     // this test. Tuple order is locked.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let expected: Vec<(String, std::path::PathBuf, tenant::domain::AccessMode)> =
@@ -177,7 +177,7 @@ fn doctor_probe_substrate_failure_exits_74() {
     // Doctor surfaces via `doctor_failed`; exit 74 (EX_IOERR) parallel
     // to mode / shell / destroy substrate failures.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().fail_next_probe(tenant::domain::ProbeError::Spawn(
+    let stub_exec = StubHostMachine::new().fail_next_probe(tenant::domain::ProbeError::Spawn(
         std::io::Error::other("sudo not found"),
     ));
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -195,7 +195,7 @@ fn doctor_dry_run_skips_probes() {
     // Probes have side effects (sudo prompts, kernel access checks)
     // — dry-run is for "what would this do" inspection only.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--dry-run"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -225,7 +225,7 @@ fn doctor_verbose_prepends_curated_path_header() {
     // one canonical entry to guard against regressions that drop
     // the disclosure block.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -247,7 +247,7 @@ fn doctor_verbose_then_findings_ordering() {
     // header would surprise the operator's eye on a long output.
     let stub_reader = make_tenant_stub_reader("dev");
     let target = std::path::PathBuf::from(format!("/Users/{TEST_HOST}/.ssh/id_rsa"));
-    let stub_exec = StubExecutor::new().with_probe_outcome(
+    let stub_exec = StubHostMachine::new().with_probe_outcome(
         "dev",
         &target,
         tenant::domain::AccessMode::Read,
@@ -270,7 +270,7 @@ fn doctor_verbose_then_findings_ordering() {
 // ----- Sudoers env-leak check -----
 //
 // Doctor reads `/etc/sudoers` + drop-ins (concatenated via
-// `Executor::read_env_policy`) and parses for `env_delete` directives.
+// `HostMachine::read_env_policy`) and parses for `env_delete` directives.
 // If `SSH_AUTH_SOCK` isn't covered, doctor emits a host-wide
 // `Finding::EnvLeak` warning so the operator knows their session env
 // (specifically the ssh-agent socket) is propagating into `tenant
@@ -281,7 +281,7 @@ fn doctor_verbose_then_findings_ordering() {
 fn doctor_reports_ssh_auth_sock_leak_when_env_delete_missing() {
     // Empty env policy → `env_delete` missing → leak finding fires.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_env_policy_content("");
+    let stub_exec = StubHostMachine::new().with_env_policy_content("");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -294,8 +294,8 @@ fn doctor_reports_ssh_auth_sock_leak_when_env_delete_missing() {
 fn doctor_silent_when_env_delete_in_main_sudoers() {
     // Main `/etc/sudoers` contains the directive → no env-leak finding.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec =
-        StubExecutor::new().with_env_policy_content("Defaults env_delete += \"SSH_AUTH_SOCK\"\n");
+    let stub_exec = StubHostMachine::new()
+        .with_env_policy_content("Defaults env_delete += \"SSH_AUTH_SOCK\"\n");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -312,7 +312,7 @@ fn doctor_finds_env_delete_in_drop_in_file() {
     let stub_reader = make_tenant_stub_reader("dev");
     let policy = "Defaults env_keep += \"PATH\"\n\
                   Defaults env_delete += \"SSH_AUTH_SOCK\"\n";
-    let stub_exec = StubExecutor::new().with_env_policy_content(policy);
+    let stub_exec = StubHostMachine::new().with_env_policy_content(policy);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -337,7 +337,7 @@ fn doctor_all_tenants_walks_each_tenant() {
     // alphabetically. Behavioral pin: the recorded probe sequence
     // contains entries for `dev` AND `staging` as the probed tenant.
     let stub_reader = make_two_tenant_stub_reader();
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let probes = stub_exec.probes();
@@ -358,7 +358,7 @@ fn doctor_all_tenants_emits_cross_tenant_probes() {
     // `/Users/dev`. The cross-tenant block is the new ground doctor
     // breaks — the sandbox plugin doesn't audit it.
     let stub_reader = make_two_tenant_stub_reader();
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let probes = stub_exec.probes();
@@ -389,7 +389,7 @@ fn doctor_single_tenant_omits_other_tenant_perspectives() {
     // Negative pin against an accidental "audit every tenant
     // anyway" implementation.
     let stub_reader = make_two_tenant_stub_reader();
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let probes = stub_exec.probes();
@@ -419,7 +419,7 @@ fn doctor_strict_critical_exits_2() {
     // --strict → exit 2.
     let stub_reader = make_tenant_stub_reader("dev");
     let target = std::path::PathBuf::from(format!("/Users/{TEST_HOST}/.ssh/id_rsa"));
-    let stub_exec = StubExecutor::new().with_probe_outcome(
+    let stub_exec = StubHostMachine::new().with_probe_outcome(
         "dev",
         &target,
         tenant::domain::AccessMode::Read,
@@ -440,7 +440,7 @@ fn doctor_strict_warning_only_exits_1() {
     // host-home is `/Users/<host>` with AccessMode::List.
     let stub_reader = make_tenant_stub_reader("dev");
     let target = std::path::PathBuf::from(format!("/Users/{TEST_HOST}"));
-    let stub_exec = StubExecutor::new().with_probe_outcome(
+    let stub_exec = StubHostMachine::new().with_probe_outcome(
         "dev",
         &target,
         tenant::domain::AccessMode::List,
@@ -459,7 +459,7 @@ fn doctor_strict_no_findings_exits_0() {
     // Clean host — every probe Denied → 0 findings → --strict → exit 0.
     // Pin: --strict doesn't manufacture exit-1 out of nothing.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
     assert_eq!(
@@ -476,7 +476,7 @@ fn doctor_non_strict_critical_still_exits_0() {
     // is the opt-in CI-style verdict shape.
     let stub_reader = make_tenant_stub_reader("dev");
     let target = std::path::PathBuf::from(format!("/Users/{TEST_HOST}/.ssh/id_rsa"));
-    let stub_exec = StubExecutor::new().with_probe_outcome(
+    let stub_exec = StubHostMachine::new().with_probe_outcome(
         "dev",
         &target,
         tenant::domain::AccessMode::Read,
@@ -502,7 +502,7 @@ fn doctor_non_strict_critical_still_exits_0() {
 
 // ----- PF rule presence (per-tenant) -----
 //
-// `Executor::read_kernel_pf_rules(name)` runs `sudo pfctl -a
+// `HostMachine::read_kernel_pf_rules(name)` runs `sudo pfctl -a
 // tenant-<name> -sr` and returns the raw text; doctor's
 // `pf_rule_presence_check` does a structural check (line begins with
 // `pass ` AND a line begins with `block `, ignoring comments). The
@@ -517,7 +517,7 @@ fn doctor_pf_rules_present_no_finding() {
     // produces no PfRuleDrift finding. Pin: doctor still exits 0
     // and the operator-visible summary is "no findings".
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -534,7 +534,7 @@ fn doctor_pf_rules_missing_pass_emits_warning() {
     // and points at the `tenant mode runtime` recovery.
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec =
-        StubExecutor::new().with_kernel_pf_rules("dev", "block return inet from any to any\n");
+        StubHostMachine::new().with_kernel_pf_rules("dev", "block return inet from any to any\n");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -562,7 +562,7 @@ fn doctor_pf_rules_missing_block_emits_warning() {
     // Symmetric: kernel anchor has `pass` but no `block` → one
     // PfRuleDrift naming the missing block.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_kernel_pf_rules("dev", "pass inet from 192.0.2.1 to <allowed> keep state\n");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -584,7 +584,7 @@ fn doctor_pf_rules_empty_anchor_emits_two_warnings() {
     // but its in-kernel image is empty" case (e.g. pfctl reload
     // partially failed leaving an empty anchor namespace).
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_kernel_pf_rules("dev", "");
+    let stub_exec = StubHostMachine::new().with_kernel_pf_rules("dev", "");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let drift_count = stdout.matches("pf anchor drift").count();
@@ -608,7 +608,7 @@ fn doctor_pf_rules_drift_with_strict_exits_1() {
     // (per the severity-ordering contract). Pins the new variant
     // through the --strict exit-code path.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_kernel_pf_rules("dev", "");
+    let stub_exec = StubHostMachine::new().with_kernel_pf_rules("dev", "");
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
     assert_eq!(
@@ -624,7 +624,7 @@ fn doctor_pf_rules_all_tenants_scoped_per_tenant() {
     // `tenant doctor` must emit exactly the dev-scoped drift
     // findings and nothing scoped to staging.
     let stub_reader = make_two_tenant_stub_reader();
-    let stub_exec = StubExecutor::new().with_kernel_pf_rules("dev", "");
+    let stub_exec = StubHostMachine::new().with_kernel_pf_rules("dev", "");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -645,7 +645,7 @@ fn doctor_pf_rules_substrate_failure_routes_to_firewall_failed_frame() {
     // `doctor_failed` (probe) and `doctor_host_file_failed`
     // (sudoers/pam)). Exit 74 (EX_IOERR).
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().fail_next_kernel_pf_rules(
+    let stub_exec = StubHostMachine::new().fail_next_kernel_pf_rules(
         tenant::domain::FirewallError::Spawn(std::io::Error::other("pfctl not found")),
     );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -666,7 +666,7 @@ fn doctor_pf_rules_substrate_failure_routes_to_firewall_failed_frame() {
 
 // ----- Touch-ID-for-sudo (host-wide) -----
 //
-// `Executor::read_pam_sudo()` reads `/etc/pam.d/sudo` (mode 0644,
+// `HostMachine::read_pam_sudo()` reads `/etc/pam.d/sudo` (mode 0644,
 // direct fs read). Doctor's `has_pam_tid` parses for an active
 // `auth sufficient pam_tid.so` directive; if absent, doctor emits
 // one `Finding::TouchIdMissing` (info-tier) per invocation,
@@ -679,7 +679,7 @@ fn doctor_pam_tid_present_no_finding() {
     // Stub default seeds `auth sufficient pam_tid.so` — happy path
     // produces no TouchIdMissing finding.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -694,7 +694,7 @@ fn doctor_pam_tid_absent_emits_info_finding() {
     // (info-tier). Operator-visible finding line names the exact
     // edit needed to enable it.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_pam_sudo_content("");
+    let stub_exec = StubHostMachine::new().with_pam_sudo_content("");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -717,7 +717,7 @@ fn doctor_pam_tid_commented_emits_info_finding() {
     // should fire TouchIdMissing exactly as if the line were
     // absent.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_pam_sudo_content(
+    let stub_exec = StubHostMachine::new().with_pam_sudo_content(
         "# auth       sufficient     pam_tid.so\n\
          auth       required       pam_opendirectory.so\n",
     );
@@ -736,7 +736,7 @@ fn doctor_pam_tid_info_does_not_trip_strict() {
     // --strict's exit-1). Pin against a regression that bumps
     // TouchIdMissing to Warning by accident.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_pam_sudo_content("");
+    let stub_exec = StubHostMachine::new().with_pam_sudo_content("");
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
     assert_eq!(code, 0, "Info should not trip --strict; stderr={stderr:?}");
@@ -748,7 +748,7 @@ fn doctor_pam_tid_all_tenants_emits_once() {
     // Bare `tenant doctor` (all-tenants walk over two tenants)
     // must emit the finding ONCE, not per-tenant.
     let stub_reader = make_two_tenant_stub_reader();
-    let stub_exec = StubExecutor::new().with_pam_sudo_content("");
+    let stub_exec = StubHostMachine::new().with_pam_sudo_content("");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let count = stdout.matches("Touch ID for sudo not detected").count();
@@ -765,7 +765,7 @@ fn doctor_pam_substrate_failure_routes_to_host_file_failed_frame() {
     // `doctor_host_file_failed` (the path-agnostic host-config-file
     // read failure frame). Exit 74 (EX_IOERR).
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().fail_next_pam_sudo(tenant::domain::HostFileError::Fs {
+    let stub_exec = StubHostMachine::new().fail_next_pam_sudo(tenant::domain::HostFileError::Fs {
         path: "/etc/pam.d/sudo".to_string(),
         message: "permission denied".to_string(),
     });
@@ -787,7 +787,7 @@ fn doctor_pam_substrate_failure_routes_to_host_file_failed_frame() {
 
 // ----- pfctl-enabled (host-wide) -----
 //
-// `Executor::read_pf_status()` runs `sudo pfctl -si` and returns the
+// `HostMachine::read_pf_status()` runs `sudo pfctl -si` and returns the
 // raw text; doctor's `pf_status_enabled` checks for the canonical
 // `Status: Enabled` line. If pf is globally disabled, NO tenant
 // anchor is enforcing — every tenant's firewall is silently inert
@@ -799,7 +799,7 @@ fn doctor_pf_enabled_no_finding() {
     // Stub default has "Status: Enabled" — happy path produces
     // no PfDisabled finding.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -813,7 +813,7 @@ fn doctor_pf_disabled_emits_critical_finding() {
     // pfctl -si reports "Status: Disabled" → one PfDisabled
     // critical finding. With --strict, critical → exit 2.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
+    let stub_exec = StubHostMachine::new().with_pf_status_content("Status: Disabled\n");
     let (code, stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
     assert_eq!(
@@ -836,7 +836,7 @@ fn doctor_pf_disabled_all_tenants_emits_once() {
     // regardless of how many tenants are walked. Pin against a
     // regression that per-tenant-emits the host-wide check.
     let stub_reader = make_two_tenant_stub_reader();
-    let stub_exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
+    let stub_exec = StubHostMachine::new().with_pf_status_content("Status: Disabled\n");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
     // Critical without --strict still exits 0.
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -852,9 +852,9 @@ fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
     // `FirewallError::Spawn` on read_pf_status surfaces via
     // `doctor_firewall_failed`; exit 74.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().fail_next_pf_status(tenant::domain::FirewallError::Spawn(
-        std::io::Error::other("pfctl not found"),
-    ));
+    let stub_exec = StubHostMachine::new().fail_next_pf_status(
+        tenant::domain::FirewallError::Spawn(std::io::Error::other("pfctl not found")),
+    );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     assert!(
@@ -869,7 +869,7 @@ fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
 
 // ----- Anchor-body drift -----
 //
-// `Executor::read_anchor_body(name)` reads the on-disk anchor file
+// `HostMachine::read_anchor_body(name)` reads the on-disk anchor file
 // `/etc/pf.anchors/tenant-<name>` (mode 0644, direct fs read).
 // Doctor renders the expected body via `firewall::render_anchor`
 // over the profile's runtime-tier hosts and compares byte-exact via
@@ -890,8 +890,8 @@ fn doctor_anchor_body_in_sync_no_finding() {
     // profile. Happy path: zero AnchorBodyDrift findings; clean
     // "no per-tenant findings" summary; exit 0.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -911,7 +911,7 @@ fn doctor_anchor_body_hand_edit_emits_warning() {
         "{}# stray operator edit\n",
         tenant::firewall::render_anchor("dev", &[])
     );
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited_body);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -944,7 +944,7 @@ fn doctor_anchor_body_profile_drift_emits_warning() {
     let stub_reader = make_tenant_stub_reader("dev");
     let new_profile = profile_with_hosts(&["example.com"], &[]);
     let stale_body = tenant::firewall::render_anchor("dev", &[]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &new_profile)
         .with_anchor_body("dev", &stale_body);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -960,7 +960,7 @@ fn doctor_anchor_body_drift_with_strict_exits_1() {
     // AnchorBodyDrift is Warning-tier; --strict + warning-only → exit 1.
     let stub_reader = make_tenant_stub_reader("dev");
     let edited_body = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited_body);
     let (code, _stdout, stderr) =
@@ -980,7 +980,7 @@ fn doctor_anchor_body_profile_unreadable_skips_check() {
     let stub_reader = make_tenant_stub_reader("dev");
     // No `with_existing_profile` → read_profile returns an error.
     // No `with_anchor_body` → default (renders empty-allowlist).
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -997,7 +997,7 @@ fn doctor_anchor_body_substrate_failure_routes_to_host_file_failed_frame() {
     // existing `doctor_host_file_failed` Reporter method (same
     // path as pam.d/sudo substrate failures). Exit 74.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_next_anchor_body(tenant::domain::HostFileError::Fs {
             path: "/etc/pf.anchors/tenant-dev".to_string(),
@@ -1023,7 +1023,7 @@ fn doctor_anchor_body_drift_all_tenants_scoped_per_tenant() {
     let stub_reader = make_two_tenant_stub_reader();
     let default = tenant::profile::default_profile_toml();
     let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &default)
         .with_existing_profile("staging", &default)
         .with_anchor_body("dev", &edited);
@@ -1046,7 +1046,7 @@ fn doctor_anchor_body_drift_suppresses_no_findings_summary() {
     // variant is counted as PER-TENANT (not host-wide).
     let stub_reader = make_tenant_stub_reader("dev");
     let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited);
     let (_code, stdout, _stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -1074,7 +1074,7 @@ fn doctor_anchor_body_install_tier_match_still_drifts() {
             "install.example.com".to_string(),
         ],
     );
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_anchor_body("dev", &install_tier_body);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -1104,7 +1104,7 @@ fn doctor_standard_mode_omits_guidance_block() {
     // Guards skim-the-output usage from sudden multi-screen output.
     let stub_reader = make_tenant_stub_reader("dev");
     let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -1128,7 +1128,7 @@ fn doctor_verbose_emits_indented_guidance_below_finding() {
     // → guidance() → Reporter prefix → stdout).
     let stub_reader = make_tenant_stub_reader("dev");
     let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
@@ -1179,11 +1179,11 @@ fn doctor_verbose_filesystem_exposure_omits_guidance_block() {
     // Set the stub to produce ONLY a FilesystemExposure finding (no
     // env leak, no pf drift, no anchor drift, etc.) so a missing
     // guidance section is unambiguous. AnchorBodyDrift would
-    // otherwise fire because the default executor's anchor body is
+    // otherwise fire because the default host machine's anchor body is
     // empty; configure a matching profile + body to suppress it.
     let stub_reader = make_tenant_stub_reader("dev");
     let target = std::path::PathBuf::from(format!("/Users/{TEST_HOST}/.ssh/id_rsa"));
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &tenant::firewall::render_anchor("dev", &[]))
         .with_probe_outcome(
@@ -1216,7 +1216,7 @@ fn doctor_verbose_multiple_findings_each_paired_with_own_guidance() {
     // markers unique to each guidance body.
     let stub_reader = make_tenant_stub_reader("dev");
     let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_pf_status_content("Status: Disabled\n")
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited);
@@ -1276,7 +1276,7 @@ fn doctor_help_text_mentions_sudo_session_and_admin_requirement() {
 // AclDrift on declared shares
 // ============================================================
 //
-// `Executor::read_host_acl(path)` reads `ls -lde <path>` and feeds
+// `HostMachine::read_host_acl(path)` reads `ls -lde <path>` and feeds
 // `doctor::has_group_acl_entry` to detect missing
 // `<tenant>-tenant-share` group entries on each declared share's
 // host_path. Warning-tier; recovery is `tenant reload <name>`.
@@ -1291,7 +1291,7 @@ fn doctor_share_acl_present_no_finding() {
     // per-tenant summary.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_tenant_path_kind(
             "dev",
@@ -1320,7 +1320,7 @@ fn doctor_share_acl_missing_emits_warning() {
     // test isolates the AclDrift signal.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_host_acl(
             std::path::Path::new("/Users/Shared/src"),
@@ -1369,7 +1369,7 @@ fn doctor_share_acl_missing_only_one_of_two_shares() {
             ("/Users/Shared/data", "ro", "$HOME/data"),
         ],
     );
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_host_acl(
             std::path::Path::new("/Users/Shared/src"),
@@ -1409,7 +1409,7 @@ fn doctor_share_acl_drift_with_strict_exits_1() {
     // AclDrift is Warning-tier; --strict + warning-only → exit 1.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_host_acl(
             std::path::Path::new("/Users/Shared/src"),
@@ -1430,13 +1430,13 @@ fn doctor_share_acl_drift_with_strict_exits_1() {
 
 #[test]
 fn doctor_share_drift_dry_run_emits_no_finding() {
-    // `--dry-run` swaps in DryRunExecutor whose `read_profile` returns
+    // `--dry-run` swaps in DryRunHostMachine whose `read_profile` returns
     // `default_profile_toml()` (no `[[shares]]`); the share-drift
     // loop never iterates regardless of the underlying stub's profile
     // state. Intent line only; no AclDrift in stdout.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_host_acl(
             std::path::Path::new("/Users/Shared/src"),
@@ -1463,7 +1463,7 @@ fn doctor_share_drift_skips_when_profile_unreadable() {
     // surface the profile state separately.
     let stub_reader = make_tenant_stub_reader("dev");
     // No `with_existing_profile` → read_profile returns an error.
-    let stub_exec = StubExecutor::new();
+    let stub_exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -1481,7 +1481,7 @@ fn doctor_share_drift_substrate_failure_exits_74() {
     // entry and the failure aborts the whole walk.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .fail_next_host_acl(
             std::path::Path::new("/Users/Shared/src"),
@@ -1511,7 +1511,7 @@ fn doctor_share_drift_all_tenants_scoped_per_tenant() {
     let profile_dev = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let profile_staging =
         profile_with_shares(&[], &[], &[("/Users/Shared/data", "ro", "$HOME/data")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile_dev)
         .with_existing_profile("staging", &profile_staging)
         // Only dev's path is drifted; staging's falls through to default
@@ -1550,7 +1550,7 @@ fn doctor_share_acl_drift_verbose_emits_guidance_block() {
     // as correct so only AclDrift's guidance fires.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_host_acl(
             std::path::Path::new("/Users/Shared/src"),
@@ -1581,7 +1581,7 @@ fn doctor_share_acl_drift_verbose_emits_guidance_block() {
 // SymlinkDrift on declared shares
 // ============================================================
 //
-// `Executor::tenant_path_kind(name, tenant_path)` returns one of
+// `HostMachine::tenant_path_kind(name, tenant_path)` returns one of
 // PathKind::{Absent, Symlink(target), Other}; doctor compares against
 // the declared host_path (string-exact, no canonicalize) and emits
 // one of the three SymlinkActual cases.
@@ -1593,7 +1593,7 @@ fn doctor_share_symlink_absent_emits_warning() {
     // ACL silenced via default stub listing carrying the entry.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_tenant_path_kind(
             "dev",
@@ -1628,7 +1628,7 @@ fn doctor_share_symlink_wrong_target_emits_warning() {
     // drift even though both are reachable from disk.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_tenant_path_kind(
             "dev",
@@ -1663,7 +1663,7 @@ fn doctor_share_symlink_not_symlink_emits_warning() {
     // a real file at tenant_path).
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_tenant_path_kind(
             "dev",
@@ -1693,7 +1693,7 @@ fn doctor_share_symlink_matching_target_no_finding() {
     // the string-exact comparator.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_tenant_path_kind(
             "dev",
@@ -1714,7 +1714,7 @@ fn doctor_share_symlink_drift_with_strict_exits_1() {
     // SymlinkDrift is Warning-tier; --strict + warning-only → exit 1.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_tenant_path_kind(
             "dev",
@@ -1731,12 +1731,12 @@ fn doctor_share_symlink_drift_with_strict_exits_1() {
 
 #[test]
 fn doctor_share_symlink_drift_dry_run_emits_no_finding() {
-    // DryRunExecutor's read_profile returns default_profile_toml()
+    // DryRunHostMachine's read_profile returns default_profile_toml()
     // (no `[[shares]]`); share-drift loop never iterates. No
     // SymlinkDrift output; intent line only.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_tenant_path_kind(
             "dev",
@@ -1761,7 +1761,7 @@ fn doctor_share_symlink_substrate_failure_exits_74() {
     // doctor_share_drift_substrate_failure_exits_74).
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .fail_next_tenant_path_kind(tenant::domain::ProbeError::NonZero {
             code: 1,
@@ -1782,7 +1782,7 @@ fn doctor_share_symlink_drift_verbose_emits_case_tailored_guidance() {
     // the byte-form pins in tests/doctor.rs cover the full bodies.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_tenant_path_kind(
             "dev",
@@ -1810,10 +1810,11 @@ fn doctor_emits_host_not_in_share_group_when_membership_missing() {
     // Operator simulating a legacy tenant: the share group exists
     // (the create flow ran before host membership was wired in) but
     // the host was never added as a secondary member. Doctor queries
-    // the membership via Executor::host_in_group, sees `false`, and
+    // the membership via HostMachine::host_in_group, sees `false`, and
     // emits the warning naming the host, the group, and the recovery.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_host_in_group("operator", "dev-tenant-share", false);
+    let stub_exec =
+        StubHostMachine::new().with_host_in_group("operator", "dev-tenant-share", false);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -1833,7 +1834,7 @@ fn doctor_clean_when_host_is_member() {
     // Locks the "no spurious finding" baseline so future stub tweaks
     // can't silently regress the default.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new(); // defaults to true
+    let stub_exec = StubHostMachine::new(); // defaults to true
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -1847,7 +1848,8 @@ fn doctor_strict_exit_1_on_host_not_in_share_group_alone() {
     // HostNotInShareGroup is Warning-tier; --strict + warning-only
     // → exit 1. Mirrors the AclDrift strict-mode test.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_host_in_group("operator", "dev-tenant-share", false);
+    let stub_exec =
+        StubHostMachine::new().with_host_in_group("operator", "dev-tenant-share", false);
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
     assert_eq!(
@@ -1861,7 +1863,7 @@ fn doctor_no_arg_emits_host_not_in_share_group_per_tenant() {
     // Two tenants, both missing the host membership; doctor walks
     // them in alphabetical order and emits one finding per tenant.
     let stub_reader = make_two_tenant_stub_reader();
-    let stub_exec = StubExecutor::new()
+    let stub_exec = StubHostMachine::new()
         .with_host_in_group("operator", "dev-tenant-share", false)
         .with_host_in_group("operator", "staging-tenant-share", false);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
@@ -1883,7 +1885,8 @@ fn doctor_host_not_in_share_group_verbose_emits_guidance_block() {
     // and the dseditgroup alternative command. The full byte-form
     // is pinned in tests/doctor.rs.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().with_host_in_group("operator", "dev-tenant-share", false);
+    let stub_exec =
+        StubHostMachine::new().with_host_in_group("operator", "dev-tenant-share", false);
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(

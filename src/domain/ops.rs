@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::domain::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 
 use super::errors::{AccountError, AclError, FirewallError};
-use super::executor::{Executor, WritableOp};
+use super::host_machine::{HostMachine, WritableOp};
 use crate::profile::ProfileError;
 
 /// Which filesystem access predicate doctor's probe checks. `Read` maps to
@@ -62,13 +62,13 @@ pub enum AccessOutcome {
 /// Account-domain operations. The writer expresses *what* to do (create the
 /// share group, look up the OD record, log in as the tenant); the substrate
 /// knows *how*. macOS-specific tool choices (dseditgroup, sysadminctl, dscl)
-/// live in `MacosExecutor`'s impl, not here.
+/// live in `MacosHostMachine`'s impl, not here.
 ///
 /// `LoginAsUser` is included for the display pipeline (the shell verb's
-/// "Shelling into…" plan line goes through `Executor::describe_account`),
+/// "Shelling into…" plan line goes through `HostMachine::describe_account`),
 /// but it is NOT handled by `execute_account` — interactive ops need stdio
 /// inheritance and a separate return type (i32 child exit code), which is
-/// the dedicated `Executor::login` method. The asymmetry is local to the
+/// the dedicated `HostMachine::login` method. The asymmetry is local to the
 /// shell verb and documented at the trait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountOp {
@@ -115,7 +115,7 @@ pub enum AccountOp {
 
     /// Interactive login as the tenant. Used by the `shell` verb. The
     /// describe-side renders `sudo -iu <name>`; execution goes through
-    /// `Executor::login` (NOT `execute_account`) because the return type
+    /// `HostMachine::login` (NOT `execute_account`) because the return type
     /// is the child shell's exit code, and stdio must inherit so sudo can
     /// prompt and the login shell can drive the controlling terminal.
     LoginAsUser { name: TenantUserName },
@@ -125,7 +125,7 @@ pub enum AccountOp {
     /// `LoginAsUser` under the `sudo -iu` mechanism family — same login
     /// shell semantics (sources `/etc/zprofile` + `~/.zprofile` so PATH
     /// and tooling env match the interactive form), same stdio carve-out
-    /// (execution goes through `Executor::exec_as_tenant`, not
+    /// (execution goes through `HostMachine::exec_as_tenant`, not
     /// `execute_account`, because stdio inherits and the return type is
     /// the child's exit code). Substrate: `sudo -iu <name> -- <argv>` —
     /// the `--` separator prevents sudo from interpreting argv[0] as a
@@ -199,7 +199,7 @@ pub enum AccountOp {
 /// Profile-domain operations. The store-backed `~/.config/tenant/profiles/<name>.toml`
 /// file is the host-side artifact; the substrate handles the actual fs work
 /// (or in-memory recording for tests). The profile read path lives on
-/// `Executor::read_profile` (a dedicated method, not a variant here)
+/// `HostMachine::read_profile` (a dedicated method, not a variant here)
 /// because the return type — file content, not unit — doesn't fit
 /// `execute_profile`'s shape. Parallels `login`'s carve-out from
 /// `execute_account` for the same reason.
@@ -223,7 +223,7 @@ pub enum ProfileOp {
 /// `Anchor` stays in the variant names because it's the project's domain
 /// vocabulary for "named per-tenant firewall ruleset"; `Pf` prefixes drop
 /// from `Reload` / `Enable` because the tool's name (pfctl) lives in
-/// `MacosExecutor`, not here.
+/// `MacosHostMachine`, not here.
 /// Per-share access intent at the substrate level — what bits to grant
 /// or revoke when invoking `chmod +a` / `chmod -a`. `Ro` maps to the
 /// sandbox-plugin `read_exec_inherit_entry` shape (read + execute +
@@ -290,7 +290,7 @@ pub enum AclOp {
 pub enum FirewallOp {
     /// Write the rendered anchor body to `/etc/pf.anchors/tenant-<name>`.
     /// `name` is the tenant name; the anchor file's full name
-    /// (`tenant-<name>`) is constructed by `MacosExecutor` from it. `body`
+    /// (`tenant-<name>`) is constructed by `MacosHostMachine` from it. `body`
     /// is the precomputed anchor content (from `firewall::render_anchor`).
     InstallAnchor { name: TenantUserName, body: String },
 
@@ -355,12 +355,12 @@ impl<'a> Op<'a> {
     /// Render the op as an operator-facing display line. The match here
     /// is the one place in the codebase that has to know the
     /// account/profile/firewall/acl split for display purposes.
-    pub fn describe_via(&self, executor: &dyn Executor) -> String {
+    pub fn describe_via(&self, machine: &dyn HostMachine) -> String {
         match self {
-            Op::Account(op) => executor.describe_account(op),
-            Op::Profile(op) => executor.describe_profile(op),
-            Op::Firewall(op) => executor.describe_firewall(op),
-            Op::Acl(op) => executor.describe_acl(op),
+            Op::Account(op) => machine.describe_account(op),
+            Op::Profile(op) => machine.describe_profile(op),
+            Op::Firewall(op) => machine.describe_firewall(op),
+            Op::Acl(op) => machine.describe_acl(op),
         }
     }
 
@@ -609,8 +609,8 @@ fn acl_intent_label(op: &AclOp) -> String {
 
 impl WritableOp for AccountOp {
     type Error = AccountError;
-    fn execute_via(&self, executor: &dyn Executor) -> Result<(), AccountError> {
-        executor.execute_account(self)
+    fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), AccountError> {
+        machine.execute_account(self)
     }
     fn op_ref(&self) -> Op<'_> {
         Op::Account(self)
@@ -619,8 +619,8 @@ impl WritableOp for AccountOp {
 
 impl WritableOp for ProfileOp {
     type Error = ProfileError;
-    fn execute_via(&self, executor: &dyn Executor) -> Result<(), ProfileError> {
-        executor.execute_profile(self)
+    fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), ProfileError> {
+        machine.execute_profile(self)
     }
     fn op_ref(&self) -> Op<'_> {
         Op::Profile(self)
@@ -629,8 +629,8 @@ impl WritableOp for ProfileOp {
 
 impl WritableOp for FirewallOp {
     type Error = FirewallError;
-    fn execute_via(&self, executor: &dyn Executor) -> Result<(), FirewallError> {
-        executor.execute_firewall(self)
+    fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), FirewallError> {
+        machine.execute_firewall(self)
     }
     fn op_ref(&self) -> Op<'_> {
         Op::Firewall(self)
@@ -639,8 +639,8 @@ impl WritableOp for FirewallOp {
 
 impl WritableOp for AclOp {
     type Error = AclError;
-    fn execute_via(&self, executor: &dyn Executor) -> Result<(), AclError> {
-        executor.execute_acl(self)
+    fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), AclError> {
+        machine.execute_acl(self)
     }
     fn op_ref(&self) -> Op<'_> {
         Op::Acl(self)

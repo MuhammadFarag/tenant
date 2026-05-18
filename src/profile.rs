@@ -4,7 +4,7 @@
 //! render path, the `mode` verb, and the `reload` verb; written at
 //! create-time as a default scaffold and removed at destroy-time.
 //!
-//! Substrate ops live on the unified `Executor` trait (the
+//! Substrate ops live on the unified `HostMachine` trait (the
 //! `describe_profile` / `execute_profile` pair). This file holds only
 //! the data shapes shared across that interface: the error type, the
 //! default TOML content, and the display-form path helper.
@@ -18,7 +18,7 @@ use serde::Deserialize;
 /// Display path for the tenant's profile, with a literal `~` (not the
 /// expanded `$HOME`). Used in user-facing plan/echo lines so the rendered
 /// output is host-independent — the operator's `~` is the universally
-/// readable form. `Executor::execute_profile` resolves the absolute form
+/// readable form. `HostMachine::execute_profile` resolves the absolute form
 /// internally for the actual fs ops. Single source of truth for the path
 /// convention so a future move (XDG_CONFIG_HOME support, schema
 /// migration) updates display + writes in one place.
@@ -68,7 +68,7 @@ impl From<io::Error> for ProfileError {
 }
 
 /// Parsed per-tenant profile. Read on the create-side firewall step
-/// (via `Executor::read_profile`) and parsed via `parse` to extract
+/// (via `HostMachine::read_profile`) and parsed via `parse` to extract
 /// the allowlist tiers for `render_anchor`.
 ///
 /// `schema_version` is checked against the supported set (currently

@@ -3,8 +3,8 @@
 //! (create-side firewall step), and the matrix here is parser-state-shaped
 //! (schema version × structural completeness × TOML well-formedness) which
 //! is awkward to drive through the CLI surface. Same in-tree precedent
-//! and justification as `tests/macos_executor.rs`'s per-variant pins on
-//! `MacosExecutor::describe_*`.
+//! and justification as `tests/macos_host_machine.rs`'s per-variant pins on
+//! `MacosHostMachine::describe_*`.
 
 use std::path::PathBuf;
 

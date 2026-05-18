@@ -1,5 +1,5 @@
 //! PF anchor + `/etc/pf.conf` line ops. Pure functions; the substrate's
-//! `MacosExecutor::execute_firewall` calls them indirectly via the
+//! `MacosHostMachine::execute_firewall` calls them indirectly via the
 //! `FirewallOp::InstallAnchor.body` / `UpdateConfig.content` payloads
 //! that the Writer composes at create/destroy time.
 //!
@@ -10,13 +10,13 @@
 
 /// Absolute directory housing per-tenant PF anchor files. The
 /// `load anchor … from "<path>"` line in `/etc/pf.conf` embeds this
-/// path, and `MacosExecutor::execute_firewall` will write/remove
+/// path, and `MacosHostMachine::execute_firewall` will write/remove
 /// files under it. Public because `ensure_anchor_ref`'s rendered
 /// output exposes the path and tests want a single source of truth.
 pub const ANCHOR_DIR: &str = "/etc/pf.anchors";
 
 /// The host's PF configuration file. The Writer reads this via
-/// `Executor::read_pf_conf`, edits with `ensure_anchor_ref` /
+/// `HostMachine::read_pf_conf`, edits with `ensure_anchor_ref` /
 /// `remove_anchor_ref`, and writes back via
 /// `FirewallOp::UpdateConfig`.
 pub const PF_CONF: &str = "/etc/pf.conf";

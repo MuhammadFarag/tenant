@@ -1,4 +1,4 @@
-//! Production `Executor` substrate — knows the macOS tool argv and the
+//! Production `HostMachine` substrate — knows the macOS tool argv and the
 //! XDG-style profile path convention. The argv-building logic that
 //! previously lived in the `build_*_argv` family (and the synthetic-argv
 //! hacks for profile ops) is now confined to this module's helpers.
@@ -12,8 +12,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
-    AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclMode, AclOp, Executor,
-    FirewallError, FirewallOp, GroupName, HostFileError, HostUserName, PathKind, ProbeError,
+    AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError,
+    FirewallOp, GroupName, HostFileError, HostMachine, HostUserName, PathKind, ProbeError,
     ProfileOp, TenantUserName,
 };
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
@@ -23,9 +23,9 @@ use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 /// path convention. The argv-building logic that previously lived in the
 /// `build_*_argv` family (and the synthetic-argv hacks for profile ops) is
 /// now confined to this struct's methods.
-pub struct MacosExecutor;
+pub struct MacosHostMachine;
 
-impl Executor for MacosExecutor {
+impl HostMachine for MacosHostMachine {
     fn describe_account(&self, op: &AccountOp) -> String {
         match op {
             AccountOp::CreateShareGroup { group, gid } => {
@@ -84,12 +84,12 @@ impl Executor for MacosExecutor {
         let argv = match op {
             AccountOp::LoginAsUser { .. } => {
                 panic!(
-                    "AccountOp::LoginAsUser must go through Executor::login, not execute_account"
+                    "AccountOp::LoginAsUser must go through HostMachine::login, not execute_account"
                 )
             }
             AccountOp::ExecAsUser { .. } => {
                 panic!(
-                    "AccountOp::ExecAsUser must go through Executor::exec_as_tenant, not execute_account"
+                    "AccountOp::ExecAsUser must go through HostMachine::exec_as_tenant, not execute_account"
                 )
             }
             _ => account_argv(op),
@@ -100,7 +100,7 @@ impl Executor for MacosExecutor {
     fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
         // Stdio inherits so sudo can prompt for the host password and the
         // launched login shell can drive the controlling terminal. Mirrors
-        // the pre-refactor `Executor::exec_into`.
+        // the pre-refactor `HostMachine::exec_into`.
         let argv = account_argv(&AccountOp::LoginAsUser { name: name.clone() });
         let (program, rest) = argv
             .split_first()
@@ -717,8 +717,8 @@ fn profile_path(name: &TenantUserName) -> Result<PathBuf, ProfileError> {
 }
 
 /// Translate an `AccountOp` to its argv. Confined to this module; the writer
-/// never sees argv directly. Used by both `MacosExecutor::execute_account`
-/// (to spawn the process) and `MacosExecutor::login` (to spawn the
+/// never sees argv directly. Used by both `MacosHostMachine::execute_account`
+/// (to spawn the process) and `MacosHostMachine::login` (to spawn the
 /// interactive login shell). The describe-side renders its own strings to
 /// match today's verbose-mode output byte-for-byte; the argv-builder is
 /// kept separate so a future change to one form doesn't silently drift the

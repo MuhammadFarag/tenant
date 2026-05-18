@@ -149,7 +149,7 @@ impl ModeLevel {
     }
 }
 
-// 9 params at the composition root — accounts + executor +
+// 9 params at the composition root — accounts + machine +
 // stdout/stderr/stdin/tty + colors — each is a discrete I/O capability
 // the harness needs to inject for testability. Bundling into a struct
 // would add a layer without removing parameters. clippy allow scoped
@@ -158,7 +158,7 @@ impl ModeLevel {
 pub fn run(
     args: &[String],
     accounts: &dyn domain::HostAccounts,
-    executor: &dyn domain::Executor,
+    machine: &dyn domain::HostMachine,
     host: &HostUserName,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -172,21 +172,21 @@ pub fn run(
     };
     // Dry-run swap: the writer stays mode-agnostic; composition root
     // selects either the caller-supplied substrate (production / test)
-    // or the no-op `DryRunExecutor` based on `--dry-run`.
-    let dry_run_executor = adapters::dry_run_executor::DryRunExecutor;
-    let active_executor: &dyn domain::Executor = if cli.dry_run {
-        &dry_run_executor
+    // or the no-op `DryRunHostMachine` based on `--dry-run`.
+    let dry_run_machine = adapters::dry_run_host_machine::DryRunHostMachine;
+    let active_machine: &dyn domain::HostMachine = if cli.dry_run {
+        &dry_run_machine
     } else {
-        executor
+        machine
     };
-    let writer = accounts::Writer::new(active_executor);
+    let writer = accounts::Writer::new(active_machine);
     let yes = cli.yes;
     let mut reporter = Reporter::new(
         stdout,
         stderr,
         cli.verbose,
         cli.dry_run,
-        active_executor,
+        active_machine,
         colors,
     );
     commands::dispatch(

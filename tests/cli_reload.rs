@@ -14,8 +14,8 @@
 
 use std::path::PathBuf;
 
-use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::adapters::stub_host_machine::StubHostMachine;
 use tenant::domain::{
     AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, PathKind, UserId,
 };
@@ -29,7 +29,7 @@ use common::*;
 
 #[test]
 fn reload_single_tenant_dry_run_default_emits_intent_only() {
-    // Smallest red→green. DryRunExecutor returns default_profile_toml
+    // Smallest red→green. DryRunHostMachine returns default_profile_toml
     // (no shares) from read_profile, so the substrate is a no-op
     // share-wise; PF reapply renders empty allowlist. Standard +
     // dry-run emits the intent line only (no plan).
@@ -135,7 +135,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
     //   1. PF: InstallAnchor + Reload (at runtime tier)
     //   2. Shares: AclOp::Grant + EnsureSymlinkAsUser
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     assert_eq!(
@@ -199,7 +199,7 @@ fn reload_profile_read_failure_surfaces_before_prompt() {
     // confirm prompt, so a missing profile surfaces pre-prompt with
     // no stdout output. Don't ask the operator to confirm an action
     // already known to fail.
-    let exec = StubExecutor::new(); // no profile preloaded
+    let exec = StubHostMachine::new(); // no profile preloaded
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -222,15 +222,15 @@ fn reload_verbose_plan_block_includes_share_ops() {
     // The verbose plan block lives in the summary, rendered only
     // when the operator is interactive OR in dry-run. Scripted
     // real-mode drops the plan (solo-Mac scope; cleaner log trace).
-    // Dry-run can't be used here because `DryRunExecutor::read_profile`
+    // Dry-run can't be used here because `DryRunHostMachine::read_profile`
     // returns the default empty-shares TOML regardless of the
     // underlying stub's seeded profile, so the plan would render
     // PF-only. Solve by simulating an interactive (TTY=true) operator
-    // who answers `y`; the live executor reads the share-bearing
+    // who answers `y`; the live host machine reads the share-bearing
     // profile, the summary renders the share ops in the intent-leads
     // layout, the prompt is consumed, and execution proceeds.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, stdout, _stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
@@ -273,7 +273,7 @@ fn reload_single_tenant_with_existing_symlink_at_tenant_path_succeeds_idempotent
     // PathKind::Symlink coverage on the reload path: the substrate
     // proceeds (existing symlink is the idempotent re-link case).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .with_tenant_path_kind(
             "dev",
@@ -292,7 +292,7 @@ fn reload_single_tenant_verbose_emits_per_op_echo() {
     // section + closing line. PF ops + per-share ops both appear in
     // the echo block.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -326,8 +326,8 @@ fn reload_single_tenant_verbose_emits_per_op_echo() {
 fn reload_with_default_profile_runs_pf_only_no_share_ops() {
     // Default profile has no shares → share substrate is a no-op.
     // PF reapply still fires.
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(exec.acl_ops().is_empty(), "no shares → no AclOp");
@@ -357,7 +357,7 @@ fn reload_firewall_failure_surfaces_with_reload_specific_wording() {
     // mode" — reload's framing says "failed to reload firewall"
     // (no tier-swap implied).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .fail_firewall_op(
             FirewallOp::Reload,
@@ -388,7 +388,7 @@ fn reload_refuses_when_host_path_missing() {
         &[],
         &[("/nonexistent/missing/reload-sentinel", "rw", "$HOME/src")],
     );
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
     assert_eq!(code, 74);
     assert!(
@@ -405,7 +405,7 @@ fn reload_refuses_when_host_path_missing() {
 fn reload_refuses_when_tenant_path_occupied() {
     // TenantPathOccupied refusal applied through reload.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .with_tenant_path_kind("dev", &PathBuf::from("/Users/dev/src"), PathKind::Other);
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
@@ -426,7 +426,7 @@ fn reload_routes_acl_failure_via_reapply_arms() {
     // `mode_acl_failed` framing (no verb-specific wording for ACL
     // arm — reuses the substrate-action phrase).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .fail_acl_op(
             AclOp::Grant {
@@ -450,7 +450,7 @@ fn reload_routes_acl_failure_via_reapply_arms() {
 #[test]
 fn reload_routes_symlink_failure_via_reapply_arms() {
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .fail_account_op(
             AccountOp::EnsureSymlinkAsUser {
@@ -479,7 +479,7 @@ fn reload_routes_symlink_failure_via_reapply_arms() {
 fn reload_no_arg_walks_all_tenants_in_alphabetical_order() {
     // tenant_names() returns alphabetical order so output is stable
     // across runs. Verify by exit code + summary line shape.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_existing_profile("staging", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
@@ -497,7 +497,7 @@ fn reload_no_arg_continues_on_per_tenant_failure() {
     // Inject a profile-read failure for 'dev' but leave 'staging'
     // healthy. The walk emits per-tenant failure inline + a summary
     // counting 1 failure.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("staging", &tenant::profile::default_profile_toml());
     // 'dev' has no profile preloaded → read_profile fails for dev.
     let (code, stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
@@ -533,7 +533,7 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
     // when state says member already" so a future regression that
     // tries to optimize the catch-up away via host_in_group pre-check
     // trips this.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_host_in_group("operator", "dev-tenant-share", true);
     let (code, _stdout, _stderr) =
@@ -557,7 +557,7 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
     // observing the cross-domain order: firewall_ops happen first,
     // then the one account op (AddHost), then the acl op.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
     assert_eq!(code, 0);
@@ -591,8 +591,8 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
 
 #[test]
 fn reload_pre_exec_doctor_silent_when_host_is_clean() {
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
@@ -608,7 +608,7 @@ fn reload_pre_exec_doctor_silent_when_host_is_clean() {
 
 #[test]
 fn reload_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_pf_status_content("Status: Disabled\n");
     let (code, stdout, _stderr) = run_with_stdin(
@@ -627,7 +627,7 @@ fn reload_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
 #[test]
 fn reload_pre_exec_doctor_aggregates_host_not_in_share_group_warning() {
     // HostNotInShareGroup → 1 warning aggregate. Singular noun.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_host_in_group("operator", "dev-tenant-share", false);
     let (code, stdout, _stderr) = run_with_stdin(
@@ -647,7 +647,7 @@ fn reload_pre_exec_doctor_aggregates_host_not_in_share_group_warning() {
 fn reload_pre_exec_doctor_scope_excludes_env_leak() {
     // EnvLeak is Shell-only — reload's share substrate doesn't reach
     // for ssh-agent socket. Audit must not aggregate any warning.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_env_policy_content("");
     let (code, stdout, _stderr) = run_with_stdin(
@@ -665,7 +665,7 @@ fn reload_pre_exec_doctor_scope_excludes_env_leak() {
 
 #[test]
 fn reload_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_next_pf_status(FirewallError::NonZero {
             code: 1,

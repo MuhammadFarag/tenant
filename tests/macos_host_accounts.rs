@@ -1,5 +1,5 @@
 //! `MacosHostAccounts`-vs-dscl integration smoke test. Symmetric with
-//! `tests/macos_executor.rs`, which pins the `MacosExecutor::describe_*`
+//! `tests/macos_host_machine.rs`, which pins the `MacosHostMachine::describe_*`
 //! argv contract. This file pins that `MacosHostAccounts::new()` translates
 //! dscl output into the in-memory snapshot the rest of the codebase
 //! expects. Gated on macOS — the rest of the test suite runs on any

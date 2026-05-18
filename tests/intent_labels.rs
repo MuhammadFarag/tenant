@@ -5,7 +5,7 @@
 //!
 //! These ARE unit tests, which crosses the project's "E2E-only"
 //! convention. Justified by the per-variant combinatorial coverage on a
-//! pure rendering function — same pattern as `tests/macos_executor.rs`
+//! pure rendering function — same pattern as `tests/macos_host_machine.rs`
 //! (argv per variant). Per-variant rendering bugs are awkward to catch
 //! through the verb-level CLI surface because (a) some variants
 //! (`LookupUserRecord`, `DeleteUserRecord`, `LoginAsUser`) don't appear

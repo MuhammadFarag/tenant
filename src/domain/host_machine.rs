@@ -8,7 +8,7 @@ use crate::profile::ProfileError;
 /// pairs over the four `Op` ADTs, plus carve-out methods for operations whose
 /// return shape doesn't fit `Result<(), E>`. Each domain keeps its own error
 /// type.
-pub trait Executor {
+pub trait HostMachine {
     fn describe_account(&self, op: &AccountOp) -> String;
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError>;
 
@@ -62,10 +62,10 @@ pub trait Executor {
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError>;
 }
 
-/// Leaf-op dispatch to the `Executor` with a domain-specific error type.
+/// Leaf-op dispatch to the `HostMachine` with a domain-specific error type.
 /// `op_ref` projects into the `Op<'_>` umbrella for unified rendering.
 pub trait WritableOp {
     type Error;
-    fn execute_via(&self, executor: &dyn Executor) -> Result<(), Self::Error>;
+    fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), Self::Error>;
     fn op_ref(&self) -> Op<'_>;
 }

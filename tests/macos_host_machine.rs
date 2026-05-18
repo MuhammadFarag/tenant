@@ -1,5 +1,5 @@
-//! Per-variant contract pins on `MacosExecutor::describe_account` and
-//! `MacosExecutor::describe_profile`. These tests are the one place
+//! Per-variant contract pins on `MacosHostMachine::describe_account` and
+//! `MacosHostMachine::describe_profile`. These tests are the one place
 //! where the literal shell-command shape of each op lives — the
 //! verb-level E2E tests in `cli.rs` already pin the end-to-end output
 //! via byte-exact stdout assertions, but those assertions are
@@ -18,12 +18,14 @@
 
 use std::path::PathBuf;
 
-use tenant::adapters::macos::MacosExecutor;
-use tenant::domain::{AccountOp, AclMode, AclOp, Executor, FirewallOp, GroupId, ProfileOp, UserId};
+use tenant::adapters::macos::MacosHostMachine;
+use tenant::domain::{
+    AccountOp, AclMode, AclOp, FirewallOp, GroupId, HostMachine, ProfileOp, UserId,
+};
 
 #[test]
 fn macos_describes_create_share_group() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::CreateShareGroup {
             group: "dev-tenant-share".into(),
@@ -35,7 +37,7 @@ fn macos_describes_create_share_group() {
 
 #[test]
 fn macos_describes_delete_share_group() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::DeleteShareGroup {
             group: "dev-tenant-share".into()
@@ -46,7 +48,7 @@ fn macos_describes_delete_share_group() {
 
 #[test]
 fn macos_describes_create_tenant_user() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::CreateTenantUser {
             name: "dev".into(),
@@ -60,7 +62,7 @@ fn macos_describes_create_tenant_user() {
 
 #[test]
 fn macos_describes_delete_tenant_user() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::DeleteTenantUser { name: "dev".into() }),
         "sudo sysadminctl -deleteUser dev",
@@ -69,7 +71,7 @@ fn macos_describes_delete_tenant_user() {
 
 #[test]
 fn macos_describes_lookup_user_record() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::LookupUserRecord { name: "dev".into() }),
         "dscl . -read /Users/dev",
@@ -78,7 +80,7 @@ fn macos_describes_lookup_user_record() {
 
 #[test]
 fn macos_describes_delete_user_record() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::DeleteUserRecord { name: "dev".into() }),
         "sudo dscl . -delete /Users/dev",
@@ -87,7 +89,7 @@ fn macos_describes_delete_user_record() {
 
 #[test]
 fn macos_describes_login_as_user() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::LoginAsUser { name: "dev".into() }),
         "sudo -iu dev",
@@ -102,7 +104,7 @@ fn macos_describes_exec_as_user() {
     // ensures sudo doesn't interpret argv[0] as a sudo flag. The display
     // is operator-facing (no shell-quoting); execution argv is the
     // already-tokenized vector so a pipe inside one element survives.
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::ExecAsUser {
             name: "dev".into(),
@@ -122,7 +124,7 @@ fn macos_describes_exec_as_user_preserves_quoted_argv_element() {
     // one argv entry; sudo's -i then -c-quotes when handing off to the
     // login shell. Display joins with a single space; no per-element
     // shell-escaping (the operator can read what they typed).
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::ExecAsUser {
             name: "dev".into(),
@@ -140,7 +142,7 @@ fn macos_describes_ensure_dir_as_user() {
     // not chmod-on-host (operator identity). Mode bits come from the
     // tenant's umask (default 022 → directories at 755); no explicit
     // mode arg until a real need surfaces.
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::EnsureDirAsUser {
             name: "dev".into(),
@@ -161,7 +163,7 @@ fn macos_describes_ensure_symlink_as_user() {
     // `TenantPathOccupied` case the Writer pre-checks for (substrate
     // would error here without that guard; Writer surfaces
     // `ShareError::TenantPathOccupied` before the substrate runs).
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::EnsureSymlinkAsUser {
             name: "dev".into(),
@@ -182,7 +184,7 @@ fn macos_describes_add_host_to_share_group() {
     // doesn't use). The operator-facing render names the host
     // literally so a verbose plan line is self-documenting about
     // WHO is being added.
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::AddHostToShareGroup {
             group: "dev-tenant-share".into(),
@@ -201,7 +203,7 @@ fn macos_describes_remove_host_from_share_group() {
     // orphan-group destroy path on a partially-created tenant. The
     // describe-side renders the edit form only — checkmember is
     // mechanism the operator doesn't need a line for.
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::RemoveHostFromShareGroup {
             group: "dev-tenant-share".into(),
@@ -213,7 +215,7 @@ fn macos_describes_remove_host_from_share_group() {
 
 #[test]
 fn macos_describes_profile_create() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_profile(&ProfileOp::Create { name: "dev".into() }),
         "tee ~/.config/tenant/profiles/dev.toml < default.toml",
@@ -222,7 +224,7 @@ fn macos_describes_profile_create() {
 
 #[test]
 fn macos_describes_profile_delete() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_profile(&ProfileOp::Delete { name: "dev".into() }),
         "rm -f ~/.config/tenant/profiles/dev.toml",
@@ -234,7 +236,7 @@ fn macos_describes_install_anchor() {
     // Body content is intentionally not in the rendered line — the
     // pretend-shell `< anchor.body` marker says "content comes from
     // elsewhere", matching the ProfileOp::Create convention.
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_firewall(&FirewallOp::InstallAnchor {
             name: "dev".into(),
@@ -246,7 +248,7 @@ fn macos_describes_install_anchor() {
 
 #[test]
 fn macos_describes_remove_anchor() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_firewall(&FirewallOp::RemoveAnchor { name: "dev".into() }),
         "sudo rm -f /etc/pf.anchors/tenant-dev",
@@ -255,7 +257,7 @@ fn macos_describes_remove_anchor() {
 
 #[test]
 fn macos_describes_backup_config() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_firewall(&FirewallOp::BackupConfig),
         "sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup",
@@ -264,7 +266,7 @@ fn macos_describes_backup_config() {
 
 #[test]
 fn macos_describes_restore_config_from_backup() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_firewall(&FirewallOp::RestoreConfigFromBackup),
         "sudo cp /etc/pf.conf.tenant-backup /etc/pf.conf",
@@ -273,7 +275,7 @@ fn macos_describes_restore_config_from_backup() {
 
 #[test]
 fn macos_describes_update_config() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_firewall(&FirewallOp::UpdateConfig {
             content: "ignored for describe".into(),
@@ -284,7 +286,7 @@ fn macos_describes_update_config() {
 
 #[test]
 fn macos_describes_reload() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_firewall(&FirewallOp::Reload),
         "sudo pfctl -f /etc/pf.conf",
@@ -293,13 +295,13 @@ fn macos_describes_reload() {
 
 #[test]
 fn macos_describes_enable() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(s.describe_firewall(&FirewallOp::Enable), "sudo pfctl -e",);
 }
 
 #[test]
 fn macos_describes_flush_anchor() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_firewall(&FirewallOp::FlushAnchor { name: "dev".into() }),
         "sudo pfctl -a tenant-dev -F all",
@@ -326,7 +328,7 @@ fn macos_describes_flush_anchor() {
 
 #[test]
 fn macos_describes_acl_grant_ro() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_acl(&AclOp::Grant {
             path: PathBuf::from("/Users/Shared/sandbox/dev"),
@@ -340,7 +342,7 @@ fn macos_describes_acl_grant_ro() {
 
 #[test]
 fn macos_describes_acl_grant_rw() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_acl(&AclOp::Grant {
             path: PathBuf::from("/Users/Shared/sandbox/dev"),
@@ -355,7 +357,7 @@ fn macos_describes_acl_grant_rw() {
 
 #[test]
 fn macos_describes_acl_revoke_ro() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_acl(&AclOp::Revoke {
             path: PathBuf::from("/Users/Shared/sandbox/dev"),
@@ -369,7 +371,7 @@ fn macos_describes_acl_revoke_ro() {
 
 #[test]
 fn macos_describes_acl_revoke_rw() {
-    let s = MacosExecutor;
+    let s = MacosHostMachine;
     assert_eq!(
         s.describe_acl(&AclOp::Revoke {
             path: PathBuf::from("/Users/Shared/sandbox/dev"),

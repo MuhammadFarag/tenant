@@ -1,5 +1,5 @@
-pub mod executor;
 pub mod host_accounts;
+pub mod host_machine;
 
-pub use executor::MacosExecutor;
 pub use host_accounts::MacosHostAccounts;
+pub use host_machine::MacosHostMachine;

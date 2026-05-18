@@ -8,8 +8,8 @@ use crate::doctor::{
     has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
 };
 use crate::domain::{
-    AccountError, AccountOp, AclError, AclMode, AclOp, Executor, FirewallError, FirewallOp,
-    GroupId, GroupName, HostAccounts, HostFileError, HostUserName, Op, PathKind, ProbeError,
+    AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp, GroupId,
+    GroupName, HostAccounts, HostFileError, HostMachine, HostUserName, Op, PathKind, ProbeError,
     ProfileOp, TenantUserName, UserId, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
@@ -397,22 +397,22 @@ pub(crate) struct ReloadAllOutcome {
 
 /// Side-effecting half of the accounts API. Verbs ask in domain terms
 /// via `AccountOp` and `ProfileOp` values handed to the substrate; the
-/// substrate (production: `MacosExecutor`) owns argv construction and
+/// substrate (production: `MacosHostMachine`) owns argv construction and
 /// the actual subprocess invocation; this writer composes ops into
 /// verb-level flows and emits intent + (verbose) mechanism via the
 /// Reporter handed in. Mode (real vs dry-run) is not the Writer's
 /// concern — each method always renders the same bracketed
 /// `would_<action>` / `<action>ing` / `<action>ed` Messages and always
 /// invokes the substrate. The Reporter filters each Message down to
-/// the right mode/verbosity; the substrate's `DryRunExecutor` impl is
+/// the right mode/verbosity; the substrate's `DryRunHostMachine` impl is
 /// a no-op in dry-run.
 pub(crate) struct Writer<'a> {
-    executor: &'a dyn Executor,
+    machine: &'a dyn HostMachine,
 }
 
 impl<'a> Writer<'a> {
-    pub(crate) fn new(executor: &'a dyn Executor) -> Self {
-        Self { executor }
+    pub(crate) fn new(machine: &'a dyn HostMachine) -> Self {
+        Self { machine }
     }
 
     pub(crate) fn create_tenant(
@@ -494,7 +494,7 @@ impl<'a> Writer<'a> {
                 // CreateError::Firewall as FirewallError::Fs with the
                 // profile path baked in — the failure surfaces during
                 // the firewall step from the operator's POV.
-                let profile_content = self.executor.read_profile(name).map_err(|e| {
+                let profile_content = self.machine.read_profile(name).map_err(|e| {
                     CreateError::Firewall(FirewallError::Fs {
                         path: display_path_for(name.as_str()),
                         message: format!("read failed: {e}"),
@@ -506,10 +506,7 @@ impl<'a> Writer<'a> {
                         message: format!("parse failed: {e}"),
                     })
                 })?;
-                let pf_conf_current = self
-                    .executor
-                    .read_pf_conf()
-                    .map_err(CreateError::Firewall)?;
+                let pf_conf_current = self.machine.read_pf_conf().map_err(CreateError::Firewall)?;
                 let install_anchor = FirewallOp::InstallAnchor {
                     name: name.into(),
                     body: render_anchor(name.as_str(), &parsed_profile.allowlist.runtime.hosts),
@@ -652,7 +649,7 @@ impl<'a> Writer<'a> {
         // DestroyError::Firewall rather than confusing the earlier
         // account/profile-domain errors.
         let pf_conf_current = self
-            .executor
+            .machine
             .read_pf_conf()
             .map_err(DestroyError::Firewall)?;
         let update_conf = FirewallOp::UpdateConfig {
@@ -719,7 +716,7 @@ impl<'a> Writer<'a> {
             .map_err(DestroyError::Profile)?;
 
         let pf_conf_current = self
-            .executor
+            .machine
             .read_pf_conf()
             .map_err(DestroyError::Firewall)?;
         let update_conf = FirewallOp::UpdateConfig {
@@ -798,7 +795,7 @@ impl<'a> Writer<'a> {
         level: ModeLevel,
     ) -> Result<ReapplyPlan, ModeError> {
         let profile_content = self
-            .executor
+            .machine
             .read_profile(name)
             .map_err(ModeError::Profile)?;
         let parsed_profile = parse(&profile_content).map_err(ModeError::Profile)?;
@@ -850,7 +847,7 @@ impl<'a> Writer<'a> {
             let tenant_path = expand_tenant_path(name.as_str(), &share.tenant_path);
             // Q12: tenant_path must be absent or an existing symlink.
             let kind = self
-                .executor
+                .machine
                 .tenant_path_kind(name, &tenant_path)
                 .map_err(ModeError::Probe)?;
             if matches!(kind, PathKind::Other) {
@@ -988,7 +985,7 @@ impl<'a> Writer<'a> {
 
     /// Interactive form (today's flow, preserved exactly). Empty argv
     /// branch from `shell_into_tenant`. Auto-narrows to runtime,
-    /// reapplies shares, then hands off to `Executor::login` which
+    /// reapplies shares, then hands off to `HostMachine::login` which
     /// inherits stdio so the operator becomes the launched login shell.
     fn shell_interactive(
         &self,
@@ -1012,11 +1009,11 @@ impl<'a> Writer<'a> {
         self.execute_reapply_plan(&reapply_plan, reporter)
             .map_err(ShellError::Mode)?;
         reporter.step(Op::Account(&login));
-        self.executor.login(name).map_err(ShellError::Account)
+        self.machine.login(name).map_err(ShellError::Account)
     }
 
     /// Command form. Build + execute the entry reapply at the
-    /// requested tier; run the child via `Executor::exec_as_tenant`
+    /// requested tier; run the child via `HostMachine::exec_as_tenant`
     /// (stdio inherits like `login`); ALWAYS reapply at runtime tier
     /// on completion to reset on-disk state (idempotent if entry was
     /// already Runtime). Composition rules:
@@ -1072,7 +1069,7 @@ impl<'a> Writer<'a> {
         //     A spawn-failure here means the entry reapply landed but
         //     exec never started; mode is whatever the operator
         //     requested, so on-disk state is correct relative to intent.
-        let child_result = self.executor.exec_as_tenant(name, argv);
+        let child_result = self.machine.exec_as_tenant(name, argv);
 
         // (4) Narrow-on-finally — ONLY when the entry widened. For
         //     mode == Runtime, the entry reapply IS the runtime
@@ -1108,7 +1105,7 @@ impl<'a> Writer<'a> {
     /// or after.
     fn run<O: WritableOp>(&self, op: &O, reporter: &mut Reporter) -> Result<(), O::Error> {
         reporter.step(op.op_ref());
-        op.execute_via(self.executor)?;
+        op.execute_via(self.machine)?;
         reporter.progress(op.op_ref());
         Ok(())
     }
@@ -1187,13 +1184,13 @@ impl<'a> Writer<'a> {
     /// Doctor's single-tenant audit. Runs in two phases:
     ///
     /// 1. **Env-policy check.** Reads `/etc/sudoers` + drop-ins (via
-    ///    `Executor::read_env_policy`); if `SSH_AUTH_SOCK` is not in
+    ///    `HostMachine::read_env_policy`); if `SSH_AUTH_SOCK` is not in
     ///    any `env_delete` directive, emits a host-wide `EnvLeak`
     ///    warning finding. The check runs even in single-tenant mode
     ///    because the leak affects EVERY tenant on the host.
     /// 2. **Filesystem probe walk.** Iterates the curated path list,
     ///    probing each `(path, mode)` tuple AS the tenant via
-    ///    `Executor::probe_access_as_tenant`. Allowed outcomes
+    ///    `HostMachine::probe_access_as_tenant`. Allowed outcomes
     ///    produce findings (severity per `doctor::classify`); Denied
     ///    / Unknown produce nothing.
     ///
@@ -1267,7 +1264,7 @@ impl<'a> Writer<'a> {
     /// any) so the caller can aggregate it into the DoctorOutcome
     /// for the `--strict` decision.
     fn check_env_leak(&self, reporter: &mut Reporter) -> Result<Option<Finding>, HostFileError> {
-        let policy = self.executor.read_env_policy()?;
+        let policy = self.machine.read_env_policy()?;
         if has_env_delete_for(&policy, "SSH_AUTH_SOCK") {
             return Ok(None);
         }
@@ -1288,7 +1285,7 @@ impl<'a> Writer<'a> {
         &self,
         reporter: &mut Reporter,
     ) -> Result<Option<Finding>, HostFileError> {
-        let pam_config = self.executor.read_pam_sudo()?;
+        let pam_config = self.machine.read_pam_sudo()?;
         if has_pam_tid(&pam_config) {
             return Ok(None);
         }
@@ -1302,7 +1299,7 @@ impl<'a> Writer<'a> {
     /// `tenant doctor` invocation (single-emit, host-level); a single
     /// global pf state covers every tenant anchor.
     fn check_pf_status(&self, reporter: &mut Reporter) -> Result<Option<Finding>, FirewallError> {
-        let status = self.executor.read_pf_status()?;
+        let status = self.machine.read_pf_status()?;
         if pf_status_enabled(&status) {
             return Ok(None);
         }
@@ -1331,7 +1328,7 @@ impl<'a> Writer<'a> {
         reporter.doctor_starting(name, &curated);
         let mut findings: Vec<Finding> = Vec::new();
         for (category, mode, path) in &curated {
-            let outcome = self.executor.probe_access_as_tenant(name, path, *mode)?;
+            let outcome = self.machine.probe_access_as_tenant(name, path, *mode)?;
             if let Some(severity) = crate::doctor::classify(*category, outcome) {
                 let finding = Finding::FilesystemExposure {
                     severity,
@@ -1343,7 +1340,7 @@ impl<'a> Writer<'a> {
                 findings.push(finding);
             }
         }
-        let rules = self.executor.read_kernel_pf_rules(name)?;
+        let rules = self.machine.read_kernel_pf_rules(name)?;
         for drift in crate::doctor::pf_rule_presence_check(&rules, name.as_str()) {
             reporter.doctor_finding(&drift);
             findings.push(drift);
@@ -1374,7 +1371,7 @@ impl<'a> Writer<'a> {
         reporter: &mut Reporter,
     ) -> Result<Option<Finding>, DoctorError> {
         let group = tenant_share_group_name(name.as_str());
-        let is_member = self.executor.host_in_group(host, &group).map_err(|e| {
+        let is_member = self.machine.host_in_group(host, &group).map_err(|e| {
             DoctorError::Probe(ProbeError::NonZero {
                 code: -1,
                 stderr: format!("dseditgroup -o checkmember failed: {e}"),
@@ -1414,7 +1411,7 @@ impl<'a> Writer<'a> {
         name: &TenantUserName,
         reporter: &mut Reporter,
     ) -> Result<Vec<Finding>, DoctorError> {
-        let profile_content = match self.executor.read_profile(name) {
+        let profile_content = match self.machine.read_profile(name) {
             Ok(c) => c,
             Err(_) => return Ok(Vec::new()),
         };
@@ -1427,7 +1424,7 @@ impl<'a> Writer<'a> {
         for share in &parsed.shares {
             // AclDrift check: read host-side ACL listing and grep for
             // the expected group's `allow` entry.
-            let listing = self.executor.read_host_acl(&share.host_path)?;
+            let listing = self.machine.read_host_acl(&share.host_path)?;
             if !has_group_acl_entry(&listing, group.as_str()) {
                 let finding = Finding::AclDrift {
                     tenant: name.clone(),
@@ -1442,7 +1439,7 @@ impl<'a> Writer<'a> {
             // comparison (no canonicalize) — the profile names the
             // operator's declared intent.
             let tenant_path = expand_tenant_path(name.as_str(), &share.tenant_path);
-            let kind = self.executor.tenant_path_kind(name, &tenant_path)?;
+            let kind = self.machine.tenant_path_kind(name, &tenant_path)?;
             let actual_opt = match kind {
                 PathKind::Absent => Some(SymlinkActual::Absent),
                 PathKind::Other => Some(SymlinkActual::NotSymlink),
@@ -1481,7 +1478,7 @@ impl<'a> Writer<'a> {
         &self,
         name: &TenantUserName,
     ) -> Result<Option<Finding>, HostFileError> {
-        let profile_content = match self.executor.read_profile(name) {
+        let profile_content = match self.machine.read_profile(name) {
             Ok(c) => c,
             Err(_) => return Ok(None),
         };
@@ -1489,7 +1486,7 @@ impl<'a> Writer<'a> {
             Ok(p) => p,
             Err(_) => return Ok(None),
         };
-        let actual = self.executor.read_anchor_body(name)?;
+        let actual = self.machine.read_anchor_body(name)?;
         let expected = render_anchor(name.as_str(), &parsed.allowlist.runtime.hosts);
         if anchor_body_matches(&actual, &expected) {
             return Ok(None);
@@ -1536,7 +1533,7 @@ impl<'a> Writer<'a> {
         // PfDisabled is host-wide and considered on every scope: pf
         // off means NO tenant anchor enforces, regardless of which
         // verb the operator typed.
-        match self.executor.read_pf_status() {
+        match self.machine.read_pf_status() {
             Ok(text) => {
                 if !pf_status_enabled(&text) {
                     record(Finding::PfDisabled);
@@ -1550,7 +1547,7 @@ impl<'a> Writer<'a> {
         // tenant session. mkdir + ln from the share substrate don't
         // reach for the var.
         if matches!(scope, DoctorScope::Shell) {
-            match self.executor.read_env_policy() {
+            match self.machine.read_env_policy() {
                 Ok(text) => {
                     if !has_env_delete_for(&text, "SSH_AUTH_SOCK") {
                         record(Finding::EnvLeak {
@@ -1570,7 +1567,7 @@ impl<'a> Writer<'a> {
                 scope,
                 DoctorScope::Shell | DoctorScope::Mode | DoctorScope::Reload
             ) {
-                match self.executor.read_kernel_pf_rules(tenant) {
+                match self.machine.read_kernel_pf_rules(tenant) {
                     Ok(rules) => {
                         for drift in pf_rule_presence_check(&rules, tenant.as_str()) {
                             record(drift);
@@ -1593,7 +1590,7 @@ impl<'a> Writer<'a> {
             if matches!(scope, DoctorScope::Shell | DoctorScope::Reload) {
                 self.collect_share_drift(tenant, reporter, &mut record);
                 match self
-                    .executor
+                    .machine
                     .host_in_group(host, &tenant_share_group_name(tenant.as_str()))
                 {
                     Ok(true) => {}
@@ -1639,7 +1636,7 @@ impl<'a> Writer<'a> {
         reporter: &mut Reporter,
         record: &mut F,
     ) {
-        let profile_content = match self.executor.read_profile(name) {
+        let profile_content = match self.machine.read_profile(name) {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -1649,7 +1646,7 @@ impl<'a> Writer<'a> {
         };
         let group = tenant_share_group_name(name.as_str());
         for share in &parsed.shares {
-            match self.executor.read_host_acl(&share.host_path) {
+            match self.machine.read_host_acl(&share.host_path) {
                 Ok(listing) => {
                     if !has_group_acl_entry(&listing, group.as_str()) {
                         record(Finding::AclDrift {
@@ -1665,7 +1662,7 @@ impl<'a> Writer<'a> {
                 }
             }
             let tenant_path = expand_tenant_path(name.as_str(), &share.tenant_path);
-            match self.executor.tenant_path_kind(name, &tenant_path) {
+            match self.machine.tenant_path_kind(name, &tenant_path) {
                 Ok(kind) => {
                     let actual_opt = match kind {
                         PathKind::Absent => Some(SymlinkActual::Absent),

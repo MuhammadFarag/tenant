@@ -4,7 +4,7 @@
 //! # Architecture
 //!
 //! The doctor verb operates in three layers:
-//! 1. **Substrate (`Executor::probe_access_as_tenant`)** — invokes
+//! 1. **Substrate (`HostMachine::probe_access_as_tenant`)** — invokes
 //!    `sudo -n -u <tenant> /usr/bin/test -<mode> <path>` and reports
 //!    Allowed / Denied / Unknown. Probe-as-tenant subsumes ACL +
 //!    sandbox + TCC semantics at the kernel level; doctor doesn't
@@ -696,7 +696,7 @@ impl fmt::Display for Finding {
 
 /// Does the on-disk anchor body match the profile-derived expected
 /// body byte-for-byte? Caller passes the actual file content
-/// (`Executor::read_anchor_body`) and the expected render
+/// (`HostMachine::read_anchor_body`) and the expected render
 /// (`firewall::render_anchor` over the runtime-tier hosts).
 ///
 /// Byte-exact: `render_anchor` is deterministic — same profile +

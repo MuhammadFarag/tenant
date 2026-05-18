@@ -4,7 +4,7 @@
 //! (empty hosts vs populated, ordering, structural invariants like
 //! loopback-before-block) which is awkward to drive through the CLI
 //! surface. Same in-tree precedent and justification as
-//! `tests/macos_executor.rs`'s per-variant pins.
+//! `tests/macos_host_machine.rs`'s per-variant pins.
 
 use tenant::firewall::render_anchor;
 

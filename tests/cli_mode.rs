@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::adapters::stub_host_machine::StubHostMachine;
 use tenant::domain::{AccountOp, AclMode, AclOp, FirewallError, FirewallOp, PathKind, UserId};
 
 mod common;
@@ -32,10 +32,10 @@ use common::*;
 fn mode_runtime_dry_run_default_shows_intent() {
     // Smallest red→green for the verb. `stub_with_tenant("dev")`
     // gives a tenant-range user so eligibility classifies as
-    // Destroyable; dry-run swaps in DryRunExecutor which returns
+    // Destroyable; dry-run swaps in DryRunHostMachine which returns
     // `default_profile_toml()` from read_profile, so the writer's
     // profile-read + parse + render path completes without touching
-    // the StubExecutor we (don't) wire here.
+    // the StubHostMachine we (don't) wire here.
     let (code, stdout, stderr) = run_with(
         stub_with_tenant("dev"),
         &["mode", "dev", "runtime", "--dry-run"],
@@ -208,8 +208,8 @@ fn mode_runtime_real_mode_op_shape() {
     // + Reload. No defensive FlushAnchor. Pre-load an existing
     // profile via with_existing_profile so the writer's read_profile
     // finds something.
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -248,8 +248,8 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
     // Delete — those belong to create / destroy. No login — that
     // belongs to shell. A regression that accidentally wired mode
     // through, say, a ProfileOp::Create would trip this.
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0);
@@ -280,8 +280,8 @@ fn mode_does_not_emit_restore_config_op() {
     // (RestoreConfigFromBackup → RemoveAnchor → Reload → FlushAnchor)
     // does NOT fire for mode. Even on success the op list should be
     // exactly [InstallAnchor, Reload] with no other firewall ops.
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (_code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     for op in exec.firewall_ops() {
@@ -307,8 +307,8 @@ fn mode_uses_centralized_anchor_name() {
     // should be the bare tenant name; the substrate constructs the
     // `tenant-<name>` anchor name from `tenant_anchor_name`. Verifies
     // the centralization rail.
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (_code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     match &exec.firewall_ops()[0] {
@@ -329,7 +329,7 @@ fn mode_install_with_only_runtime_populated() {
     // a body with runtime hosts only (the install tier is empty, so
     // the union has no extra entries).
     let profile = profile_with_hosts(&["api.example.com", "deploy.example.com"], &[]);
-    let exec = StubExecutor::new().with_existing_profile("dev", &profile);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "install"]);
     assert_eq!(code, 0);
@@ -357,7 +357,7 @@ fn mode_install_with_runtime_and_install_populated() {
         &["api.example.com"],
         &["nodejs.org", "storage.googleapis.com"],
     );
-    let exec = StubExecutor::new().with_existing_profile("dev", &profile);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "install"]);
     assert_eq!(code, 0);
@@ -387,7 +387,7 @@ fn mode_runtime_with_runtime_and_install_populated_excludes_install() {
         &["api.example.com"],
         &["nodejs.org", "storage.googleapis.com"],
     );
-    let exec = StubExecutor::new().with_existing_profile("dev", &profile);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0);
@@ -406,7 +406,7 @@ fn mode_install_with_empty_runtime_and_populated_install() {
     // body has [a, b]. The order-preserving union still works when
     // the runtime tier is empty (no awkward leading-empty handling).
     let profile = profile_with_hosts(&[], &["pypi.org", "npmjs.org"]);
-    let exec = StubExecutor::new().with_existing_profile("dev", &profile);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "install"]);
     assert_eq!(code, 0);
@@ -429,8 +429,8 @@ fn mode_real_standard_emits_only_post_exec_confirmation() {
     // Standard real mode: silent pre-exec, one summary line post-exec.
     // Matches create/destroy's pattern. The level appears in the
     // confirmation so the operator sees which mode they ended up in.
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -455,8 +455,8 @@ fn mode_real_verbose_shows_plan_and_echo() {
     // The plan shows the placeholder InstallAnchor + Reload (their
     // describe lines ignore the body/content fields, so the rendered
     // text matches the real-body ops at execution time).
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -487,8 +487,8 @@ fn mode_install_real_verbose_shows_install_level_text() {
     // Same plan/echo shape as runtime mode (anchor body content
     // differs but the describe text doesn't include the body).
     // The "install" level appears in the intent + done lines.
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -541,11 +541,11 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
 }
 
 #[test]
-fn mode_dry_run_bypasses_injected_executor() {
-    // Dry-run swap-in of DryRunExecutor means the StubExecutor wired
+fn mode_dry_run_bypasses_injected_host_machine() {
+    // Dry-run swap-in of DryRunHostMachine means the StubHostMachine wired
     // by the test never sees a call. Mirrors create/destroy/shell's
     // dry-run-bypass tests.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -557,7 +557,7 @@ fn mode_dry_run_bypasses_injected_executor() {
         exec.firewall_ops().is_empty()
             && exec.account_ops().is_empty()
             && exec.profile_ops().is_empty(),
-        "executor should not be invoked in dry-run; firewall_ops={:?}, account_ops={:?}, profile_ops={:?}",
+        "host machine should not be invoked in dry-run; firewall_ops={:?}, account_ops={:?}, profile_ops={:?}",
         exec.firewall_ops(),
         exec.account_ops(),
         exec.profile_ops()
@@ -570,7 +570,7 @@ fn mode_dry_run_bypasses_injected_executor() {
 
 #[test]
 fn mode_read_profile_failure_surfaces() {
-    // No `with_existing_profile` → StubExecutor::read_profile returns
+    // No `with_existing_profile` → StubHostMachine::read_profile returns
     // a "not found" ProfileError. Mode should surface this through
     // mode_profile_failed with the profile path framed for the operator.
     //
@@ -578,7 +578,7 @@ fn mode_read_profile_failure_surfaces() {
     // a profile-read failure exits the verb pre-section-divider.
     // Stdout stays empty; stderr carries the failure framing —
     // don't ask the operator to confirm something doomed to fail.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
@@ -600,7 +600,7 @@ fn mode_parse_failure_surfaces_schema_version() {
     // returns ProfileError → mode_profile_failed. The operator-readable
     // refusal message ("schema_version N not understood") is preserved
     // through the surface.
-    let exec = StubExecutor::new().with_existing_profile(
+    let exec = StubHostMachine::new().with_existing_profile(
         "dev",
         "schema_version = 99\n[allowlist.runtime]\nhosts = []\n[allowlist.install]\nhosts = []\n",
     );
@@ -622,7 +622,7 @@ fn mode_install_anchor_failure_surfaces() {
     // InstallAnchor (the first firewall op) fails → mode_failed with
     // the FirewallError display. Reload should NOT run after a failed
     // InstallAnchor.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_firewall_op(
             FirewallOp::InstallAnchor {
@@ -665,7 +665,7 @@ fn mode_reload_failure_surfaces_without_recovery() {
     // fires (no RestoreConfigFromBackup, no RemoveAnchor, no second
     // Reload, no FlushAnchor). The verb is idempotent; the operator
     // reruns to retry. Mirrors plugin's reapply_anchor.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_firewall_op(
             FirewallOp::Reload,
@@ -729,7 +729,7 @@ fn mode_profile_read_failure_surfaces_before_prompt() {
     // no stdout output (no section divider, no bullets, no plan).
     // Don't ask the operator to confirm an action already known to
     // fail. Stderr carries the framed failure.
-    let exec = StubExecutor::new(); // no profile preloaded
+    let exec = StubHostMachine::new(); // no profile preloaded
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -760,7 +760,7 @@ fn mode_runtime_with_shares_emits_per_share_substrate_ops() {
     // Verifies: AclOp recorded with literal group + path; symlink
     // op recorded with expanded tenant_path.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
@@ -816,7 +816,7 @@ fn mode_runtime_with_nested_tenant_path_emits_ensure_dir_for_parent() {
     // EnsureDirAsUser must fire on it (substrate is responsible for
     // mkdir -p). Symlink then points the leaf at host_path.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "ro", "$HOME/.local/share/chezmoi")]);
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
@@ -845,7 +845,7 @@ fn mode_runtime_preserves_profile_declared_share_order() {
         &[],
         &[("/tmp", "rw", "$HOME/zeta"), ("/var", "ro", "$HOME/alpha")],
     );
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
@@ -875,7 +875,7 @@ fn mode_refuses_when_host_path_does_not_exist() {
         &[],
         &[("/nonexistent/missing/sentinel", "rw", "$HOME/src")],
     );
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(
@@ -908,7 +908,7 @@ fn mode_refuses_when_tenant_path_is_real_directory() {
     // returns PathKind::Other. Stub returns Other for the expanded
     // tenant_path; no substrate op fires after refusal.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .with_tenant_path_kind("dev", &PathBuf::from("/Users/dev/src"), PathKind::Other);
     let (code, _stdout, stderr) =
@@ -939,7 +939,7 @@ fn mode_runtime_skips_substrate_with_existing_symlink_at_tenant_path() {
     // existing symlink). No refusal — share substrate fires
     // normally.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .with_tenant_path_kind(
             "dev",
@@ -970,7 +970,7 @@ fn mode_install_tier_does_not_change_share_substrate() {
         &["nodejs.org"],
         &[("/tmp", "rw", "$HOME/src")],
     );
-    let exec = StubExecutor::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "install"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
@@ -992,8 +992,8 @@ fn mode_install_tier_does_not_change_share_substrate() {
 
 #[test]
 fn mode_pre_exec_doctor_silent_when_host_is_clean() {
-    let exec =
-        StubExecutor::new().with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
@@ -1009,7 +1009,7 @@ fn mode_pre_exec_doctor_silent_when_host_is_clean() {
 
 #[test]
 fn mode_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_pf_status_content("Status: Disabled\n");
     let (code, stdout, _stderr) = run_with_stdin(
@@ -1028,7 +1028,7 @@ fn mode_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
 #[test]
 fn mode_pre_exec_doctor_aggregates_pf_rule_drift_warning() {
     // PfRuleDrift fires when kernel anchor is missing pass or block.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_kernel_pf_rules("dev", "");
     let (code, stdout, _stderr) = run_with_stdin(
@@ -1048,7 +1048,7 @@ fn mode_pre_exec_doctor_aggregates_pf_rule_drift_warning() {
 fn mode_pre_exec_doctor_scope_excludes_share_drift() {
     // Share drift is out of mode's scope. Even with HostNotInShareGroup
     // injected, mode's audit must not aggregate any warning.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_host_in_group("operator", "dev-tenant-share", false);
     let (code, stdout, _stderr) = run_with_stdin(
@@ -1066,7 +1066,7 @@ fn mode_pre_exec_doctor_scope_excludes_share_drift() {
 
 #[test]
 fn mode_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_next_pf_status(FirewallError::NonZero {
             code: 1,

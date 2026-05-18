@@ -3,7 +3,7 @@
 //! `is_anchor_referenced`. Each function has a matrix of input states
 //! (both lines present, neither, partial, with-other-anchors) that
 //! drives the idempotence + non-interference contracts. Same in-tree
-//! precedent as `tests/macos_executor.rs` / `tests/firewall_render.rs`
+//! precedent as `tests/macos_host_machine.rs` / `tests/firewall_render.rs`
 //! / `tests/profile_parse.rs` — pure functions whose call sites land
 //! in 2.4 with a verb consumer, so unit tests precede the CLI tests.
 

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::adapters::stub_host_machine::StubHostMachine;
 use tenant::domain::{
     AccountError, AccountOp, AclMode, AclOp, FirewallError, GroupId, ProfileOp, UserId,
 };
@@ -347,8 +347,8 @@ fn create_writes_default_profile_to_store() {
     // After a successful real-mode create, the substrate's profile state
     // contains an entry keyed by the tenant name. Content-shape
     // assertion lives in the dedicated TOML test below; this test only
-    // pins presence via `StubExecutor::has_profile`.
-    let exec = StubExecutor::new();
+    // pins presence via `StubHostMachine::has_profile`.
+    let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -366,7 +366,7 @@ fn create_writes_profile_with_correct_toml_shape() {
     // sections matching the shape the PF anchor render reads from.
     // No `[share]` section — that's Claude-Code-specific and out of
     // scope for the generic Rust port.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -384,10 +384,10 @@ fn create_writes_profile_with_correct_toml_shape() {
 
 #[test]
 fn create_dry_run_does_not_write_profile() {
-    // Dry-run swap-in of `DryRunExecutor` means the wired `StubExecutor`
+    // Dry-run swap-in of `DryRunHostMachine` means the wired `StubHostMachine`
     // never receives an `execute_profile` call. Mirrors the
-    // `dry_run_bypasses_injected_executor` test for the executor side.
-    let exec = StubExecutor::new();
+    // `dry_run_bypasses_injected_host_machine` test for the host-machine side.
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         StubHostAccounts::default(),
         &exec,
@@ -412,7 +412,7 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
     // chowns the home dir to the group named by `-GID` at creation
     // time); this test pins both the order and the operand values via
     // the ✓ stream + `account_ops()` assertions below.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -466,7 +466,7 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
     // progress interleave, then Done section + single enriched
     // closing line. The plan-before-prompt move lives on the TTY
     // path; this test pins the scripted-mode shape.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, _stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev", "-v"]);
     assert_eq!(code, 0);
@@ -508,7 +508,7 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
     // Their recovery is `tenant destroy <name>` — destroy's Destroyable
     // arm cleans up the user+group, and the missing profile case is a
     // successful noop for the profile-rm step.
-    let exec = StubExecutor::new().fail_next_profile(tenant::profile::ProfileError {
+    let exec = StubHostMachine::new().fail_next_profile(tenant::profile::ProfileError {
         message: "disk full".into(),
     });
     let (code, stdout, stderr) =
@@ -549,8 +549,8 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
 }
 
 #[test]
-fn dry_run_bypasses_injected_executor() {
-    let exec = StubExecutor::new();
+fn dry_run_bypasses_injected_host_machine() {
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         StubHostAccounts::default(),
         &exec,
@@ -560,7 +560,7 @@ fn dry_run_bypasses_injected_executor() {
     assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
     assert!(
         exec.account_ops().is_empty() && exec.profile_ops().is_empty(),
-        "executor should not be invoked in dry-run mode; account_ops={:?}, profile_ops={:?}",
+        "host machine should not be invoked in dry-run mode; account_ops={:?}, profile_ops={:?}",
         exec.account_ops(),
         exec.profile_ops()
     );
@@ -569,13 +569,13 @@ fn dry_run_bypasses_injected_executor() {
 #[test]
 fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
     // Phase 3 issues two exec calls: dseditgroup-create first, sysadminctl
-    // second. `StubExecutor::failing(78)` fails ALL calls, so the first
+    // second. `StubHostMachine::failing(78)` fails ALL calls, so the first
     // call (dseditgroup-create) trips. The expected behavior is: stop
     // immediately (no sysadminctl, no rollback — there's nothing to roll
     // back because dseditgroup-create itself failed), exit EX_IOERR, and
     // emit the new `create_group_failed` shape that names the group
     // explicitly so the operator knows the user wasn't touched.
-    let exec = StubExecutor::new().fail_account_blanket(78, "");
+    let exec = StubHostMachine::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
@@ -607,7 +607,7 @@ fn create_add_host_failure_aborts_with_orphan_group_recovery_hint() {
     // operator runs `tenant destroy <name>` to converge via the
     // OrphanGroup eligibility arm. The stderr frame names the host
     // AND the recovery command.
-    let exec = StubExecutor::new().fail_account_op(
+    let exec = StubHostMachine::new().fail_account_op(
         AccountOp::AddHostToShareGroup {
             group: "dev-tenant-share".into(),
             host: "operator".into(),
@@ -647,7 +647,7 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
     // *original* user-creation failure as the error (the rollback
     // succeeded so it's not separately reportable). Three account ops
     // in total.
-    let exec = StubExecutor::new().fail_account_op(
+    let exec = StubHostMachine::new().fail_account_op(
         AccountOp::CreateTenantUser {
             name: "dev".into(),
             uid: UserId(600),
@@ -712,7 +712,7 @@ fn create_real_mode_verbose_shows_rollback_echo() {
     // AddHost + CreateTenantUser steps, then the rollback fires.
     // No Done section + closing line because create failed; stderr
     // carries the original sysadminctl error.
-    let exec = StubExecutor::new().fail_account_op(
+    let exec = StubHostMachine::new().fail_account_op(
         AccountOp::CreateTenantUser {
             name: "dev".into(),
             uid: UserId(600),
@@ -757,7 +757,7 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
     // The trailing `— host now has an orphan group; next 'tenant destroy
     // dev' will converge` is the load-bearing piece: the operator
     // shouldn't have to read the source to find out how to clean up.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .fail_account_op(
             AccountOp::CreateTenantUser {
                 name: "dev".into(),
@@ -810,7 +810,7 @@ fn create_real_mode_invokes_firewall_ops_in_locked_order() {
     // Locked PF flow: BackupConfig → InstallAnchor → UpdateConfig →
     // Reload → Enable. Pins the order of `firewall_ops()` recorded by
     // the stub on a clean-host (empty pf.conf) success path.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -847,7 +847,7 @@ fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
     // The create flow writes the default profile (empty runtime
     // hosts) before reading, so the body's table is the empty `{ }`
     // form. Pins the read→parse→render data flow end-to-end.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -887,7 +887,7 @@ fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() 
                      \n\
                      [allowlist.install]\n\
                      hosts = []\n";
-    let exec = StubExecutor::new().with_create_profile_content("dev", populated);
+    let exec = StubHostMachine::new().with_create_profile_content("dev", populated);
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -933,7 +933,7 @@ fn create_real_mode_update_conf_content_reflects_existing_pf_conf() {
     // tenant's lines append. The stub's `with_pf_conf` simulates the
     // existing-host state.
     let initial = "# host's existing pf.conf\nset block-policy drop\n";
-    let exec = StubExecutor::new().with_pf_conf(initial);
+    let exec = StubHostMachine::new().with_pf_conf(initial);
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -966,7 +966,7 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
     // group + profile in place. Recovery is `tenant destroy <name>`
     // — the Destroyable arm cleans up all of them. Operator sees a
     // create_firewall_failed message at EX_IOERR.
-    let exec = StubExecutor::new().fail_firewall_op(
+    let exec = StubHostMachine::new().fail_firewall_op(
         tenant::domain::FirewallOp::InstallAnchor {
             name: "dev".into(),
             body: tenant::firewall::render_anchor("dev", &[]),
@@ -1020,7 +1020,7 @@ fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence
     // RestoreConfigFromBackup, RemoveAnchor, Reload (recovery),
     // FlushAnchor (recovery). Eight ops; the original reload failure
     // surfaces as the CreateError after recovery runs.
-    let exec = StubExecutor::new().fail_firewall_op(
+    let exec = StubHostMachine::new().fail_firewall_op(
         tenant::domain::FirewallOp::Reload,
         FirewallError::NonZero {
             code: 1,
@@ -1082,7 +1082,7 @@ fn create_reload_failure_with_failed_restore_surfaces_recovery_hint_naming_backu
     // with the em-dash-suffixed manual-recovery hint naming the
     // backup path. The host is left in a half-edited state; only the
     // operator (with shell access) can resolve.
-    let exec = StubExecutor::new()
+    let exec = StubHostMachine::new()
         .fail_firewall_op(
             tenant::domain::FirewallOp::Reload,
             FirewallError::NonZero {
@@ -1116,7 +1116,7 @@ fn create_pf_enable_failure_surfaces_via_create_firewall_failed() {
     // loaded but enforcement is off — surface as create_firewall_failed
     // at EX_IOERR. Recovery posture per locked policy: user + group +
     // profile + anchor remain on host; `tenant destroy` converges.
-    let exec = StubExecutor::new().fail_firewall_op(
+    let exec = StubHostMachine::new().fail_firewall_op(
         tenant::domain::FirewallOp::Enable,
         FirewallError::NonZero {
             code: 1,
@@ -1135,11 +1135,11 @@ fn create_pf_enable_failure_surfaces_via_create_firewall_failed() {
 }
 
 #[test]
-fn create_dry_run_bypasses_firewall_executor() {
-    // Dry-run swaps in DryRunExecutor; the wired StubExecutor's
+fn create_dry_run_bypasses_firewall_host_machine() {
+    // Dry-run swaps in DryRunHostMachine; the wired StubHostMachine's
     // firewall_ops list stays empty. Mirrors
     // `create_dry_run_does_not_write_profile` for firewall.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         StubHostAccounts::default(),
         &exec,
@@ -1149,17 +1149,17 @@ fn create_dry_run_bypasses_firewall_executor() {
     assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
     assert!(
         exec.firewall_ops().is_empty(),
-        "firewall executor should not be invoked in dry-run; got: {:?}",
+        "firewall host machine should not be invoked in dry-run; got: {:?}",
         exec.firewall_ops()
     );
 }
 
 #[test]
-fn create_real_mode_dseditgroup_failure_surfaces_executor_stderr() {
+fn create_real_mode_dseditgroup_failure_surfaces_host_machine_stderr() {
     // Companion to the above — when dseditgroup-create has captured stderr,
     // it flows through ExecError::Display unchanged. Pins the error-shape
     // contract end-to-end.
-    let exec = StubExecutor::new().fail_account_blanket(
+    let exec = StubHostMachine::new().fail_account_blanket(
         78,
         "dseditgroup: cannot create group dev-tenant-share: not authorized\n",
     );
@@ -1187,7 +1187,7 @@ fn create_success_path_does_not_invoke_flush_anchor() {
     // test). Without this guard, an accidental wiring of FlushAnchor
     // into the success path would silently wipe the rules we just
     // installed.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1217,7 +1217,7 @@ fn create_with_pre_populated_shares_runs_post_provision_substrate() {
     // `[[shares]]` entry. After user/group/profile/PF land, the
     // post-provision step grants the ACL and installs the symlink.
     let with_share = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
-    let exec = StubExecutor::new().with_create_profile_content("dev", &with_share);
+    let exec = StubHostMachine::new().with_create_profile_content("dev", &with_share);
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
@@ -1250,7 +1250,7 @@ fn create_with_default_profile_emits_no_post_provision_acl_ops() {
     // create's post-provision substrate is a no-op. Existing create
     // tests rely on this — explicit pin so a future schema change
     // can't silently break the contract.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, _stdout, _stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0);
@@ -1286,7 +1286,7 @@ fn create_post_provision_refusal_carries_recovery_hint() {
         &[],
         &[("/nonexistent/cycle10/create-sentinel", "rw", "$HOME/src")],
     );
-    let exec = StubExecutor::new().with_create_profile_content("dev", &bad_share);
+    let exec = StubHostMachine::new().with_create_profile_content("dev", &bad_share);
     let (code, _stdout, stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "EX_IOERR on share refusal; stderr={stderr:?}");
@@ -1312,7 +1312,7 @@ fn create_real_verbose_interactive_emits_plan_before_prompt() {
     // the "Sudo needed for:" line and the "Proceed? [Y/n]" prompt;
     // the section divider must only appear AFTER the operator answers
     // (so an n-answer leaves zero verb-section state in the output).
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, _stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1367,7 +1367,7 @@ fn create_with_tty_proceeds_on_y() {
     // Operator at TTY, types `y` + ENTER → confirm returns Proceed →
     // substrate runs. Verifies the summary emits + the prompt line +
     // the post-summary section + ✓ stream + done.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1398,7 +1398,7 @@ fn create_with_tty_proceeds_on_y() {
 fn create_with_tty_aborts_on_n() {
     // Operator types `n` + ENTER → confirm returns Abort → substrate
     // does NOT run; exit 0 (user-initiated abort is not a failure).
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1422,7 +1422,7 @@ fn create_with_tty_empty_input_uses_default_yes() {
     // Operator hits ENTER without typing — default Y for create →
     // Proceed. The prompt hint is `[Y/n]` (Y capitalized) signaling
     // the default.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1441,7 +1441,7 @@ fn create_with_tty_empty_input_uses_default_yes() {
 fn create_with_yes_flag_skips_prompt_proceeds() {
     // `--yes` (or `-y`) bypasses the prompt without reading stdin.
     // Even with no stdin content, substrate fires.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1461,7 +1461,7 @@ fn create_with_invalid_input_reprompts_then_accepts() {
     // Q16 edge case: typing `maybe` (neither y nor n) triggers a
     // reprompt with the "Please answer y or n." hint. Second line
     // `y` proceeds.
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1486,7 +1486,7 @@ fn create_with_invalid_input_reprompts_then_accepts() {
 
 #[test]
 fn create_pre_exec_doctor_silent_when_host_is_clean() {
-    let exec = StubExecutor::new();
+    let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1506,7 +1506,7 @@ fn create_pre_exec_doctor_silent_when_host_is_clean() {
 
 #[test]
 fn create_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
-    let exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
+    let exec = StubHostMachine::new().with_pf_status_content("Status: Disabled\n");
     let (code, stdout, stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1526,7 +1526,7 @@ fn create_pre_exec_doctor_scope_excludes_env_leak() {
     // create's audit must NOT emit a warning. The leak doesn't
     // apply to the create flow's substrate (no `sudo -u` happens
     // in create).
-    let exec = StubExecutor::new().with_env_policy_content("");
+    let exec = StubHostMachine::new().with_env_policy_content("");
     let (code, stdout, stderr) = run_with_stdin(
         StubHostAccounts::default(),
         &exec,
@@ -1543,7 +1543,7 @@ fn create_pre_exec_doctor_scope_excludes_env_leak() {
 #[test]
 fn create_pre_exec_doctor_silent_in_scripted_mode() {
     // No TTY, no --dry-run → no summary, no audit (Q3 lock).
-    let exec = StubExecutor::new().with_pf_status_content("Status: Disabled\n");
+    let exec = StubHostMachine::new().with_pf_status_content("Status: Disabled\n");
     let (code, stdout, _stderr) =
         run_with_exec(StubHostAccounts::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0);
@@ -1555,7 +1555,7 @@ fn create_pre_exec_doctor_silent_in_scripted_mode() {
 
 #[test]
 fn create_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
-    let exec = StubExecutor::new().fail_next_pf_status(FirewallError::NonZero {
+    let exec = StubHostMachine::new().fail_next_pf_status(FirewallError::NonZero {
         code: 1,
         stderr: "sudo: a password is required".into(),
     });

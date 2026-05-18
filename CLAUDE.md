@@ -44,7 +44,7 @@ file with shipped-feature recaps.
 ```
 src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`;
                     global `--verbose` / `--dry-run` / `--yes`. Swaps to
-                    `DryRunExecutor` when `--dry-run`.
+                    `DryRunHostMachine` when `--dry-run`.
 src/ansi.rs       — `Colors { stdout, stderr }` per-stream gate; color
                     wrappers; `rule(title, width)` section divider.
 src/commands.rs   — verb dispatch (no I/O). Per-arm `surface_*_error`
@@ -63,8 +63,8 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     `HostAccounts` trait — driven port for account
                     inventory queries (`used_uids` / `used_gids` /
                     `has_user` / `has_group` / `uid_for` /
-                    `tenant_names`). `executor.rs` defines the
-                    `Executor` trait — driven port for the host-side
+                    `tenant_names`). `host_machine.rs` defines the
+                    `HostMachine` trait — driven port for the host-side
                     substrate (per-domain `describe_*` / `execute_*`
                     pairs + non-unit carve-outs: `login`,
                     `exec_as_tenant`, `read_profile`, `read_pf_conf`,
@@ -86,17 +86,17 @@ src/adapters/     — driven adapters. `stub_host_accounts.rs`
                     (`StubHostAccounts` for tests) +
                     `macos/host_accounts.rs` (`MacosHostAccounts` —
                     dscl-backed snapshot, populated once at `new()`).
-                    Three `Executor` impls: `macos/executor.rs`
-                    (`MacosExecutor` — production substrate; owns
+                    Three `HostMachine` impls: `macos/host_machine.rs`
+                    (`MacosHostMachine` — production substrate; owns
                     argv for dseditgroup / sysadminctl / dscl / pfctl
                     / chmod, tempfile-based privileged writes, the
-                    XDG-style profile path), `stub_executor.rs`
-                    (`StubExecutor` — test substitute; records every
+                    XDG-style profile path), `stub_host_machine.rs`
+                    (`StubHostMachine` — test substitute; records every
                     op invocation, supports per-op failure injection
                     + builder-pattern preload of profile / pf-conf /
                     env-policy / anchor-body / probe-outcome state),
-                    `dry_run_executor.rs` (`DryRunExecutor` — no-op
-                    execute; describe delegates to `MacosExecutor`;
+                    `dry_run_host_machine.rs` (`DryRunHostMachine` — no-op
+                    execute; describe delegates to `MacosHostMachine`;
                     read carve-outs return "no actionable warning"
                     placeholders).
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both
@@ -124,8 +124,9 @@ src/main.rs       — composition root: prod impls + `tenant::run`.
 tests/cli_*.rs            — E2E, one binary per verb plus `cli.rs`
                             for parser cross-cutting; shared helpers in
                             `tests/common/mod.rs`.
-tests/macos_executor.rs   — per-variant pins of
-                            `MacosExecutor::describe_*` argv contracts.
+tests/macos_host_machine.rs
+                          — per-variant pins of
+                            `MacosHostMachine::describe_*` argv contracts.
 tests/intent_labels.rs    — per-variant pins of `Op::intent_label()`
                             + sharpening pins (intent ≠ business label).
 tests/macos_host_accounts.rs
@@ -147,34 +148,34 @@ it from scratch wastes a cycle and risks getting it wrong.
 ### ADT + trait shape
 
 - **Intent / mechanism split.** Domain ops (`AccountOp` / `ProfileOp`
-  / `FirewallOp` / `AclOp`) express *what*; `MacosExecutor` owns argv.
+  / `FirewallOp` / `AclOp`) express *what*; `MacosHostMachine` owns argv.
   Writer never constructs argv. Tests assert on op identity (e.g.
   `exec.account_ops()[N] == AccountOp::CreateShareGroup{..}`); literal
-  shell shape pinned narrowly in `tests/macos_executor.rs`, one test
+  shell shape pinned narrowly in `tests/macos_host_machine.rs`, one test
   per variant.
 
-- **One `Executor` trait; sub-domains live as method-pairs.** Adding
-  a future sub-domain extends `Executor` with a new `describe_*` /
+- **One `HostMachine` trait; sub-domains live as method-pairs.** Adding
+  a future sub-domain extends `HostMachine` with a new `describe_*` /
   `execute_*` pair plus a leaf `Op<'_>` variant — no new trait. The
-  single `Executor` is the one test seam at the host boundary,
+  single `HostMachine` is the one test seam at the host boundary,
   preserving per-domain error types end-to-end.
 
-- **Carve-out methods for non-unit returns.** Executor methods that
+- **Carve-out methods for non-unit returns.** HostMachine methods that
   don't fit `Result<(), E>` are called directly by Writer: `login` /
   `exec_as_tenant` (stdio inherit, i32 child exit), content reads
   (return `String`), probe verdicts (return enum / bool).
   `AccountOp::LoginAsUser` + `ExecAsUser` exist only for plan/echo
-  render — `execute_account` panics on them. Future Executor method:
+  render — `execute_account` panics on them. Future HostMachine method:
   if it fits `Result<(), E>`, make it an ADT variant; if not, carve out.
 
-- **Probe via Executor, not HostAccounts live re-read.** When a verb needs
+- **Probe via HostMachine, not HostAccounts live re-read.** When a verb needs
   to re-check OS state mid-execution (destroy's `LookupUserRecord`
   residue probe is canonical), it's a regular substrate call whose
   `Ok` vs `Err` drives a Writer branch. HostAccounts stays snapshot-then-act
   — in-memory view captured at composition-root construction.
 
 - **Doctor doesn't fit the `WritableOp` shape.** All doctor probes
-  are Executor carve-out methods, NOT `Op<'a>` variants. Probes are
+  are HostMachine carve-out methods, NOT `Op<'a>` variants. Probes are
   how doctor LEARNS, not what the verb DOES — plan/echo dispatch
   would emit ~50 lines of `$ sudo -n -u tenant test -r ...` per
   tenant. No `Op::Doctor(_)` variant.
@@ -190,7 +191,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   `EnsureSymlinkAsUser` substrate-group under `sudo -[in] -u <tenant>`.**
   The shared mechanism is what's shared; grouping under `AccountOp`
   is doctrinal. `LoginAsUser` + `ExecAsUser` carve out to
-  `Executor::login` / `exec_as_tenant` (stdio inherit + i32 child
+  `HostMachine::login` / `exec_as_tenant` (stdio inherit + i32 child
   exit); the other two flow through `execute_account`.
 
 ### Layering + DI
@@ -201,11 +202,11 @@ it from scratch wastes a cycle and risks getting it wrong.
   / verbosity branching lives inside Reporter.
 
 - **Composition-root DI.** `tenant::run` takes `&dyn accounts::HostAccounts`
-  + `&dyn executor::Executor`. `main.rs` builds prod impls; tests
-  build `StubHostAccounts` + `StubExecutor` / `NeverExecutor`. Writer +
-  Reporter constructed inside `run` from the active Executor; both
-  swap to `DryRunExecutor` when `--dry-run`. Test seam stays at the
-  Executor boundary.
+  + `&dyn host_machine::HostMachine`. `main.rs` builds prod impls; tests
+  build `StubHostAccounts` + `StubHostMachine` / `NeverHostMachine`. Writer +
+  Reporter constructed inside `run` from the active HostMachine; both
+  swap to `DryRunHostMachine` when `--dry-run`. Test seam stays at the
+  HostMachine boundary.
 
 - **Snapshot-then-act on `HostAccounts`.** `MacosHostAccounts::new()` queries
   dscl once at composition-root construction; subsequent lookups
@@ -484,16 +485,16 @@ it from scratch wastes a cycle and risks getting it wrong.
 ## Test discipline
 
 E2E-first. Bulk in `tests/cli_<verb>.rs` drives through `tenant::run`
-with `StubHostAccounts` + `StubExecutor`. `tests/cli.rs` holds parser
+with `StubHostAccounts` + `StubHostMachine`. `tests/cli.rs` holds parser
 cross-cutting. Shared helpers in `tests/common/mod.rs`. Inline
 `#[cfg(test)] mod tests` is out of style; standalone unit-test files
 need explicit justification (per-substrate boundary pins for
-`macos_executor.rs` / `macos_host_accounts.rs`; combinatorial coverage on
+`macos_host_machine.rs` / `macos_host_accounts.rs`; combinatorial coverage on
 pure functions for the parse/render/classify pin files).
 
-`run_with(stub, args) -> (u8, String, String)` wires `NeverExecutor`
-(panics on any substrate call). `run_with_exec(stub, &StubExecutor,
-args)` lets the test own the executor for real-mode assertions. Both
+`run_with(stub, args) -> (u8, String, String)` wires `NeverHostMachine`
+(panics on any substrate call). `run_with_exec(stub, &StubHostMachine,
+args)` lets the test own the host machine for real-mode assertions. Both
 run in-process.
 
 Behavioral assertions: op identity (`exec.account_ops()`,

@@ -7,48 +7,48 @@
 
 #![allow(dead_code)]
 
-use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::adapters::stub_host_machine::StubHostMachine;
 use tenant::domain::{
-    AccountError, AccountOp, Executor, FirewallError, FirewallOp, GroupId, GroupName, HostUserName,
-    ProfileOp, TenantUserName, UserId,
+    AccountError, AccountOp, FirewallError, FirewallOp, GroupId, GroupName, HostMachine,
+    HostUserName, ProfileOp, TenantUserName, UserId,
 };
 
-/// Default executor for tests that should not reach the exec stage —
+/// Default host machine for tests that should not reach the exec stage —
 /// validation failures, conflicts, and dry-run paths. Panics on any
 /// substrate call, so any accidental invocation from a path that's
 /// meant to be no-op surfaces loudly instead of being silently absorbed.
-pub struct NeverExecutor;
-impl Executor for NeverExecutor {
+pub struct NeverHostMachine;
+impl HostMachine for NeverHostMachine {
     fn describe_account(&self, op: &AccountOp) -> String {
-        panic!("executor unexpectedly invoked (describe_account) with op: {op:?}");
+        panic!("host machine unexpectedly invoked (describe_account) with op: {op:?}");
     }
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError> {
-        panic!("executor unexpectedly invoked (execute_account) with op: {op:?}");
+        panic!("host machine unexpectedly invoked (execute_account) with op: {op:?}");
     }
     fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
-        panic!("executor unexpectedly invoked (login) with name: {name:?}");
+        panic!("host machine unexpectedly invoked (login) with name: {name:?}");
     }
     fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
-        panic!("executor unexpectedly invoked (exec_as_tenant): name={name:?} argv={argv:?}");
+        panic!("host machine unexpectedly invoked (exec_as_tenant): name={name:?} argv={argv:?}");
     }
     fn describe_profile(&self, op: &ProfileOp) -> String {
-        panic!("executor unexpectedly invoked (describe_profile) with op: {op:?}");
+        panic!("host machine unexpectedly invoked (describe_profile) with op: {op:?}");
     }
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), tenant::profile::ProfileError> {
-        panic!("executor unexpectedly invoked (execute_profile) with op: {op:?}");
+        panic!("host machine unexpectedly invoked (execute_profile) with op: {op:?}");
     }
     fn read_profile(&self, name: &TenantUserName) -> Result<String, tenant::profile::ProfileError> {
-        panic!("executor unexpectedly invoked (read_profile) with name: {name:?}");
+        panic!("host machine unexpectedly invoked (read_profile) with name: {name:?}");
     }
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
-        panic!("executor unexpectedly invoked (read_pf_conf)");
+        panic!("host machine unexpectedly invoked (read_pf_conf)");
     }
     fn describe_firewall(&self, op: &FirewallOp) -> String {
-        panic!("executor unexpectedly invoked (describe_firewall) with op: {op:?}");
+        panic!("host machine unexpectedly invoked (describe_firewall) with op: {op:?}");
     }
     fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
-        panic!("executor unexpectedly invoked (execute_firewall) with op: {op:?}");
+        panic!("host machine unexpectedly invoked (execute_firewall) with op: {op:?}");
     }
     fn probe_access_as_tenant(
         &self,
@@ -57,48 +57,48 @@ impl Executor for NeverExecutor {
         mode: tenant::domain::AccessMode,
     ) -> Result<tenant::domain::AccessOutcome, tenant::domain::ProbeError> {
         panic!(
-            "executor unexpectedly invoked (probe_access_as_tenant): name={name:?} path={path:?} mode={mode:?}"
+            "host machine unexpectedly invoked (probe_access_as_tenant): name={name:?} path={path:?} mode={mode:?}"
         );
     }
     fn read_env_policy(&self) -> Result<String, tenant::domain::HostFileError> {
-        panic!("executor unexpectedly invoked (read_env_policy)");
+        panic!("host machine unexpectedly invoked (read_env_policy)");
     }
     fn read_kernel_pf_rules(
         &self,
         name: &TenantUserName,
     ) -> Result<String, tenant::domain::FirewallError> {
-        panic!("executor unexpectedly invoked (read_kernel_pf_rules): name={name:?}");
+        panic!("host machine unexpectedly invoked (read_kernel_pf_rules): name={name:?}");
     }
     fn read_pam_sudo(&self) -> Result<String, tenant::domain::HostFileError> {
-        panic!("executor unexpectedly invoked (read_pam_sudo)");
+        panic!("host machine unexpectedly invoked (read_pam_sudo)");
     }
     fn read_pf_status(&self) -> Result<String, tenant::domain::FirewallError> {
-        panic!("executor unexpectedly invoked (read_pf_status)");
+        panic!("host machine unexpectedly invoked (read_pf_status)");
     }
     fn read_anchor_body(
         &self,
         name: &TenantUserName,
     ) -> Result<String, tenant::domain::HostFileError> {
-        panic!("executor unexpectedly invoked (read_anchor_body): name={name:?}");
+        panic!("host machine unexpectedly invoked (read_anchor_body): name={name:?}");
     }
     fn describe_acl(&self, op: &tenant::domain::AclOp) -> String {
-        panic!("executor unexpectedly invoked (describe_acl) with op: {op:?}");
+        panic!("host machine unexpectedly invoked (describe_acl) with op: {op:?}");
     }
     fn execute_acl(&self, op: &tenant::domain::AclOp) -> Result<(), tenant::domain::AclError> {
-        panic!("executor unexpectedly invoked (execute_acl) with op: {op:?}");
+        panic!("host machine unexpectedly invoked (execute_acl) with op: {op:?}");
     }
     fn tenant_path_kind(
         &self,
         name: &TenantUserName,
         path: &std::path::Path,
     ) -> Result<tenant::domain::PathKind, tenant::domain::ProbeError> {
-        panic!("executor unexpectedly invoked (tenant_path_kind): name={name:?} path={path:?}");
+        panic!("host machine unexpectedly invoked (tenant_path_kind): name={name:?} path={path:?}");
     }
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, tenant::domain::ProbeError> {
-        panic!("executor unexpectedly invoked (read_host_acl): path={path:?}");
+        panic!("host machine unexpectedly invoked (read_host_acl): path={path:?}");
     }
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
-        panic!("executor unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
+        panic!("host machine unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
     }
 }
 
@@ -585,7 +585,7 @@ pub fn reload_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
 }
 
 pub fn run_with(stub: StubHostAccounts, args: &[&str]) -> (u8, String, String) {
-    let exec = NeverExecutor;
+    let machine = NeverHostMachine;
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
@@ -594,7 +594,7 @@ pub fn run_with(stub: StubHostAccounts, args: &[&str]) -> (u8, String, String) {
     let code = tenant::run(
         &args,
         &stub,
-        &exec,
+        &machine,
         &host,
         &mut stdout,
         &mut stderr,
@@ -611,7 +611,7 @@ pub fn run_with(stub: StubHostAccounts, args: &[&str]) -> (u8, String, String) {
 
 pub fn run_with_exec(
     stub: StubHostAccounts,
-    exec: &StubExecutor,
+    exec: &StubHostMachine,
     args: &[&str],
 ) -> (u8, String, String) {
     let mut stdout: Vec<u8> = Vec::new();
@@ -646,7 +646,7 @@ pub fn run_with_exec(
 /// unaffected.
 pub fn run_with_stdin(
     stub: StubHostAccounts,
-    exec: &StubExecutor,
+    exec: &StubHostMachine,
     args: &[&str],
     stdin_content: &[u8],
 ) -> (u8, String, String) {

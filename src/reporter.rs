@@ -8,7 +8,7 @@
 //! refused / failed" and the Reporter picks the right output for the
 //! current mode.
 //!
-//! `Reporter` holds a reference to the active `Executor` so it can
+//! `Reporter` holds a reference to the active `HostMachine` so it can
 //! render plan + echo lines lazily from `AccountOp` / `ProfileOp` values
 //! via the `Op::describe_via` ADT method. Plan rendering walks
 //! `&[(Op<'_>, Option<&'static str>)]` tuples — `Op` for domain dispatch,
@@ -23,7 +23,7 @@ use crate::accounts::{ConflictError, NameError, ShareError, tenant_share_group_n
 use crate::ansi::{self, Colors};
 use crate::doctor::{Category, Finding, Severity};
 use crate::domain::{
-    AccessMode, AccountError, AclError, Executor, FirewallError, GroupId, HostUserName, Op,
+    AccessMode, AccountError, AclError, FirewallError, GroupId, HostMachine, HostUserName, Op,
     ProbeError, TenantUserName, UserId,
 };
 use crate::profile::{ProfileError, display_path_for};
@@ -43,7 +43,7 @@ pub(crate) struct Reporter<'a> {
     stderr: &'a mut dyn Write,
     verbose: bool,
     dry_run: bool,
-    executor: &'a dyn Executor,
+    machine: &'a dyn HostMachine,
     colors: Colors,
 }
 
@@ -53,7 +53,7 @@ impl<'a> Reporter<'a> {
         stderr: &'a mut dyn Write,
         verbose: bool,
         dry_run: bool,
-        executor: &'a dyn Executor,
+        machine: &'a dyn HostMachine,
         colors: Colors,
     ) -> Self {
         Self {
@@ -61,7 +61,7 @@ impl<'a> Reporter<'a> {
             stderr,
             verbose,
             dry_run,
-            executor,
+            machine,
             colors,
         }
     }
@@ -118,7 +118,7 @@ impl<'a> Reporter<'a> {
         if self.dry_run || !self.verbose {
             return;
         }
-        let line = op.describe_via(self.executor);
+        let line = op.describe_via(self.machine);
         let _ = writeln!(self.stdout, "$ {line}");
     }
 
@@ -1580,7 +1580,7 @@ impl<'a> Reporter<'a> {
     fn render_plan_block(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         for (op, annotation) in plan {
             let intent = op.intent_label();
-            let shell = op.describe_via(self.executor);
+            let shell = op.describe_via(self.machine);
             let intent_line = match annotation {
                 Some(note) => format!("  \u{2022} {intent}  # {note}"),
                 None => format!("  \u{2022} {intent}"),

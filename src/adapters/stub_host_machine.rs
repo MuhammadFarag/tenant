@@ -1,19 +1,19 @@
-//! Test substitute for the `Executor` substrate. Records every op
+//! Test substitute for the `HostMachine` substrate. Records every op
 //! invocation (for behavioral assertions) and supports per-op failure
 //! injection (for partial-failure-path tests like "sysadminctl-addUser
 //! fails after dseditgroup-create succeeded"). Describe still works
 //! (tests assert on the rendered plan/echo strings via the byte-exact
-//! stdout E2E pattern) — delegated to `MacosExecutor` so production +
+//! stdout E2E pattern) — delegated to `MacosHostMachine` so production +
 //! test render identical bytes.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::adapters::macos::MacosExecutor;
+use crate::adapters::macos::MacosHostMachine;
 use crate::domain::{
-    AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, Executor, FirewallError,
-    FirewallOp, GroupName, HostFileError, HostUserName, PathKind, ProbeError, ProfileOp,
+    AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
+    GroupName, HostFileError, HostMachine, HostUserName, PathKind, ProbeError, ProfileOp,
     TenantUserName,
 };
 use crate::profile::{ProfileError, default_profile_toml};
@@ -24,7 +24,7 @@ use crate::profile::{ProfileError, default_profile_toml};
 /// Describe still works (tests assert on the rendered plan/echo strings via
 /// the byte-exact stdout E2E pattern).
 #[derive(Default)]
-pub struct StubExecutor {
+pub struct StubHostMachine {
     account_ops: RefCell<Vec<AccountOp>>,
     profile_ops: RefCell<Vec<ProfileOp>>,
     firewall_ops: RefCell<Vec<FirewallOp>>,
@@ -54,7 +54,7 @@ pub struct StubExecutor {
     /// Blanket failure for `execute_account` calls that don't match an
     /// override. Stored as a (code, stderr) pair so it's Clone-able and
     /// fires on every call (mirrors the pre-refactor
-    /// `StubExecutor::failing` infinite-fire shape). Spawn-failure
+    /// `StubHostMachine::failing` infinite-fire shape). Spawn-failure
     /// injection isn't supported by the blanket path; use a per-op
     /// override for Spawn semantics.
     account_blanket_failure: RefCell<Option<(i32, String)>>,
@@ -149,7 +149,7 @@ pub struct StubExecutor {
     kernel_pf_rules_failure: RefCell<Option<FirewallError>>,
 
     /// In-memory simulation of `/etc/pam.d/sudo`. Default is a
-    /// "Touch-ID-active" placeholder (see `StubExecutor::new`) so
+    /// "Touch-ID-active" placeholder (see `StubHostMachine::new`) so
     /// doctor tests that don't care about the PAM path don't see
     /// spurious `TouchIdMissing` findings. Tests override with
     /// `with_pam_sudo_content` to exercise the absent / commented
@@ -242,7 +242,7 @@ pub struct StubExecutor {
     host_in_group_failure: RefCell<Option<AccountError>>,
 }
 
-impl StubExecutor {
+impl StubHostMachine {
     pub fn new() -> Self {
         let s = Self::default();
         // Default env policy to "no leak" so doctor tests that don't
@@ -274,7 +274,7 @@ impl StubExecutor {
 
     /// Configure all `execute_account` calls to fail with `NonZero { code,
     /// stderr }` (overridden by per-op matchers). Mirrors the pre-refactor
-    /// `StubExecutor::failing_with`. Fires on every call (not one-shot).
+    /// `StubHostMachine::failing_with`. Fires on every call (not one-shot).
     pub fn fail_account_blanket(self, code: i32, stderr: &str) -> Self {
         *self.account_blanket_failure.borrow_mut() = Some((code, stderr.to_string()));
         self
@@ -595,9 +595,9 @@ impl StubExecutor {
     }
 }
 
-impl Executor for StubExecutor {
+impl HostMachine for StubHostMachine {
     fn describe_account(&self, op: &AccountOp) -> String {
-        MacosExecutor.describe_account(op)
+        MacosHostMachine.describe_account(op)
     }
 
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError> {
@@ -630,7 +630,7 @@ impl Executor for StubExecutor {
     }
 
     fn describe_profile(&self, op: &ProfileOp) -> String {
-        MacosExecutor.describe_profile(op)
+        MacosHostMachine.describe_profile(op)
     }
 
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), ProfileError> {
@@ -675,7 +675,7 @@ impl Executor for StubExecutor {
     }
 
     fn describe_firewall(&self, op: &FirewallOp) -> String {
-        MacosExecutor.describe_firewall(op)
+        MacosHostMachine.describe_firewall(op)
     }
 
     fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
@@ -772,7 +772,7 @@ impl Executor for StubExecutor {
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
-        MacosExecutor.describe_acl(op)
+        MacosHostMachine.describe_acl(op)
     }
 
     fn execute_acl(&self, op: &AclOp) -> Result<(), AclError> {

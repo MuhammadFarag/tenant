@@ -1,7 +1,7 @@
 use std::io;
 use std::process::ExitCode;
 
-use tenant::adapters::macos::{MacosExecutor, MacosHostAccounts};
+use tenant::adapters::macos::{MacosHostAccounts, MacosHostMachine};
 use tenant::domain::HostUserName;
 
 fn main() -> ExitCode {
@@ -12,7 +12,7 @@ fn main() -> ExitCode {
             return ExitCode::from(74); // EX_IOERR
         }
     };
-    let executor = MacosExecutor;
+    let machine = MacosHostMachine;
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Operator's login name is the `host` identity in doctor's curated
     // path expansion (`/Users/<host>/.ssh/...`). USER is set by the
@@ -36,7 +36,7 @@ fn main() -> ExitCode {
     let code = tenant::run(
         &args,
         &accounts,
-        &executor,
+        &machine,
         &host,
         // (HostUserName) borrowed from the owned wrap above.
         &mut stdout,

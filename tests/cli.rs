@@ -1,6 +1,6 @@
 //! Cross-cutting CLI parser tests. Per-verb tests live in
 //! `tests/cli_<verb>.rs` (cli_create / cli_destroy / cli_shell / cli_mode /
-//! cli_doctor); shared helpers — `NeverExecutor`, `run_with`, `run_with_exec`,
+//! cli_doctor); shared helpers — `NeverHostMachine`, `run_with`, `run_with_exec`,
 //! `TEST_HOST`, plus stub-builder factories — live in `tests/common/mod.rs`.
 
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
