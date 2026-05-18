@@ -145,10 +145,12 @@ fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
             AccountOp::LookupUserRecord { name: "dev".into() },
             AccountOp::DeleteUserRecord { name: "dev".into() },
             AccountOp::RemoveHostFromShareGroup {
-                name: "dev".into(),
+                group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
-            AccountOp::DeleteShareGroup { name: "dev".into() },
+            AccountOp::DeleteShareGroup {
+                group: "dev-tenant-share".into()
+            },
         ],
     );
     assert_eq!(
@@ -251,10 +253,12 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
             AccountOp::DeleteTenantUser { name: "dev".into() },
             AccountOp::LookupUserRecord { name: "dev".into() },
             AccountOp::RemoveHostFromShareGroup {
-                name: "dev".into(),
+                group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
-            AccountOp::DeleteShareGroup { name: "dev".into() },
+            AccountOp::DeleteShareGroup {
+                group: "dev-tenant-share".into()
+            },
         ],
         "expected DeleteTenantUser + LookupUserRecord + RemoveHost + DeleteShareGroup \
          (DeleteUserRecord cleanup skipped because probe found clean)"
@@ -273,7 +277,9 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
     // ExecError carries enough detail (the dseditgroup tool prints
     // its own argv-aware context) for the operator to diagnose.
     let exec = StubExecutor::new().fail_account_op(
-        AccountOp::DeleteShareGroup { name: "dev".into() },
+        AccountOp::DeleteShareGroup {
+            group: "dev-tenant-share".into(),
+        },
         AccountError::NonZero {
             code: 78,
             stderr: "dseditgroup: cannot remove group dev-tenant-share: not authorized\n".into(),
@@ -713,10 +719,12 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
         exec.account_ops(),
         vec![
             AccountOp::RemoveHostFromShareGroup {
-                name: "dev".into(),
+                group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
-            AccountOp::DeleteShareGroup { name: "dev".into() },
+            AccountOp::DeleteShareGroup {
+                group: "dev-tenant-share".into()
+            },
         ],
         "expected RemoveHost + DeleteShareGroup (cosmetic remove before group delete)"
     );

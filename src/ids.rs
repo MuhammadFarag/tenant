@@ -1,11 +1,16 @@
 //! Newtype wrappers for tenant + operator identifiers, both numeric
 //! (`UserId` / `GroupId`) and string-shaped (`TenantUserName` /
-//! `HostUserName`). The numeric pair carries POSIX UIDs / GIDs and
-//! protects against UID-vs-GID position swaps. The string pair carries
-//! macOS short usernames in two distinct roles — the sandboxed tenant
-//! user and the host operator — and protects against
+//! `HostUserName` / `GroupName`). The numeric pair carries POSIX UIDs /
+//! GIDs and protects against UID-vs-GID position swaps. The user-name
+//! pair carries macOS short usernames in two distinct roles — the
+//! sandboxed tenant user and the host operator — and protects against
 //! tenant-name-vs-host-name position swaps in the many
-//! `(name, host, ...)` signatures.
+//! `(name, host, ...)` signatures. `GroupName` carries the full
+//! macOS short group name (always `<tenant>-tenant-share` today; the
+//! suffix is appended at the Writer boundary by
+//! `accounts::tenant_share_group_name`) and protects share-group
+//! AccountOp variants and the share ACL ops from accidentally
+//! receiving a tenant name where a group name belongs.
 //!
 //! `HostUserName` carries the `User` qualifier deliberately: bare
 //! `HostName` is a polyseme with the networking term (DNS hostname,
@@ -15,7 +20,10 @@
 //! Validation for `TenantUserName` lives outside the constructor —
 //! `validate_name` is still the gatekeeper at the dispatch layer.
 //! The newtype is a tag, not a validity proof; future work may move
-//! validation into a `try_new` constructor.
+//! validation into a `try_new` constructor. `GroupName` is similarly
+//! constructed without validation; today's only producer is
+//! `accounts::tenant_share_group_name`, which appends the suffix to an
+//! already-validated tenant name.
 
 use std::fmt;
 use std::str::FromStr;
@@ -75,6 +83,9 @@ pub struct TenantUserName(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HostUserName(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GroupName(pub String);
+
 impl TenantUserName {
     pub fn as_str(&self) -> &str {
         &self.0
@@ -87,6 +98,12 @@ impl HostUserName {
     }
 }
 
+impl GroupName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Display for TenantUserName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -94,6 +111,12 @@ impl fmt::Display for TenantUserName {
 }
 
 impl fmt::Display for HostUserName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Display for GroupName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -123,6 +146,18 @@ impl From<String> for HostUserName {
     }
 }
 
+impl From<&str> for GroupName {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for GroupName {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 // `From<&Self>` for cheap `.into()` at substrate ADT construction
 // sites — `AccountOp::CreateTenantUser { name: name.into(), ... }` where
 // `name: &TenantUserName`. Without this, callers would have to use
@@ -135,6 +170,12 @@ impl From<&TenantUserName> for TenantUserName {
 
 impl From<&HostUserName> for HostUserName {
     fn from(s: &HostUserName) -> Self {
+        s.clone()
+    }
+}
+
+impl From<&GroupName> for GroupName {
+    fn from(s: &GroupName) -> Self {
         s.clone()
     }
 }
@@ -186,6 +227,30 @@ impl PartialEq<&str> for HostUserName {
 
 impl PartialEq<HostUserName> for &str {
     fn eq(&self, other: &HostUserName) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<str> for GroupName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<GroupName> for str {
+    fn eq(&self, other: &GroupName) -> bool {
+        self == other.0
+    }
+}
+
+impl PartialEq<&str> for GroupName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<GroupName> for &str {
+    fn eq(&self, other: &GroupName) -> bool {
         *self == other.0
     }
 }

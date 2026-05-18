@@ -29,7 +29,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
-use crate::ids::{GroupId, HostUserName, TenantUserName, UserId};
+use crate::ids::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
 /// Which filesystem access predicate doctor's probe checks. `Read` maps to
@@ -98,15 +98,17 @@ pub enum AccessOutcome {
 /// shell verb and documented at the trait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountOp {
-    /// Create the `<name>-tenant-share` primary group with the given GID.
-    /// Maps to `sudo dseditgroup -o create -n . -i <gid> <name>-tenant-share`
-    /// on macOS.
-    CreateShareGroup { name: TenantUserName, gid: GroupId },
+    /// Create the share group with the given GID. `group` is the full
+    /// macOS short group name (today always `<tenant>-tenant-share` —
+    /// `accounts::tenant_share_group_name` appends the suffix at the
+    /// Writer boundary). Maps to `sudo dseditgroup -o create -n . -i
+    /// <gid> <group>` on macOS.
+    CreateShareGroup { group: GroupName, gid: GroupId },
 
-    /// Delete the `<name>-tenant-share` group. Used as the create-side
-    /// rollback step and the destroy-side cleanup step. Maps to `sudo
-    /// dseditgroup -o delete -n . <name>-tenant-share` on macOS.
-    DeleteShareGroup { name: TenantUserName },
+    /// Delete the share group. Used as the create-side rollback step
+    /// and the destroy-side cleanup step. Maps to `sudo dseditgroup
+    /// -o delete -n . <group>` on macOS.
+    DeleteShareGroup { group: GroupName },
 
     /// Create the tenant user with the given UID + GID. Maps to `sudo
     /// sysadminctl -addUser <name> -fullName "Tenant: <name>" -shell
@@ -187,14 +189,14 @@ pub enum AccountOp {
         target: PathBuf,
     },
 
-    /// Add the host operator as a secondary member of the
-    /// tenant's `<name>-tenant-share` group. Maps to `sudo dseditgroup
-    /// -o edit -n . -a <host> -t user <name>-tenant-share` on macOS.
-    /// Idempotent at the substrate (`dseditgroup -o edit -a` on an
-    /// existing member is a silent noop), so the catch-up path
-    /// (`execute_reapply_plan` running this on every reload/mode/shell)
-    /// costs one dseditgroup invocation per verb regardless of the
-    /// tenant's pre-existing state.
+    /// Add the host operator as a secondary member of the tenant's
+    /// share group. Maps to `sudo dseditgroup -o edit -n . -a <host>
+    /// -t user <group>` on macOS. Idempotent at the substrate
+    /// (`dseditgroup -o edit -a` on an existing member is a silent
+    /// noop), so the catch-up path (`execute_reapply_plan` running
+    /// this on every reload/mode/shell) costs one dseditgroup
+    /// invocation per verb regardless of the tenant's pre-existing
+    /// state.
     ///
     /// Ported verbatim from sandbox's `_add_human_to_group` step
     /// (`scripts/lib/phases/phase01_user.py:180-185`); originally
@@ -202,20 +204,20 @@ pub enum AccountOp {
     /// bidirectional-write asymmetry on RW shares — was caught in
     /// the 2026-05-15 operator setup pass.
     AddHostToShareGroup {
-        name: TenantUserName,
+        group: GroupName,
         host: HostUserName,
     },
 
     /// Symmetric counter to `AddHostToShareGroup`. Maps to `sudo
-    /// dseditgroup -o edit -n . -d <host> -t user <name>-tenant-share`.
-    /// The describe-side renders only the `-d` edit form; the
-    /// production `execute_account` impl invokes `dseditgroup -o
-    /// checkmember -m <host> <group>` first and skips the edit when
-    /// the host is not a member (idempotence for legacy tenants
-    /// without host membership and the orphan-group destroy path
-    /// on a partially-created tenant).
+    /// dseditgroup -o edit -n . -d <host> -t user <group>`. The
+    /// describe-side renders only the `-d` edit form; the production
+    /// `execute_account` impl invokes `dseditgroup -o checkmember -m
+    /// <host> <group>` first and skips the edit when the host is not
+    /// a member (idempotence for legacy tenants without host
+    /// membership and the orphan-group destroy path on a partially-
+    /// created tenant).
     RemoveHostFromShareGroup {
-        name: TenantUserName,
+        group: GroupName,
         host: HostUserName,
     },
 }
@@ -297,7 +299,7 @@ pub enum AclOp {
     /// up the same grant.
     Grant {
         path: PathBuf,
-        group: String,
+        group: GroupName,
         mode: AclMode,
     },
 
@@ -305,7 +307,7 @@ pub enum AclOp {
     /// if the entry isn't present, returns Ok(()) without invoking chmod.
     Revoke {
         path: PathBuf,
-        group: String,
+        group: GroupName,
         mode: AclMode,
     },
 }
@@ -699,7 +701,7 @@ pub trait Executor {
     /// `RemoveHostFromShareGroup` to short-circuit the `-d` edit
     /// when the host isn't currently a member (substrate-side
     /// idempotence).
-    fn host_in_group(&self, host: &HostUserName, group: &str) -> Result<bool, AccountError>;
+    fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError>;
 }
 
 /// Top-level ADT wrapper for "any op, regardless of domain." Used by the
@@ -768,11 +770,11 @@ impl<'a> Op<'a> {
 
 fn account_business_label(op: &AccountOp) -> String {
     match op {
-        AccountOp::CreateShareGroup { name, gid } => {
-            format!("Share group '{name}-tenant-share' created (GID {gid})")
+        AccountOp::CreateShareGroup { group, gid } => {
+            format!("Share group '{group}' created (GID {gid})")
         }
-        AccountOp::DeleteShareGroup { name } => {
-            format!("Share group '{name}-tenant-share' removed")
+        AccountOp::DeleteShareGroup { group } => {
+            format!("Share group '{group}' removed")
         }
         AccountOp::CreateTenantUser { name, uid, .. } => {
             format!("User account '{name}' provisioned (UID {uid})")
@@ -807,11 +809,11 @@ fn account_business_label(op: &AccountOp) -> String {
                 target.display()
             )
         }
-        AccountOp::AddHostToShareGroup { name, host } => {
-            format!("Host '{host}' added to share group '{name}-tenant-share'")
+        AccountOp::AddHostToShareGroup { group, host } => {
+            format!("Host '{host}' added to share group '{group}'")
         }
-        AccountOp::RemoveHostFromShareGroup { name, host } => {
-            format!("Host '{host}' removed from share group '{name}-tenant-share'")
+        AccountOp::RemoveHostFromShareGroup { group, host } => {
+            format!("Host '{host}' removed from share group '{group}'")
         }
     }
 }
@@ -876,11 +878,11 @@ fn acl_business_label(op: &AclOp) -> String {
 
 fn account_intent_label(op: &AccountOp) -> String {
     match op {
-        AccountOp::CreateShareGroup { name, gid } => {
-            format!("Create share group '{name}-tenant-share' (GID {gid})")
+        AccountOp::CreateShareGroup { group, gid } => {
+            format!("Create share group '{group}' (GID {gid})")
         }
-        AccountOp::DeleteShareGroup { name } => {
-            format!("Remove share group '{name}-tenant-share'")
+        AccountOp::DeleteShareGroup { group } => {
+            format!("Remove share group '{group}'")
         }
         AccountOp::CreateTenantUser { name, uid, gid } => {
             format!("Create user account '{name}' (UID {uid}, GID {gid})")
@@ -913,11 +915,11 @@ fn account_intent_label(op: &AccountOp) -> String {
                 target.display()
             )
         }
-        AccountOp::AddHostToShareGroup { name, host } => {
-            format!("Add host '{host}' to share group '{name}-tenant-share'")
+        AccountOp::AddHostToShareGroup { group, host } => {
+            format!("Add host '{host}' to share group '{group}'")
         }
-        AccountOp::RemoveHostFromShareGroup { name, host } => {
-            format!("Remove host '{host}' from share group '{name}-tenant-share'")
+        AccountOp::RemoveHostFromShareGroup { group, host } => {
+            format!("Remove host '{host}' from share group '{group}'")
         }
     }
 }
@@ -1036,11 +1038,11 @@ pub struct MacosExecutor;
 impl Executor for MacosExecutor {
     fn describe_account(&self, op: &AccountOp) -> String {
         match op {
-            AccountOp::CreateShareGroup { name, gid } => {
-                format!("sudo dseditgroup -o create -n . -i {gid} {name}-tenant-share")
+            AccountOp::CreateShareGroup { group, gid } => {
+                format!("sudo dseditgroup -o create -n . -i {gid} {group}")
             }
-            AccountOp::DeleteShareGroup { name } => {
-                format!("sudo dseditgroup -o delete -n . {name}-tenant-share")
+            AccountOp::DeleteShareGroup { group } => {
+                format!("sudo dseditgroup -o delete -n . {group}")
             }
             AccountOp::CreateTenantUser { name, uid, gid } => format!(
                 "sudo sysadminctl -addUser {name} -fullName \"Tenant: {name}\" \
@@ -1063,11 +1065,11 @@ impl Executor for MacosExecutor {
                 target.display(),
                 link.display(),
             ),
-            AccountOp::AddHostToShareGroup { name, host } => {
-                format!("sudo dseditgroup -o edit -n . -a {host} -t user {name}-tenant-share")
+            AccountOp::AddHostToShareGroup { group, host } => {
+                format!("sudo dseditgroup -o edit -n . -a {host} -t user {group}")
             }
-            AccountOp::RemoveHostFromShareGroup { name, host } => {
-                format!("sudo dseditgroup -o edit -n . -d {host} -t user {name}-tenant-share")
+            AccountOp::RemoveHostFromShareGroup { group, host } => {
+                format!("sudo dseditgroup -o edit -n . -d {host} -t user {group}")
             }
         }
     }
@@ -1077,7 +1079,7 @@ impl Executor for MacosExecutor {
         // through `login`. Match-arm panics on it so an accidental wiring
         // through `execute_account` fails loudly in dev / tests rather than
         // silently doing the wrong thing in prod.
-        if let AccountOp::RemoveHostFromShareGroup { name, host } = op {
+        if let AccountOp::RemoveHostFromShareGroup { group, host } = op {
             // Idempotence: skip the `-d` edit when host isn't a
             // current member. Covers (a) legacy tenants where the host
             // was never added and (b) destroy_orphan_group on a
@@ -1085,8 +1087,7 @@ impl Executor for MacosExecutor {
             // is the source of truth — Writer keeps the op in the plan
             // for symmetry; the substrate decides whether to actually
             // fire it.
-            let group = format!("{name}-tenant-share");
-            if !self.host_in_group(host, &group)? {
+            if !self.host_in_group(host, group)? {
                 return Ok(());
             }
         }
@@ -1562,7 +1563,7 @@ impl Executor for MacosExecutor {
         };
         format!(
             "chmod {flag} \"{}\" {}",
-            acl_entry(group, *mode),
+            acl_entry(group.as_str(), *mode),
             path.display(),
         )
     }
@@ -1595,7 +1596,7 @@ impl Executor for MacosExecutor {
                 path, group, mode, ..
             } => ("-a", path, group, mode),
         };
-        let entry = acl_entry(group, *mode);
+        let entry = acl_entry(group.as_str(), *mode);
         let path_str = path.display().to_string();
         let output = Command::new("chmod")
             .args([flag, &entry, &path_str])
@@ -1610,7 +1611,7 @@ impl Executor for MacosExecutor {
         Ok(())
     }
 
-    fn host_in_group(&self, host: &HostUserName, group: &str) -> Result<bool, AccountError> {
+    fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         // Read-only directory-service membership probe. Exit 0 ⇒ member;
         // any non-zero exit (host absent from group, group absent) ⇒
         // false. Machinery failure (dseditgroup not on PATH, fork
@@ -1619,7 +1620,7 @@ impl Executor for MacosExecutor {
         // contract treats any non-zero as "not a member" so the
         // substrate isn't tied to the tool's exact stderr wording.
         let output = Command::new("dseditgroup")
-            .args(["-o", "checkmember", "-m", host.as_str(), group])
+            .args(["-o", "checkmember", "-m", host.as_str(), group.as_str()])
             .output()
             .map_err(AccountError::Spawn)?;
         Ok(output.status.success())
@@ -1734,7 +1735,7 @@ fn profile_path(name: &TenantUserName) -> Result<PathBuf, ProfileError> {
 /// other.
 fn account_argv(op: &AccountOp) -> Vec<String> {
     match op {
-        AccountOp::CreateShareGroup { name, gid } => vec![
+        AccountOp::CreateShareGroup { group, gid } => vec![
             "sudo".into(),
             "dseditgroup".into(),
             "-o".into(),
@@ -1743,16 +1744,16 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             ".".into(),
             "-i".into(),
             gid.to_string(),
-            format!("{name}-tenant-share"),
+            group.0.clone(),
         ],
-        AccountOp::DeleteShareGroup { name } => vec![
+        AccountOp::DeleteShareGroup { group } => vec![
             "sudo".into(),
             "dseditgroup".into(),
             "-o".into(),
             "delete".into(),
             "-n".into(),
             ".".into(),
-            format!("{name}-tenant-share"),
+            group.0.clone(),
         ],
         AccountOp::CreateTenantUser { name, uid, gid } => vec![
             "sudo".into(),
@@ -1817,7 +1818,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             target.display().to_string(),
             link.display().to_string(),
         ],
-        AccountOp::AddHostToShareGroup { name, host } => vec![
+        AccountOp::AddHostToShareGroup { group, host } => vec![
             "sudo".into(),
             "dseditgroup".into(),
             "-o".into(),
@@ -1828,9 +1829,9 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             host.0.clone(),
             "-t".into(),
             "user".into(),
-            format!("{name}-tenant-share"),
+            group.0.clone(),
         ],
-        AccountOp::RemoveHostFromShareGroup { name, host } => vec![
+        AccountOp::RemoveHostFromShareGroup { group, host } => vec![
             "sudo".into(),
             "dseditgroup".into(),
             "-o".into(),
@@ -1841,7 +1842,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             host.0.clone(),
             "-t".into(),
             "user".into(),
-            format!("{name}-tenant-share"),
+            group.0.clone(),
         ],
     }
 }
@@ -2016,7 +2017,11 @@ impl Executor for DryRunExecutor {
     /// doctor's `HostNotInShareGroup` finding — same "no actionable
     /// warnings in dry-run" posture as `read_host_acl` and
     /// `tenant_path_kind`.
-    fn host_in_group(&self, _host: &HostUserName, _group: &str) -> Result<bool, AccountError> {
+    fn host_in_group(
+        &self,
+        _host: &HostUserName,
+        _group: &GroupName,
+    ) -> Result<bool, AccountError> {
         Ok(true)
     }
 }
@@ -2849,7 +2854,7 @@ impl Executor for StubExecutor {
         Ok(listing)
     }
 
-    fn host_in_group(&self, host: &HostUserName, group: &str) -> Result<bool, AccountError> {
+    fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         self.host_in_group_invocations
             .borrow_mut()
             .push((host.to_string(), group.to_string()));

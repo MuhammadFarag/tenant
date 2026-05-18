@@ -411,24 +411,33 @@ it from scratch wastes a cycle and risks getting it wrong.
 - **Domain newtypes in `src/ids.rs`.** `UserId(u32)` / `GroupId(u32)`
   wrap the POSIX numeric identifiers; `TenantUserName(String)` /
   `HostUserName(String)` wrap the macOS short usernames in their two
-  distinct roles. The `UserName` qualifier on the name pair is
-  deliberate: bare `HostName` is a polyseme with the networking term
-  (DNS hostname / `uname -n`); the qualifier disambiguates and the
-  symmetric `TenantUserName` keeps the pair parallel. The bare nouns
-  `host` and `tenant` persist in prose, in variable names, and in
-  user-facing output strings. Validation for `TenantUserName` lives
-  outside the constructor (`validate_name` at dispatch); the newtype
-  is a tag, not a validity proof.
+  distinct roles; `GroupName(String)` wraps the macOS short group
+  name (today always `<tenant>-tenant-share`, built at the Writer
+  boundary by `accounts::tenant_share_group_name`). The `UserName`
+  qualifier on the name pair is deliberate: bare `HostName` is a
+  polyseme with the networking term (DNS hostname / `uname -n`); the
+  qualifier disambiguates and the symmetric `TenantUserName` keeps
+  the pair parallel. The bare nouns `host` and `tenant` persist in
+  prose, in variable names, and in user-facing output strings.
+  Validation for `TenantUserName` lives outside the constructor
+  (`validate_name` at dispatch); the newtype is a tag, not a validity
+  proof. Same for `GroupName` — `tenant_share_group_name` is the only
+  producer today and appends the suffix to an already-validated tenant
+  name.
 
 - **Pure string formatters take `&str`, not the newtype.** `firewall::
   tenant_anchor_name(name: &str)`, `profile::display_path_for(name:
-  &str)`, `doctor::pf_rule_presence_check(rules, tenant: &str)`, etc.,
-  stay as `&str` parameters. Callers pass `name.as_str()` from a
-  `&TenantUserName`. The type-safety win is realized at the Writer /
-  Reader / Reporter method boundaries and at ADT variants
-  (`AccountOp::CreateTenantUser { name: TenantUserName, ... }`); pure
-  helpers stay simple. Tests of pure helpers continue to use string
-  literals directly.
+  &str)`, `doctor::pf_rule_presence_check(rules, tenant: &str)`,
+  `doctor::has_group_acl_entry(listing, group: &str)`, etc., stay as
+  `&str` parameters. Callers pass `name.as_str()` from a
+  `&TenantUserName` (or `group.as_str()` from a `&GroupName`). The
+  type-safety win is realized at the Writer / Reader / Reporter
+  method boundaries and at ADT variants
+  (`AccountOp::CreateTenantUser { name: TenantUserName, ... }`,
+  `AccountOp::CreateShareGroup { group: GroupName, ... }`,
+  `AclOp::Grant { group: GroupName, ... }`); pure helpers stay
+  simple. Tests of pure helpers continue to use string literals
+  directly.
 
 - **Clap flag scoping.** `-v / --verbose`, `--dry-run`, `-y / --yes`
   are `global = true` on `Cli`. Per-subcommand flags (e.g.

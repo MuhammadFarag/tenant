@@ -8,7 +8,7 @@
 #[cfg(target_os = "macos")]
 use tenant::accounts::Reader;
 #[cfg(target_os = "macos")]
-use tenant::ids::{TenantUserName, UserId};
+use tenant::ids::{GroupName, TenantUserName, UserId};
 
 #[cfg(target_os = "macos")]
 #[test]
@@ -29,7 +29,7 @@ fn macos_reader_observes_host_state() {
         "MacosReader should see 'root' user"
     );
     assert!(
-        reader.has_group("wheel"),
+        reader.has_group(&GroupName::from("wheel")),
         "MacosReader should see 'wheel' group"
     );
     assert_eq!(

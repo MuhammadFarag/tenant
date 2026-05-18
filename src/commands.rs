@@ -604,13 +604,14 @@ fn build_create_plan_ops(
     uid: ids::UserId,
     gid: ids::GroupId,
 ) -> CreatePlanOps {
+    let group = accounts::tenant_share_group_name(name.as_str());
     CreatePlanOps {
         create_group: AccountOp::CreateShareGroup {
-            name: name.into(),
+            group: group.clone(),
             gid,
         },
         add_host: AccountOp::AddHostToShareGroup {
-            name: name.into(),
+            group: group.clone(),
             host: host.into(),
         },
         add_user: AccountOp::CreateTenantUser {
@@ -618,7 +619,7 @@ fn build_create_plan_ops(
             uid,
             gid,
         },
-        rollback_group: AccountOp::DeleteShareGroup { name: name.into() },
+        rollback_group: AccountOp::DeleteShareGroup { group },
         create_profile: ProfileOp::Create { name: name.into() },
         backup: FirewallOp::BackupConfig,
         install_anchor: FirewallOp::InstallAnchor {
@@ -670,15 +671,16 @@ pub(crate) struct DestroyPlanOps {
 }
 
 fn build_destroy_plan_ops(name: &ids::TenantUserName, host: &ids::HostUserName) -> DestroyPlanOps {
+    let group = accounts::tenant_share_group_name(name.as_str());
     DestroyPlanOps {
         delete_user: AccountOp::DeleteTenantUser { name: name.into() },
         probe: AccountOp::LookupUserRecord { name: name.into() },
         cleanup: AccountOp::DeleteUserRecord { name: name.into() },
         remove_host: AccountOp::RemoveHostFromShareGroup {
-            name: name.into(),
+            group: group.clone(),
             host: host.into(),
         },
-        delete_group: AccountOp::DeleteShareGroup { name: name.into() },
+        delete_group: AccountOp::DeleteShareGroup { group },
         delete_profile: ProfileOp::Delete { name: name.into() },
         backup: FirewallOp::BackupConfig,
         remove_anchor: FirewallOp::RemoveAnchor { name: name.into() },
@@ -721,12 +723,13 @@ fn build_orphan_plan_ops(
     name: &ids::TenantUserName,
     host: &ids::HostUserName,
 ) -> OrphanGroupPlanOps {
+    let group = accounts::tenant_share_group_name(name.as_str());
     OrphanGroupPlanOps {
         remove_host: AccountOp::RemoveHostFromShareGroup {
-            name: name.into(),
+            group: group.clone(),
             host: host.into(),
         },
-        delete_group: AccountOp::DeleteShareGroup { name: name.into() },
+        delete_group: AccountOp::DeleteShareGroup { group },
         delete_profile: ProfileOp::Delete { name: name.into() },
         backup: FirewallOp::BackupConfig,
         remove_anchor: FirewallOp::RemoveAnchor { name: name.into() },

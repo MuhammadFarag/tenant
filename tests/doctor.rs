@@ -571,7 +571,7 @@ fn finding_display_acl_drift() {
     let f = Finding::AclDrift {
         tenant: TenantUserName::from("dev"),
         host_path: std::path::PathBuf::from("/Users/Shared/src"),
-        group: "dev-tenant-share".to_string(),
+        group: "dev-tenant-share".into(),
     };
     assert_eq!(
         format!("{f}"),
@@ -585,7 +585,7 @@ fn finding_acl_drift_severity_is_warning() {
     let f = Finding::AclDrift {
         tenant: TenantUserName::from("dev"),
         host_path: std::path::PathBuf::from("/Users/Shared/src"),
-        group: "dev-tenant-share".to_string(),
+        group: "dev-tenant-share".into(),
     };
     assert_eq!(f.severity(), Severity::Warning);
 }
@@ -595,7 +595,7 @@ fn guidance_acl_drift_byte_form() {
     let f = Finding::AclDrift {
         tenant: TenantUserName::from("dev"),
         host_path: std::path::PathBuf::from("/Users/Shared/src"),
-        group: "dev-tenant-share".to_string(),
+        group: "dev-tenant-share".into(),
     };
     let expected = "Why this matters
   The host path /Users/Shared/src is declared as a share for tenant 'dev' in
@@ -821,7 +821,7 @@ fn finding_display_host_not_in_share_group() {
     let f = Finding::HostNotInShareGroup {
         tenant: TenantUserName::from("dev"),
         host: HostUserName::from("operator"),
-        group: "dev-tenant-share".to_string(),
+        group: "dev-tenant-share".into(),
     };
     assert_eq!(
         format!("{f}"),
@@ -836,7 +836,7 @@ fn finding_host_not_in_share_group_severity_is_warning() {
     let f = Finding::HostNotInShareGroup {
         tenant: TenantUserName::from("dev"),
         host: HostUserName::from("operator"),
-        group: "dev-tenant-share".to_string(),
+        group: "dev-tenant-share".into(),
     };
     assert_eq!(f.severity(), Severity::Warning);
 }
@@ -846,7 +846,7 @@ fn guidance_host_not_in_share_group_byte_form() {
     let f = Finding::HostNotInShareGroup {
         tenant: TenantUserName::from("dev"),
         host: HostUserName::from("operator"),
-        group: "dev-tenant-share".to_string(),
+        group: "dev-tenant-share".into(),
     };
     let expected = "Why this matters
   Host 'operator' is not a member of 'dev-tenant-share'. The share substrate

@@ -179,7 +179,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
         acl_ops,
         vec![AclOp::Grant {
             path: PathBuf::from("/tmp"),
-            group: "dev-tenant-share".to_string(),
+            group: "dev-tenant-share".into(),
             mode: tenant::executor::AclMode::Rw,
         }]
     );
@@ -542,7 +542,7 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
     assert_eq!(
         exec.account_ops(),
         vec![AccountOp::AddHostToShareGroup {
-            name: "dev".into(),
+            group: "dev-tenant-share".into(),
             host: "operator".into(),
         }],
         "reload fires AddHost unconditionally (substrate is idempotent, not Writer-side conditional)"
@@ -565,7 +565,7 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
         exec.account_ops(),
         vec![
             AccountOp::AddHostToShareGroup {
-                name: "dev".into(),
+                group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
             AccountOp::EnsureSymlinkAsUser {

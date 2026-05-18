@@ -11,7 +11,7 @@ use tenant::accounts::StubReader;
 use tenant::executor::{
     AccountError, AccountOp, Executor, FirewallError, FirewallOp, ProfileOp, StubExecutor,
 };
-use tenant::ids::{GroupId, HostUserName, TenantUserName, UserId};
+use tenant::ids::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 
 /// Default executor for tests that should not reach the exec stage —
 /// validation failures, conflicts, and dry-run paths. Panics on any
@@ -99,7 +99,7 @@ impl Executor for NeverExecutor {
     ) -> Result<String, tenant::executor::ProbeError> {
         panic!("executor unexpectedly invoked (read_host_acl): path={path:?}");
     }
-    fn host_in_group(&self, host: &HostUserName, group: &str) -> Result<bool, AccountError> {
+    fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         panic!("executor unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
     }
 }

@@ -26,7 +26,7 @@ fn macos_describes_create_share_group() {
     let s = MacosExecutor;
     assert_eq!(
         s.describe_account(&AccountOp::CreateShareGroup {
-            name: "dev".into(),
+            group: "dev-tenant-share".into(),
             gid: GroupId(600)
         }),
         "sudo dseditgroup -o create -n . -i 600 dev-tenant-share",
@@ -37,7 +37,9 @@ fn macos_describes_create_share_group() {
 fn macos_describes_delete_share_group() {
     let s = MacosExecutor;
     assert_eq!(
-        s.describe_account(&AccountOp::DeleteShareGroup { name: "dev".into() }),
+        s.describe_account(&AccountOp::DeleteShareGroup {
+            group: "dev-tenant-share".into()
+        }),
         "sudo dseditgroup -o delete -n . dev-tenant-share",
     );
 }
@@ -183,7 +185,7 @@ fn macos_describes_add_host_to_share_group() {
     let s = MacosExecutor;
     assert_eq!(
         s.describe_account(&AccountOp::AddHostToShareGroup {
-            name: "dev".into(),
+            group: "dev-tenant-share".into(),
             host: "operator".into(),
         }),
         "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
@@ -202,7 +204,7 @@ fn macos_describes_remove_host_from_share_group() {
     let s = MacosExecutor;
     assert_eq!(
         s.describe_account(&AccountOp::RemoveHostFromShareGroup {
-            name: "dev".into(),
+            group: "dev-tenant-share".into(),
             host: "operator".into(),
         }),
         "sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share",

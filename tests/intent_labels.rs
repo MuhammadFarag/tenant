@@ -24,7 +24,7 @@ use tenant::ids::{GroupId, UserId};
 #[test]
 fn intent_create_share_group() {
     let op = AccountOp::CreateShareGroup {
-        name: "dev".into(),
+        group: "dev-tenant-share".into(),
         gid: GroupId(600),
     };
     assert_eq!(
@@ -35,7 +35,9 @@ fn intent_create_share_group() {
 
 #[test]
 fn intent_delete_share_group() {
-    let op = AccountOp::DeleteShareGroup { name: "dev".into() };
+    let op = AccountOp::DeleteShareGroup {
+        group: "dev-tenant-share".into(),
+    };
     assert_eq!(
         Op::Account(&op).intent_label(),
         "Remove share group 'dev-tenant-share'"
@@ -141,7 +143,7 @@ fn intent_ensure_symlink_as_user() {
 #[test]
 fn intent_add_host_to_share_group() {
     let op = AccountOp::AddHostToShareGroup {
-        name: "dev".into(),
+        group: "dev-tenant-share".into(),
         host: "operator".into(),
     };
     assert_eq!(
@@ -153,7 +155,7 @@ fn intent_add_host_to_share_group() {
 #[test]
 fn intent_remove_host_from_share_group() {
     let op = AccountOp::RemoveHostFromShareGroup {
-        name: "dev".into(),
+        group: "dev-tenant-share".into(),
         host: "operator".into(),
     };
     assert_eq!(

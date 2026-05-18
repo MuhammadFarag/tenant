@@ -86,7 +86,7 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
     assert_eq!(
         exec.account_ops(),
         vec![AccountOp::AddHostToShareGroup {
-            name: "dev".into(),
+            group: "dev-tenant-share".into(),
             host: "operator".into(),
         }],
         "shell auto-narrow includes the AddHost catch-up op"
@@ -1421,7 +1421,7 @@ fn shell_command_form_share_substrate_reapplies_before_exec() {
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
     let add_host = AccountOp::AddHostToShareGroup {
-        name: "dev".into(),
+        group: "dev-tenant-share".into(),
         host: "operator".into(),
     };
     // AddHost fires twice (entry + finally narrow), and BEFORE exec.

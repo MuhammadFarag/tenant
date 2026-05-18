@@ -256,7 +256,7 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
     assert_eq!(
         exec.account_ops(),
         vec![AccountOp::AddHostToShareGroup {
-            name: "dev".into(),
+            group: "dev-tenant-share".into(),
             host: "operator".into(),
         }],
         "mode should fire exactly one account op: the catch-up AddHost"
@@ -770,7 +770,7 @@ fn mode_runtime_with_shares_emits_per_share_substrate_ops() {
         acl_ops,
         vec![AclOp::Grant {
             path: PathBuf::from("/tmp"),
-            group: "dev-tenant-share".to_string(),
+            group: "dev-tenant-share".into(),
             mode: AclMode::Rw,
         }],
         "expected single Grant op for /tmp at rw; got {acl_ops:?}"

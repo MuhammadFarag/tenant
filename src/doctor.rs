@@ -23,7 +23,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::executor::{AccessMode, AccessOutcome};
-use crate::ids::{HostUserName, TenantUserName};
+use crate::ids::{GroupName, HostUserName, TenantUserName};
 
 /// Severity tier of a finding. Order is load-bearing: `--strict` exit
 /// code logic consumes `findings.iter().map(severity).max()` to decide
@@ -177,7 +177,7 @@ pub enum Finding {
     AclDrift {
         tenant: TenantUserName,
         host_path: PathBuf,
-        group: String,
+        group: GroupName,
     },
     SymlinkDrift {
         tenant: TenantUserName,
@@ -194,7 +194,7 @@ pub enum Finding {
     HostNotInShareGroup {
         tenant: TenantUserName,
         host: HostUserName,
-        group: String,
+        group: GroupName,
     },
 }
 

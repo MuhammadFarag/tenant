@@ -428,11 +428,11 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
         exec.account_ops(),
         vec![
             AccountOp::CreateShareGroup {
-                name: "dev".into(),
+                group: "dev-tenant-share".into(),
                 gid: GroupId(600)
             },
             AccountOp::AddHostToShareGroup {
-                name: "dev".into(),
+                group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
             AccountOp::CreateTenantUser {
@@ -597,7 +597,7 @@ fn create_add_host_failure_aborts_with_orphan_group_recovery_hint() {
     // AND the recovery command.
     let exec = StubExecutor::new().fail_account_op(
         AccountOp::AddHostToShareGroup {
-            name: "dev".into(),
+            group: "dev-tenant-share".into(),
             host: "operator".into(),
         },
         AccountError::NonZero {
@@ -671,11 +671,11 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
         exec.account_ops(),
         vec![
             AccountOp::CreateShareGroup {
-                name: "dev".into(),
+                group: "dev-tenant-share".into(),
                 gid: GroupId(600)
             },
             AccountOp::AddHostToShareGroup {
-                name: "dev".into(),
+                group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
             AccountOp::CreateTenantUser {
@@ -683,7 +683,9 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
                 uid: UserId(600),
                 gid: GroupId(600)
             },
-            AccountOp::DeleteShareGroup { name: "dev".into() },
+            AccountOp::DeleteShareGroup {
+                group: "dev-tenant-share".into()
+            },
         ],
     );
 }
@@ -754,7 +756,9 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
             },
         )
         .fail_account_op(
-            AccountOp::DeleteShareGroup { name: "dev".into() },
+            AccountOp::DeleteShareGroup {
+                group: "dev-tenant-share".into(),
+            },
             AccountError::NonZero {
                 code: 1,
                 stderr: "dseditgroup: not authorized\n".into(),
@@ -1197,7 +1201,7 @@ fn create_with_pre_populated_shares_runs_post_provision_substrate() {
         acl_ops,
         vec![AclOp::Grant {
             path: PathBuf::from("/tmp"),
-            group: "dev-tenant-share".to_string(),
+            group: "dev-tenant-share".into(),
             mode: AclMode::Rw,
         }],
         "expected single Grant op from post-provision substrate; got {acl_ops:?}"

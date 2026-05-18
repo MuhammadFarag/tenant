@@ -15,7 +15,7 @@ use crate::executor::{
     HostFileError, Op, PathKind, ProbeError, ProfileOp, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
-use crate::ids::{GroupId, HostUserName, TenantUserName, UserId};
+use crate::ids::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
 use crate::profile::{
     Profile, ProfileError, ShareMode, display_path_for, expand_tenant_path, parse,
 };
@@ -28,7 +28,7 @@ pub trait Reader {
     /// but diverge as tenants come and go. Feeds `GidAllocator`.
     fn used_gids(&self) -> Vec<GroupId>;
     fn has_user(&self, name: &TenantUserName) -> bool;
-    fn has_group(&self, name: &str) -> bool;
+    fn has_group(&self, group: &GroupName) -> bool;
     /// Returns the positive UID for `name`, or `None` if either (a) the
     /// account doesn't exist, or (b) the account exists with a non-positive
     /// UID (negative-UID system accounts like `nobody` on macOS). Callers
@@ -67,8 +67,8 @@ impl Reader for StubReader {
         self.users.iter().any(|u| u == name.as_str())
     }
 
-    fn has_group(&self, name: &str) -> bool {
-        self.groups.iter().any(|g| g == name)
+    fn has_group(&self, group: &GroupName) -> bool {
+        self.groups.iter().any(|g| g == group.as_str())
     }
 
     fn uid_for(&self, name: &TenantUserName) -> Option<UserId> {
@@ -137,8 +137,8 @@ pub enum ConflictError {
 /// agree on the literal string. Choosing the convention here also keeps the
 /// suffix exactly one grep away from any caller — handy when the operator
 /// asks "where does '-tenant-share' come from?".
-pub fn tenant_share_group_name(name: &str) -> String {
-    format!("{name}-tenant-share")
+pub fn tenant_share_group_name(name: &str) -> GroupName {
+    GroupName(format!("{name}-tenant-share"))
 }
 
 /// Create-side precheck: refuse if the requested name already exists as a
@@ -289,8 +289,8 @@ impl Reader for MacosReader {
         self.users.contains(name.as_str())
     }
 
-    fn has_group(&self, name: &str) -> bool {
-        self.groups.contains(name)
+    fn has_group(&self, group: &GroupName) -> bool {
+        self.groups.contains(group.as_str())
     }
 
     fn uid_for(&self, name: &TenantUserName) -> Option<UserId> {
@@ -648,12 +648,13 @@ impl<'a> Writer<'a> {
         // and UpdateConfig content happens BETWEEN step 4 and step 5,
         // is implicit in the plan, and surfaces as
         // CreateError::Firewall on failure.
+        let group = tenant_share_group_name(name.as_str());
         let create_group = AccountOp::CreateShareGroup {
-            name: name.into(),
+            group: group.clone(),
             gid,
         };
         let add_host = AccountOp::AddHostToShareGroup {
-            name: name.into(),
+            group: group.clone(),
             host: host.into(),
         };
         let add_user = AccountOp::CreateTenantUser {
@@ -661,7 +662,9 @@ impl<'a> Writer<'a> {
             uid,
             gid,
         };
-        let rollback_group = AccountOp::DeleteShareGroup { name: name.into() };
+        let rollback_group = AccountOp::DeleteShareGroup {
+            group: group.clone(),
+        };
         let create_profile = ProfileOp::Create { name: name.into() };
         let backup = FirewallOp::BackupConfig;
         let restore = FirewallOp::RestoreConfigFromBackup;
@@ -805,14 +808,15 @@ impl<'a> Writer<'a> {
         // next tenant getting the same UID inherits them silently. No
         // recovery on reload failure (the symmetric restore would
         // re-reference the just-removed anchor file).
+        let group = tenant_share_group_name(name.as_str());
         let delete_user = AccountOp::DeleteTenantUser { name: name.into() };
         let probe = AccountOp::LookupUserRecord { name: name.into() };
         let cleanup = AccountOp::DeleteUserRecord { name: name.into() };
         let remove_host = AccountOp::RemoveHostFromShareGroup {
-            name: name.into(),
+            group: group.clone(),
             host: host.into(),
         };
-        let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
+        let delete_group = AccountOp::DeleteShareGroup { group };
         let delete_profile = ProfileOp::Delete { name: name.into() };
         let backup = FirewallOp::BackupConfig;
         let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
@@ -891,11 +895,12 @@ impl<'a> Writer<'a> {
         // missing file is a noop, UpdateConfig on conf without our
         // anchor is a noop, FlushAnchor on an unknown anchor is a
         // noop) so the convergence path stays single-pass.
+        let group = tenant_share_group_name(name.as_str());
         let remove_host = AccountOp::RemoveHostFromShareGroup {
-            name: name.into(),
+            group: group.clone(),
             host: host.into(),
         };
-        let delete_group = AccountOp::DeleteShareGroup { name: name.into() };
+        let delete_group = AccountOp::DeleteShareGroup { group };
         let delete_profile = ProfileOp::Delete { name: name.into() };
         let backup = FirewallOp::BackupConfig;
         let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
@@ -1004,7 +1009,7 @@ impl<'a> Writer<'a> {
         };
         let reload = FirewallOp::Reload;
         let add_host = AccountOp::AddHostToShareGroup {
-            name: name.into(),
+            group: tenant_share_group_name(name.as_str()),
             host: host.into(),
         };
         let share_ops = self.build_share_ops(name, &parsed_profile)?;
@@ -1623,7 +1628,7 @@ impl<'a> Writer<'a> {
             // AclDrift check: read host-side ACL listing and grep for
             // the expected group's `allow` entry.
             let listing = self.executor.read_host_acl(&share.host_path)?;
-            if !has_group_acl_entry(&listing, &group) {
+            if !has_group_acl_entry(&listing, group.as_str()) {
                 let finding = Finding::AclDrift {
                     tenant: name.clone(),
                     host_path: share.host_path.clone(),
@@ -1846,7 +1851,7 @@ impl<'a> Writer<'a> {
         for share in &parsed.shares {
             match self.executor.read_host_acl(&share.host_path) {
                 Ok(listing) => {
-                    if !has_group_acl_entry(&listing, &group) {
+                    if !has_group_acl_entry(&listing, group.as_str()) {
                         record(Finding::AclDrift {
                             tenant: name.clone(),
                             host_path: share.host_path.clone(),
