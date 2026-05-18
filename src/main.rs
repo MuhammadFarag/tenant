@@ -1,4 +1,3 @@
-use std::io;
 use std::process::ExitCode;
 
 use tenant::adapters::macos::{MacosHostAccounts, MacosHostMachine};
@@ -22,19 +21,8 @@ fn main() -> ExitCode {
             .or_else(|_| std::env::var("USER"))
             .unwrap_or_else(|_| "operator".to_string()),
     );
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-    let stdin_handle = io::stdin();
-    let stdin_is_tty = std::io::IsTerminal::is_terminal(&stdin_handle);
-    let mut stdin = stdin_handle.lock();
-    let colors = tenant::ansi::Colors::detect();
-    let terminal = tenant::Terminal {
-        stdout: &mut stdout,
-        stderr: &mut stderr,
-        stdin: &mut stdin,
-        stdin_is_tty,
-        colors,
-    };
-    let code = tenant::run(&args, &accounts, &machine, &host, terminal);
+    let code = tenant::Terminal::with_stdio(|terminal| {
+        tenant::run(&args, &accounts, &machine, &host, terminal)
+    });
     ExitCode::from(code)
 }
