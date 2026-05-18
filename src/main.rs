@@ -1,12 +1,12 @@
 use std::process::ExitCode;
 
-use tenant::adapters::macos::{MacosHostAccounts, MacosHostMachine};
+use tenant::adapters::macos::{MacosHostMachine, MacosUserDirectory};
 use tenant::domain::HostUserName;
 
 fn main() -> ExitCode {
-    // Per-call dscl now lives inside each `HostAccounts` trait method,
+    // Per-call dscl now lives inside each `HostUserDirectory` trait method,
     // so both adapters are ZSTs and construction is infallible.
-    let accounts = MacosHostAccounts;
+    let directory = MacosUserDirectory;
     let machine = MacosHostMachine;
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Under sudo, USER becomes `root` but SUDO_USER preserves the
@@ -18,7 +18,7 @@ fn main() -> ExitCode {
             .unwrap_or_else(|_| "operator".to_string()),
     );
     let code = tenant::Terminal::with_stdio(|terminal| {
-        tenant::run(&args, &accounts, &machine, &host, terminal)
+        tenant::run(&args, &directory, &machine, &host, terminal)
     });
     ExitCode::from(code)
 }

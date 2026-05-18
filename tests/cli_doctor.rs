@@ -1,5 +1,5 @@
-use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::adapters::stub_host_machine::StubHostMachine;
+use tenant::adapters::stub_user_directory::StubUserDirectory;
 use tenant::domain::UserId;
 
 mod common;
@@ -16,10 +16,10 @@ use common::*;
 
 #[test]
 fn doctor_refuses_when_tenant_absent() {
-    // Empty StubHostAccounts — no user, no group. Doctor must refuse: there
+    // Empty StubUserDirectory — no user, no group. Doctor must refuse: there
     // is no tenant to audit. Exit 64 (EX_USAGE; operator gave a name
     // we can't resolve). Never reaches the host machine.
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["doctor", "ghost"]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["doctor", "ghost"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -35,7 +35,7 @@ fn doctor_refuses_when_only_orphan_group_present() {
     // and a lingering `<name>-tenant-share` group with no user behind
     // it doesn't represent one. A regression that surfaced the orphan
     // group as a distinct refusal would trip this test.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -54,7 +54,7 @@ fn doctor_refuses_below_floor() {
     // a positive UID below TENANT_UID_FLOOR (600) → refuse. `legacyusr`
     // sidesteps the reserved-name blocklist so this test exercises
     // the state-based refusal path specifically.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(501))]
             .into_iter()
@@ -75,7 +75,7 @@ fn doctor_refuses_system_account() {
     // System-account refusal (`has_user` true, `uid_for` None — service
     // accounts whose negative UIDs were filtered by `parse_id_line`).
     // Same shape as shell/mode's system-account refusal.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
         ..Default::default()
     };
@@ -92,10 +92,10 @@ fn doctor_refuses_system_account() {
 fn doctor_rejects_invalid_start() {
     // Lexical validation runs before eligibility; an uppercase first
     // character trips `NameError::InvalidStart` and never consults the
-    // HostAccounts. Reuses the generic `refuse_invalid_name` Reporter method
+    // HostUserDirectory. Reuses the generic `refuse_invalid_name` Reporter method
     // (no doctor-specific charset wording) — same shape as create /
     // destroy / shell / mode.
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["doctor", "BAD"]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["doctor", "BAD"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -324,7 +324,7 @@ fn doctor_finds_env_delete_in_drop_in_file() {
 // ----- All-tenants walk + cross-tenant probes -----
 //
 // `tenant doctor` without a positional name enumerates every
-// tenant-range account via `HostAccounts::tenant_names()` and probes each
+// tenant-range account via `HostUserDirectory::tenant_names()` and probes each
 // from its own perspective. The `others` list (every other tenant)
 // drives cross-tenant + tenant-artifact probe expansion. Single-
 // tenant invocation (`tenant doctor dev`) intentionally probes ONLY
@@ -1260,7 +1260,7 @@ fn doctor_help_text_mentions_sudo_session_and_admin_requirement() {
     // `sudo -u <tenant>` is permitted on macOS) and the cached sudo
     // session pattern (one prompt up front, N probes run silently).
     // Pins load-bearing words, not byte-exact wording.
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["doctor", "--help"]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["doctor", "--help"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
         stdout.contains("sudo"),
@@ -1904,12 +1904,12 @@ fn doctor_host_not_in_share_group_verbose_emits_guidance_block() {
 }
 
 #[test]
-fn doctor_single_tenant_surfaces_accounts_error_when_eligibility_probe_fails() {
+fn doctor_single_tenant_surfaces_user_directory_error_when_eligibility_probe_fails() {
     // Single-tenant doctor uses `destroy_eligibility`; a dscl failure
     // routes to `doctor_eligibility_probe_failed` with doctor-named
     // action wording.
-    let stub = StubHostAccounts {
-        fail_has_user: accounts_fail_once(),
+    let stub = StubUserDirectory {
+        fail_has_user: directory_fail_once(),
         ..Default::default()
     };
     let (code, _stdout, stderr) = run_with(stub, &["doctor", "dev"]);
@@ -1921,15 +1921,15 @@ fn doctor_single_tenant_surfaces_accounts_error_when_eligibility_probe_fails() {
 }
 
 #[test]
-fn doctor_all_surfaces_accounts_error_when_tenant_enumeration_fails() {
-    // No-arg `doctor` reaches `accounts.tenant_names()` after host-wide
+fn doctor_all_surfaces_user_directory_error_when_tenant_enumeration_fails() {
+    // No-arg `doctor` reaches `directory.tenant_names()` after host-wide
     // checks. The pre-walk checks need a host machine that doesn't
     // fail, so the test wires an empty `StubHostMachine` and lets the
     // walk reach the enumeration step. A dscl failure surfaces as
     // `doctor_enumeration_failed`.
     let exec = StubHostMachine::new();
-    let stub = StubHostAccounts {
-        fail_tenant_names: accounts_fail_once(),
+    let stub = StubUserDirectory {
+        fail_tenant_names: directory_fail_once(),
         ..Default::default()
     };
     let (code, _stdout, stderr) = run_with_exec(stub, &exec, &["doctor"]);

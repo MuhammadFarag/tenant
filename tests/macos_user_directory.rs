@@ -1,32 +1,32 @@
-//! `MacosHostAccounts`-vs-dscl integration smoke test. Symmetric with
+//! `MacosUserDirectory`-vs-dscl integration smoke test. Symmetric with
 //! `tests/macos_host_machine.rs`, which pins the `MacosHostMachine::describe_*`
 //! argv contract. This file pins that the per-call dscl wired into each
-//! `HostAccounts` trait method behaves correctly against a real macOS
+//! `HostUserDirectory` trait method behaves correctly against a real macOS
 //! directory service. Gated on macOS — the rest of the test suite runs
-//! on any platform via `StubHostAccounts`.
+//! on any platform via `StubUserDirectory`.
 
 #[cfg(target_os = "macos")]
-use tenant::domain::{GroupName, HostAccounts, TenantUserName, UserId};
+use tenant::domain::{GroupName, HostUserDirectory, TenantUserName, UserId};
 
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_reader_observes_host_state() {
-    // Smoke test that the real `MacosHostAccounts` translates dscl
+    // Smoke test that the real `MacosUserDirectory` translates dscl
     // output into the trait return shape the rest of the codebase
     // expects. `root` (UID 0) and `wheel` (group) are universally
     // present on macOS, so this is host-stable.
-    let reader = tenant::adapters::macos::MacosHostAccounts;
+    let reader = tenant::adapters::macos::MacosUserDirectory;
     assert!(
         reader
             .has_user(&TenantUserName::from("root"))
             .expect("dscl lookup should succeed"),
-        "MacosHostAccounts should see 'root' user"
+        "MacosUserDirectory should see 'root' user"
     );
     assert!(
         reader
             .has_group(&GroupName::from("wheel"))
             .expect("dscl lookup should succeed"),
-        "MacosHostAccounts should see 'wheel' group"
+        "MacosUserDirectory should see 'wheel' group"
     );
     assert_eq!(
         reader
@@ -46,7 +46,7 @@ fn macos_reader_returns_false_for_absent_record() {
     // that swapped the pattern match for "any nonzero ⇒ absent" would
     // still pass `has_user`, but any other dscl failure would silently
     // report absent instead of erroring.
-    let reader = tenant::adapters::macos::MacosHostAccounts;
+    let reader = tenant::adapters::macos::MacosUserDirectory;
     assert!(
         !reader
             .has_user(&TenantUserName::from("definitely-not-a-user"))

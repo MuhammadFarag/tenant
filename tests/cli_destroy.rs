@@ -1,5 +1,5 @@
-use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::adapters::stub_host_machine::StubHostMachine;
+use tenant::adapters::stub_user_directory::StubUserDirectory;
 use tenant::domain::{AccountError, AccountOp, FirewallError, ProfileOp, UserId};
 
 mod common;
@@ -393,7 +393,7 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
 #[test]
 fn destroy_rejects_empty_name() {
     let (code, stdout, stderr) =
-        run_with(StubHostAccounts::default(), &["destroy", "", "--dry-run"]);
+        run_with(StubUserDirectory::default(), &["destroy", "", "--dry-run"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: name cannot be empty\n");
@@ -402,8 +402,10 @@ fn destroy_rejects_empty_name() {
 #[test]
 fn destroy_rejects_non_letter_start() {
     for (name, offender) in [("1dev", '1'), ("_dev", '_'), ("Dev", 'D')] {
-        let (code, stdout, stderr) =
-            run_with(StubHostAccounts::default(), &["destroy", name, "--dry-run"]);
+        let (code, stdout, stderr) = run_with(
+            StubUserDirectory::default(),
+            &["destroy", name, "--dry-run"],
+        );
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -419,8 +421,10 @@ fn destroy_rejects_non_letter_start() {
 #[test]
 fn destroy_rejects_invalid_character() {
     for (name, offender) in [("de v", ' '), ("de@v", '@'), ("dev.", '.')] {
-        let (code, stdout, stderr) =
-            run_with(StubHostAccounts::default(), &["destroy", name, "--dry-run"]);
+        let (code, stdout, stderr) = run_with(
+            StubUserDirectory::default(),
+            &["destroy", name, "--dry-run"],
+        );
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -433,10 +437,10 @@ fn destroy_rejects_invalid_character() {
 
 #[test]
 fn destroy_noop_when_user_missing() {
-    // Empty StubHostAccounts — no users on the host. Destroy should be
+    // Empty StubUserDirectory — no users on the host. Destroy should be
     // convergent-toward-absence: report the noop and exit 0 without
     // touching the host machine (NeverHostMachine would panic if reached).
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["destroy", "dev"]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "tenant 'dev' does not exist; nothing to do.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
@@ -450,7 +454,7 @@ fn destroy_refuses_below_floor() {
     // `legacyusr` deliberately sidesteps the blocklist so the floor
     // guard is the actual code path under test. Refuse with EX_USAGE;
     // never reach the host machine.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
         ..Default::default()
@@ -468,7 +472,7 @@ fn destroy_refuses_below_floor() {
 fn destroy_refuses_just_below_floor() {
     // Boundary: UID 599 refuses; UID 600 (the floor itself) accepts —
     // see `destroy_accepts_at_floor` for the matching positive case.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["edge".to_string()],
         uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
         ..Default::default()
@@ -489,7 +493,7 @@ fn destroy_accepts_at_floor() {
     // so a future helper edit that bumps `stub_with_tenant`'s UID can't
     // silently erase the boundary contract.
     let exec = StubHostMachine::new();
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["edge".to_string()],
         uid_by_name: [("edge".to_string(), UserId(600))].into_iter().collect(),
         ..Default::default()
@@ -531,12 +535,12 @@ fn destroy_refuses_when_uid_unknown_but_user_present() {
     // The canonical real-world case is `nobody` on macOS (UID -2 filtered
     // by `parse_uid_line` out of `uid_by_name`), but `nobody` is now
     // lexically reserved — the blocklist trips first. Synthetic
-    // `phantom` reproduces the same HostAccounts state (present in `users`,
+    // `phantom` reproduces the same HostUserDirectory state (present in `users`,
     // absent from `uid_by_name`) without crossing the reserved-name
     // rail, so the test still pins the `Eligibility::SystemAccount`
     // arm. `has_user` is true, `uid_for` returns None → refuse with
     // EX_USAGE, NOT a noop.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
         // uid_by_name deliberately empty: simulates the parse_uid_line
         // negative-UID filter.
@@ -557,7 +561,7 @@ fn destroy_refuses_below_floor_verbose() {
     // (no "Destroying …" line, no argv). The refusal is the only output,
     // and it goes to stderr. Guards against a class of "we built the argv
     // string before checking the guard" regressions.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["edge".to_string()],
         uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
         ..Default::default()
@@ -575,7 +579,8 @@ fn destroy_refuses_below_floor_verbose() {
 fn destroy_noop_when_user_missing_verbose() {
     // -v on the convergent-noop path emits only the noop line — no
     // mechanism preview, no argv — and on stdout (not stderr).
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["destroy", "ghost", "-v"]);
+    let (code, stdout, stderr) =
+        run_with(StubUserDirectory::default(), &["destroy", "ghost", "-v"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "tenant 'ghost' does not exist; nothing to do.\n");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
@@ -586,7 +591,7 @@ fn destroy_noop_emits_in_dry_run_too() {
     // Same noop framing in dry-run mode — the message is tense-neutral
     // because we'd "do nothing" either way.
     let (code, stdout, stderr) = run_with(
-        StubHostAccounts::default(),
+        StubUserDirectory::default(),
         &["destroy", "dev", "--dry-run"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -600,14 +605,16 @@ fn destroy_rejects_reserved_names() {
     // pins that the blocklist applies to destroy too — important because
     // destroy_eligibility's `NotATenant` floor guard would catch most
     // reserved names by UID, but the lexical refusal is the cheaper
-    // first failure (no HostAccounts call needed) and surfaces the more
+    // first failure (no HostUserDirectory call needed) and surfaces the more
     // operator-relevant reason ("you can't name a tenant 'wheel'" vs
     // "UID 0 is below tenant floor 600").
     for name in [
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
-        let (code, stdout, stderr) =
-            run_with(StubHostAccounts::default(), &["destroy", name, "--dry-run"]);
+        let (code, stdout, stderr) = run_with(
+            StubUserDirectory::default(),
+            &["destroy", name, "--dry-run"],
+        );
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -622,7 +629,7 @@ fn destroy_rejects_reserved_names() {
 fn destroy_rejects_overlong_name() {
     let name = "a".repeat(32);
     let (code, stdout, stderr) = run_with(
-        StubHostAccounts::default(),
+        StubUserDirectory::default(),
         &["destroy", &name, "--dry-run"],
     );
     assert_eq!(code, 64);
@@ -697,7 +704,7 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
     // sysadminctl, no dscl — and exit 0. Standard-mode stdout names
     // the tenant (not the group) so it stays parallel with the rest
     // of the destroy UX from the operator's perspective.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -745,7 +752,7 @@ fn destroy_orphan_group_also_removes_profile_if_present() {
     // (the profile may or may not be present; either way is success).
     // Pre-load the profile alongside the orphan group to pin the "both
     // gone after" semantics.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -780,7 +787,7 @@ fn destroy_orphan_group_also_removes_profile_if_present() {
 fn destroy_dry_run_for_orphan_group() {
     // Dry-run twin: same convergence framing, "Would" tense. No exec
     // calls (dry-run bypasses the host machine — NeverHostMachine would panic).
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -796,7 +803,7 @@ fn destroy_dry_run_verbose_for_orphan_group() {
     // Standard-mode framing is tenant-named; verbose adds the group
     // name for grep-friendliness, matching the mechanism-exposure
     // convention used elsewhere in the codebase.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -816,7 +823,7 @@ fn destroy_real_mode_verbose_for_orphan_group() {
     // confirmation), just with one argv in each block instead of four.
     // Scripted-real-verbose drops the plan block. Orphan path has
     // 8 steps — no user-removal.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -858,7 +865,7 @@ fn destroy_noop_when_neither_user_nor_tenant_share_group_present() {
     // A regression that loosened the OrphanGroup check to bare-name
     // matching (e.g. dropping the `tenant_share_group_name` call) would
     // trip this test.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev".to_string()],
         ..Default::default()
     };
@@ -874,7 +881,7 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
     // whatever). Surface as EX_IOERR via the same `destroy_failed` shape
     // as the regular destroy — the operator's remediation is the same
     // (retry; if the issue persists, manual dscl inspection).
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -992,7 +999,7 @@ fn destroy_orphan_group_tears_down_firewall_too() {
     // have orphan PF state (e.g. a create that failed mid-firewall
     // before getting to UpdateConfig+Reload). The convergence path
     // includes the full PF teardown to clean both.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -1068,7 +1075,7 @@ fn destroy_invokes_flush_anchor_as_final_firewall_step() {
 #[test]
 fn destroy_orphan_group_invokes_flush_anchor_as_final_firewall_step() {
     // Same load-bearing flush, on the convergence path.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -1147,12 +1154,12 @@ fn destroy_with_yes_flag_skips_prompt() {
 }
 
 #[test]
-fn destroy_surfaces_accounts_error_when_eligibility_probe_fails() {
+fn destroy_surfaces_user_directory_error_when_eligibility_probe_fails() {
     // `destroy_eligibility` calls has_user / has_group / uid_for; a dscl
     // failure at has_user routes to `destroy_eligibility_probe_failed`
     // and exits 74 before the convergent-noop or Destroyable branches.
-    let stub = StubHostAccounts {
-        fail_has_user: accounts_fail_once(),
+    let stub = StubUserDirectory {
+        fail_has_user: directory_fail_once(),
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["destroy", "dev", "--dry-run"]);
@@ -1165,7 +1172,7 @@ fn destroy_surfaces_accounts_error_when_eligibility_probe_fails() {
 }
 
 #[test]
-fn destroy_surfaces_accounts_error_when_uid_lookup_fails() {
+fn destroy_surfaces_user_directory_error_when_uid_lookup_fails() {
     // The `destroy_uid_lookup_failed` frame fires on the SECOND
     // `uid_for` call in the dispatch flow: `destroy_eligibility`
     // already consumed the first to classify `Destroyable`, then the
@@ -1174,10 +1181,10 @@ fn destroy_surfaces_accounts_error_when_uid_lookup_fails() {
     // fails the second. The re-lookup only fires when `show_summary`
     // is true — driven by `--dry-run` here so stdin doesn't have to
     // be a TTY.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["dev".to_string()],
         uid_by_name: [("dev".to_string(), UserId(600))].into_iter().collect(),
-        fail_uid_for: accounts_fail_on_second_call(),
+        fail_uid_for: directory_fail_on_second_call(),
         ..Default::default()
     };
     let (code, _stdout, stderr) = run_with(stub, &["destroy", "dev", "--dry-run"]);

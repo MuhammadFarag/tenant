@@ -21,7 +21,7 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
 
 pub(crate) fn dispatch(
     cli: Cli,
-    accounts: &dyn super::HostAccounts,
+    directory: &dyn super::HostUserDirectory,
     tenants: &tenants::Tenants<'_>,
     host: &super::HostUserName,
     reporter: &mut Reporter,
@@ -33,7 +33,7 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            match tenants::check_conflict(accounts, &name) {
+            match tenants::check_conflict(directory, &name) {
                 Ok(None) => {}
                 Ok(Some(conflict)) => {
                     reporter.refuse_name_conflict(&name, &conflict);
@@ -44,14 +44,14 @@ pub(crate) fn dispatch(
                     return EX_IOERR;
                 }
             }
-            let uid = match allocation::UidAllocator::new(accounts).lowest_free_uid() {
+            let uid = match allocation::UidAllocator::new(directory).lowest_free_uid() {
                 Ok(uid) => uid,
                 Err(e) => {
                     reporter.create_uid_allocation_failed(&e);
                     return EX_IOERR;
                 }
             };
-            let gid = match allocation::GidAllocator::new(accounts).lowest_free_gid() {
+            let gid = match allocation::GidAllocator::new(directory).lowest_free_gid() {
                 Ok(gid) => gid,
                 Err(e) => {
                     reporter.create_gid_allocation_failed(&e);
@@ -111,7 +111,7 @@ pub(crate) fn dispatch(
             }
             // NotPresent + OrphanGroup collapse to one refusal: shell can't
             // run against a lingering group; convergence belongs to destroy.
-            let eligibility = match tenants::destroy_eligibility(accounts, &name) {
+            let eligibility = match tenants::destroy_eligibility(directory, &name) {
                 Ok(e) => e,
                 Err(e) => {
                     reporter.shell_eligibility_probe_failed(&name, &e);
@@ -185,7 +185,7 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            let eligibility = match tenants::destroy_eligibility(accounts, &name) {
+            let eligibility = match tenants::destroy_eligibility(directory, &name) {
                 Ok(e) => e,
                 Err(e) => {
                     reporter.mode_eligibility_probe_failed(&name, &e);
@@ -247,7 +247,7 @@ pub(crate) fn dispatch(
                     reporter.refuse_invalid_name(&n, &e);
                     return EX_USAGE;
                 }
-                let eligibility = match tenants::destroy_eligibility(accounts, &n) {
+                let eligibility = match tenants::destroy_eligibility(directory, &n) {
                     Ok(e) => e,
                     Err(e) => {
                         reporter.doctor_eligibility_probe_failed(&n, &e);
@@ -278,7 +278,7 @@ pub(crate) fn dispatch(
                     }
                 }
             }
-            None => match tenants.doctor_all(host, accounts, reporter) {
+            None => match tenants.doctor_all(host, directory, reporter) {
                 Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
                 Err(e) => {
                     surface_doctor_error(reporter, &e);
@@ -292,7 +292,7 @@ pub(crate) fn dispatch(
                     reporter.refuse_invalid_name(&n, &e);
                     return EX_USAGE;
                 }
-                let eligibility = match tenants::destroy_eligibility(accounts, &n) {
+                let eligibility = match tenants::destroy_eligibility(directory, &n) {
                     Ok(e) => e,
                     Err(e) => {
                         reporter.reload_eligibility_probe_failed(&n, &e);
@@ -349,7 +349,7 @@ pub(crate) fn dispatch(
             None => {
                 // Show scope before the prompt; empty host has nothing
                 // to confirm, so skip straight to the no-op summary.
-                let names = match accounts.tenant_names() {
+                let names = match directory.tenant_names() {
                     Ok(n) => n,
                     Err(e) => {
                         reporter.reload_all_enumeration_failed(&e);
@@ -357,7 +357,7 @@ pub(crate) fn dispatch(
                     }
                 };
                 if names.is_empty() {
-                    return match tenants.reload_all(accounts, host, reporter) {
+                    return match tenants.reload_all(directory, host, reporter) {
                         Ok(outcome) if outcome.failed == 0 => 0,
                         Ok(_) => EX_IOERR,
                         Err(e) => {
@@ -373,7 +373,7 @@ pub(crate) fn dispatch(
                     reporter.aborted();
                     return 0;
                 }
-                match tenants.reload_all(accounts, host, reporter) {
+                match tenants.reload_all(directory, host, reporter) {
                     Ok(outcome) if outcome.failed == 0 => 0,
                     Ok(_) => EX_IOERR,
                     Err(e) => {
@@ -388,7 +388,7 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            let eligibility = match tenants::destroy_eligibility(accounts, &name) {
+            let eligibility = match tenants::destroy_eligibility(directory, &name) {
                 Ok(e) => e,
                 Err(e) => {
                     reporter.destroy_eligibility_probe_failed(&name, &e);
@@ -430,7 +430,7 @@ pub(crate) fn dispatch(
                     let destroy_plan_ops = build_destroy_plan_ops(&name, host);
                     let destroy_plan = destroy_plan_entries(&destroy_plan_ops);
                     if show_summary {
-                        let uid = match accounts.uid_for(&name) {
+                        let uid = match directory.uid_for(&name) {
                             Ok(opt) => opt.unwrap_or(super::UserId(0)),
                             Err(e) => {
                                 reporter.destroy_uid_lookup_failed(&name, &e);
@@ -471,7 +471,7 @@ fn surface_doctor_error(reporter: &mut Reporter, error: &tenants::DoctorError) {
         tenants::DoctorError::Probe(e) => reporter.doctor_failed(e),
         tenants::DoctorError::HostFile(e) => reporter.doctor_host_file_failed(e),
         tenants::DoctorError::Firewall(e) => reporter.doctor_firewall_failed(e),
-        tenants::DoctorError::AccountsLookup(e) => reporter.doctor_enumeration_failed(e),
+        tenants::DoctorError::UserDirectoryLookup(e) => reporter.doctor_enumeration_failed(e),
     }
 }
 

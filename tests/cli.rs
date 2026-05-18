@@ -3,21 +3,23 @@
 //! cli_doctor); shared helpers — `NeverHostMachine`, `run_with`, `run_with_exec`,
 //! `TEST_HOST`, plus stub-builder factories — live in `tests/common/mod.rs`.
 
-use tenant::adapters::stub_host_accounts::StubHostAccounts;
+use tenant::adapters::stub_user_directory::StubUserDirectory;
 
 mod common;
 use common::*;
 
 #[test]
 fn help_exits_zero() {
-    let (code, _stdout, stderr) = run_with(StubHostAccounts::default(), &["--help"]);
+    let (code, _stdout, stderr) = run_with(StubUserDirectory::default(), &["--help"]);
     assert_eq!(code, 0, "--help exited with {code}; stderr={stderr:?}");
 }
 
 #[test]
 fn dry_run_accepted_as_global_flag_before_subcommand() {
-    let (code, stdout, stderr) =
-        run_with(StubHostAccounts::default(), &["--dry-run", "create", "dev"]);
+    let (code, stdout, stderr) = run_with(
+        StubUserDirectory::default(),
+        &["--dry-run", "create", "dev"],
+    );
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     // Dry-run: summary + prompt-preview, no substrate.
     assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));

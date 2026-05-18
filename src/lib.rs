@@ -123,7 +123,7 @@ impl ModeLevel {
 // over `Vec<u8>` writers and a `Cursor` reader.
 pub fn run(
     args: &[String],
-    accounts: &dyn domain::HostAccounts,
+    directory: &dyn domain::HostUserDirectory,
     machine: &dyn domain::HostMachine,
     host: &HostUserName,
     mut terminal: Terminal<'_>,
@@ -140,7 +140,7 @@ pub fn run(
     };
     let tenants = domain::Tenants::new(active_machine);
     let mut reporter = Reporter::new(terminal, cli.verbose, cli.dry_run, cli.yes, active_machine);
-    domain::commands::dispatch(cli, accounts, &tenants, host, &mut reporter)
+    domain::commands::dispatch(cli, directory, &tenants, host, &mut reporter)
 }
 
 fn parse(args: &[String], terminal: &mut Terminal<'_>) -> Result<Cli, u8> {

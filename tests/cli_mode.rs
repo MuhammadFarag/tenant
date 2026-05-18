@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::adapters::stub_host_machine::StubHostMachine;
+use tenant::adapters::stub_user_directory::StubUserDirectory;
 use tenant::domain::{AccountOp, AclMode, AclOp, FirewallError, FirewallOp, PathKind, UserId};
 
 mod common;
@@ -67,7 +67,7 @@ fn mode_rejects_unknown_level() {
 #[test]
 fn mode_requires_name() {
     // `tenant mode` with no positional → clap parse error.
-    let (code, _stdout, _stderr) = run_with(StubHostAccounts::default(), &["mode"]);
+    let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["mode"]);
     assert_eq!(code, 1, "clap should reject missing name");
 }
 
@@ -75,7 +75,7 @@ fn mode_requires_name() {
 fn mode_requires_level() {
     // `tenant mode dev` (no level) → clap parse error. Pins the
     // ValueEnum being a required positional.
-    let (code, _stdout, _stderr) = run_with(StubHostAccounts::default(), &["mode", "dev"]);
+    let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["mode", "dev"]);
     assert_eq!(code, 1, "clap should reject missing level");
 }
 
@@ -86,9 +86,9 @@ fn mode_requires_level() {
 #[test]
 fn mode_rejects_empty_name() {
     // Lexical validation runs before eligibility; empty name trips
-    // NameError::Empty and never consults the HostAccounts. Same shape and
+    // NameError::Empty and never consults the HostUserDirectory. Same shape and
     // wording as create/destroy/shell.
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["mode", "", "runtime"]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["mode", "", "runtime"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: name cannot be empty\n");
@@ -102,7 +102,7 @@ fn mode_rejects_reserved_names() {
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
         let (code, stdout, stderr) =
-            run_with(StubHostAccounts::default(), &["mode", name, "runtime"]);
+            run_with(StubUserDirectory::default(), &["mode", name, "runtime"]);
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -115,9 +115,9 @@ fn mode_rejects_reserved_names() {
 
 #[test]
 fn mode_refuses_when_tenant_absent() {
-    // Empty StubHostAccounts → NotPresent → refuse_mode_absent. Exit 64.
+    // Empty StubUserDirectory → NotPresent → refuse_mode_absent. Exit 64.
     let (code, stdout, stderr) =
-        run_with(StubHostAccounts::default(), &["mode", "ghost", "runtime"]);
+        run_with(StubUserDirectory::default(), &["mode", "ghost", "runtime"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -131,7 +131,7 @@ fn mode_refuses_when_only_orphan_group_present() {
     // OrphanGroup collapses to the same refusal as NotPresent for
     // mode purposes — operator wants to apply a mode; the lingering
     // group can't host one. Same collapse as the shell verb.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -150,7 +150,7 @@ fn mode_refuses_below_floor() {
     // TENANT_UID_FLOOR (600) → refuse. `legacyusr` sidesteps the
     // reserved-name blocklist so this test exercises the state-based
     // refusal path specifically.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
         ..Default::default()
@@ -168,7 +168,7 @@ fn mode_refuses_below_floor() {
 fn mode_refuses_system_account() {
     // System-account refusal: `has_user` true, `uid_for` None (negative
     // UID was filtered by parse_id_line). Same shape as destroy/shell.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
         ..Default::default()
     };
@@ -186,7 +186,7 @@ fn mode_dry_run_refuses_missing_tenant() {
     // Dry-run doesn't bypass eligibility — same answer real-mode
     // would give. Mirrors shell_dry_run_refuses_missing_tenant.
     let (code, stdout, stderr) = run_with(
-        StubHostAccounts::default(),
+        StubUserDirectory::default(),
         &["mode", "ghost", "runtime", "--dry-run"],
     );
     assert_eq!(code, 64);
@@ -1086,11 +1086,11 @@ fn mode_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
 }
 
 #[test]
-fn mode_surfaces_accounts_error_when_eligibility_probe_fails() {
+fn mode_surfaces_user_directory_error_when_eligibility_probe_fails() {
     // `destroy_eligibility` is shared by mode; the verb's frame names
     // 'mode' so log-grep can bind to the verb invocation.
-    let stub = StubHostAccounts {
-        fail_has_user: accounts_fail_once(),
+    let stub = StubUserDirectory {
+        fail_has_user: directory_fail_once(),
         ..Default::default()
     };
     let (code, _stdout, stderr) = run_with(stub, &["mode", "dev", "runtime"]);

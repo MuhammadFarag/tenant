@@ -28,7 +28,7 @@ Verbs:
 
 Rust port of an earlier Go prototype (at `/Users/plugin-dev/src/tenant/`
 for cross-reference); follows Rust idioms (clap derive,
-composition-root DI, trait-object HostAccounts) rather than mirroring the
+composition-root DI, trait-object HostUserDirectory) rather than mirroring the
 Go shape.
 
 ## Scope
@@ -53,8 +53,8 @@ src/terminal.rs   — `Terminal { stdout, stderr, stdin, stdin_is_tty,
                     `run` → `parse` → `Reporter`.
 src/ansi.rs       — `Colors { stdout, stderr }` per-stream gate; color
                     wrappers; `rule(title, width)` section divider.
-src/domain/       — domain layer. `host_accounts.rs` defines the
-                    `HostAccounts` trait — driven port for account
+src/domain/       — domain layer. `host_user_directory.rs` defines the
+                    `HostUserDirectory` trait — driven port for account
                     inventory queries (`used_uids` / `used_gids` /
                     `has_user` / `has_group` / `uid_for` /
                     `tenant_names`). `host_machine.rs` defines the
@@ -71,7 +71,7 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     `AccountOp` / `ProfileOp` / `FirewallOp` /
                     `AclOp` plus the four `impl WritableOp for *Op`
                     blocks. `errors.rs` carries the per-domain error
-                    types (`AccountError`, `AccountsError`, `AclError`,
+                    types (`AccountError`, `UserDirectoryError`, `AclError`,
                     `FirewallError`, `HostFileError`, `ProbeError`).
                     `ids.rs` carries the domain newtypes (`UserId` / `GroupId` /
                     `TenantUserName` / `HostUserName` / `GroupName`),
@@ -118,12 +118,12 @@ src/domain/reporter.rs
                     `dry_run || stdin_is_tty`). `doctor_finding` /
                     `doctor_finding_one_liner` /
                     `doctor_summary_pending` drive the audit surface.
-src/adapters/     — driven adapters. `stub_host_accounts.rs`
-                    (`StubHostAccounts` — test substitute; HashMap-
+src/adapters/     — driven adapters. `stub_user_directory.rs`
+                    (`StubUserDirectory` — test substitute; HashMap-
                     backed inventory with per-method
-                    `RefCell<VecDeque<Option<AccountsError>>>` failure-
-                    injection queues) + `macos/host_accounts.rs`
-                    (`MacosHostAccounts` — ZST driver; per-call dscl
+                    `RefCell<VecDeque<Option<UserDirectoryError>>>` failure-
+                    injection queues) + `macos/user_directory.rs`
+                    (`MacosUserDirectory` — ZST driver; per-call dscl
                     with `eDSRecordNotFound` absence detection;
                     symmetric with `MacosHostMachine`).
                     Three `HostMachine` impls: `macos/host_machine.rs`
@@ -162,8 +162,8 @@ tests/macos_host_machine.rs
                             `MacosHostMachine::describe_*` argv contracts.
 tests/intent_labels.rs    — per-variant pins of `Op::intent_label()`
                             + sharpening pins (intent ≠ business label).
-tests/macos_host_accounts.rs
-                          — `MacosHostAccounts` per-call dscl smoke +
+tests/macos_user_directory.rs
+                          — `MacosUserDirectory` per-call dscl smoke +
                             `eDSRecordNotFound` absence-detection pin
                             (`#[cfg(target_os = "macos")]`).
 tests/doctor.rs           — combinatorial: classify matrix, `Finding`
@@ -202,11 +202,11 @@ it from scratch wastes a cycle and risks getting it wrong.
   render — `execute_account` panics on them. Future HostMachine method:
   if it fits `Result<(), E>`, make it an ADT variant; if not, carve out.
 
-- **Probe via HostMachine, not HostAccounts re-read.** When a verb
+- **Probe via HostMachine, not HostUserDirectory re-read.** When a verb
   needs to re-check OS state mid-execution (destroy's
   `LookupUserRecord` residue probe is canonical), it's a regular
   substrate call whose `Ok` vs `Err` drives a Tenants branch.
-  HostAccounts is for inventory queries (presence, IDs, enumeration)
+  HostUserDirectory is for inventory queries (presence, IDs, enumeration)
   consumed up front in dispatch; per-mutation follow-up probes
   belong on HostMachine alongside the mutation they verify.
 
@@ -237,9 +237,9 @@ it from scratch wastes a cycle and risks getting it wrong.
   touches raw writers nor checks `cli.verbose` / `cli.dry_run`. Mode
   / verbosity branching lives inside Reporter.
 
-- **Composition-root DI.** `tenant::run` takes `&dyn accounts::HostAccounts`
+- **Composition-root DI.** `tenant::run` takes `&dyn HostUserDirectory`
   + `&dyn host_machine::HostMachine` + a `Terminal` bundle. `main.rs`
-  builds prod impls; tests build `StubHostAccounts` + `StubHostMachine` /
+  builds prod impls; tests build `StubUserDirectory` + `StubHostMachine` /
   `NeverHostMachine`. Tenants + Reporter constructed inside `run` from
   the active HostMachine; both swap to `DryRunHostMachine` when
   `--dry-run`. Test seam stays at the HostMachine boundary.
@@ -256,7 +256,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   Write)` shapes; pass `Terminal` and let the body access what it
   needs.
 
-- **Per-call dscl on `HostAccounts`.** `MacosHostAccounts` is a ZST;
+- **Per-call dscl on `HostUserDirectory`.** `MacosUserDirectory` is a ZST;
   each trait method spawns dscl per call. No internal cache, no eager
   snapshot at composition-root. A verb that calls `has_user` +
   `uid_for` + the allocator pays N+1 dscl spawns; on a solo-Mac admin
@@ -514,7 +514,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   `doctor::has_group_acl_entry(listing, group: &str)`, etc., stay as
   `&str` parameters. Callers pass `name.as_str()` from a
   `&TenantUserName` (or `group.as_str()` from a `&GroupName`). The
-  type-safety win is realized at the Tenants / HostAccounts / Reporter
+  type-safety win is realized at the Tenants / HostUserDirectory / Reporter
   method boundaries and at ADT variants
   (`AccountOp::CreateTenantUser { name: TenantUserName, ... }`,
   `AccountOp::CreateShareGroup { group: GroupName, ... }`,
@@ -538,11 +538,11 @@ it from scratch wastes a cycle and risks getting it wrong.
 ## Test discipline
 
 E2E-first. Bulk in `tests/cli_<verb>.rs` drives through `tenant::run`
-with `StubHostAccounts` + `StubHostMachine`. `tests/cli.rs` holds parser
+with `StubUserDirectory` + `StubHostMachine`. `tests/cli.rs` holds parser
 cross-cutting. Shared helpers in `tests/common/mod.rs`. Inline
 `#[cfg(test)] mod tests` is out of style; standalone unit-test files
 need explicit justification (per-substrate boundary pins for
-`macos_host_machine.rs` / `macos_host_accounts.rs`; combinatorial coverage on
+`macos_host_machine.rs` / `macos_user_directory.rs`; combinatorial coverage on
 pure functions for the parse/render/classify pin files).
 
 `run_with(stub, args) -> (u8, String, String)` wires `NeverHostMachine`

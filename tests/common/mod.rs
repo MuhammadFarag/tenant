@@ -11,30 +11,30 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 
-use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::adapters::stub_host_machine::StubHostMachine;
+use tenant::adapters::stub_user_directory::StubUserDirectory;
 use tenant::domain::{
-    AccountError, AccountOp, AccountsError, FirewallError, FirewallOp, GroupId, GroupName,
-    HostMachine, HostUserName, ProfileOp, TenantUserName, UserId,
+    AccountError, AccountOp, FirewallError, FirewallOp, GroupId, GroupName, HostMachine,
+    HostUserName, ProfileOp, TenantUserName, UserDirectoryError, UserId,
 };
 
 /// Single-failure queue: returns Err on the first call to the matching
-/// `HostAccounts` method, snapshots thereafter. The default fixture for
+/// `HostUserDirectory` method, snapshots thereafter. The default fixture for
 /// tests that drive Reporter's `*_eligibility_probe_failed` /
 /// `*_allocation_failed` / `*_enumeration_failed` / `*_conflict_probe_failed`
 /// frames — one call site, one failure.
-pub fn accounts_fail_once() -> RefCell<VecDeque<Option<AccountsError>>> {
-    let err = AccountsError::Spawn(io::Error::other("synthetic"));
+pub fn directory_fail_once() -> RefCell<VecDeque<Option<UserDirectoryError>>> {
+    let err = UserDirectoryError::Spawn(io::Error::other("synthetic"));
     RefCell::new(VecDeque::from([Some(err)]))
 }
 
 /// Pass-then-fail queue: first call succeeds (uses the snapshot), second
 /// fails. The fixture for `destroy_uid_lookup_failed` — the dispatch
-/// surface where `accounts.uid_for` is called AFTER `destroy_eligibility`
+/// surface where `directory.uid_for` is called AFTER `destroy_eligibility`
 /// already consumed its own `uid_for` call. Without skipping the first
 /// call, the failure routes to `destroy_eligibility_probe_failed`.
-pub fn accounts_fail_on_second_call() -> RefCell<VecDeque<Option<AccountsError>>> {
-    let err = AccountsError::Spawn(io::Error::other("synthetic"));
+pub fn directory_fail_on_second_call() -> RefCell<VecDeque<Option<UserDirectoryError>>> {
+    let err = UserDirectoryError::Spawn(io::Error::other("synthetic"));
     RefCell::new(VecDeque::from([None, Some(err)]))
 }
 
@@ -608,7 +608,7 @@ pub fn reload_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
     )
 }
 
-pub fn run_with(stub: StubHostAccounts, args: &[&str]) -> (u8, String, String) {
+pub fn run_with(stub: StubUserDirectory, args: &[&str]) -> (u8, String, String) {
     let machine = NeverHostMachine;
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
@@ -631,7 +631,7 @@ pub fn run_with(stub: StubHostAccounts, args: &[&str]) -> (u8, String, String) {
 }
 
 pub fn run_with_exec(
-    stub: StubHostAccounts,
+    stub: StubUserDirectory,
     exec: &StubHostMachine,
     args: &[&str],
 ) -> (u8, String, String) {
@@ -663,7 +663,7 @@ pub fn run_with_exec(
 /// posture (stdin=empty, tty=false) so the existing test bank is
 /// unaffected.
 pub fn run_with_stdin(
-    stub: StubHostAccounts,
+    stub: StubUserDirectory,
     exec: &StubHostMachine,
     args: &[&str],
     stdin_content: &[u8],
@@ -692,8 +692,8 @@ pub fn run_with_stdin(
 /// UID (for tests that drive the destroy verb's actual-destroy path rather
 /// than its noop / refusal paths). UID 600 is the canonical floor; any
 /// floor-or-above UID would do.
-pub fn stub_with_tenant(name: &str) -> StubHostAccounts {
-    StubHostAccounts {
+pub fn stub_with_tenant(name: &str) -> StubUserDirectory {
+    StubUserDirectory {
         users: vec![name.to_string()],
         uid_by_name: [(name.to_string(), UserId(600))].into_iter().collect(),
         ..Default::default()
@@ -760,8 +760,8 @@ pub fn profile_with_hosts(runtime: &[&str], install: &[&str]) -> String {
 
 /// A reader where `name` is present as a Destroyable tenant (UID at floor,
 /// group present). Lets dispatch reach `doctor_tenant`.
-pub fn make_tenant_stub_reader(name: &str) -> StubHostAccounts {
-    StubHostAccounts {
+pub fn make_tenant_stub_reader(name: &str) -> StubUserDirectory {
+    StubUserDirectory {
         users: vec![name.to_string()],
         groups: vec![format!("{name}-tenant-share")],
         uid_by_name: [(name.to_string(), UserId(600))].into_iter().collect(),
@@ -772,8 +772,8 @@ pub fn make_tenant_stub_reader(name: &str) -> StubHostAccounts {
     }
 }
 
-pub fn make_two_tenant_stub_reader() -> StubHostAccounts {
-    StubHostAccounts {
+pub fn make_two_tenant_stub_reader() -> StubUserDirectory {
+    StubUserDirectory {
         users: vec!["dev".to_string(), "staging".to_string()],
         groups: vec![
             "dev-tenant-share".to_string(),

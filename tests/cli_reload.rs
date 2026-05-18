@@ -14,8 +14,8 @@
 
 use std::path::PathBuf;
 
-use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::adapters::stub_host_machine::StubHostMachine;
+use tenant::adapters::stub_user_directory::StubUserDirectory;
 use tenant::domain::{
     AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, PathKind, UserId,
 };
@@ -40,11 +40,11 @@ fn reload_single_tenant_dry_run_default_emits_intent_only() {
 
 #[test]
 fn reload_no_arg_form_dry_run_with_no_tenants_emits_summary_only() {
-    // Empty HostAccounts → tenant_names() empty → no-tenant summary
+    // Empty HostUserDirectory → tenant_names() empty → no-tenant summary
     // explicitly tells the operator "nothing to do" so the output
     // isn't silent. Real-mode prints the line; dry-run is silent on
     // summaries (would_done is silent).
-    let (code, stdout, _stderr) = run_with(StubHostAccounts::default(), &["reload"]);
+    let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["reload"]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "No tenants on this host to reload.\n");
 }
@@ -55,7 +55,7 @@ fn reload_no_arg_form_dry_run_with_no_tenants_emits_summary_only() {
 
 #[test]
 fn reload_rejects_empty_name() {
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["reload", ""]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["reload", ""]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: name cannot be empty\n");
@@ -66,7 +66,7 @@ fn reload_rejects_reserved_names() {
     for name in [
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
-        let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["reload", name]);
+        let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["reload", name]);
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -79,7 +79,7 @@ fn reload_rejects_reserved_names() {
 
 #[test]
 fn reload_refuses_when_tenant_absent() {
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["reload", "ghost"]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["reload", "ghost"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: cannot reload 'ghost': does not exist\n");
@@ -87,7 +87,7 @@ fn reload_refuses_when_tenant_absent() {
 
 #[test]
 fn reload_refuses_when_only_orphan_group_present() {
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -98,7 +98,7 @@ fn reload_refuses_when_only_orphan_group_present() {
 
 #[test]
 fn reload_refuses_below_floor() {
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
         ..Default::default()
@@ -113,7 +113,7 @@ fn reload_refuses_below_floor() {
 
 #[test]
 fn reload_refuses_system_account() {
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
         ..Default::default()
     };
@@ -516,7 +516,7 @@ fn reload_no_arg_continues_on_per_tenant_failure() {
 
 #[test]
 fn reload_no_arg_emits_no_op_summary_when_no_tenants() {
-    let (code, stdout, _stderr) = run_with(StubHostAccounts::default(), &["reload"]);
+    let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["reload"]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "No tenants on this host to reload.\n");
 }
@@ -685,12 +685,12 @@ fn reload_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
 }
 
 #[test]
-fn reload_surfaces_accounts_error_when_eligibility_probe_fails() {
+fn reload_surfaces_user_directory_error_when_eligibility_probe_fails() {
     // Single-tenant reload re-uses `destroy_eligibility`; a dscl failure
     // routes to `reload_eligibility_probe_failed` with reload-named
     // action wording.
-    let stub = StubHostAccounts {
-        fail_has_user: accounts_fail_once(),
+    let stub = StubUserDirectory {
+        fail_has_user: directory_fail_once(),
         ..Default::default()
     };
     let (code, _stdout, stderr) = run_with(stub, &["reload", "dev"]);
@@ -702,12 +702,12 @@ fn reload_surfaces_accounts_error_when_eligibility_probe_fails() {
 }
 
 #[test]
-fn reload_all_surfaces_accounts_error_when_tenant_enumeration_fails() {
-    // No-arg `reload` walks `accounts.tenant_names()`; a dscl failure
+fn reload_all_surfaces_user_directory_error_when_tenant_enumeration_fails() {
+    // No-arg `reload` walks `directory.tenant_names()`; a dscl failure
     // surfaces as `reload_all_enumeration_failed` and aborts the walk
     // before any per-tenant work.
-    let stub = StubHostAccounts {
-        fail_tenant_names: accounts_fail_once(),
+    let stub = StubUserDirectory {
+        fail_tenant_names: directory_fail_once(),
         ..Default::default()
     };
     let (code, _stdout, stderr) = run_with(stub, &["reload"]);

@@ -8,8 +8,8 @@ use crate::doctor::{
 };
 use crate::domain::reporter::Reporter;
 use crate::domain::{
-    AccountsError, FirewallError, HostAccounts, HostFileError, HostUserName, PathKind, ProbeError,
-    TenantUserName,
+    FirewallError, HostFileError, HostUserDirectory, HostUserName, PathKind, ProbeError,
+    TenantUserName, UserDirectoryError,
 };
 use crate::firewall::render_anchor;
 use crate::profile::{expand_tenant_path, parse};
@@ -30,7 +30,7 @@ pub(crate) enum DoctorError {
     Probe(ProbeError),
     HostFile(HostFileError),
     Firewall(FirewallError),
-    AccountsLookup(AccountsError),
+    UserDirectoryLookup(UserDirectoryError),
 }
 
 impl From<ProbeError> for DoctorError {
@@ -51,9 +51,9 @@ impl From<FirewallError> for DoctorError {
     }
 }
 
-impl From<AccountsError> for DoctorError {
-    fn from(e: AccountsError) -> Self {
-        DoctorError::AccountsLookup(e)
+impl From<UserDirectoryError> for DoctorError {
+    fn from(e: UserDirectoryError) -> Self {
+        DoctorError::UserDirectoryLookup(e)
     }
 }
 
@@ -101,7 +101,7 @@ impl<'a> Tenants<'a> {
     pub(crate) fn doctor_all(
         &self,
         host: &HostUserName,
-        accounts: &dyn HostAccounts,
+        directory: &dyn HostUserDirectory,
         reporter: &mut Reporter,
     ) -> Result<DoctorOutcome, DoctorError> {
         let mut findings: Vec<Finding> = Vec::new();
@@ -114,7 +114,7 @@ impl<'a> Tenants<'a> {
         if let Some(pf_disabled) = self.check_pf_status(reporter)? {
             findings.push(pf_disabled);
         }
-        let tenants = accounts.tenant_names()?;
+        let tenants = directory.tenant_names()?;
         if tenants.is_empty() {
             reporter.doctor_all_tenants_noop();
             return Ok(DoctorOutcome { findings });

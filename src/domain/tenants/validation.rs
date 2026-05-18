@@ -1,7 +1,7 @@
 //! Pre-verb-gate validation: charset rules and state-existence checks
 //! that fire before any verb logic touches the substrate.
 
-use crate::domain::{AccountsError, HostAccounts, TenantUserName};
+use crate::domain::{HostUserDirectory, TenantUserName, UserDirectoryError};
 
 use super::tenant_share_group_name;
 
@@ -69,14 +69,16 @@ pub fn validate_name(name: &TenantUserName) -> Result<(), NameError> {
 /// outcomes lets dispatch route lookup failure to a substep-named
 /// frame distinct from the conflict-refusal frame.
 pub fn check_conflict(
-    reader: &dyn HostAccounts,
+    directory: &dyn HostUserDirectory,
     name: &TenantUserName,
-) -> Result<Option<ConflictError>, AccountsError> {
+) -> Result<Option<ConflictError>, UserDirectoryError> {
     let group = tenant_share_group_name(name.as_str());
-    Ok(match (reader.has_user(name)?, reader.has_group(&group)?) {
-        (false, false) => None,
-        (true, false) => Some(ConflictError::UserExists),
-        (false, true) => Some(ConflictError::GroupExists),
-        (true, true) => Some(ConflictError::Both),
-    })
+    Ok(
+        match (directory.has_user(name)?, directory.has_group(&group)?) {
+            (false, false) => None,
+            (true, false) => Some(ConflictError::UserExists),
+            (false, true) => Some(ConflictError::GroupExists),
+            (true, true) => Some(ConflictError::Both),
+        },
+    )
 }

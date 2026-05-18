@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::adapters::stub_host_machine::StubHostMachine;
+use tenant::adapters::stub_user_directory::StubUserDirectory;
 use tenant::domain::{AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, UserId};
 
 mod common;
@@ -134,11 +134,11 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
 
 #[test]
 fn shell_refuses_when_tenant_absent() {
-    // Empty StubHostAccounts — no user, no group. Shell must refuse: there's
+    // Empty StubUserDirectory — no user, no group. Shell must refuse: there's
     // no account to log into. Exit 64 (EX_USAGE; the operator gave us a
     // name we can't resolve). Never reaches the host machine (NeverHostMachine
     // would panic), so stdout stays empty and the refusal lands on stderr.
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["shell", "ghost"]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["shell", "ghost"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -155,7 +155,7 @@ fn shell_refuses_when_only_orphan_group_present() {
     // NotPresent case. A regression that special-cased OrphanGroup
     // (e.g. mentioning the group, or routing to a different message)
     // would trip this test.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
@@ -171,7 +171,7 @@ fn shell_refuses_below_floor() {
     // positive UID below TENANT_UID_FLOOR (600) → refuse. `legacyusr`
     // sidesteps the reserved-name blocklist so this test exercises
     // the state-based refusal path specifically.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
         ..Default::default()
@@ -190,7 +190,7 @@ fn shell_refuses_system_account() {
     // System-account refusal (`has_user` true, `uid_for` None — service
     // accounts whose negative UIDs were filtered by `parse_id_line`).
     // Same shape as destroy's `system_account_refusal`.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
         ..Default::default()
     };
@@ -209,7 +209,7 @@ fn shell_refuses_below_floor_verbose() {
     // line, no mechanism preview. Mirrors `destroy_refuses_below_floor_verbose`;
     // guards against "we built the argv before the eligibility match"
     // regressions.
-    let stub = StubHostAccounts {
+    let stub = StubUserDirectory {
         users: vec!["edge".to_string()],
         uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
         ..Default::default()
@@ -226,9 +226,9 @@ fn shell_refuses_below_floor_verbose() {
 #[test]
 fn shell_rejects_empty_name() {
     // Lexical validation runs before eligibility; an empty name trips
-    // `NameError::Empty` and never consults the HostAccounts. Same shape and
+    // `NameError::Empty` and never consults the HostUserDirectory. Same shape and
     // wording as create/destroy.
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["shell", ""]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["shell", ""]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(stderr, "tenant: name cannot be empty\n");
@@ -239,7 +239,7 @@ fn shell_rejects_invalid_start() {
     // Pins the leading-letter rule for shell. One representative case
     // (a digit) — the full parametric matrix lives on
     // `create_rejects_non_letter_start` / `destroy_rejects_non_letter_start`.
-    let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["shell", "1dev"]);
+    let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["shell", "1dev"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
     assert_eq!(
@@ -257,7 +257,7 @@ fn shell_rejects_reserved_names() {
     for name in [
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
-        let (code, stdout, stderr) = run_with(StubHostAccounts::default(), &["shell", name]);
+        let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["shell", name]);
         assert_eq!(code, 64, "want EX_USAGE for {name:?}");
         assert!(
             stdout.is_empty(),
@@ -275,7 +275,7 @@ fn shell_dry_run_refuses_missing_tenant() {
     // they'd get in real mode. Refusal lands on stderr; stdout stays
     // empty; no host-machine invocation.
     let (code, stdout, stderr) = run_with(
-        StubHostAccounts::default(),
+        StubUserDirectory::default(),
         &["shell", "ghost", "--dry-run"],
     );
     assert_eq!(code, 64);
@@ -399,7 +399,7 @@ fn shell_refusal_does_not_invoke_narrow() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) =
-        run_with_exec(StubHostAccounts::default(), &exec, &["shell", "ghost"]);
+        run_with_exec(StubUserDirectory::default(), &exec, &["shell", "ghost"]);
     assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
     assert!(
         stdout.is_empty(),
@@ -1716,12 +1716,12 @@ fn shell_clap_rejects_mode_without_argv() {
 }
 
 #[test]
-fn shell_surfaces_accounts_error_when_eligibility_probe_fails() {
+fn shell_surfaces_user_directory_error_when_eligibility_probe_fails() {
     // Same eligibility probe as destroy — a dscl failure on `has_user`
     // routes to `shell_eligibility_probe_failed` with shell-named
     // action wording.
-    let stub = StubHostAccounts {
-        fail_has_user: accounts_fail_once(),
+    let stub = StubUserDirectory {
+        fail_has_user: directory_fail_once(),
         ..Default::default()
     };
     let (code, _stdout, stderr) = run_with(stub, &["shell", "dev"]);
