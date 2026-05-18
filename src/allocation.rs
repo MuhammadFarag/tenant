@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::accounts::Reader;
+use crate::domain::Reader;
 use crate::ids::{GroupId, UserId};
 
 /// Lower bound for tenant UIDs *and* GIDs — clear of macOS system

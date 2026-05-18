@@ -3,7 +3,7 @@
 //! cli_doctor); shared helpers — `NeverExecutor`, `run_with`, `run_with_exec`,
 //! `TEST_HOST`, plus stub-builder factories — live in `tests/common/mod.rs`.
 
-use tenant::accounts::StubReader;
+use tenant::adapters::stub_reader::StubReader;
 
 mod common;
 use common::*;

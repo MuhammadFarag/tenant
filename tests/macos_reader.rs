@@ -6,7 +6,7 @@
 //! platform via `StubReader`.
 
 #[cfg(target_os = "macos")]
-use tenant::accounts::Reader;
+use tenant::domain::Reader;
 #[cfg(target_os = "macos")]
 use tenant::ids::{GroupName, TenantUserName, UserId};
 
@@ -23,7 +23,8 @@ fn macos_reader_observes_host_state() {
     // and proves the dscl → MacosReader translation works end-to-end
     // for both the user listing and the group listing. The dispatch
     // path is already extensively covered via StubReader.
-    let reader = tenant::accounts::MacosReader::new().expect("dscl should be available on macOS");
+    let reader =
+        tenant::adapters::macos::MacosReader::new().expect("dscl should be available on macOS");
     assert!(
         reader.has_user(&TenantUserName::from("root")),
         "MacosReader should see 'root' user"

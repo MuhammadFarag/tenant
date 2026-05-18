@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use tenant::accounts::StubReader;
+use tenant::adapters::stub_reader::StubReader;
 use tenant::executor::{
     AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, PathKind, StubExecutor,
 };

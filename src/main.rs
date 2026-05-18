@@ -1,7 +1,7 @@
 use std::io;
 use std::process::ExitCode;
 
-use tenant::accounts::MacosReader;
+use tenant::adapters::macos::MacosReader;
 use tenant::executor::MacosExecutor;
 use tenant::ids::HostUserName;
 

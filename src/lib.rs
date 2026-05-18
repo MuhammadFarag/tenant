@@ -6,10 +6,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::ids::{HostUserName, TenantUserName};
 
 pub mod accounts;
+pub mod adapters;
 pub mod allocation;
 pub mod ansi;
 mod commands;
 pub mod doctor;
+pub mod domain;
 pub mod executor;
 pub mod firewall;
 pub mod ids;
@@ -157,7 +159,7 @@ impl ModeLevel {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     args: &[String],
-    accounts: &dyn accounts::Reader,
+    accounts: &dyn domain::Reader,
     executor: &dyn executor::Executor,
     host: &HostUserName,
     stdout: &mut dyn Write,

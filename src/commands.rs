@@ -5,7 +5,7 @@ use crate::doctor::Severity;
 use crate::executor::{AccountOp, FirewallOp, Op, ProfileOp};
 use crate::reporter::ConfirmOutcome;
 use crate::{
-    Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, ids, reporter::Reporter,
+    Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, domain, ids, reporter::Reporter,
 };
 
 const EX_USAGE: u8 = 64;
@@ -36,7 +36,7 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch(
     cli: Cli,
-    accounts: &dyn accounts::Reader,
+    accounts: &dyn domain::Reader,
     writer: &accounts::Writer<'_>,
     host: &ids::HostUserName,
     reporter: &mut Reporter,

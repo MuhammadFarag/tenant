@@ -51,15 +51,21 @@ src/commands.rs   — verb dispatch (no I/O). Per-arm `surface_*_error`
                     helpers route domain errors to Reporter. Dispatch
                     builds `ReapplyPlan` upfront for prompt-bearing
                     verbs so profile-read failures surface pre-prompt.
-src/accounts.rs   — `Reader` trait + Macos/Stub impls; `Writer` verb
-                    methods. `shell_into_tenant` branches on
-                    argv-presence into `shell_interactive` /
-                    `shell_command`. `build_reapply_plan` +
+src/accounts.rs   — `Writer` verb methods. `shell_into_tenant`
+                    branches on argv-presence into `shell_interactive`
+                    / `shell_command`. `build_reapply_plan` +
                     `execute_reapply_plan` shared across mode/shell/
                     reload. `DoctorScope { Create, Shell, Mode, Reload }`
                     selects per-verb audit relevance. Error families:
                     `ShareError`, `ModeError`, `ShellError`, `CreateError`,
                     `DoctorError`.
+src/domain/       — domain layer. `reader.rs` defines the `Reader`
+                    trait — driven port for account inventory queries
+                    (`used_uids` / `used_gids` / `has_user` /
+                    `has_group` / `uid_for` / `tenant_names`).
+src/adapters/     — driven adapters. `stub_reader.rs` (`StubReader`
+                    for tests) + `macos/reader.rs` (`MacosReader` —
+                    dscl-backed snapshot, populated once at `new()`).
 src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both
                     iterate from `TENANT_UID_FLOOR = 600`.
 src/executor.rs   — `Op` ADT over `AccountOp` / `ProfileOp` /
