@@ -71,20 +71,30 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     `TenantUserName` / `HostUserName` / `GroupName`),
                     re-exported flat from `crate::domain`.
 src/domain/accounts.rs / accounts/
-                  — `Tenants` verb methods, `ReapplyPlan` /
-                    `ShareOps` / `ReloadAllOutcome` / `DoctorOutcome`,
-                    and `tenant_share_group_name`. `shell`
-                    branches on argv-presence into `shell_interactive`
-                    / `shell_command`. `build_reapply_plan` +
-                    `execute_reapply_plan` shared across mode/shell/
-                    reload. Per-verb submodules carry their error types
-                    (re-exported from the facade): `validation.rs`
-                    (`NameError`, `ConflictError`, `validate_name`,
-                    `check_conflict`), `create.rs` (`CreateError`),
-                    `destroy.rs` (`DestroyError`, `Eligibility`,
-                    `destroy_eligibility`), `shares.rs` (`ShareError`),
-                    `reapply.rs` (`ModeError`), `shell.rs` (`ShellError`),
-                    `doctor.rs` (`DoctorError`, `DoctorScope`).
+                  — facade: `Tenants` struct + `new()` + the generic
+                    `run<O: WritableOp>` narrate-execute-narrate
+                    dispatcher + `tenant_share_group_name`. Each
+                    per-verb submodule owns its complete code (error
+                    type + `impl Tenants` block + bound helpers /
+                    data carriers) via split impl blocks across
+                    files: `validation.rs` (`NameError`,
+                    `ConflictError`, `validate_name`,
+                    `check_conflict`), `create.rs` (`CreateError`,
+                    `create`), `destroy.rs` (`DestroyError`,
+                    `Eligibility`, `destroy_eligibility`, `destroy`,
+                    `destroy_orphan_group`), `reapply.rs`
+                    (`ModeError`, `ReapplyPlan`, `ReloadAllOutcome`,
+                    `hosts_for_level`, `mode`, `build_reapply_plan`,
+                    `execute_reapply_plan`, `reload`, `reload_all`),
+                    `shares.rs` (`ShareError`, `ShareOps`,
+                    `build_share_ops`, `execute_share_ops`,
+                    `reapply_shares_post_provision`), `shell.rs`
+                    (`ShellError`, `shell` branching on argv-presence
+                    into `shell_interactive` / `shell_command`),
+                    `doctor.rs` (`DoctorError`, `DoctorScope`,
+                    `DoctorOutcome`, the eight probe methods, plus
+                    `doctor`, `doctor_all`, `pre_exec_doctor_summary`).
+                    Error types re-exported from the facade.
 src/domain/commands.rs
                   — verb dispatch (no I/O). Per-arm `surface_*_error`
                     helpers route domain errors to Reporter. Dispatch

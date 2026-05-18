@@ -1,10 +1,14 @@
-//! Create-verb error type. The constructor lives in
-//! `Tenants::create` (in `accounts.rs`) for now.
+//! Create-verb error type and the `Tenants::create` orchestrator.
 
-use crate::domain::{AccountError, FirewallError};
-use crate::profile::ProfileError;
+use crate::domain::reporter::Reporter;
+use crate::domain::{
+    AccountError, AccountOp, FirewallError, FirewallOp, GroupId, HostUserName, ProfileOp,
+    TenantUserName, UserId,
+};
+use crate::firewall::{ensure_anchor_ref, render_anchor};
+use crate::profile::{ProfileError, display_path_for, parse};
 
-use super::ModeError;
+use super::{ModeError, Tenants, tenant_share_group_name};
 
 /// Failure surface for create. `UserWithRollback` is the
 /// worst case where rollback itself failed and the host is left with
@@ -25,4 +29,106 @@ pub(crate) enum CreateError {
     /// composition step.
     Firewall(FirewallError),
     PostProvision(ModeError),
+}
+
+impl<'a> Tenants<'a> {
+    pub(crate) fn create(
+        &self,
+        name: &TenantUserName,
+        host: &HostUserName,
+        uid: UserId,
+        gid: GroupId,
+        reporter: &mut Reporter,
+    ) -> Result<(), CreateError> {
+        let group = tenant_share_group_name(name.as_str());
+        let create_group = AccountOp::CreateShareGroup {
+            group: group.clone(),
+            gid,
+        };
+        let add_host = AccountOp::AddHostToShareGroup {
+            group: group.clone(),
+            host: host.into(),
+        };
+        let add_user = AccountOp::CreateTenantUser {
+            name: name.into(),
+            uid,
+            gid,
+        };
+        let rollback_group = AccountOp::DeleteShareGroup {
+            group: group.clone(),
+        };
+        let create_profile = ProfileOp::Create { name: name.into() };
+        let backup = FirewallOp::BackupConfig;
+        let restore = FirewallOp::RestoreConfigFromBackup;
+        let reload = FirewallOp::Reload;
+        let enable = FirewallOp::Enable;
+        let remove_anchor = FirewallOp::RemoveAnchor { name: name.into() };
+        let flush_anchor = FirewallOp::FlushAnchor { name: name.into() };
+
+        reporter.create_starting(name);
+
+        self.run(&create_group, reporter)
+            .map_err(CreateError::Group)?;
+        self.run(&add_host, reporter)
+            .map_err(CreateError::HostMembership)?;
+        match self.run(&add_user, reporter) {
+            Ok(()) => {
+                self.run(&create_profile, reporter)
+                    .map_err(CreateError::Profile)?;
+                let profile_content = self.machine.read_profile(name).map_err(|e| {
+                    CreateError::Firewall(FirewallError::Fs {
+                        path: display_path_for(name.as_str()),
+                        message: format!("read failed: {e}"),
+                    })
+                })?;
+                let parsed_profile = parse(&profile_content).map_err(|e| {
+                    CreateError::Firewall(FirewallError::Fs {
+                        path: display_path_for(name.as_str()),
+                        message: format!("parse failed: {e}"),
+                    })
+                })?;
+                let pf_conf_current = self.machine.read_pf_conf().map_err(CreateError::Firewall)?;
+                let install_anchor = FirewallOp::InstallAnchor {
+                    name: name.into(),
+                    body: render_anchor(name.as_str(), &parsed_profile.allowlist.runtime.hosts),
+                };
+                let update_conf = FirewallOp::UpdateConfig {
+                    content: ensure_anchor_ref(&pf_conf_current, name.as_str()),
+                };
+                self.run(&backup, reporter).map_err(CreateError::Firewall)?;
+                self.run(&install_anchor, reporter)
+                    .map_err(CreateError::Firewall)?;
+                self.run(&update_conf, reporter)
+                    .map_err(CreateError::Firewall)?;
+                if let Err(reload_err) = self.run(&reload, reporter) {
+                    // FlushAnchor is the symmetric counter to the partial
+                    // in-kernel state from the failed Reload — without
+                    // it, restoring pf.conf and removing the anchor file
+                    // still leaves the partially-loaded rules in kernel
+                    // memory under the now-orphaned anchor name.
+                    if self.run(&restore, reporter).is_err() {
+                        return Err(CreateError::Firewall(FirewallError::RestoreFailed {
+                            path: crate::firewall::PF_CONF_BACKUP.to_string(),
+                        }));
+                    }
+                    let _ = self.run(&remove_anchor, reporter);
+                    let _ = self.run(&reload, reporter);
+                    let _ = self.run(&flush_anchor, reporter);
+                    return Err(CreateError::Firewall(reload_err));
+                }
+                self.run(&enable, reporter).map_err(CreateError::Firewall)?;
+                self.reapply_shares_post_provision(name, &parsed_profile, reporter)
+                    .map_err(CreateError::PostProvision)?;
+                reporter.create_done(name, uid, gid);
+                Ok(())
+            }
+            Err(user_err) => match self.run(&rollback_group, reporter) {
+                Ok(()) => Err(CreateError::User(user_err)),
+                Err(rollback_err) => Err(CreateError::UserWithRollback {
+                    user: user_err,
+                    rollback: rollback_err,
+                }),
+            },
+        }
+    }
 }
