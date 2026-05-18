@@ -1,6 +1,3 @@
-use std::ffi::OsString;
-use std::io::Write;
-
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::domain::TenantUserName;
@@ -20,24 +17,24 @@ use domain::reporter::Reporter;
 
 #[derive(Parser)]
 #[command(name = "tenant")]
-pub(crate) struct Cli {
+pub struct Cli {
     #[arg(short, long, global = true)]
-    pub(crate) verbose: bool,
+    pub verbose: bool,
 
     #[arg(long, global = true)]
-    pub(crate) dry_run: bool,
+    pub dry_run: bool,
 
     /// Skip the interactive confirmation prompt that mutating verbs
     /// (create / destroy / mode / reload) emit before executing.
     #[arg(short = 'y', long, global = true)]
-    pub(crate) yes: bool,
+    pub yes: bool,
 
     #[command(subcommand)]
-    pub(crate) verb: Verb,
+    pub verb: Verb,
 }
 
 #[derive(Subcommand)]
-pub(crate) enum Verb {
+pub enum Verb {
     Create {
         name: TenantUserName,
     },
@@ -104,7 +101,7 @@ pub(crate) enum Verb {
 /// Which tier of the profile's allowlist the rendered firewall anchor
 /// includes. Runtime is the baseline; install is the widened set.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ModeLevel {
+pub enum ModeLevel {
     Runtime,
     Install,
 }
@@ -118,19 +115,15 @@ impl ModeLevel {
     }
 }
 
-// `run` takes a `Terminal` bundle so every I/O capability is injectable
-// at the binary boundary; tests wire stubs by constructing a `Terminal`
-// over `Vec<u8>` writers and a `Cursor` reader.
+// `run` takes a parsed `Cli` plus a `Terminal` bundle; argv-to-Cli
+// parsing lives at the binary boundary (main / test helpers) so the
+// core stays clap-error-routing free.
 pub fn run(
-    args: &[String],
+    cli: Cli,
     directory: &dyn domain::HostUserDirectory,
     machine: &dyn domain::HostMachine,
-    mut terminal: Terminal<'_>,
+    terminal: Terminal<'_>,
 ) -> u8 {
-    let cli = match parse(args, &mut terminal) {
-        Ok(cli) => cli,
-        Err(code) => return code,
-    };
     // Resolve the operator identity from the real (non-dry-run) machine
     // BEFORE the dry-run swap, so dry-run preserves the env-var answer
     // rather than substituting a placeholder.
@@ -144,18 +137,4 @@ pub fn run(
     let tenants = domain::Tenants::new(active_machine);
     let mut reporter = Reporter::new(terminal, cli.verbose, cli.dry_run, cli.yes, active_machine);
     domain::commands::dispatch(cli, directory, &tenants, &host, &mut reporter)
-}
-
-fn parse(args: &[String], terminal: &mut Terminal<'_>) -> Result<Cli, u8> {
-    let argv = std::iter::once(OsString::from("tenant")).chain(args.iter().map(OsString::from));
-    Cli::try_parse_from(argv).map_err(|e| {
-        let to_stderr = e.use_stderr();
-        let target: &mut dyn Write = if to_stderr {
-            &mut *terminal.stderr
-        } else {
-            &mut *terminal.stdout
-        };
-        let _ = write!(target, "{e}");
-        if to_stderr { 1 } else { 0 }
-    })
 }

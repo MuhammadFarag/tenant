@@ -9,12 +9,32 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::io;
+use std::io::Write;
+
+use clap::Parser;
 
 use crate::adapters::NeverHostMachine;
 use crate::adapters::{StubHostMachine, StubUserDirectory};
 
+use tenant::Cli;
 use tenant::domain::{GroupId, UserDirectoryError, UserId};
+
+/// Parse `&[&str]` test args into a `Cli` value, mirroring how clap
+/// would render parse errors in production: errors via `use_stderr()`
+/// go to captured stderr with exit 1; help/version goes to captured
+/// stdout with exit 0. Test helpers absorb the parse step so callers
+/// keep the `run_with(stub, &["create", "foo"])` shape.
+fn parse_cli(args: &[&str], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<Cli, u8> {
+    let argv = std::iter::once(OsString::from("tenant")).chain(args.iter().map(OsString::from));
+    Cli::try_parse_from(argv).map_err(|e| {
+        let to_stderr = e.use_stderr();
+        let target: &mut dyn Write = if to_stderr { stderr } else { stdout };
+        let _ = write!(target, "{e}");
+        if to_stderr { 1 } else { 0 }
+    })
+}
 
 /// Single-failure queue: returns Err on the first call to the matching
 /// `HostUserDirectory` method, snapshots thereafter. The default fixture for
@@ -526,7 +546,16 @@ pub fn run_with(stub: StubUserDirectory, args: &[&str]) -> (u8, String, String) 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
-    let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let cli = match parse_cli(args, &mut stdout, &mut stderr) {
+        Ok(cli) => cli,
+        Err(code) => {
+            return (
+                code,
+                String::from_utf8_lossy(&stdout).into_owned(),
+                String::from_utf8_lossy(&stderr).into_owned(),
+            );
+        }
+    };
     let terminal = tenant::Terminal {
         stdout: &mut stdout,
         stderr: &mut stderr,
@@ -534,7 +563,7 @@ pub fn run_with(stub: StubUserDirectory, args: &[&str]) -> (u8, String, String) 
         stdin_is_tty: false, // stdin not a TTY → confirm auto-proceeds
         colors: tenant::ansi::Colors::default(),
     };
-    let code = tenant::run(&args, &stub, &machine, terminal);
+    let code = tenant::run(cli, &stub, &machine, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -550,7 +579,16 @@ pub fn run_with_exec(
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
-    let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let cli = match parse_cli(args, &mut stdout, &mut stderr) {
+        Ok(cli) => cli,
+        Err(code) => {
+            return (
+                code,
+                String::from_utf8_lossy(&stdout).into_owned(),
+                String::from_utf8_lossy(&stderr).into_owned(),
+            );
+        }
+    };
     let terminal = tenant::Terminal {
         stdout: &mut stdout,
         stderr: &mut stderr,
@@ -558,7 +596,7 @@ pub fn run_with_exec(
         stdin_is_tty: false,
         colors: tenant::ansi::Colors::default(),
     };
-    let code = tenant::run(&args, &stub, exec, terminal);
+    let code = tenant::run(cli, &stub, exec, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -582,7 +620,16 @@ pub fn run_with_stdin(
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(stdin_content.to_vec());
-    let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let cli = match parse_cli(args, &mut stdout, &mut stderr) {
+        Ok(cli) => cli,
+        Err(code) => {
+            return (
+                code,
+                String::from_utf8_lossy(&stdout).into_owned(),
+                String::from_utf8_lossy(&stderr).into_owned(),
+            );
+        }
+    };
     let terminal = tenant::Terminal {
         stdout: &mut stdout,
         stderr: &mut stderr,
@@ -590,7 +637,7 @@ pub fn run_with_stdin(
         stdin_is_tty: true, // simulate TTY so confirm prompts fire
         colors: tenant::ansi::Colors::default(),
     };
-    let code = tenant::run(&args, &stub, exec, terminal);
+    let code = tenant::run(cli, &stub, exec, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),

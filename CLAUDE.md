@@ -42,15 +42,18 @@ file with shipped-feature recaps.
 ## File map
 
 ```
-src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`;
-                    global `--verbose` / `--dry-run` / `--yes`. Swaps to
-                    `DryRunHostMachine` when `--dry-run`. `run` takes a
-                    `Terminal` bundle (5th arg) for all operator I/O.
+src/lib.rs        — public API (`run`); public `Cli` + `Verb` +
+                    `ModeLevel`; global `--verbose` / `--dry-run` /
+                    `--yes`. `run` takes a parsed `Cli` (argv parsing
+                    happens at the binary boundary via `Cli::parse()` /
+                    `Cli::try_parse_from`), a `&dyn HostUserDirectory`, a
+                    `&dyn HostMachine`, and a `Terminal` bundle. Swaps to
+                    `DryRunHostMachine` when `cli.dry_run`.
 src/terminal.rs   — `Terminal { stdout, stderr, stdin, stdin_is_tty,
                     colors }`: capability bundle for operator-side I/O,
                     constructed once at the binary boundary (main /
                     test helpers) and threaded as a single value through
-                    `run` → `parse` → `Reporter`.
+                    `run` → `Reporter`.
 src/ansi.rs       — `Colors { stdout, stderr }` per-stream gate; color
                     wrappers; `rule(title, width)` section divider.
 src/domain/       — domain layer. `host_user_directory.rs` defines the
@@ -250,12 +253,17 @@ it from scratch wastes a cycle and risks getting it wrong.
   touches raw writers nor checks `cli.verbose` / `cli.dry_run`. Mode
   / verbosity branching lives inside Reporter.
 
-- **Composition-root DI.** `tenant::run` takes `&dyn HostUserDirectory`
-  + `&dyn host_machine::HostMachine` + a `Terminal` bundle. `main.rs`
-  builds prod impls; tests build `StubUserDirectory` + `StubHostMachine` /
-  `NeverHostMachine`. Tenants + Reporter constructed inside `run` from
-  the active HostMachine; both swap to `DryRunHostMachine` when
-  `--dry-run`. Test seam stays at the HostMachine boundary.
+- **Composition-root DI.** `tenant::run` takes a parsed `Cli` + `&dyn
+  HostUserDirectory` + `&dyn host_machine::HostMachine` + a `Terminal`
+  bundle. Argv parsing lives at the binary boundary: `main.rs` uses
+  `Cli::parse()` (clap exits the process on `--help` / `--version` /
+  bad input), test helpers use `Cli::try_parse_from` and route clap's
+  rendered errors to the captured stdout/stderr per `use_stderr()`. Prod
+  impls live in `main.rs`; tests build `StubUserDirectory` +
+  `StubHostMachine` / `NeverHostMachine`. Tenants + Reporter constructed
+  inside `run` from the active HostMachine; both swap to
+  `DryRunHostMachine` when `cli.dry_run`. Test seam stays at the
+  HostMachine boundary.
 
 - **Adapters live under `.../adapters/`, regardless of src vs tests.**
   Production-reachable adapters (`MacosHostMachine`, `MacosUserDirectory`,
