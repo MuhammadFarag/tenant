@@ -1,7 +1,5 @@
-//! Production `HostMachine` substrate — knows the macOS tool argv and the
-//! XDG-style profile path convention. The argv-building logic that
-//! previously lived in the `build_*_argv` family (and the synthetic-argv
-//! hacks for profile ops) is now confined to this module's helpers.
+//! Production `HostMachine` substrate — macOS tool argv + XDG-style profile
+//! path convention.
 
 use std::env;
 use std::fs;
@@ -19,10 +17,6 @@ use crate::domain::{
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
-/// Production substrate. Knows the macOS tool argv and the XDG-style profile
-/// path convention. The argv-building logic that previously lived in the
-/// `build_*_argv` family (and the synthetic-argv hacks for profile ops) is
-/// now confined to this struct's methods.
 pub struct MacosHostMachine;
 
 impl HostMachine for MacosHostMachine {
@@ -65,18 +59,9 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError> {
-        // LoginAsUser is intentionally not handled here — interactive ops go
-        // through `login`. Match-arm panics on it so an accidental wiring
-        // through `execute_account` fails loudly in dev / tests rather than
-        // silently doing the wrong thing in prod.
         if let AccountOp::RemoveHostFromShareGroup { group, host } = op {
-            // Idempotence: skip the `-d` edit when host isn't a
-            // current member. Covers (a) legacy tenants where the host
-            // was never added and (b) destroy_orphan_group on a
-            // partial-create tenant where AddHost failed. The substrate
-            // is the source of truth — Writer keeps the op in the plan
-            // for symmetry; the substrate decides whether to actually
-            // fire it.
+            // Idempotence: skip the `-d` edit when host isn't a current
+            // member. dseditgroup `-d` on a non-member exits non-zero.
             if !self.host_in_group(host, group)? {
                 return Ok(());
             }
@@ -99,8 +84,7 @@ impl HostMachine for MacosHostMachine {
 
     fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
         // Stdio inherits so sudo can prompt for the host password and the
-        // launched login shell can drive the controlling terminal. Mirrors
-        // the pre-refactor `HostMachine::exec_into`.
+        // launched login shell can drive the controlling terminal.
         let argv = account_argv(&AccountOp::LoginAsUser { name: name.clone() });
         let (program, rest) = argv
             .split_first()
@@ -113,10 +97,9 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
-        // Same stdio + return-code posture as `login`. argv shape:
-        // `sudo -iu <name> -- <argv...>`. The `--` separator is
-        // load-bearing — without it, an argv[0] starting with `-`
-        // would be interpreted as a sudo flag.
+        // The `--` separator in `sudo -iu <name> -- <argv...>` is
+        // load-bearing — without it, an argv[0] starting with `-` would
+        // be interpreted as a sudo flag.
         let full = account_argv(&AccountOp::ExecAsUser {
             name: name.clone(),
             argv: argv.to_vec(),
@@ -134,15 +117,13 @@ impl HostMachine for MacosHostMachine {
     fn describe_profile(&self, op: &ProfileOp) -> String {
         match op {
             ProfileOp::Create { name } => {
-                // Pretend-shell `tee … < default.toml` framing for the
-                // operator — there's no actual tee invocation, but the
-                // shape signals "a file landed here" and matches today's
-                // verbose-mode bytes exactly.
+                // Pretend-shell `tee … < default.toml` framing — no actual
+                // tee invocation; the shape signals "a file landed here".
                 format!("tee {} < default.toml", display_path_for(name.as_str()))
             }
             ProfileOp::Delete { name } => {
                 // `rm -f` reflects the idempotent semantics — NotFound is
-                // success on both the production fs side and the stub.
+                // success.
                 format!("rm -f {}", display_path_for(name.as_str()))
             }
         }
@@ -182,12 +163,8 @@ impl HostMachine for MacosHostMachine {
     fn describe_firewall(&self, op: &FirewallOp) -> String {
         match op {
             FirewallOp::InstallAnchor { name, .. } => {
-                // Pretend-shell `sudo tee … < anchor.body` framing — the
-                // operator sees the file path and a `<` marker for the
-                // content; the actual mechanism inside `execute_firewall`
-                // is tempfile + sudo mv + sudo chmod. Matches the
-                // ProfileOp::Create convention (`tee … < default.toml`),
-                // with `sudo` because the target is privileged.
+                // Pretend-shell framing; actual mechanism in
+                // `execute_firewall` is tempfile + sudo mv + sudo chmod.
                 format!("sudo tee /etc/pf.anchors/tenant-{name} < anchor.body")
             }
             FirewallOp::RemoveAnchor { name } => {
@@ -221,18 +198,11 @@ impl HostMachine for MacosHostMachine {
         path: &std::path::Path,
         mode: AccessMode,
     ) -> Result<AccessOutcome, ProbeError> {
-        // `/bin/test -<flag> <path>` returns:
-        //   0  → predicate true (Allowed)
-        //   1  → predicate false (Denied — includes file-doesn't-exist;
-        //        we accept the ambiguity here, since mechanism-of-denial
-        //        belongs with the future remediation surface).
-        //   ≥2 → anything else (Unknown — probe machinery hiccup).
-        // `sudo -n` is the non-interactive flag: if the operator's
-        // sudo session isn't already cached, sudo fails with non-zero
-        // and we surface as `ProbeError::NonZero`. The expected
-        // operator workflow is `sudo -v` (or any prior privileged
-        // command in the last ~5 min) before `tenant doctor`; the
-        // `--help` text documents this.
+        // `/bin/test -<flag> <path>` exit codes: 0 = Allowed,
+        // 1 = Denied (includes file-doesn't-exist; mechanism-of-denial
+        // is the remediation surface's job), ≥2 = Unknown.
+        // /bin/test absolute path because /usr/bin/test is absent on
+        // Darwin 25.x.
         let flag = match mode {
             AccessMode::Read => "-r",
             AccessMode::List => "-x",
@@ -249,8 +219,7 @@ impl HostMachine for MacosHostMachine {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 // Distinguish "sudo couldn't authenticate" (machinery
                 // failure → ProbeError) from "test answered something
-                // weird" (kernel state weird → Unknown). A non-cached
-                // sudo session is the canonical machinery failure.
+                // weird" (kernel state weird → Unknown).
                 if stderr.contains("sudo: a password is required")
                     || stderr.contains("sudo: a terminal is required")
                 {
@@ -267,14 +236,10 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_env_policy(&self) -> Result<String, HostFileError> {
-        // Read /etc/sudoers (sudoers files are mode 0440 root:wheel —
-        // not world-readable; sudo is required), then read every file
-        // in /etc/sudoers.d/. Concatenate with newlines so the
-        // parser's `env_delete` grep doesn't accidentally bridge the
-        // last line of one file into the first of the next. Origin
-        // attribution is intentionally dropped — doctor's parser
-        // doesn't need it, and a future cycle that wants attribution
-        // would have to introduce a wrapper type (we lean YAGNI).
+        // /etc/sudoers is mode 0440 root:wheel — sudo required. Concatenate
+        // primary + every drop-in with newlines so the parser's
+        // `env_delete` grep can't bridge one file's last line into the
+        // next's first.
         let primary = read_privileged_text("/etc/sudoers")?;
         let mut combined = primary;
         if !combined.ends_with('\n') {
@@ -284,10 +249,8 @@ impl HostMachine for MacosHostMachine {
             .args(["-n", "ls", "-1", "/etc/sudoers.d"])
             .output()
             .map_err(HostFileError::Spawn)?;
-        // A non-existent or unreadable /etc/sudoers.d/ is treated as
-        // "no drop-ins" rather than a hard failure — sudo doesn't
-        // require the dir to exist. Only surface as Fs error if sudo
-        // itself reported an authentication failure.
+        // Non-existent/unreadable /etc/sudoers.d/ → "no drop-ins", not a
+        // hard failure; sudo doesn't require the dir to exist.
         if listing_output.status.success() {
             let listing = String::from_utf8_lossy(&listing_output.stdout).into_owned();
             for entry in listing.lines() {
@@ -312,9 +275,8 @@ impl HostMachine for MacosHostMachine {
                 write_privileged(&tenant_anchor_path(name.as_str()), body)
             }
             FirewallOp::RemoveAnchor { name } => {
-                // `sudo rm -f <path>` — idempotent on the macOS side
-                // (`rm -f` returns 0 on NotFound), so a partial-state
-                // destroy doesn't trip here.
+                // `rm -f` returns 0 on NotFound — partial-state destroy
+                // doesn't trip here.
                 spawn_firewall(&[
                     "sudo".into(),
                     "rm".into(),
@@ -329,11 +291,9 @@ impl HostMachine for MacosHostMachine {
                 PF_CONF_BACKUP.into(),
             ]),
             FirewallOp::RestoreConfigFromBackup => {
-                // Recovery half: copy the backup back. A failure here
-                // means the host carries a half-edited pf.conf with no
-                // clean automated path back; surface as `RestoreFailed`
-                // so the Reporter message names the backup path and
-                // includes the manual recovery command.
+                // Failure here leaves a half-edited pf.conf with no
+                // automated path back; `RestoreFailed` names the backup
+                // path so the Reporter can emit the manual recovery hint.
                 spawn_firewall(&[
                     "sudo".into(),
                     "cp".into(),
@@ -357,10 +317,8 @@ impl HostMachine for MacosHostMachine {
                 "all".into(),
             ]),
             FirewallOp::Enable => {
-                // `pfctl -e` exits non-zero with "pf already enabled"
-                // when already on. Treat both success and
-                // already-enabled as success — the plugin's defensive
-                // pattern, transcribed verbatim.
+                // `pfctl -e` exits non-zero with "pf already enabled" when
+                // already on — treat that as success.
                 match spawn_firewall(&["sudo".into(), "pfctl".into(), "-e".into()]) {
                     Ok(()) => Ok(()),
                     Err(FirewallError::NonZero { stderr, .. })
@@ -389,9 +347,7 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {
-        // `/etc/pam.d/sudo` is mode 0644 — direct fs read, no sudo.
-        // The `Fs` variant carries the path so the operator-facing
-        // frame names what failed.
+        // /etc/pam.d/sudo is mode 0644 — direct fs read, no sudo.
         fs::read_to_string("/etc/pam.d/sudo").map_err(|e| HostFileError::Fs {
             path: "/etc/pam.d/sudo".to_string(),
             message: e.to_string(),
@@ -411,18 +367,14 @@ impl HostMachine for MacosHostMachine {
         }
         // `pfctl -si` writes to BOTH stdout and stderr — the
         // "Status: Enabled" line lands on stderr in practice. Combine
-        // both into one blob for the parser; tolerating the empty
-        // case if the user's host ever emits to a single stream.
+        // both into one blob for the parser.
         let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(combined)
     }
 
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
-        // Mode 0644 root-owned — direct fs read, no sudo. Same
-        // substrate posture as `read_pam_sudo`. Path centralized via
-        // `firewall::tenant_anchor_path` so a future anchor-dir move
-        // flows through here without inline edits.
+        // Mode 0644 root-owned — direct fs read, no sudo.
         let path = crate::firewall::tenant_anchor_path(name.as_str());
         fs::read_to_string(&path).map_err(|e| HostFileError::Fs {
             path,
@@ -435,24 +387,13 @@ impl HostMachine for MacosHostMachine {
         name: &TenantUserName,
         path: &std::path::Path,
     ) -> Result<PathKind, ProbeError> {
-        // Probes:
-        //   `sudo -n -u <name> /bin/test -L <path>` → exit 0 = symlink
-        //   On symlink-hit: `sudo -n -u <name> /usr/bin/readlink <path>`
-        //     captures the target string. readlink itself does not
-        //     resolve intermediate symlinks; we record what's literally
-        //     stored in the link entry. Doctor's SymlinkDrift comparator
-        //     is string-exact.
-        //   On symlink-miss: `sudo -n -u <name> /bin/test -e <path>`
-        //     distinguishes Other vs Absent.
-        // sudo-machinery failures (auth cache miss, fork failed) surface
-        // as `ProbeError`. Same NonZero pattern as
-        // `probe_access_as_tenant`.
+        // readlink stores the link entry verbatim — no intermediate
+        // resolution; SymlinkDrift compares string-exact against the
+        // declared host_path.
         //
-        // Note on absolute paths: macOS Tahoe (Darwin 25.x) ships
-        // `test` at `/bin/test` (not `/usr/bin/test`); readlink at
-        // `/usr/bin/readlink` (not `/bin/readlink`); `ln` at `/bin/ln`.
-        // No single bin-directory is canonical on macOS; the right
-        // answer is per-utility.
+        // Per-utility absolute paths because Darwin 25.x scatters them:
+        // test at /bin/test (not /usr/bin/test), readlink at
+        // /usr/bin/readlink (not /bin/readlink), ln at /bin/ln.
         let path_str = path.to_string_lossy().into_owned();
         let symlink_out = Command::new("sudo")
             .args(["-n", "-u", name.as_str(), "/bin/test", "-L", &path_str])
@@ -486,7 +427,7 @@ impl HostMachine for MacosHostMachine {
                 }
             }
             if code != 1 {
-                // Sudo-auth failure surfaces with codes other than 0/1.
+                // Codes other than 0/1 are sudo-auth failure.
                 return Err(ProbeError::NonZero {
                     code,
                     stderr: String::from_utf8_lossy(&symlink_out.stderr).into_owned(),
@@ -517,13 +458,9 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
-        // Operator-process `ls -lde <path>`: host-side ACL is host
-        // state, read from the operator process — no sudo, no
-        // run-as-tenant. `ls`'s exit code is 0 on success, non-zero
-        // when the path is unreadable (which IS a substrate failure
-        // for doctor's purposes — operator can't audit a path they
-        // can't list). Concatenate stdout+stderr so both `total N +
-        // entries` lines and any error blurb feed the parser uniformly.
+        // Host-side ACL is host state — read from the operator process,
+        // no sudo, no run-as-tenant. Unreadable path IS a substrate
+        // failure: operator can't audit a path they can't list.
         let path_str = path.to_string_lossy().into_owned();
         let output = Command::new("ls")
             .args(["-lde", &path_str])
@@ -539,10 +476,8 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
-        // Pretend-shell `chmod +a "<entry>" <path>` framing. Quoted
-        // entry preserved with literal double-quotes in the rendered
-        // line — matches the form an operator would type at a prompt;
-        // also lets the test golden assert on the exact shape.
+        // Literal double-quotes around the entry match the form an
+        // operator would type at a prompt.
         let (flag, path, group, mode) = match op {
             AclOp::Grant {
                 path, group, mode, ..
@@ -559,25 +494,15 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn execute_acl(&self, op: &AclOp) -> Result<(), AclError> {
-        // macOS `chmod +a` is natively idempotent — re-applying the
-        // same ACL entry to a path that already carries it doesn't
-        // add a duplicate and doesn't error. So Grant runs chmod
-        // unconditionally; substrate-side dedup is the contract.
+        // macOS chmod +a is natively idempotent. No substring-match
+        // pre-check: macOS canonicalizes bit names on storage (we write
+        // `read,write,execute` and storage carries
+        // `list,add_file,search`), so substring comparison would always
+        // miss. Grant runs chmod unconditionally.
         //
-        // An earlier draft tried a substring-match pre-check against
-        // `ls -lde` output before calling chmod, but macOS canonicalizes
-        // the bit names on storage (we write
-        // `read,write,execute,delete,append` and macOS stores
-        // `list,add_file,search,delete,add_subdirectory`), so the
-        // substring pre-check always failed false-negative and chmod
-        // ran every time anyway. Removed the dead pre-check; the
-        // operator-visible behavior is unchanged.
-        //
-        // Revoke (`chmod -a`) on an absent entry currently surfaces
-        // as `AclError::NonZero` with "No matching ACL entry" stderr.
-        // No production path exercises Revoke today; future
-        // ACL-drift remediation will need to tolerate that case
-        // (or pre-check via ls).
+        // Revoke on an absent entry surfaces as `AclError::NonZero`
+        // ("No matching ACL entry") — no production path exercises it
+        // today.
         let (flag, path, group, mode) = match op {
             AclOp::Grant {
                 path, group, mode, ..
@@ -602,13 +527,9 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
-        // Read-only directory-service membership probe. Exit 0 ⇒ member;
-        // any non-zero exit (host absent from group, group absent) ⇒
-        // false. Machinery failure (dseditgroup not on PATH, fork
-        // failed) surfaces as `AccountError::Spawn`. The non-zero
-        // branch deliberately does NOT inspect stderr; the idempotence
-        // contract treats any non-zero as "not a member" so the
-        // substrate isn't tied to the tool's exact stderr wording.
+        // Exit 0 ⇒ member; any non-zero (host absent, group absent) ⇒
+        // false — dseditgroup conflates these and the idempotence
+        // contract doesn't need to distinguish.
         let output = Command::new("dseditgroup")
             .args(["-o", "checkmember", "-m", host.as_str(), group.as_str()])
             .output()
@@ -617,11 +538,6 @@ impl HostMachine for MacosHostMachine {
     }
 }
 
-/// Read `path` via `sudo -n cat <path>`. Used for privileged-read
-/// access to `/etc/sudoers` and `/etc/sudoers.d/*`. Mirrors the
-/// `write_privileged` pattern in reverse: confine sudo invocation
-/// to one helper so the substrate code that calls it stays
-/// readable.
 fn read_privileged_text(path: &str) -> Result<String, HostFileError> {
     let output = Command::new("sudo")
         .args(["-n", "cat", path])
@@ -636,9 +552,7 @@ fn read_privileged_text(path: &str) -> Result<String, HostFileError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Write `content` to a privileged absolute `path` via the tempfile +
-/// sudo mv + sudo chmod pattern from the plugin's
-/// `phase02_pf.py::_write_anchor_file`. Atomic from the operator's
+/// Tempfile + `sudo mv` + `sudo chmod`. Atomic from the operator's
 /// viewpoint: either the file lands fully or it doesn't.
 fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
     let tmp_path = tempfile_path();
@@ -664,9 +578,8 @@ fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
     result
 }
 
-/// Privately-named tempfile under the OS temp dir. PID + nanos suffix
-/// to avoid collision between concurrent tenant invocations (rare in
-/// the create/destroy verbs, but cheap to guard against).
+/// PID + nanos suffix avoids collision between concurrent tenant
+/// invocations.
 fn tempfile_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -695,18 +608,14 @@ fn spawn_firewall(argv: &[String]) -> Result<(), FirewallError> {
     Ok(())
 }
 
-/// Extract the tenant name from any `ProfileOp` variant. Centralizes the
-/// pattern-match so future variants (e.g. a `Read` op) just slot in.
 fn op_name(op: &ProfileOp) -> &TenantUserName {
     match op {
         ProfileOp::Create { name } | ProfileOp::Delete { name } => name,
     }
 }
 
-/// Resolve the absolute profile path for `name` on the host.
-/// `$HOME/.config/tenant/profiles/<name>.toml`. The display form (with a
-/// literal `~`) lives in `profile::display_path_for`; the absolute form
-/// is what the fs ops need.
+/// `$HOME/.config/tenant/profiles/<name>.toml`. Display form with literal
+/// `~` lives in `profile::display_path_for`.
 fn profile_path(name: &TenantUserName) -> Result<PathBuf, ProfileError> {
     let home = env::var("HOME").map_err(|_| ProfileError {
         message: "HOME environment variable is not set".to_string(),
@@ -716,13 +625,9 @@ fn profile_path(name: &TenantUserName) -> Result<PathBuf, ProfileError> {
         .join(format!("{name}.toml")))
 }
 
-/// Translate an `AccountOp` to its argv. Confined to this module; the writer
-/// never sees argv directly. Used by both `MacosHostMachine::execute_account`
-/// (to spawn the process) and `MacosHostMachine::login` (to spawn the
-/// interactive login shell). The describe-side renders its own strings to
-/// match today's verbose-mode output byte-for-byte; the argv-builder is
-/// kept separate so a future change to one form doesn't silently drift the
-/// other.
+/// Describe-side renders its own strings (byte-exact verbose output); this
+/// builder stays separate so a change to one form doesn't silently drift
+/// the other.
 fn account_argv(op: &AccountOp) -> Vec<String> {
     match op {
         AccountOp::CreateShareGroup { group, gid } => vec![
@@ -782,9 +687,6 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             vec!["sudo".into(), "-iu".into(), name.0.clone()]
         }
         AccountOp::ExecAsUser { name, argv } => {
-            // sudo -iu <name> -- <argv...>. Each argv element passes
-            // through as a separate process-argv entry; shell
-            // metacharacters inside a single element survive intact.
             let mut full = vec!["sudo".into(), "-iu".into(), name.0.clone(), "--".into()];
             full.extend(argv.iter().cloned());
             full
@@ -837,10 +739,7 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
     }
 }
 
-/// Compose the ACL entry string for `(group, mode)`. The bytes live in
-/// `AclMode::acl_bits`; this function adds the `group:<g> allow ` prefix.
-/// One source of truth so both `describe_acl` (operator-facing
-/// rendering) and `execute_acl` (chmod argv) use the same form.
+/// One source of truth so describe_acl and execute_acl render identically.
 fn acl_entry(group: &str, mode: AclMode) -> String {
     format!("group:{group} allow {}", mode.acl_bits())
 }

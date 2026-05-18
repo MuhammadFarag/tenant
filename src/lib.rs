@@ -26,7 +26,6 @@ pub(crate) struct Cli {
 
     /// Skip the interactive confirmation prompt that mutating verbs
     /// (create / destroy / mode / reload) emit before executing.
-    /// Equivalent to typing 'y' at the prompt.
     #[arg(short = 'y', long, global = true)]
     pub(crate) yes: bool,
 
@@ -46,88 +45,61 @@ pub(crate) enum Verb {
     ///
     /// - `tenant shell <name>` — interactive: auto-narrows the firewall
     ///   to runtime tier, reapplies declared shares, then launches a
-    ///   login shell as the tenant. Operator IS the shell on return.
+    ///   login shell as the tenant.
     ///
     /// - `tenant shell <name> [--mode install|runtime] -- <cmd...>` —
     ///   command form: same reapply (at the requested tier; runtime by
-    ///   default), then runs `<cmd...>` as the tenant via `sudo -iu`,
-    ///   then ALWAYS reapplies at runtime tier on completion (RAII
-    ///   cleanup — guarantees on-disk state returns to runtime even if
-    ///   the command widened with `--mode install`). Child exit code
-    ///   propagates to the verb's exit. A narrow-on-finally failure
-    ///   emits a yellow ⚠ stderr warning naming `tenant mode <name>
+    ///   default), runs `<cmd...>` as the tenant, then always reapplies
+    ///   at runtime tier on completion — guarantees on-disk state
+    ///   returns to runtime even if `--mode install` widened it. Child
+    ///   exit code propagates to the verb's exit. A narrow-on-completion
+    ///   failure emits a ⚠ stderr warning naming `tenant mode <name>
     ///   runtime` for recovery, but does NOT override the child's exit
-    ///   code (operator's $? sees the command's outcome).
+    ///   code.
     ///
-    /// `--mode` is valid only with `-- <cmd>` (clap rejects bare
-    /// `--mode install` because widening the interactive session would
-    /// leave the operator at install tier silently). The `--` separator
-    /// is POSIX-canonical and matches `sudo` / `kubectl exec` /
-    /// `docker exec`.
+    /// `--mode` is valid only with `-- <cmd>` — widening the interactive
+    /// session would leave the operator at install tier silently.
     Shell {
         name: TenantUserName,
         /// Firewall tier for the command-form reapply. `install` widens
         /// for the call; runtime narrow always fires on completion.
-        /// Requires `-- <cmd>` — clap rejects `--mode` without argv.
         #[arg(long, value_enum, requires = "argv")]
         mode: Option<ModeLevel>,
-        /// Command to run as the tenant. Empty = interactive login
-        /// shell (today's flow). Non-empty after `--` separator =
-        /// single-command form.
         #[arg(last = true)]
         argv: Vec<String>,
     },
-    /// Apply a PF widening level to the named tenant. Re-renders the
-    /// anchor body from the profile's runtime or runtime+install host
-    /// set, writes it, and reloads pf. Install widening is intentionally
-    /// non-persistent; `tenant shell <name>` auto-narrows to runtime
-    /// tier on entry.
+    /// Apply a firewall widening level to the named tenant. Install
+    /// widening is intentionally non-persistent — `tenant shell <name>`
+    /// auto-narrows to runtime tier on entry.
     Mode {
         name: TenantUserName,
         #[arg(value_enum)]
         level: ModeLevel,
     },
-    /// Audit filesystem-exposure boundaries between host and tenants
-    /// by probing sensitive host paths as each tenant. Reports findings
-    /// for paths that are unexpectedly readable or listable from a
-    /// tenant account.
+    /// Audit filesystem-exposure boundaries between host and tenants by
+    /// probing sensitive host paths as each tenant. Bare `tenant doctor`
+    /// walks every tenant. `--strict` exits 1 on warnings, 2 on any
+    /// critical finding.
     ///
-    /// Requires the operator to be a member of the `admin` group on
-    /// macOS so `sudo -u <tenant>` is permitted. On invocation, doctor
-    /// caches a sudo session up front (one Touch ID / password prompt);
-    /// subsequent probes run silently within that session.
-    ///
-    /// Run against a single tenant with `tenant doctor <name>`; run
-    /// against every tenant on the host with bare `tenant doctor`.
-    /// Pass `--strict` to exit non-zero when findings are present (1
-    /// for warnings only, 2 for any critical finding).
+    /// Requires admin-group membership; doctor caches one sudo session
+    /// up front so subsequent probes run silently.
     Doctor {
         name: Option<TenantUserName>,
         #[arg(long)]
         strict: bool,
     },
-    /// Reapply the tenant's profile to host state: rewrite the PF
-    /// anchor at runtime tier, then apply each declared share entry
-    /// (host-side ACL grant + tenant-side parent dir + tenant-side
-    /// symlink). The operator-facing "I edited the profile, apply
-    /// it" verb. Idempotent at the substrate.
-    ///
-    /// Bare `tenant reload` walks every tenant on the host (parallel
-    /// to `tenant doctor`'s no-arg shape). Per-tenant failures don't
-    /// abort the walk; the verb continues and surfaces a summary at
-    /// the end. Exit code is 0 on full success or 74 if any tenant
-    /// tripped.
-    ///
-    /// Always lands at runtime tier — install-tier widening stays the
-    /// explicit `tenant mode <name> install` operator action.
+    /// Reapply the tenant's profile to host state. Always lands at
+    /// runtime tier — install-tier widening stays the explicit
+    /// `tenant mode <name> install` operator action. Bare `tenant
+    /// reload` walks every tenant; per-tenant failures don't abort
+    /// the walk.
     Reload {
         name: Option<TenantUserName>,
     },
 }
 
-/// Which tier of the profile's allowlist the rendered PF anchor body
-/// should include. Runtime is the baseline (only `allowlist.runtime.hosts`);
-/// install is the widened set (`runtime + install`).
+/// Which tier of the profile's allowlist the rendered firewall anchor
+/// includes. Runtime is the baseline; install is the widened set.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ModeLevel {
     Runtime,
@@ -135,9 +107,6 @@ pub(crate) enum ModeLevel {
 }
 
 impl ModeLevel {
-    /// Operator-facing label used in plan / echo / refusal / done
-    /// messages. Matches the CLI literal so an operator who typed
-    /// `tenant mode dev runtime` sees the same word back.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             ModeLevel::Runtime => "runtime",
@@ -146,11 +115,9 @@ impl ModeLevel {
     }
 }
 
-// 9 params at the composition root — accounts + machine +
-// stdout/stderr/stdin/tty + colors — each is a discrete I/O capability
-// the harness needs to inject for testability. Bundling into a struct
-// would add a layer without removing parameters. clippy allow scoped
-// to this single function.
+// Composition root: each parameter is a discrete I/O capability the
+// harness injects for testability. Bundling would add a layer without
+// removing parameters.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     args: &[String],
@@ -167,9 +134,6 @@ pub fn run(
         Ok(cli) => cli,
         Err(code) => return code,
     };
-    // Dry-run swap: the writer stays mode-agnostic; composition root
-    // selects either the caller-supplied substrate (production / test)
-    // or the no-op `DryRunHostMachine` based on `--dry-run`.
     let dry_run_machine = adapters::dry_run_host_machine::DryRunHostMachine;
     let active_machine: &dyn domain::HostMachine = if cli.dry_run {
         &dry_run_machine

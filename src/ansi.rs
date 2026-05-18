@@ -1,18 +1,3 @@
-//! Internal ANSI escape-sequence wrapper for tenant's operator-facing
-//! output.
-//!
-//! Three responsibilities:
-//!   - color wrappers (`red`/`green`/`yellow`/`cyan`/`bold`/`dim`) that
-//!     emit `\x1b[<code>m...\x1b[0m`,
-//!   - a section-rule renderer (`rule`),
-//!   - a box-panel renderer (`panel`) using rounded box-drawing chars.
-//!
-//! Gating: `should_color(Stream)` probes the named stream's terminal
-//! state at runtime. Production composition (main.rs) computes this
-//! once at startup and threads the booleans through `tenant::run` →
-//! `Reporter::new`. Tests pass `false` so escape sequences don't leak
-//! into byte-form fixtures.
-
 use std::io::IsTerminal;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -21,10 +6,6 @@ pub enum Stream {
     Stderr,
 }
 
-/// Per-stream color decision threaded from the composition root into
-/// `Reporter`. Both off by default — tests' `Vec<u8>`-backed writers
-/// aren't terminals, so byte-form fixtures stay clean without per-test
-/// wiring. `main.rs` flips the bits at startup via `should_color`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Colors {
     pub stdout: bool,
@@ -40,9 +21,6 @@ impl Colors {
     }
 }
 
-/// True when the named stream is connected to a terminal. Production
-/// callers (main.rs) wrap this; tests don't go through it because their
-/// `Vec<u8>`-backed writers aren't terminals anyway.
 pub fn should_color(stream: Stream) -> bool {
     match stream {
         Stream::Stdout => std::io::stdout().is_terminal(),
@@ -104,11 +82,9 @@ pub fn rule(title: &str, width: usize) -> String {
 ///
 /// `width` is the total character width including the corners. Body
 /// lines longer than the available inner width print verbatim (overflow
-/// rather than wrap) — tenant's panel content is short structured text,
-/// not prose.
+/// rather than wrap).
 pub fn panel(title: &str, body: &str, width: usize) -> String {
     let width = width.max(8);
-    // Top: ╭─ TITLE ─...─╮
     let title_segment = format!("─ {title} ");
     let title_chars = title_segment.chars().count();
     let inner_top = width - 2;
@@ -119,7 +95,6 @@ pub fn panel(title: &str, body: &str, width: usize) -> String {
     };
     let top = format!("╭{title_segment}{top_dashes}╮");
 
-    // Body: │ <line padded to inner width - 2> │
     let inner = width - 4; // account for "│ " and " │"
     let mut out = String::new();
     out.push_str(&top);
@@ -133,7 +108,6 @@ pub fn panel(title: &str, body: &str, width: usize) -> String {
         };
         out.push_str(&format!("│ {line}{padding} │\n"));
     }
-    // Bottom: ╰─...─╯
     let bottom_dashes = "─".repeat(width - 2);
     out.push_str(&format!("╰{bottom_dashes}╯"));
     out

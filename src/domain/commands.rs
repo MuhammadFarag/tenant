@@ -10,12 +10,6 @@ const EX_IOERR: u8 = 74;
 const EX_DOCTOR_WARNING: u8 = 1;
 const EX_DOCTOR_CRITICAL: u8 = 2;
 
-/// Map `(max_severity, --strict)` to an exit code:
-/// - Without strict: always exit 0 (findings are informational).
-/// - With strict, no findings (max = None): exit 0.
-/// - With strict, max = Info: exit 0 (info-tier doesn't trip --strict).
-/// - With strict, max = Warning: exit 1.
-/// - With strict, max = Critical: exit 2.
 fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
     if !strict {
         return 0;
@@ -27,9 +21,6 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
     }
 }
 
-// Mirror of `tenant::run`'s param-count clippy allow — dispatch needs
-// every capability `run` threaded through to make per-verb routing
-// decisions. Bundling adds a layer without reducing real arguments.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch(
     cli: Cli,
@@ -41,11 +32,8 @@ pub(crate) fn dispatch(
     stdin_is_tty: bool,
     yes_flag: bool,
 ) -> u8 {
-    // The pre-execution summary emits ONLY when the operator is
-    // interactive OR running dry-run. Non-TTY real-mode invocation
-    // (scripted callers) stays silent before the substrate. `--yes`
-    // doesn't suppress the summary on a TTY — the operator opted
-    // out of the PROMPT, not the context.
+    // `--yes` suppresses the prompt, not the summary: an operator on a
+    // TTY still sees context; scripted (non-TTY real-mode) stays silent.
     let show_summary = cli.dry_run || stdin_is_tty;
     match cli.verb {
         Verb::Create { name } => {
@@ -57,33 +45,12 @@ pub(crate) fn dispatch(
                 reporter.refuse_name_conflict(&name, &e);
                 return EX_USAGE;
             }
-            // Phase 3 allocates UID and GID independently — see the
-            // `Decoupled UID/GID allocation` note in the project doctrine
-            // for why these aren't fused. Both consult the same HostAccounts
-            // but read disjoint maps, so the values may legitimately
-            // diverge.
             let uid = allocation::UidAllocator::new(accounts).lowest_free_uid();
             let gid = allocation::GidAllocator::new(accounts).lowest_free_gid();
-            // Pre-execution confirmation: summary + prompt
-            // BEFORE any substrate fires. Default Y for create (the
-            // operator typed the verb; abort is cheap; idempotent
-            // on re-run).
-            //
-            // The plan slice the verbose summary renders is built
-            // here in dispatch, mirroring the substrate flow the
-            // verb fires. The placeholder InstallAnchor / UpdateConfig
-            // bodies are empty strings — `describe_via` ignores those
-            // fields, so plan + echo lines come out identical to the
-            // real-bodied ops the verb constructs after profile-read.
             let create_plan_ops = build_create_plan_ops(&name, host, uid, gid);
             let create_plan = create_plan_entries(&create_plan_ops);
             if show_summary {
                 reporter.create_summary(&name, host, uid, gid, Some(&create_plan));
-                // Cycle-16 inline audit: surface verb-relevant doctor
-                // findings BEFORE the operator confirms — critical
-                // findings inline, warnings aggregated to a single
-                // hint line pointing at `tenant doctor`. Same gating
-                // as the summary itself; scripted callers stay silent.
                 writer.pre_exec_doctor_summary(None, host, accounts::DoctorScope::Create, reporter);
             }
             if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
@@ -105,11 +72,9 @@ pub(crate) fn dispatch(
                     EX_IOERR
                 }
                 Err(accounts::CreateError::UserWithRollback { user, rollback }) => {
-                    // Two stderr lines — the original sysadminctl failure
-                    // first (so log-grep regexes that match the
-                    // single-failure shape keep working), then the
-                    // rollback failure with its em-dash recovery hint
-                    // pointing at `tenant destroy`.
+                    // Emit the original failure first so log-grep regexes
+                    // matching the single-failure shape keep working; the
+                    // rollback-failed line follows with its recovery hint.
                     reporter.create_failed(&name, &user);
                     reporter.create_rollback_failed(&name, &rollback);
                     EX_IOERR
@@ -133,12 +98,8 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            // Reuses `destroy_eligibility`'s 5-way classifier (per the
-            // Option-A design lock). Shell collapses NotPresent and
-            // OrphanGroup into the same `refuse_shell_absent` refusal —
-            // Q3 ruled that operators wanting a shell don't care about
-            // the lingering group; the destroy verb is the right tool
-            // to converge that.
+            // NotPresent + OrphanGroup collapse to one refusal: shell can't
+            // run against a lingering group; convergence belongs to destroy.
             match accounts::destroy_eligibility(accounts, &name) {
                 accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
                     reporter.refuse_shell_absent(&name);
@@ -153,16 +114,7 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
-                    // Clap enforces `--mode` requires argv (parse-time
-                    // refusal), so if mode is Some, argv is non-empty;
-                    // dispatch still resolves to Runtime when mode is
-                    // None for the interactive branch's symmetry.
                     let resolved_mode = mode.unwrap_or(ModeLevel::Runtime);
-                    // Shell has no confirm prompt (interactive entry,
-                    // auto-narrow is convergent + idempotent), but the
-                    // pre-exec audit still wants visual context — the
-                    // summary supplies it. Same `show_summary` gate as
-                    // the other verbs; scripted callers stay silent.
                     if show_summary {
                         if argv.is_empty() {
                             reporter.shell_summary(&name, host);
@@ -178,12 +130,9 @@ pub(crate) fn dispatch(
                     }
                     match writer.shell_into_tenant(&name, host, &argv, resolved_mode, reporter) {
                         Ok(code) => {
-                            // Closing surface only for the command
-                            // form. Interactive form returns from
-                            // `login` after the operator typed exit;
-                            // there's no terminal context to render
-                            // into (cycle-4 doctrine). Argv presence
-                            // is the discriminator.
+                            // Closing surface is command-form-only; the
+                            // interactive form has no terminal context
+                            // left to render into after the session ends.
                             if !argv.is_empty() {
                                 reporter.shell_command_done(code, resolved_mode);
                             }
@@ -201,17 +150,10 @@ pub(crate) fn dispatch(
                             child_exit,
                             narrow_err,
                         }) => {
-                            // Per option (a) lock: child exit wins. The
-                            // yellow ⚠ stderr warning surfaces the
-                            // narrow failure but does NOT override the
-                            // child's outcome — operator's $? matches
-                            // what the command itself returned. The
-                            // closing line still fires (child ran),
-                            // but with no "(firewall narrowed back ...)"
-                            // suffix — that would be a lie when the
-                            // narrow just failed. Pass Runtime to elide
-                            // the suffix; the warning above carries the
-                            // real signal about firewall state.
+                            // Child exit wins; the warning carries the
+                            // narrow-failure signal. Pass Runtime to elide
+                            // the "narrowed back" suffix — it would lie
+                            // when the narrow just failed.
                             reporter.shell_narrow_failed(&name, &narrow_err);
                             reporter.shell_command_done(child_exit, ModeLevel::Runtime);
                             child_exit.clamp(0, 255) as u8
@@ -225,11 +167,6 @@ pub(crate) fn dispatch(
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
             }
-            // Mode reuses `destroy_eligibility`'s 5-way classifier.
-            // Same collapse as shell: NotPresent + OrphanGroup both
-            // refuse via `refuse_mode_absent` — the operator wants
-            // to switch a tenant's mode; the lingering group alone
-            // can't host one.
             match accounts::destroy_eligibility(accounts, &name) {
                 accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
                     reporter.refuse_mode_absent(&name);
@@ -247,9 +184,7 @@ pub(crate) fn dispatch(
                     // Build the reapply plan BEFORE the summary so
                     // profile-read / share pre-flight failures surface
                     // pre-prompt — don't ask the operator to confirm
-                    // something already doomed. The verbose summary
-                    // renders the plan upfront; the verb then receives
-                    // the same plan for execution.
+                    // something already doomed.
                     let plan = match writer.build_reapply_plan(&name, host, level) {
                         Ok(p) => p,
                         Err(e) => {
@@ -258,8 +193,6 @@ pub(crate) fn dispatch(
                         }
                     };
                     let plan_entries = plan.as_plan_entries();
-                    // Confirm prompt; default Y (convergent reapply,
-                    // reversible via the other mode).
                     if show_summary {
                         reporter.mode_summary(&name, host, level, Some(&plan_entries));
                         writer.pre_exec_doctor_summary(
@@ -285,53 +218,44 @@ pub(crate) fn dispatch(
                 }
             }
         }
-        Verb::Doctor { name, strict } => {
-            // Reuses `destroy_eligibility`'s 5-way classifier (same shape
-            // as shell / mode). NotPresent + OrphanGroup collapse into
-            // `refuse_doctor_absent` — a lingering `<name>-tenant-share`
-            // group with no user behind it can't be audited as a tenant.
-            // After the classifier clears, dispatch runs `doctor_tenant`
-            // and consults the `DoctorOutcome.max_severity()` plus the
-            // `--strict` flag to decide the exit code.
-            match name {
-                Some(n) => {
-                    if let Err(e) = accounts::validate_name(&n) {
-                        reporter.refuse_invalid_name(&n, &e);
-                        return EX_USAGE;
+        Verb::Doctor { name, strict } => match name {
+            Some(n) => {
+                if let Err(e) = accounts::validate_name(&n) {
+                    reporter.refuse_invalid_name(&n, &e);
+                    return EX_USAGE;
+                }
+                match accounts::destroy_eligibility(accounts, &n) {
+                    accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
+                        reporter.refuse_doctor_absent(&n);
+                        EX_USAGE
                     }
-                    match accounts::destroy_eligibility(accounts, &n) {
-                        accounts::Eligibility::NotPresent | accounts::Eligibility::OrphanGroup => {
-                            reporter.refuse_doctor_absent(&n);
-                            EX_USAGE
-                        }
-                        accounts::Eligibility::NotATenant { uid } => {
-                            reporter.refuse_doctor_not_a_tenant(&n, uid, TENANT_UID_FLOOR);
-                            EX_USAGE
-                        }
-                        accounts::Eligibility::SystemAccount => {
-                            reporter.refuse_doctor_system_account(&n);
-                            EX_USAGE
-                        }
-                        accounts::Eligibility::Destroyable => {
-                            match writer.doctor_tenant(host, &n, &[], reporter) {
-                                Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
-                                Err(e) => {
-                                    surface_doctor_error(reporter, &e);
-                                    EX_IOERR
-                                }
+                    accounts::Eligibility::NotATenant { uid } => {
+                        reporter.refuse_doctor_not_a_tenant(&n, uid, TENANT_UID_FLOOR);
+                        EX_USAGE
+                    }
+                    accounts::Eligibility::SystemAccount => {
+                        reporter.refuse_doctor_system_account(&n);
+                        EX_USAGE
+                    }
+                    accounts::Eligibility::Destroyable => {
+                        match writer.doctor_tenant(host, &n, &[], reporter) {
+                            Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
+                            Err(e) => {
+                                surface_doctor_error(reporter, &e);
+                                EX_IOERR
                             }
                         }
                     }
                 }
-                None => match writer.doctor_all_tenants(host, accounts, reporter) {
-                    Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
-                    Err(e) => {
-                        surface_doctor_error(reporter, &e);
-                        EX_IOERR
-                    }
-                },
             }
-        }
+            None => match writer.doctor_all_tenants(host, accounts, reporter) {
+                Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
+                Err(e) => {
+                    surface_doctor_error(reporter, &e);
+                    EX_IOERR
+                }
+            },
+        },
         Verb::Reload { name } => match name {
             Some(n) => {
                 if let Err(e) = accounts::validate_name(&n) {
@@ -352,9 +276,8 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     accounts::Eligibility::Destroyable => {
-                        // Build the reapply plan BEFORE the summary
-                        // so profile-read / share pre-flight failures
-                        // surface pre-prompt.
+                        // Build plan pre-summary so profile-read / share
+                        // pre-flight failures surface pre-prompt.
                         let plan = match writer.build_reapply_plan(&n, host, ModeLevel::Runtime) {
                             Ok(p) => p,
                             Err(e) => {
@@ -363,7 +286,6 @@ pub(crate) fn dispatch(
                             }
                         };
                         let plan_entries = plan.as_plan_entries();
-                        // Default Y (convergent, idempotent).
                         if show_summary {
                             reporter.reload_summary(&n, host, Some(&plan_entries));
                             writer.pre_exec_doctor_summary(
@@ -390,10 +312,8 @@ pub(crate) fn dispatch(
                 }
             }
             None => {
-                // List the tenants up-front so the operator confirms
-                // the scope before any substrate fires. Empty host
-                // short-circuits via reload_all_done_summary (which
-                // prints "No tenants…"), so we skip the prompt there.
+                // Show scope before the prompt; empty host has nothing
+                // to confirm, so skip straight to the no-op summary.
                 let names = accounts.tenant_names();
                 if names.is_empty() {
                     let outcome = writer.reload_all_tenants(accounts, host, reporter);
@@ -421,10 +341,8 @@ pub(crate) fn dispatch(
                     0
                 }
                 accounts::Eligibility::OrphanGroup => {
-                    // Convergence path: tenant user is already gone but
-                    // the suffixed group survived a prior partial
-                    // failure. Confirm; default N — same
-                    // destructive-action posture as the full destroy.
+                    // Convergence path: tenant user is gone but the
+                    // suffixed group survived a prior partial failure.
                     let orphan_plan_ops = build_orphan_plan_ops(&name, host);
                     let orphan_plan = orphan_plan_entries(&orphan_plan_ops);
                     if show_summary {
@@ -436,9 +354,6 @@ pub(crate) fn dispatch(
                         reporter.aborted();
                         return 0;
                     }
-                    // Routes through `surface_destroy_error` so a
-                    // profile-rm failure on this arm gets the same
-                    // operator-friendly framing as the Destroyable arm.
                     if let Err(e) = writer.destroy_orphan_group(&name, host, reporter) {
                         surface_destroy_error(reporter, &name, &e);
                         return EX_IOERR;
@@ -454,8 +369,6 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 accounts::Eligibility::Destroyable => {
-                    // Confirm; default N (destructive, muscle-memory
-                    // ENTER must not delete).
                     let destroy_plan_ops = build_destroy_plan_ops(&name, host);
                     let destroy_plan = destroy_plan_entries(&destroy_plan_ops);
                     if show_summary {
@@ -479,9 +392,6 @@ pub(crate) fn dispatch(
     }
 }
 
-/// Route a `DestroyError` to the appropriate Reporter failure method.
-/// Centralized so both destroy arms (`Destroyable` and `OrphanGroup`)
-/// surface account-domain and profile-domain failures consistently.
 fn surface_destroy_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
@@ -494,11 +404,6 @@ fn surface_destroy_error(
     }
 }
 
-/// Route a `DoctorError` to the right Reporter framing — Probe-side
-/// failures (sudo prompt machinery) go to `doctor_failed`; host-config
-/// file read failures (sudoers, pam.d/sudo) go to
-/// `doctor_host_file_failed`; firewall-read failures (pfctl) go to
-/// `doctor_firewall_failed`.
 fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) {
     match error {
         accounts::DoctorError::Probe(e) => reporter.doctor_failed(e),
@@ -507,10 +412,6 @@ fn surface_doctor_error(reporter: &mut Reporter, error: &accounts::DoctorError) 
     }
 }
 
-/// Route a `ModeError` (mode verb) to the right Reporter framing.
-/// The share-reapply substrate adds four arms beyond the Profile +
-/// Firewall pair; centralizing the dispatch keeps the verb arm in
-/// `dispatch` thin.
 fn surface_mode_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
@@ -526,10 +427,9 @@ fn surface_mode_error(
     }
 }
 
-/// Route a `ShellError::Mode(_)` to the right Reporter framing.
-/// Parallel to `surface_mode_error` with shell-entry context phrasing
-/// on each arm — operator typed `tenant shell`, not `tenant mode`, so
-/// the failure frame names the narrow as a step within the shell verb.
+/// Parallel to `surface_mode_error` with shell-entry phrasing: the
+/// operator typed `tenant shell`, so the frame names the narrow as a
+/// step within the shell verb, not a standalone mode switch.
 fn surface_shell_mode_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
@@ -545,10 +445,8 @@ fn surface_shell_mode_error(
     }
 }
 
-/// Route a `ModeError` to the right Reporter framing for the reload
-/// verb. Parallel to `surface_mode_error` with reload-specific wording
-/// on Firewall + Share arms ("reload firewall" / "cannot reload");
-/// substrate arms (Acl / Account / Probe / Profile) reuse the
+/// Parallel to `surface_mode_error` with reload-specific wording on
+/// Firewall + Share arms; Acl / Account / Probe arms reuse the
 /// mode-named methods whose wording is verb-agnostic.
 fn surface_reload_error(
     reporter: &mut Reporter,
@@ -565,19 +463,11 @@ fn surface_reload_error(
     }
 }
 
-// ============================================================
-// Plan-slice construction for prompt-having verbs
-//
-// Dispatch builds the plan-side op list BEFORE the summary so the
-// verbose plan block can render before the confirm prompt.
-// `*_plan_ops` owns the ops; `*_plan_entries` flattens them into the
-// borrowed-slice shape the Reporter expects.
-//
-// The placeholder InstallAnchor / UpdateConfig bodies are empty
-// strings — `describe_via` ignores those fields, so plan + echo lines
-// come out identical to the real-bodied ops the verb constructs after
-// profile-read.
-// ============================================================
+// Plan-slice construction for prompt-having verbs. `*_plan_ops` owns
+// the ops; `*_plan_entries` flattens them into the borrowed-slice the
+// Reporter expects. InstallAnchor / UpdateConfig placeholder bodies
+// are empty strings; `describe_via` ignores those fields, so plan +
+// echo lines match the real ops constructed later after profile-read.
 
 pub(crate) struct CreatePlanOps {
     pub(crate) create_group: AccountOp,
@@ -754,17 +644,11 @@ fn orphan_plan_entries(ops: &OrphanGroupPlanOps) -> Vec<(Op<'_>, Option<&'static
     ]
 }
 
-/// Route a `CreateError::PostProvision(ModeError)` to the right
-/// Reporter framing. Post-provision is the arm where the tenant has
-/// already been provisioned (user + group + profile + PF + enable
-/// all succeeded) but the share-reapply substrate failed — the
-/// per-arm framing names the existing-tenant-state explicitly so the
-/// operator's recovery is `tenant reload`, not `tenant create`
-/// (which would refuse on name-conflict). Profile/Firewall arms are
-/// unreachable on the create path because `reapply_shares_post_provision`
-/// is called with a pre-parsed Profile and doesn't touch firewall
-/// ops; the two arms are wired through the mode-failure family for
-/// completeness.
+/// Post-provision is the arm where the tenant is already provisioned
+/// but share-reapply failed; the per-arm framing names the existing
+/// state so the operator's recovery is `tenant reload`, not a fresh
+/// `tenant create` (which would refuse on name-conflict). Profile /
+/// Firewall arms are unreachable here but wired for completeness.
 fn surface_create_post_provision_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,

@@ -1,13 +1,6 @@
 //! Per-tenant profile config — TOML at `~/.config/tenant/profiles/<name>.toml`.
 //! Carries the PF allowlist (runtime / install tiers) and any
-//! `[[shares]]` filesystem-share declarations. Read by the firewall
-//! render path, the `mode` verb, and the `reload` verb; written at
-//! create-time as a default scaffold and removed at destroy-time.
-//!
-//! Substrate ops live on the unified `HostMachine` trait (the
-//! `describe_profile` / `execute_profile` pair). This file holds only
-//! the data shapes shared across that interface: the error type, the
-//! default TOML content, and the display-form path helper.
+//! `[[shares]]` filesystem-share declarations.
 
 use std::fmt;
 use std::io;
@@ -15,22 +8,14 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-/// Display path for the tenant's profile, with a literal `~` (not the
-/// expanded `$HOME`). Used in user-facing plan/echo lines so the rendered
-/// output is host-independent — the operator's `~` is the universally
-/// readable form. `HostMachine::execute_profile` resolves the absolute form
-/// internally for the actual fs ops. Single source of truth for the path
-/// convention so a future move (XDG_CONFIG_HOME support, schema
-/// migration) updates display + writes in one place.
+/// Display path with literal `~` for user-facing plan/echo lines —
+/// host-independent rendering.
 pub fn display_path_for(name: &str) -> String {
     format!("~/.config/tenant/profiles/{name}.toml")
 }
 
-/// The default profile content scaffolded at create-time. Empty hosts
-/// arrays mean "no egress allowlisted yet"; the operator edits this
-/// file before any non-trivial use. Hand-rolled `format!` rather than
-/// going through `toml::ser` because this content is fixed — the
-/// toml/serde dep earns its keep on the read side.
+/// Default profile content scaffolded at create-time. Empty hosts arrays
+/// mean "no egress allowlisted yet"; the operator edits before use.
 pub fn default_profile_toml() -> String {
     "schema_version = 1\n\
      \n\
@@ -42,12 +27,6 @@ pub fn default_profile_toml() -> String {
         .to_string()
 }
 
-/// Failure shape for the profile domain. Wraps any error surfaced from
-/// the substrate's `execute_profile` / `read_profile` impls (fs failures
-/// in production, caller-injected failures in tests). The dispatcher
-/// renders this through `Reporter::create_profile_failed` /
-/// `destroy_profile_failed` so the operator sees the path that failed
-/// without having to read source.
 #[derive(Debug)]
 pub struct ProfileError {
     pub message: String,
@@ -67,26 +46,19 @@ impl From<io::Error> for ProfileError {
     }
 }
 
-/// Parsed per-tenant profile. Read on the create-side firewall step
-/// (via `HostMachine::read_profile`) and parsed via `parse` to extract
-/// the allowlist tiers for `render_anchor`.
+/// Parsed per-tenant profile.
 ///
-/// `schema_version` is checked against the supported set (currently
-/// just `1`) before structural deserialization so a future schema
-/// bump produces an operator-readable refusal rather than a low-level
-/// serde error frame. Host order is preserved across parse → render
-/// so the anchor file's host order matches the operator's grouping
-/// intent in the profile.
+/// `schema_version` is checked against the supported set (currently just
+/// `1`) before structural deserialization so a future schema bump
+/// produces an operator-readable refusal rather than a low-level serde
+/// error frame. Host order is preserved across parse so the anchor
+/// file's host order matches the operator's grouping intent.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Profile {
     pub schema_version: u32,
     pub allowlist: Allowlist,
-    /// Per-tenant filesystem shares. Each entry declares a host_path
-    /// the tenant should be able to access (via `<name>-tenant-share`
-    /// ACL grant) and a tenant-side `tenant_path` symlink that points
-    /// at it. Absent `[[shares]]` array deserializes to an empty Vec
-    /// via `#[serde(default)]`, preserving backward-compat for
-    /// profiles authored before the share substrate.
+    /// Absent `[[shares]]` deserializes to empty via `#[serde(default)]`,
+    /// preserving backward-compat with pre-shares profiles.
     #[serde(default)]
     pub shares: Vec<Share>,
 }
@@ -102,12 +74,9 @@ pub struct Tier {
     pub hosts: Vec<String>,
 }
 
-/// One per-tenant filesystem share entry. The Writer expands `tenant_path`'s
-/// `$HOME` token at op-construction time; the substrate sees a fully
-/// absolute path. `host_path` is parsed as `PathBuf` directly (literal
-/// absolute path on the host); `tenant_path` stays as `String` because
-/// it's a template (`$HOME/...`) that the parser doesn't resolve — keeping
-/// the type distinction signals "not yet resolved" at the type level.
+/// `host_path` is a literal absolute path; `tenant_path` is a `$HOME`-
+/// templated string that the parser does NOT resolve — the type
+/// distinction signals "not yet resolved" at the layer boundary.
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
 pub struct Share {
     pub host_path: PathBuf,
@@ -115,13 +84,10 @@ pub struct Share {
     pub tenant_path: String,
 }
 
-/// Per-share access intent. Two values, intent-named (`ro` / `rw`).
-/// POSIX bit-string forms are intentionally rejected because POSIX
-/// bit semantics differ for files vs directories (`r` alone on a
-/// directory means "list names but can't open any" which is almost
-/// never the operator intent). String discriminator via serde:
-/// `mode = "ro"` and `mode = "rw"` are the only accepted TOML forms;
-/// anything else is a parse error.
+/// Intent-named only (`ro` / `rw`). POSIX bit-string forms are rejected
+/// because POSIX bit semantics diverge for files vs directories (`r`
+/// alone on a directory means "list names but can't open any" — almost
+/// never the operator intent).
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum ShareMode {
@@ -129,17 +95,10 @@ pub enum ShareMode {
     Rw,
 }
 
-/// Expand a `tenant_path` template into an absolute `PathBuf` for tenant
-/// `name`. `$HOME` is the only supported template variable; it expands
-/// to `/Users/<name>` (the macOS tenant home convention) and only
-/// when it appears as the prefix. A `tenant_path` like `/etc/$HOME/foo`
-/// stays literal so an operator typo doesn't silently become a different
-/// path. Literal absolute paths (`/opt/shared`) flow through unchanged.
-///
-/// Called by `Writer::build_share_ops` at op-construction time so the
-/// substrate sees fully-resolved paths; the parser stores the raw
-/// template so the type signals "not yet resolved" at the layer
-/// boundary.
+/// Expand `$HOME` to `/Users/<name>` only when it appears as the path
+/// prefix. Mid-string `$HOME` flows through literally — caught by
+/// `parse`'s prefix-only validation, so this fallback is only reached
+/// for paths that don't contain `$HOME` at all.
 pub fn expand_tenant_path(name: &str, template: &str) -> PathBuf {
     if template == "$HOME" {
         PathBuf::from(format!("/Users/{name}"))
@@ -150,24 +109,17 @@ pub fn expand_tenant_path(name: &str, template: &str) -> PathBuf {
     }
 }
 
-/// Parse profile TOML content into a typed `Profile`. Pre-checks
-/// `schema_version` against the supported set (currently just `1`) so a
-/// version bump produces a refusal message that names the version
-/// explicitly; structural failures (missing sections, wrong types) fall
-/// through to serde's error frame, which the dispatcher rewraps in the
-/// path-naming Reporter frame.
-///
-/// Post-parse, validates each `[[shares]]` entry's `tenant_path` for the
-/// `$HOME` template's prefix-only contract: the token only expands when
-/// it appears at the start of the path. A `tenant_path` that contains
-/// `$HOME` anywhere else (`$HOME$HOME/src`, `/etc/$HOME/foo`) is a
-/// profile-authoring mistake — refuse rather than silently produce a
-/// surprising literal path.
+/// Pre-checks `schema_version` against the supported set (currently `1`)
+/// before structural deserialization so a version bump produces an
+/// operator-readable refusal naming the version, not a serde error
+/// frame. Post-parse, enforces the `$HOME` prefix-only contract on each
+/// `[[shares]]` `tenant_path` — mid-string `$HOME` (`$HOME$HOME/src`,
+/// `/etc/$HOME/foo`) is a likely authoring mistake and refused rather
+/// than passed through as a surprising literal.
 pub fn parse(content: &str) -> Result<Profile, ProfileError> {
-    // Pre-check schema_version separately so the refusal phrasing
-    // doesn't depend on serde's error formatting. Falls through silently
-    // if the field is absent or the wrong type — the typed deserialize
-    // below catches both cases with its own (acceptable) message.
+    // Pre-check before typed deserialize so the refusal phrasing doesn't
+    // depend on serde's error formatting. Falls through silently if the
+    // field is absent / wrong type; the typed deserialize catches both.
     let raw: toml::Value = toml::from_str(content).map_err(|e: toml::de::Error| ProfileError {
         message: format!("invalid TOML: {e}"),
     })?;
@@ -187,13 +139,8 @@ pub fn parse(content: &str) -> Result<Profile, ProfileError> {
     Ok(profile)
 }
 
-/// Prefix-only `$HOME` contract: token expands only when it appears
-/// at position 0 followed by `/` (or as the whole path on its own).
-/// Any other occurrence of `$HOME` in `tenant_path` is a likely typo
-/// and refused at parse time. Examples refused: `$HOME$HOME/src` (would
-/// expand to `/Users/<name>$HOME/src` — confusing literal); `/etc/$HOME/x`
-/// (would pass through unchanged, but the operator's intent was almost
-/// certainly to use a tenant home subpath).
+/// Prefix-only `$HOME`: position 0 followed by `/`, or the whole path.
+/// Any other occurrence refused as likely typo.
 fn validate_tenant_path_template(template: &str) -> Result<(), ProfileError> {
     if template == "$HOME" || template.starts_with("$HOME/") {
         return Ok(());

@@ -1,33 +1,13 @@
-//! Filesystem-exposure detection: pure functions for the curated path
-//! list, severity classification, and finding rendering.
-//!
-//! # Architecture
-//!
-//! The doctor verb operates in three layers:
-//! 1. **Substrate (`HostMachine::probe_access_as_tenant`)** — invokes
-//!    `sudo -n -u <tenant> /usr/bin/test -<mode> <path>` and reports
-//!    Allowed / Denied / Unknown. Probe-as-tenant subsumes ACL +
-//!    sandbox + TCC semantics at the kernel level; doctor doesn't
-//!    re-implement them.
-//! 2. **This module (`doctor`)** — curated path list and pure
-//!    classification. Knows the project's threat model (which paths
-//!    matter, what severity each category produces). No I/O.
-//! 3. **Writer (`accounts::Writer::doctor_tenant`)** — orchestrates
-//!    probes for one tenant, collects findings, drives the Reporter.
-//!    Bare `tenant doctor` runs the all-tenants walk on top.
-//!
-//! The curated list is fixed (not configurable); verbose mode surfaces
-//! the list to the operator so the bounded scope is operator-visible.
+//! Pure functions for the curated path list, severity classification,
+//! and finding rendering. No I/O.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::domain::{AccessMode, AccessOutcome, GroupName, HostUserName, TenantUserName};
 
-/// Severity tier of a finding. Order is load-bearing: `--strict` exit
-/// code logic consumes `findings.iter().map(severity).max()` to decide
-/// between exit 0 (no findings worse than info), 1 (warning max), or
-/// 2 (critical present). Info < Warning < Critical.
+/// Order is load-bearing: `--strict` maps max severity to exit code
+/// (Info → 0, Warning → 1, Critical → 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Info,
@@ -45,114 +25,39 @@ impl Severity {
     }
 }
 
-/// Threat-category for a curated path. The severity each category
-/// produces (when a probe comes back `Allowed`) is locked by
-/// `classify` — see the matrix there.
-///
-/// The sudoers env-leak finding is rendered separately via
-/// `Finding::EnvLeak`; it has no curated path and therefore no
-/// `Category` entry.
+/// Threat-category for a curated path. The (category, outcome) →
+/// severity matrix lives in `classify`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
     /// Host-side secret targets — private keys, cloud credentials,
-    /// session tokens, command history. Tenant-readability is a
-    /// critical exposure (the agent could exfiltrate without any
-    /// network access).
+    /// session tokens, command history.
     HostSecret,
-    /// Top-level `/Users/<host>/` listability — if a tenant can
-    /// `ls /Users/host`, they can enumerate file names that might
-    /// themselves reveal sensitive activity even if individual
-    /// files are protected. Less severe than reading a secret
-    /// directly: warning-tier.
+    /// `/Users/<host>/` listability — enumerable file names can
+    /// themselves reveal sensitive activity even if individual files
+    /// are protected.
     HostHomeListing,
-    /// Cross-tenant exposure — tenant A's access to tenant B's home
-    /// directory or `.ssh/` directory. Warning-tier rather than
-    /// critical because the leakage is between two operator-managed
-    /// principals (no third-party data involved), but still a
-    /// boundary the design assumes is intact.
+    /// Tenant A's access to tenant B's home directory or `.ssh/`.
     CrossTenant,
-    /// Tenant-project artifacts on the host (per-tenant profiles in
-    /// the host's `~/.config/tenant/profiles/`, per-tenant PF anchor
-    /// files in `/etc/pf.anchors/`). The anchor files specifically
-    /// are mode 0644 by design, so they WILL surface as `Allowed`;
-    /// we report as `info` rather than warning because the exposure
-    /// is intentional and the operator only needs to know it exists,
-    /// not act on it.
+    /// Per-tenant profiles in `~/.config/tenant/profiles/` and per-
+    /// tenant PF anchor files in `/etc/pf.anchors/`. Anchors are mode
+    /// 0644 by design and WILL surface as `Allowed`; classified
+    /// `info` because the exposure is intentional.
     TenantArtifact,
 }
 
 /// A doctor-detected exposure.
 ///
-/// `FilesystemExposure` is the per-tenant per-path probe finding from
-/// `probe_access_as_tenant` returning Allowed.
-///
-/// `EnvLeak` is the host-wide finding from the sudoers env-policy
-/// check: if `/etc/sudoers` (plus drop-ins) doesn't `env_delete +=
-/// "<var>"` an inherited env var, that var propagates from the
-/// operator's session into every `sudo -iu <tenant>`. The canonical
-/// case is SSH_AUTH_SOCK — macOS ssh-agent's socket gets inherited
-/// so the tenant can `ssh` anywhere the host has cached keys for.
-/// Warning-tier (not critical) because the leak depends on the
-/// operator's session env actually holding the var; recovery is a
-/// one-line `/etc/sudoers` edit. The finding line names the directive
-/// shape so the operator's fix is mechanical.
-///
-/// `PfRuleDrift` is the per-tenant kernel-side finding: the kernel's
-/// anchor for `tenant-<name>` is missing a structural rule (no `pass`
-/// rule, no `block return` rule, or both — empty anchor). Warning-tier
-/// because the drift is recoverable via `tenant mode <name> runtime`
-/// (re-renders + reloads the anchor). `detail` names which structural
-/// rule is missing.
-///
-/// `TouchIdMissing` is the host-wide finding: `/etc/pam.d/sudo` has
-/// no active `pam_tid.so` directive. Info-tier — it's a recommendation
-/// aligned with the project's NOPASSWD-sudoers stance (Touch ID
-/// makes sudo faster AND adds an auth factor), not a correctness
-/// drift. Info findings do not trip `--strict`'s exit-1, so the
-/// operator sees the tip once but isn't nagged on every doctor run.
-///
-/// `PfDisabled` is the host-wide finding: pf's global enable state
-/// is off (`pfctl -d` was run, or pf never got enabled on this host).
-/// Critical-tier — when pf is off, NO tenant's firewall enforces
-/// anything; every tenant's anchor is silently inert. Recovery is
-/// `sudo pfctl -e` (idempotent at the substrate; the create flow's
-/// `FirewallOp::Enable` is the same command).
-///
-/// `AnchorBodyDrift` is the per-tenant file-side finding: the on-disk
-/// anchor file at `/etc/pf.anchors/tenant-<name>` differs byte-for-byte
-/// from what `firewall::render_anchor` would produce from the current
-/// profile (runtime tier — install widening is session-scoped, so any
-/// sustained install-tier on-disk state IS drift). Warning-tier;
-/// recovery is `tenant mode <name> runtime` (re-renders + reloads
-/// the anchor), same as `PfRuleDrift`.
-///
-/// Vocabulary note: the variant says "body" (the technical content
-/// concept) and the `Display` impl says "anchor file drift" / "on-disk
-/// body" (the operator's mental model — they hand-edited the FILE; the
-/// detail names what specifically diverged). Same deliberate
-/// two-level framing as `PfRuleDrift` ("rule" internally, "pf anchor"
-/// in Display).
-///
-/// `AclDrift` is the per-tenant finding: a declared `[[shares]]`
-/// entry's `host_path` is missing the `<tenant>-tenant-share` group's
-/// `allow` ACL entry. Warning-tier; recovery is `tenant reload <name>`
-/// (the share substrate is idempotent — Grant re-applies cleanly).
-/// The set of paths audited is bounded by the profile's declared
-/// shares (orphan-ACL detection across the host filesystem is NOT in
-/// scope).
-///
-/// `SymlinkDrift` is the per-tenant finding: a declared share's
-/// `tenant_path` doesn't match the declared `host_path` via symlink.
-/// Three sub-cases via `SymlinkActual`: `Absent` (no entry at
-/// tenant_path — tenant `rm`'d the symlink or never had one),
-/// `WrongTarget(actual)` (symlink exists but points elsewhere — operator
-/// changed the profile's host_path without re-running reload), and
-/// `NotSymlink` (tenant_path is a real file or directory — reload's
-/// pre-flight would refuse; doctor surfaces the conflict before the
-/// next reload attempt). Warning-tier; recovery is `tenant reload <name>`
-/// for the first two cases and manual cleanup + reload for `NotSymlink`.
-/// Target comparison is string-exact (no canonicalize) — the profile
-/// names the operator's declared intent.
+/// Severity rationale for the non-obvious cases:
+/// - `EnvLeak` is warning (not critical): the leak only triggers if
+///   the operator's session env actually holds the var; recovery is a
+///   one-line `/etc/sudoers` edit.
+/// - `TouchIdMissing` is info: a recommendation aligned with the
+///   NOPASSWD-sudoers stance, not a correctness drift. Info doesn't
+///   trip `--strict`'s exit-1.
+/// - `PfDisabled` is critical: when pf is off, every tenant's anchor
+///   is silently inert.
+/// - `SymlinkDrift` target comparison is string-exact (no canonicalize)
+///   — the profile names declared intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
     FilesystemExposure {
@@ -184,12 +89,6 @@ pub enum Finding {
         expected_target: PathBuf,
         actual: SymlinkActual,
     },
-    /// The host operator is not a secondary member of the tenant's
-    /// `<name>-tenant-share` group. Surfaces (a) legacy tenants whose
-    /// create flow predates the host-membership step, and (b) tenants
-    /// where the operator manually removed themselves with
-    /// `dseditgroup -o edit -d`. Warning-tier; recovery is `tenant
-    /// reload <name>` (the substrate's catch-up path re-adds the host).
     HostNotInShareGroup {
         tenant: TenantUserName,
         host: HostUserName,
@@ -197,14 +96,8 @@ pub enum Finding {
     },
 }
 
-/// What's actually present at a declared share's `tenant_path`, when
-/// it doesn't match the declared `host_path` symlink. Case-tailored
-/// guidance per variant — Absent / WrongTarget have the same recovery
-/// (`tenant reload <name>` re-creates the link via `ln -sfn`);
-/// NotSymlink requires manual cleanup first (reload would refuse with
-/// `ShareError::TenantPathOccupied`). All three express "symlink
-/// isn't what was declared" — they're modelled as one Finding variant
-/// rather than three, so callers route through a single arm.
+/// What's actually present at a declared share's `tenant_path` when
+/// it doesn't match the declared `host_path` symlink.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymlinkActual {
     Absent,
@@ -227,24 +120,13 @@ impl Finding {
         }
     }
 
-    /// Multi-section operator-facing guidance for a finding. Returned
-    /// text is flat (section headers at column 0; body at column 2;
-    /// no trailing newline). Reporter prefixes each rendered line with
-    /// 2 spaces under the finding line for verbose-mode emission.
+    /// Multi-section operator-facing guidance. Section headers at
+    /// column 0; body at column 2; no trailing newline.
     ///
-    /// `None` for `FilesystemExposure`: per-path-category guidance
-    /// depends on operator intent (file vs directory; intentional-public
-    /// vs accidental-leak; POSIX vs ACL fix) and would belong with the
+    /// `None` for `FilesystemExposure`: per-path guidance depends on
+    /// operator intent (file vs directory; intentional-public vs
+    /// accidental-leak; POSIX vs ACL fix) — belongs with the
     /// remediation surface, not the detection surface.
-    ///
-    /// Section structure mirrors the sandbox plugin's
-    /// `home_check.HomeCheck::guidance()` prior art:
-    /// - **Why this matters**: 1-2 paragraphs framing the stake.
-    /// - **Recommended fix**: exact command + one-line justification.
-    /// - **Side-effects to know about**: bullet list of consequences.
-    /// - **Alternative**: when applicable; omitted for variants where
-    ///   no meaningful alternative exists (`TouchIdMissing`,
-    ///   `PfDisabled`).
     pub fn guidance(&self) -> Option<String> {
         match self {
             Finding::FilesystemExposure { .. } => None,
@@ -694,61 +576,38 @@ impl fmt::Display for Finding {
     }
 }
 
-/// Does the on-disk anchor body match the profile-derived expected
-/// body byte-for-byte? Caller passes the actual file content
-/// (`HostMachine::read_anchor_body`) and the expected render
-/// (`firewall::render_anchor` over the runtime-tier hosts).
-///
 /// Byte-exact: `render_anchor` is deterministic — same profile +
 /// tenant produces identical output across runs — so any difference
-/// is real drift, not cosmetic. If trailing-whitespace or comment-edit
-/// false positives ever surface, soften the comparator here.
+/// is real drift, not cosmetic.
 pub fn anchor_body_matches(actual: &str, expected: &str) -> bool {
     actual == expected
 }
 
-/// Does the env policy unconditionally delete `var` from propagation
-/// for `sudo -u <tenant>` invocations?
-///
-/// Greps the concatenated sudoers text for an UNQUALIFIED `Defaults
-/// env_delete` directive that includes `var`. Recognized shapes:
+/// Greps sudoers text for an UNQUALIFIED `Defaults env_delete`
+/// directive that includes `var`. Recognized shapes:
 /// - `Defaults env_delete += "X"`
-/// - `Defaults env_delete = "X Y Z"` (multi-var list, space-separated)
+/// - `Defaults env_delete = "X Y Z"` (space-separated list)
 /// - `Defaults env_delete += X` (unquoted single var)
 ///
-/// **Qualified `Defaults` forms are NOT accepted.** Sudo allows
-/// `Defaults:user` (invoking-user scoped), `Defaults>runas`
-/// (target-user scoped), `Defaults@host` (host scoped), and
-/// `Defaults!cmd` (command-tag scoped) — each restricts when the
-/// directive applies. A `Defaults>plugin-dev env_delete += "X"`
-/// applies only when sudo runs as `plugin-dev`, not when it runs
-/// as a tenant — so it doesn't protect the operator's tenant
-/// sessions even though the literal text mentions `env_delete`.
-/// Tradeoff: conservative-false. Better to nag the operator about a
-/// leak covered by a per-runas directive (false positive — they can
-/// add an unqualified directive to silence) than to silently miss
-/// a real leak.
+/// Qualified forms (`Defaults:user`, `Defaults>runas`, `Defaults@host`,
+/// `Defaults!cmd`) are NOT accepted: each restricts scope and may not
+/// cover `sudo -u <tenant>` invocations. Conservative-false: a
+/// genuinely-covering qualified directive sees a false-positive nag;
+/// the alternative is silently missing a real leak.
 pub fn has_env_delete_for(policy: &str, var: &str) -> bool {
     for raw_line in policy.lines() {
         let line = raw_line.trim();
-        // Accept ONLY unqualified `Defaults` followed directly by
-        // whitespace. Qualified forms (`Defaults:`, `Defaults>`,
-        // `Defaults@`, `Defaults!`) restrict the directive's scope
-        // and don't reliably protect tenant invocations.
         let after_defaults = match line.strip_prefix("Defaults") {
             Some(rest) if rest.starts_with(|c: char| c.is_whitespace()) => rest.trim(),
             _ => continue,
         };
-        // Now `after_defaults` should start with `env_delete`. Use a
-        // word-boundary check so `env_delete_extra` doesn't false-
-        // match.
+        // Word-boundary check so `env_delete_extra` doesn't false-match.
         let after_envdel = match after_defaults.strip_prefix("env_delete") {
             Some(rest) if rest.starts_with(|c: char| c.is_whitespace() || c == '=' || c == '+') => {
                 rest.trim()
             }
             _ => continue,
         };
-        // Expect `+=` or `=` next.
         let after_op = if let Some(rest) = after_envdel.strip_prefix("+=") {
             rest.trim()
         } else if let Some(rest) = after_envdel.strip_prefix('=') {
@@ -756,13 +615,10 @@ pub fn has_env_delete_for(policy: &str, var: &str) -> bool {
         } else {
             continue;
         };
-        // The value is either a double-quoted space-separated list or
-        // a single bare token. Strip surrounding quotes if present.
         let value = after_op
             .trim_start_matches('"')
             .trim_end_matches('"')
             .trim();
-        // Tokenize space-separated entries.
         if value.split_whitespace().any(|tok| tok == var) {
             return true;
         }
@@ -770,10 +626,8 @@ pub fn has_env_delete_for(policy: &str, var: &str) -> bool {
     false
 }
 
-/// Map a (category, probe-outcome) pair to a finding's severity, or
-/// `None` if no finding fires. Only `Allowed` ever produces a
-/// finding — `Denied` and `Unknown` are the expected case for
-/// sensitive paths on a hardened host and should not pollute output.
+/// Only `Allowed` produces a finding — `Denied` and `Unknown` are
+/// the expected case for sensitive paths on a hardened host.
 pub fn classify(category: Category, outcome: AccessOutcome) -> Option<Severity> {
     match (category, outcome) {
         (_, AccessOutcome::Denied) | (_, AccessOutcome::Unknown) => None,
@@ -784,28 +638,10 @@ pub fn classify(category: Category, outcome: AccessOutcome) -> Option<Severity> 
     }
 }
 
-/// Build the curated list of (category, access, path) tuples to probe
-/// for one tenant on one host. The list is:
-///
-/// - **HostHomeListing**: `/Users/<host>` (List).
-/// - **HostSecret (Read)**: SSH private keys, AWS credentials, GnuPG
-///   private-key dir, GitHub PAT (`~/.config/gh/hosts.yml`), Claude
-///   OAuth token (`~/.claude.json`), zsh history.
-/// - **HostSecret (List)**: `.ssh`, `.aws`, `.gnupg`, `.config/gh`,
-///   `.claude`, `Library/Keychains`, `Documents`, `Desktop`,
-///   `Downloads` — directory listability checks for the same threat
-///   model (a tenant who can list `~/.ssh/` may enumerate key names
-///   even if individual files are 0600).
-/// - **CrossTenant**: for each `other` tenant ≠ `tenant`,
-///   `/Users/<other>` (List) and `/Users/<other>/.ssh` (List).
-/// - **TenantArtifact**: for each `other`, the host-side profile
-///   `~/.config/tenant/profiles/<other>.toml` (Read) and the per-
-///   tenant PF anchor `/etc/pf.anchors/tenant-<other>` (Read).
-///
-/// `others` is permitted to contain the current `tenant` name; that
-/// entry is filtered out so callers can pass an unfiltered tenant
-/// list. Order is stable across calls so the operator's diff between
-/// two `tenant doctor` runs is meaningful.
+/// Curated list of (category, access, path) tuples for one tenant on
+/// one host. `others` may contain `tenant` — that entry is filtered
+/// out so callers can pass an unfiltered tenant list. Output order is
+/// stable across calls so operator diffs between runs are meaningful.
 pub fn curated_paths(
     host: &str,
     tenant: &str,
@@ -892,14 +728,11 @@ pub fn curated_paths(
     out
 }
 
-/// Does `pfctl -si` report pf as enabled?
-///
 /// Match shape: a non-comment line whose trimmed form starts with
-/// `Status: Enabled`. `pfctl -si`'s canonical first line is e.g.
-/// `Status: Enabled for 3 days 04:32:18` (uptime suffix varies);
-/// when pf is off, it reports `Status: Disabled`. Prefix match on
-/// `Status: Enabled` distinguishes cleanly. Leading whitespace is
-/// tolerated.
+/// `Status: Enabled`. Canonical first line is e.g. `Status: Enabled
+/// for 3 days 04:32:18` (uptime suffix varies); disabled reports
+/// `Status: Disabled`. Prefix match distinguishes cleanly. Leading
+/// whitespace is tolerated.
 pub fn pf_status_enabled(status: &str) -> bool {
     for raw_line in status.lines() {
         let line = raw_line.trim_start();
@@ -913,28 +746,15 @@ pub fn pf_status_enabled(status: &str) -> bool {
     false
 }
 
-/// Does `/etc/pam.d/sudo` enable Touch-ID-for-sudo via an active
-/// `pam_tid.so` directive?
+/// Match shape: a non-comment line whose first three tokens are
+/// `auth sufficient pam_tid.so`.
 ///
-/// Match shape: a non-comment line whose tokens are `auth sufficient
-/// pam_tid.so` (control == `sufficient`, module == `pam_tid.so`).
-/// Returns `true` on first hit; `false` if no such line is present.
-///
-/// Why `sufficient` specifically: pam.d's stack semantics give
+/// `sufficient` specifically: pam.d's stack semantics give
 /// `sufficient` modules a short-circuit-on-success role — a passing
-/// `pam_tid.so sufficient` means sudo authenticates via Touch ID
-/// alone (no fallback to password). A `required` or `optional`
-/// pam_tid.so doesn't carry the same UX guarantee (Touch ID may
-/// run AND then still demand a password). Conservative-false: a
-/// non-`sufficient` directive reports as missing, prompting the
-/// operator to inspect and confirm.
-///
-/// Commented (`#`-prefixed) lines do not count. Leading whitespace
-/// is tolerated. Inline trailing comments after the module name are
-/// not parsed — pam.d doesn't accept them in the canonical sense, so
-/// `auth sufficient pam_tid.so # comment` is treated as a real line
-/// (the parser sees `auth`, `sufficient`, `pam_tid.so` as the first
-/// three tokens).
+/// `pam_tid.so sufficient` authenticates via Touch ID alone (no
+/// password fallback). `required` / `optional` may run Touch ID AND
+/// still demand a password. Conservative-false: non-`sufficient`
+/// reports as missing, prompting the operator to inspect.
 pub fn has_pam_tid(pam_config: &str) -> bool {
     for raw_line in pam_config.lines() {
         let line = raw_line.trim();
@@ -952,23 +772,18 @@ pub fn has_pam_tid(pam_config: &str) -> bool {
     false
 }
 
-/// Structural-presence check on the kernel's pf rules for the
-/// `tenant-<name>` anchor. Returns up to two `PfRuleDrift` findings:
-/// one if no `pass` rule is present, one if no `block return` rule
-/// is present.
+/// Returns up to two `PfRuleDrift` findings: one if no `pass` rule
+/// is present, one if no `block` rule is present.
 ///
-/// Structural rather than exact-match: pfctl's output format isn't
-/// a stable contract (numerical IPs vs hostnames, table-reference
-/// reformatting) so an exact-match check would false-positive on
-/// cosmetic drift. The structural shape catches the case that
-/// actually matters — "kernel anchor is empty or missing one of
-/// the two rule classes the runtime requires".
+/// Structural rather than exact-match: pfctl's output format isn't a
+/// stable contract (numerical IPs vs hostnames, table-reference
+/// reformatting) so exact-match would false-positive on cosmetic
+/// drift. Structural shape catches "kernel anchor empty or missing
+/// one of the two required rule classes".
 ///
-/// Match shape: line begins with `pass ` (any pass rule) and
-/// separately a line begins with `block ` (any block rule). Both are
-/// case-sensitive lowercase per pfctl's canonical output. Leading
-/// whitespace is tolerated; commented-out lines (`#`-prefixed) do
-/// not count as a real rule.
+/// Match shape: line begins with `pass ` or `block ` (case-sensitive
+/// lowercase per pfctl's canonical output). Leading whitespace
+/// tolerated; `#`-prefixed lines do not count.
 pub fn pf_rule_presence_check(rules: &str, tenant: &str) -> Vec<Finding> {
     let mut out: Vec<Finding> = Vec::new();
     let mut has_pass = false;
@@ -1000,27 +815,18 @@ pub fn pf_rule_presence_check(rules: &str, tenant: &str) -> Vec<Finding> {
     out
 }
 
-/// Does the `ls -lde` listing carry an `allow` ACL entry for `group`?
-///
 /// Match shape: any line containing the literal substring
 /// `group:<group> allow`. Looser than substring-matching the full
-/// canonical entry string — `chmod +a "group:dev-tenant-share allow
-/// read,write,..."` writes bits in one form but macOS canonicalizes
-/// to another on storage (e.g. `read,write,execute,delete,append` →
+/// canonical entry — macOS canonicalizes bit names on storage
+/// (`read,write,execute,delete,append` →
 /// `list,add_file,search,delete,add_subdirectory`), so any bit-list
-/// comparison would false-negative. The presence of the group's
-/// `allow` entry is the structural invariant doctor cares about; the
-/// specific bits are the operator's choice via the profile's
-/// `mode = "ro"` / `"rw"` translated by the `AclMode` substrate.
+/// comparison would false-negative. The group's `allow` entry
+/// presence is the structural invariant; specific bits are the
+/// operator's profile choice.
 ///
-/// Word-boundary discipline: we delimit the group name with `:` on
-/// the left and ` allow` on the right so a prefix-collision case like
-/// listing carrying `group:dev` while doctor queries `group:dev-tenant-share`
-/// does NOT match (`group:dev allow` ≠ `group:dev-tenant-share allow`).
-///
-/// Commented lines (`#`-prefixed after trim) do not count, matching
-/// the convention of the env-policy + pam parsers. `ls -lde` doesn't
-/// actually emit comments — defensive parser shape only.
+/// Word-boundary discipline: the `:` on the left and ` allow` on the
+/// right prevent prefix-collision (`group:dev allow` ≠
+/// `group:dev-tenant-share allow`).
 pub fn has_group_acl_entry(listing: &str, group: &str) -> bool {
     let needle = format!("group:{group} allow");
     for raw_line in listing.lines() {
@@ -1035,10 +841,8 @@ pub fn has_group_acl_entry(listing: &str, group: &str) -> bool {
     false
 }
 
-/// Render a curated path for the verbose-mode "Curated sensitive paths
-/// checked:" disclosure block. Forms one line per path with the access
-/// mode suffix so operators can see which capability was probed
-/// (Read vs List on the same path produce two lines).
+/// Render one curated-path line with its access-mode verb (Read vs
+/// List on the same path produce two lines).
 pub fn render_curated_line(access: AccessMode, path: &Path) -> String {
     let verb = match access {
         AccessMode::Read => "read",

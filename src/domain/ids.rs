@@ -1,29 +1,7 @@
-//! Newtype wrappers for tenant + operator identifiers, both numeric
-//! (`UserId` / `GroupId`) and string-shaped (`TenantUserName` /
-//! `HostUserName` / `GroupName`). The numeric pair carries POSIX UIDs /
-//! GIDs and protects against UID-vs-GID position swaps. The user-name
-//! pair carries macOS short usernames in two distinct roles — the
-//! sandboxed tenant user and the host operator — and protects against
-//! tenant-name-vs-host-name position swaps in the many
-//! `(name, host, ...)` signatures. `GroupName` carries the full
-//! macOS short group name (always `<tenant>-tenant-share` today; the
-//! suffix is appended at the Writer boundary by
-//! `accounts::tenant_share_group_name`) and protects share-group
-//! AccountOp variants and the share ACL ops from accidentally
-//! receiving a tenant name where a group name belongs.
-//!
 //! `HostUserName` carries the `User` qualifier deliberately: bare
-//! `HostName` is a polyseme with the networking term (DNS hostname,
-//! `/etc/hostname`, `uname -n`); the qualifier disambiguates and the
-//! symmetric `TenantUserName` keeps the pair parallel.
-//!
-//! Validation for `TenantUserName` lives outside the constructor —
-//! `validate_name` is still the gatekeeper at the dispatch layer.
-//! The newtype is a tag, not a validity proof; future work may move
-//! validation into a `try_new` constructor. `GroupName` is similarly
-//! constructed without validation; today's only producer is
-//! `accounts::tenant_share_group_name`, which appends the suffix to an
-//! already-validated tenant name.
+//! `HostName` is a polyseme with the networking term (DNS hostname);
+//! the qualifier disambiguates and the symmetric `TenantUserName`
+//! keeps the pair parallel.
 
 use std::fmt;
 use std::str::FromStr;
@@ -35,10 +13,6 @@ pub struct UserId(pub u32);
 pub struct GroupId(pub u32);
 
 impl UserId {
-    /// Next UID in ascending order. Used by the allocator's "find
-    /// lowest free" walk; no overflow check (the search range bottoms
-    /// out at `TENANT_UID_FLOOR = 600` and u32::MAX is unreachable in
-    /// practice).
     pub fn next(self) -> Self {
         Self(self.0 + 1)
     }
@@ -62,9 +36,8 @@ impl fmt::Display for GroupId {
     }
 }
 
-// `From<u32>` for cheap construction at parse boundaries (dscl output,
-// allocator iteration). No `From<UserId> for u32` — unwrapping is
-// explicit (`uid.0`) so it shows in diffs.
+// No `From<UserId> for u32` — unwrapping is explicit (`uid.0`) so it
+// shows in diffs.
 impl From<u32> for UserId {
     fn from(v: u32) -> Self {
         Self(v)
@@ -158,10 +131,8 @@ impl From<String> for GroupName {
     }
 }
 
-// `From<&Self>` for cheap `.into()` at substrate ADT construction
-// sites — `AccountOp::CreateTenantUser { name: name.into(), ... }` where
-// `name: &TenantUserName`. Without this, callers would have to use
-// `.clone()` explicitly. Same shape as `String: From<&String>`.
+// `From<&Self>` mirrors `String: From<&String>` so callers can `.into()`
+// from a borrow without an explicit `.clone()`.
 impl From<&TenantUserName> for TenantUserName {
     fn from(s: &TenantUserName) -> Self {
         s.clone()
@@ -180,9 +151,8 @@ impl From<&GroupName> for GroupName {
     }
 }
 
-// `PartialEq<str>` / `PartialEq<&str>` for ergonomic test assertions
-// (`assert_eq!(name, "dev")`) and `match`/`if`-let comparisons inline
-// in dispatch. Mirrors `String`'s PartialEq impls in std.
+// Mirrors `String`'s `PartialEq<str>` / `PartialEq<&str>` impls so
+// comparisons against string literals work without a `.as_str()`.
 impl PartialEq<str> for TenantUserName {
     fn eq(&self, other: &str) -> bool {
         self.0 == other
@@ -255,10 +225,8 @@ impl PartialEq<GroupName> for &str {
     }
 }
 
-// `FromStr` exists so clap's derive macro can parse `TenantUserName`
-// directly from CLI input without a custom `value_parser`. Validation
-// lives separately (`accounts::validate_name`); the constructor is
-// infallible.
+// Infallible so clap's derive macro can parse `TenantUserName` directly
+// from CLI input; validation lives separately at dispatch.
 impl FromStr for TenantUserName {
     type Err = std::convert::Infallible;
     fn from_str(s: &str) -> Result<Self, Self::Err> {

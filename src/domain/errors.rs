@@ -1,11 +1,6 @@
 use std::fmt;
 use std::io;
 
-/// Account-domain error. Same shape as the pre-refactor `ExecError` — the
-/// substrate distinguishes spawn failures (sudo not on PATH, fork failed)
-/// from non-zero exits (the tool reported an error). The writer's
-/// `LookupUserRecord` flow pattern-matches on `NonZero` specifically to
-/// treat probe-non-zero as "no cleanup needed."
 #[derive(Debug)]
 pub enum AccountError {
     Spawn(io::Error),
@@ -28,14 +23,6 @@ impl fmt::Display for AccountError {
     }
 }
 
-/// Failure surface for privileged-or-cheap reads of host config files
-/// — `/etc/sudoers` + `/etc/sudoers.d/*` (privileged) and
-/// `/etc/pam.d/sudo` (mode-0644 direct read). The substrate
-/// concatenates the readable text into one blob that doctor's parsers
-/// grep through; either the read invocation fails (spawn / non-zero
-/// on sudo-gated reads) or a direct filesystem read fails. Mirrors
-/// `FirewallError`'s shape with an extra `Fs` variant for the
-/// direct-read case.
 #[derive(Debug)]
 pub enum HostFileError {
     Spawn(io::Error),
@@ -62,13 +49,8 @@ impl fmt::Display for HostFileError {
     }
 }
 
-/// Probe-substrate error. Fires when the probe machinery itself failed —
-/// `sudo` not on PATH, fork failed, an unexpected non-zero exit pattern
-/// that doesn't map cleanly to Allowed / Denied. `Denied` and `Unknown`
-/// are NOT errors here — they're `AccessOutcome` variants the probe
-/// returns on its happy path. This error type fires only when doctor
-/// couldn't get a probe answer at all; the dispatcher routes it to
-/// `doctor_failed` and exits 74.
+/// Fires only when the probe couldn't produce a verdict at all. `Denied`
+/// and `Unknown` are happy-path `AccessOutcome` variants, not errors.
 #[derive(Debug)]
 pub enum ProbeError {
     Spawn(io::Error),
@@ -91,16 +73,10 @@ impl fmt::Display for ProbeError {
     }
 }
 
-/// Firewall-domain error. Same `Spawn` / `NonZero` shape as `AccountError`
-/// for pfctl invocations; two additional variants for the fs side of
-/// firewall ops:
-/// - `Fs` covers tempfile / mv / chmod failures during anchor/pf.conf
-///   writes; carries the path so the operator-facing frame can name what
-///   failed.
-/// - `RestoreFailed` is the recovery-of-recovery case: a `Reload` failure
-///   triggered a `RestoreConfigFromBackup`, and the restore itself failed.
-///   The host now carries a half-edited pf.conf; the message names the
-///   backup path and the manual recovery command.
+/// `RestoreFailed` is the recovery-of-recovery case: a reload failure
+/// triggered a config-restore that itself failed, leaving the host with a
+/// half-edited firewall config. Display names the backup path and the
+/// manual recovery command.
 #[derive(Debug)]
 pub enum FirewallError {
     Spawn(io::Error),
@@ -133,9 +109,6 @@ impl fmt::Display for FirewallError {
     }
 }
 
-/// ACL-domain error. Mirrors `AccountError`'s shape because the
-/// substrate is `chmod` (a tool with the same spawn / non-zero contract
-/// as dseditgroup / sysadminctl).
 #[derive(Debug)]
 pub enum AclError {
     Spawn(io::Error),
