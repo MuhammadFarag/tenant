@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
-use crate::allocation::TENANT_UID_FLOOR;
-use crate::domain::{
+use tenant::allocation::TENANT_UID_FLOOR;
+use tenant::domain::{
     GroupId, GroupName, HostUserDirectory, TenantUserName, UserDirectoryError, UserId,
 };
 

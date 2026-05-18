@@ -1,8 +1,8 @@
-use tenant::adapters::stub_host_machine::StubHostMachine;
-use tenant::adapters::stub_user_directory::StubUserDirectory;
 use tenant::domain::{AccountError, AccountOp, FirewallError, ProfileOp, UserId};
 
+mod adapters;
 mod common;
+use adapters::*;
 use common::*;
 
 #[test]

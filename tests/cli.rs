@@ -3,9 +3,9 @@
 //! cli_doctor); shared helpers — `NeverHostMachine`, `run_with`, `run_with_exec`,
 //! `TEST_HOST`, plus stub-builder factories — live in `tests/common/mod.rs`.
 
-use tenant::adapters::stub_user_directory::StubUserDirectory;
-
+mod adapters;
 mod common;
+use adapters::*;
 use common::*;
 
 #[test]

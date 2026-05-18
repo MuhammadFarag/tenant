@@ -7,13 +7,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::adapters::macos::MacosHostMachine;
-use crate::domain::{
+use tenant::adapters::macos::MacosHostMachine;
+use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
     GroupName, HostFileError, HostMachine, HostUserName, PathKind, ProbeError, ProfileOp,
     TenantUserName,
 };
-use crate::profile::{ProfileError, default_profile_toml};
+use tenant::profile::{ProfileError, default_profile_toml};
 
 #[derive(Default)]
 pub struct StubHostMachine {
@@ -517,13 +517,13 @@ impl HostMachine for StubHostMachine {
             return Ok(content.clone());
         }
         let hosts: Vec<String> = match self.profile_state.borrow().get(name.as_str()) {
-            Some(toml) => match crate::profile::parse(toml) {
+            Some(toml) => match tenant::profile::parse(toml) {
                 Ok(profile) => profile.allowlist.runtime.hosts.clone(),
                 Err(_) => Vec::new(),
             },
             None => Vec::new(),
         };
-        Ok(crate::firewall::render_anchor(name.as_str(), &hosts))
+        Ok(tenant::firewall::render_anchor(name.as_str(), &hosts))
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
@@ -561,11 +561,11 @@ impl HostMachine for StubHostMachine {
             return Ok(kind);
         }
         if let Some(toml) = self.profile_state.borrow().get(name.as_str())
-            && let Ok(profile) = crate::profile::parse(toml)
+            && let Ok(profile) = tenant::profile::parse(toml)
         {
             for share in &profile.shares {
                 let expanded =
-                    crate::profile::expand_tenant_path(name.as_str(), &share.tenant_path);
+                    tenant::profile::expand_tenant_path(name.as_str(), &share.tenant_path);
                 if expanded == path {
                     return Ok(PathKind::Symlink(share.host_path.clone()));
                 }

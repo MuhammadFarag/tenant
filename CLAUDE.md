@@ -118,23 +118,15 @@ src/domain/reporter.rs
                     `dry_run || stdin_is_tty`). `doctor_finding` /
                     `doctor_finding_one_liner` /
                     `doctor_summary_pending` drive the audit surface.
-src/adapters/     — driven adapters. `stub_user_directory.rs`
-                    (`StubUserDirectory` — test substitute; HashMap-
-                    backed inventory with per-method
-                    `RefCell<VecDeque<Option<UserDirectoryError>>>` failure-
-                    injection queues) + `macos/user_directory.rs`
+src/adapters/     — driven adapters. `macos/user_directory.rs`
                     (`MacosUserDirectory` — ZST driver; per-call dscl
                     with `eDSRecordNotFound` absence detection;
                     symmetric with `MacosHostMachine`).
-                    Three `HostMachine` impls: `macos/host_machine.rs`
+                    Two `HostMachine` impls: `macos/host_machine.rs`
                     (`MacosHostMachine` — production substrate; owns
                     argv for dseditgroup / sysadminctl / dscl / pfctl
                     / chmod, tempfile-based privileged writes, the
-                    XDG-style profile path), `stub_host_machine.rs`
-                    (`StubHostMachine` — test substitute; records every
-                    op invocation, supports per-op failure injection
-                    + builder-pattern preload of profile / pf-conf /
-                    env-policy / anchor-body / probe-outcome state),
+                    XDG-style profile path),
                     `dry_run_host_machine.rs` (`DryRunHostMachine` — no-op
                     execute; describe delegates to `MacosHostMachine`;
                     read carve-outs return "no actionable warning"
@@ -155,8 +147,29 @@ src/main.rs       — composition root: prod impls + `tenant::run`.
                     `Terminal` over real stdout/stderr/stdin.
 
 tests/cli_*.rs            — E2E, one binary per verb plus `cli.rs`
-                            for parser cross-cutting; shared helpers in
-                            `tests/common/mod.rs`.
+                            for parser cross-cutting. Each declares
+                            `mod adapters; mod common;` (adapters first
+                            so common can reach `crate::adapters`).
+tests/common/mod.rs       — output/plan builders, test runners
+                            (`run_with`, `run_with_exec`,
+                            `run_with_stdin`), stub-factory helpers
+                            (`stub_with_tenant`, `make_tenant_stub_reader`,
+                            `make_two_tenant_stub_reader`,
+                            `profile_with_hosts`, `profile_with_shares`,
+                            dry-run block helpers). `TEST_HOST` constant.
+tests/adapters/           — test-only adapter impls:
+                            `StubHostMachine` (records every op
+                            invocation; per-op failure injection +
+                            builder-pattern preload of profile / pf-conf
+                            / env-policy / anchor-body / probe-outcome
+                            state), `StubUserDirectory` (HashMap-backed
+                            inventory with per-method
+                            `RefCell<VecDeque<Option<UserDirectoryError>>>`
+                            failure-injection queues),
+                            `NeverHostMachine` (panicking `HostMachine`
+                            impl; default for `run_with` so paths that
+                            should not reach the substrate fail loudly).
+                            All accessible via `use adapters::*;`.
 tests/macos_host_machine.rs
                           — per-variant pins of
                             `MacosHostMachine::describe_*` argv contracts.
@@ -243,6 +256,14 @@ it from scratch wastes a cycle and risks getting it wrong.
   `NeverHostMachine`. Tenants + Reporter constructed inside `run` from
   the active HostMachine; both swap to `DryRunHostMachine` when
   `--dry-run`. Test seam stays at the HostMachine boundary.
+
+- **Adapters live under `.../adapters/`, regardless of src vs tests.**
+  Production-reachable adapters (`MacosHostMachine`, `MacosUserDirectory`,
+  `DryRunHostMachine`) stay in `src/adapters/`. Test-only adapter impls
+  (`StubHostMachine`, `StubUserDirectory`, `NeverHostMachine`) live in
+  `tests/adapters/`, accessed via `use adapters::*;` after `mod adapters;`.
+  Keeps the production library surface free of `RefCell`-laden test
+  scaffolding; mirrors the src structure for discoverability.
 
 - **Terminal is the capability, not a bundle.** All operator-side I/O
   (stdout / stderr / stdin / stdin_is_tty / colors) is carried by the

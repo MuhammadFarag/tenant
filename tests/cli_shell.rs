@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use tenant::adapters::stub_host_machine::StubHostMachine;
-use tenant::adapters::stub_user_directory::StubUserDirectory;
 use tenant::domain::{AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, UserId};
 
+mod adapters;
 mod common;
+use adapters::*;
 use common::*;
 
 #[test]

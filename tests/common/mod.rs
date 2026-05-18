@@ -11,12 +11,10 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 
-use tenant::adapters::stub_host_machine::StubHostMachine;
-use tenant::adapters::stub_user_directory::StubUserDirectory;
-use tenant::domain::{
-    AccountError, AccountOp, FirewallError, FirewallOp, GroupId, GroupName, HostMachine,
-    HostUserName, ProfileOp, TenantUserName, UserDirectoryError, UserId,
-};
+use crate::adapters::NeverHostMachine;
+use crate::adapters::{StubHostMachine, StubUserDirectory};
+
+use tenant::domain::{GroupId, HostUserName, UserDirectoryError, UserId};
 
 /// Single-failure queue: returns Err on the first call to the matching
 /// `HostUserDirectory` method, snapshots thereafter. The default fixture for
@@ -36,94 +34,6 @@ pub fn directory_fail_once() -> RefCell<VecDeque<Option<UserDirectoryError>>> {
 pub fn directory_fail_on_second_call() -> RefCell<VecDeque<Option<UserDirectoryError>>> {
     let err = UserDirectoryError::Spawn(io::Error::other("synthetic"));
     RefCell::new(VecDeque::from([None, Some(err)]))
-}
-
-/// Default host machine for tests that should not reach the exec stage —
-/// validation failures, conflicts, and dry-run paths. Panics on any
-/// substrate call, so any accidental invocation from a path that's
-/// meant to be no-op surfaces loudly instead of being silently absorbed.
-pub struct NeverHostMachine;
-impl HostMachine for NeverHostMachine {
-    fn describe_account(&self, op: &AccountOp) -> String {
-        panic!("host machine unexpectedly invoked (describe_account) with op: {op:?}");
-    }
-    fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError> {
-        panic!("host machine unexpectedly invoked (execute_account) with op: {op:?}");
-    }
-    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
-        panic!("host machine unexpectedly invoked (login) with name: {name:?}");
-    }
-    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
-        panic!("host machine unexpectedly invoked (exec_as_tenant): name={name:?} argv={argv:?}");
-    }
-    fn describe_profile(&self, op: &ProfileOp) -> String {
-        panic!("host machine unexpectedly invoked (describe_profile) with op: {op:?}");
-    }
-    fn execute_profile(&self, op: &ProfileOp) -> Result<(), tenant::profile::ProfileError> {
-        panic!("host machine unexpectedly invoked (execute_profile) with op: {op:?}");
-    }
-    fn read_profile(&self, name: &TenantUserName) -> Result<String, tenant::profile::ProfileError> {
-        panic!("host machine unexpectedly invoked (read_profile) with name: {name:?}");
-    }
-    fn read_pf_conf(&self) -> Result<String, FirewallError> {
-        panic!("host machine unexpectedly invoked (read_pf_conf)");
-    }
-    fn describe_firewall(&self, op: &FirewallOp) -> String {
-        panic!("host machine unexpectedly invoked (describe_firewall) with op: {op:?}");
-    }
-    fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
-        panic!("host machine unexpectedly invoked (execute_firewall) with op: {op:?}");
-    }
-    fn probe_access_as_tenant(
-        &self,
-        name: &TenantUserName,
-        path: &std::path::Path,
-        mode: tenant::domain::AccessMode,
-    ) -> Result<tenant::domain::AccessOutcome, tenant::domain::ProbeError> {
-        panic!(
-            "host machine unexpectedly invoked (probe_access_as_tenant): name={name:?} path={path:?} mode={mode:?}"
-        );
-    }
-    fn read_env_policy(&self) -> Result<String, tenant::domain::HostFileError> {
-        panic!("host machine unexpectedly invoked (read_env_policy)");
-    }
-    fn read_kernel_pf_rules(
-        &self,
-        name: &TenantUserName,
-    ) -> Result<String, tenant::domain::FirewallError> {
-        panic!("host machine unexpectedly invoked (read_kernel_pf_rules): name={name:?}");
-    }
-    fn read_pam_sudo(&self) -> Result<String, tenant::domain::HostFileError> {
-        panic!("host machine unexpectedly invoked (read_pam_sudo)");
-    }
-    fn read_pf_status(&self) -> Result<String, tenant::domain::FirewallError> {
-        panic!("host machine unexpectedly invoked (read_pf_status)");
-    }
-    fn read_anchor_body(
-        &self,
-        name: &TenantUserName,
-    ) -> Result<String, tenant::domain::HostFileError> {
-        panic!("host machine unexpectedly invoked (read_anchor_body): name={name:?}");
-    }
-    fn describe_acl(&self, op: &tenant::domain::AclOp) -> String {
-        panic!("host machine unexpectedly invoked (describe_acl) with op: {op:?}");
-    }
-    fn execute_acl(&self, op: &tenant::domain::AclOp) -> Result<(), tenant::domain::AclError> {
-        panic!("host machine unexpectedly invoked (execute_acl) with op: {op:?}");
-    }
-    fn tenant_path_kind(
-        &self,
-        name: &TenantUserName,
-        path: &std::path::Path,
-    ) -> Result<tenant::domain::PathKind, tenant::domain::ProbeError> {
-        panic!("host machine unexpectedly invoked (tenant_path_kind): name={name:?} path={path:?}");
-    }
-    fn read_host_acl(&self, path: &std::path::Path) -> Result<String, tenant::domain::ProbeError> {
-        panic!("host machine unexpectedly invoked (read_host_acl): path={path:?}");
-    }
-    fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
-        panic!("host machine unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
-    }
 }
 
 /// Host identity passed to `tenant::run`. Production reads `$USER`; tests
