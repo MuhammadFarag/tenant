@@ -14,8 +14,7 @@
 
 use std::path::PathBuf;
 
-use tenant::domain::{GroupId, UserId};
-use tenant::executor::{AccountOp, AclMode, AclOp, FirewallOp, Op, ProfileOp};
+use tenant::domain::{AccountOp, AclMode, AclOp, FirewallOp, GroupId, Op, ProfileOp, UserId};
 
 // ============================================================
 // Account-domain variants

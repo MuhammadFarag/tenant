@@ -7,10 +7,11 @@
 
 #![allow(dead_code)]
 
+use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
-use tenant::domain::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
-use tenant::executor::{
-    AccountError, AccountOp, Executor, FirewallError, FirewallOp, ProfileOp, StubExecutor,
+use tenant::domain::{
+    AccountError, AccountOp, Executor, FirewallError, FirewallOp, GroupId, GroupName, HostUserName,
+    ProfileOp, TenantUserName, UserId,
 };
 
 /// Default executor for tests that should not reach the exec stage —
@@ -53,50 +54,47 @@ impl Executor for NeverExecutor {
         &self,
         name: &TenantUserName,
         path: &std::path::Path,
-        mode: tenant::executor::AccessMode,
-    ) -> Result<tenant::executor::AccessOutcome, tenant::executor::ProbeError> {
+        mode: tenant::domain::AccessMode,
+    ) -> Result<tenant::domain::AccessOutcome, tenant::domain::ProbeError> {
         panic!(
             "executor unexpectedly invoked (probe_access_as_tenant): name={name:?} path={path:?} mode={mode:?}"
         );
     }
-    fn read_env_policy(&self) -> Result<String, tenant::executor::HostFileError> {
+    fn read_env_policy(&self) -> Result<String, tenant::domain::HostFileError> {
         panic!("executor unexpectedly invoked (read_env_policy)");
     }
     fn read_kernel_pf_rules(
         &self,
         name: &TenantUserName,
-    ) -> Result<String, tenant::executor::FirewallError> {
+    ) -> Result<String, tenant::domain::FirewallError> {
         panic!("executor unexpectedly invoked (read_kernel_pf_rules): name={name:?}");
     }
-    fn read_pam_sudo(&self) -> Result<String, tenant::executor::HostFileError> {
+    fn read_pam_sudo(&self) -> Result<String, tenant::domain::HostFileError> {
         panic!("executor unexpectedly invoked (read_pam_sudo)");
     }
-    fn read_pf_status(&self) -> Result<String, tenant::executor::FirewallError> {
+    fn read_pf_status(&self) -> Result<String, tenant::domain::FirewallError> {
         panic!("executor unexpectedly invoked (read_pf_status)");
     }
     fn read_anchor_body(
         &self,
         name: &TenantUserName,
-    ) -> Result<String, tenant::executor::HostFileError> {
+    ) -> Result<String, tenant::domain::HostFileError> {
         panic!("executor unexpectedly invoked (read_anchor_body): name={name:?}");
     }
-    fn describe_acl(&self, op: &tenant::executor::AclOp) -> String {
+    fn describe_acl(&self, op: &tenant::domain::AclOp) -> String {
         panic!("executor unexpectedly invoked (describe_acl) with op: {op:?}");
     }
-    fn execute_acl(&self, op: &tenant::executor::AclOp) -> Result<(), tenant::executor::AclError> {
+    fn execute_acl(&self, op: &tenant::domain::AclOp) -> Result<(), tenant::domain::AclError> {
         panic!("executor unexpectedly invoked (execute_acl) with op: {op:?}");
     }
     fn tenant_path_kind(
         &self,
         name: &TenantUserName,
         path: &std::path::Path,
-    ) -> Result<tenant::executor::PathKind, tenant::executor::ProbeError> {
+    ) -> Result<tenant::domain::PathKind, tenant::domain::ProbeError> {
         panic!("executor unexpectedly invoked (tenant_path_kind): name={name:?} path={path:?}");
     }
-    fn read_host_acl(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<String, tenant::executor::ProbeError> {
+    fn read_host_acl(&self, path: &std::path::Path) -> Result<String, tenant::domain::ProbeError> {
         panic!("executor unexpectedly invoked (read_host_acl): path={path:?}");
     }
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {

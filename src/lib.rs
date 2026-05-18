@@ -12,7 +12,6 @@ pub mod ansi;
 mod commands;
 pub mod doctor;
 pub mod domain;
-pub mod executor;
 pub mod firewall;
 pub mod profile;
 mod reporter;
@@ -159,7 +158,7 @@ impl ModeLevel {
 pub fn run(
     args: &[String],
     accounts: &dyn domain::HostAccounts,
-    executor: &dyn executor::Executor,
+    executor: &dyn domain::Executor,
     host: &HostUserName,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -174,8 +173,8 @@ pub fn run(
     // Dry-run swap: the writer stays mode-agnostic; composition root
     // selects either the caller-supplied substrate (production / test)
     // or the no-op `DryRunExecutor` based on `--dry-run`.
-    let dry_run_executor = executor::DryRunExecutor;
-    let active_executor: &dyn executor::Executor = if cli.dry_run {
+    let dry_run_executor = adapters::dry_run_executor::DryRunExecutor;
+    let active_executor: &dyn domain::Executor = if cli.dry_run {
         &dry_run_executor
     } else {
         executor

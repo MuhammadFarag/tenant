@@ -2,7 +2,7 @@ use std::io::BufRead;
 
 use crate::ModeLevel;
 use crate::doctor::Severity;
-use crate::executor::{AccountOp, FirewallOp, Op, ProfileOp};
+use crate::domain::{AccountOp, FirewallOp, Op, ProfileOp};
 use crate::reporter::ConfirmOutcome;
 use crate::{
     Cli, Verb, accounts, allocation, allocation::TENANT_UID_FLOOR, domain, reporter::Reporter,

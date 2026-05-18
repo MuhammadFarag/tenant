@@ -22,9 +22,9 @@ use crate::ModeLevel;
 use crate::accounts::{ConflictError, NameError, ShareError, tenant_share_group_name};
 use crate::ansi::{self, Colors};
 use crate::doctor::{Category, Finding, Severity};
-use crate::domain::{GroupId, HostUserName, TenantUserName, UserId};
-use crate::executor::{
-    AccessMode, AccountError, AclError, Executor, FirewallError, Op, ProbeError,
+use crate::domain::{
+    AccessMode, AccountError, AclError, Executor, FirewallError, GroupId, HostUserName, Op,
+    ProbeError, TenantUserName, UserId,
 };
 use crate::profile::{ProfileError, display_path_for};
 
@@ -1085,7 +1085,7 @@ impl<'a> Reporter<'a> {
     /// detail; this frame adds the verb-level context. Distinct from
     /// `doctor_failed` (filesystem-probe machinery) so the operator
     /// sees which substrate tripped.
-    pub fn doctor_host_file_failed(&mut self, err: &crate::executor::HostFileError) {
+    pub fn doctor_host_file_failed(&mut self, err: &crate::domain::HostFileError) {
         let _ = writeln!(self.stderr, "tenant: failed to read host config: {err}");
     }
 

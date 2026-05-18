@@ -63,27 +63,44 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     `HostAccounts` trait — driven port for account
                     inventory queries (`used_uids` / `used_gids` /
                     `has_user` / `has_group` / `uid_for` /
-                    `tenant_names`). `ids.rs` carries the domain
-                    newtypes (`UserId` / `GroupId` / `TenantUserName`
-                    / `HostUserName` / `GroupName`), re-exported flat
-                    from `crate::domain`.
-src/adapters/     — driven adapters. `stub_host_accounts.rs`
-                    (`StubHostAccounts` for tests) +
-                    `macos/host_accounts.rs` (`MacosHostAccounts` —
-                    dscl-backed snapshot, populated once at `new()`).
-src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both
-                    iterate from `TENANT_UID_FLOOR = 600`.
-src/executor.rs   — `Op` ADT over `AccountOp` / `ProfileOp` /
-                    `FirewallOp` / `AclOp` + `WritableOp` trait.
-                    `Executor` trait: per-domain `describe_*` /
-                    `execute_*` pairs + non-unit carve-outs (`login`,
+                    `tenant_names`). `executor.rs` defines the
+                    `Executor` trait — driven port for the host-side
+                    substrate (per-domain `describe_*` / `execute_*`
+                    pairs + non-unit carve-outs: `login`,
                     `exec_as_tenant`, `read_profile`, `read_pf_conf`,
                     `probe_access_as_tenant`, `read_env_policy`,
                     `read_kernel_pf_rules`, `read_pam_sudo`,
                     `read_pf_status`, `read_anchor_body`,
                     `read_host_acl`, `tenant_path_kind`,
-                    `host_in_group`). Impls: `MacosExecutor` /
-                    `StubExecutor` / `DryRunExecutor`.
+                    `host_in_group`) plus the `WritableOp` bridge
+                    trait. `ops.rs` carries the `Op` ADT over
+                    `AccountOp` / `ProfileOp` / `FirewallOp` /
+                    `AclOp` plus the four `impl WritableOp for *Op`
+                    blocks. `errors.rs` carries the per-domain error
+                    types (`AccountError`, `AclError`, `FirewallError`,
+                    `HostFileError`, `ProbeError`). `ids.rs` carries
+                    the domain newtypes (`UserId` / `GroupId` /
+                    `TenantUserName` / `HostUserName` / `GroupName`),
+                    re-exported flat from `crate::domain`.
+src/adapters/     — driven adapters. `stub_host_accounts.rs`
+                    (`StubHostAccounts` for tests) +
+                    `macos/host_accounts.rs` (`MacosHostAccounts` —
+                    dscl-backed snapshot, populated once at `new()`).
+                    Three `Executor` impls: `macos/executor.rs`
+                    (`MacosExecutor` — production substrate; owns
+                    argv for dseditgroup / sysadminctl / dscl / pfctl
+                    / chmod, tempfile-based privileged writes, the
+                    XDG-style profile path), `stub_executor.rs`
+                    (`StubExecutor` — test substitute; records every
+                    op invocation, supports per-op failure injection
+                    + builder-pattern preload of profile / pf-conf /
+                    env-policy / anchor-body / probe-outcome state),
+                    `dry_run_executor.rs` (`DryRunExecutor` — no-op
+                    execute; describe delegates to `MacosExecutor`;
+                    read carve-outs return "no actionable warning"
+                    placeholders).
+src/allocation.rs — `UidAllocator` + `GidAllocator`. Independent; both
+                    iterate from `TENANT_UID_FLOOR = 600`.
 src/profile.rs    — TOML serde shapes + `parse` (schema-version +
                     `$HOME` prefix-only validation); `expand_tenant_path`;
                     `default_profile_toml`.

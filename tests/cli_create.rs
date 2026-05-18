@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
+use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
-use tenant::domain::{GroupId, UserId};
-use tenant::executor::{
-    AccountError, AccountOp, AclMode, AclOp, FirewallError, ProfileOp, StubExecutor,
+use tenant::domain::{
+    AccountError, AccountOp, AclMode, AclOp, FirewallError, GroupId, ProfileOp, UserId,
 };
 
 mod common;
@@ -818,14 +818,14 @@ fn create_real_mode_invokes_firewall_ops_in_locked_order() {
     let names: Vec<&'static str> = ops
         .iter()
         .map(|op| match op {
-            tenant::executor::FirewallOp::BackupConfig => "BackupConfig",
-            tenant::executor::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
-            tenant::executor::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
-            tenant::executor::FirewallOp::Reload => "Reload",
-            tenant::executor::FirewallOp::Enable => "Enable",
-            tenant::executor::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
-            tenant::executor::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
-            tenant::executor::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
+            tenant::domain::FirewallOp::BackupConfig => "BackupConfig",
+            tenant::domain::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
+            tenant::domain::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
+            tenant::domain::FirewallOp::Reload => "Reload",
+            tenant::domain::FirewallOp::Enable => "Enable",
+            tenant::domain::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
+            tenant::domain::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
+            tenant::domain::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
         })
         .collect();
     assert_eq!(
@@ -855,7 +855,7 @@ fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
         .firewall_ops()
         .into_iter()
         .find_map(|op| match op {
-            tenant::executor::FirewallOp::InstallAnchor { body, .. } => Some(body),
+            tenant::domain::FirewallOp::InstallAnchor { body, .. } => Some(body),
             _ => None,
         })
         .expect("InstallAnchor op must have been issued");
@@ -895,7 +895,7 @@ fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() 
         .firewall_ops()
         .into_iter()
         .find_map(|op| match op {
-            tenant::executor::FirewallOp::InstallAnchor { body, .. } => Some(body),
+            tenant::domain::FirewallOp::InstallAnchor { body, .. } => Some(body),
             _ => None,
         })
         .expect("InstallAnchor op must have been issued");
@@ -941,7 +941,7 @@ fn create_real_mode_update_conf_content_reflects_existing_pf_conf() {
         .firewall_ops()
         .into_iter()
         .find_map(|op| match op {
-            tenant::executor::FirewallOp::UpdateConfig { content } => Some(content),
+            tenant::domain::FirewallOp::UpdateConfig { content } => Some(content),
             _ => None,
         })
         .expect("UpdateConfig op must have been issued");
@@ -967,7 +967,7 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
     // — the Destroyable arm cleans up all of them. Operator sees a
     // create_firewall_failed message at EX_IOERR.
     let exec = StubExecutor::new().fail_firewall_op(
-        tenant::executor::FirewallOp::InstallAnchor {
+        tenant::domain::FirewallOp::InstallAnchor {
             name: "dev".into(),
             body: tenant::firewall::render_anchor("dev", &[]),
         },
@@ -1021,7 +1021,7 @@ fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence
     // FlushAnchor (recovery). Eight ops; the original reload failure
     // surfaces as the CreateError after recovery runs.
     let exec = StubExecutor::new().fail_firewall_op(
-        tenant::executor::FirewallOp::Reload,
+        tenant::domain::FirewallOp::Reload,
         FirewallError::NonZero {
             code: 1,
             stderr: "syntax error".to_string(),
@@ -1049,14 +1049,14 @@ fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence
         .firewall_ops()
         .iter()
         .map(|op| match op {
-            tenant::executor::FirewallOp::BackupConfig => "BackupConfig",
-            tenant::executor::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
-            tenant::executor::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
-            tenant::executor::FirewallOp::Reload => "Reload",
-            tenant::executor::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
-            tenant::executor::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
-            tenant::executor::FirewallOp::Enable => "Enable",
-            tenant::executor::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
+            tenant::domain::FirewallOp::BackupConfig => "BackupConfig",
+            tenant::domain::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
+            tenant::domain::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
+            tenant::domain::FirewallOp::Reload => "Reload",
+            tenant::domain::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
+            tenant::domain::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
+            tenant::domain::FirewallOp::Enable => "Enable",
+            tenant::domain::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
         })
         .collect();
     assert_eq!(
@@ -1084,14 +1084,14 @@ fn create_reload_failure_with_failed_restore_surfaces_recovery_hint_naming_backu
     // operator (with shell access) can resolve.
     let exec = StubExecutor::new()
         .fail_firewall_op(
-            tenant::executor::FirewallOp::Reload,
+            tenant::domain::FirewallOp::Reload,
             FirewallError::NonZero {
                 code: 1,
                 stderr: "syntax error".to_string(),
             },
         )
         .fail_firewall_op(
-            tenant::executor::FirewallOp::RestoreConfigFromBackup,
+            tenant::domain::FirewallOp::RestoreConfigFromBackup,
             FirewallError::NonZero {
                 code: 1,
                 stderr: "cp: permission denied".to_string(),
@@ -1117,7 +1117,7 @@ fn create_pf_enable_failure_surfaces_via_create_firewall_failed() {
     // at EX_IOERR. Recovery posture per locked policy: user + group +
     // profile + anchor remain on host; `tenant destroy` converges.
     let exec = StubExecutor::new().fail_firewall_op(
-        tenant::executor::FirewallOp::Enable,
+        tenant::domain::FirewallOp::Enable,
         FirewallError::NonZero {
             code: 1,
             stderr: "pfctl: operation not permitted".to_string(),
@@ -1195,7 +1195,7 @@ fn create_success_path_does_not_invoke_flush_anchor() {
         !exec
             .firewall_ops()
             .iter()
-            .any(|op| matches!(op, tenant::executor::FirewallOp::FlushAnchor { .. })),
+            .any(|op| matches!(op, tenant::domain::FirewallOp::FlushAnchor { .. })),
         "FlushAnchor must NOT appear in create's success-path firewall_ops; got: {:?}",
         exec.firewall_ops()
     );

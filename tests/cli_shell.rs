@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 
+use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
-use tenant::domain::UserId;
-use tenant::executor::{
-    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, StubExecutor,
-};
+use tenant::domain::{AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, UserId};
 
 mod common;
 use common::*;
@@ -708,7 +706,7 @@ fn shell_routes_acl_substrate_failure_via_shell_narrow_acl_frame() {
             AclOp::Grant {
                 path: PathBuf::from("/tmp"),
                 group: "dev-tenant-share".into(),
-                mode: tenant::executor::AclMode::Rw,
+                mode: tenant::domain::AclMode::Rw,
             },
             AclError::NonZero {
                 code: 1,

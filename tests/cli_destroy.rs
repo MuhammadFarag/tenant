@@ -1,6 +1,6 @@
+use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
-use tenant::domain::UserId;
-use tenant::executor::{AccountError, AccountOp, FirewallError, ProfileOp, StubExecutor};
+use tenant::domain::{AccountError, AccountOp, FirewallError, ProfileOp, UserId};
 
 mod common;
 use common::*;
@@ -911,14 +911,14 @@ fn destroy_real_mode_invokes_firewall_teardown_in_locked_order() {
         .firewall_ops()
         .iter()
         .map(|op| match op {
-            tenant::executor::FirewallOp::BackupConfig => "BackupConfig",
-            tenant::executor::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
-            tenant::executor::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
-            tenant::executor::FirewallOp::Reload => "Reload",
-            tenant::executor::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
-            tenant::executor::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
-            tenant::executor::FirewallOp::Enable => "Enable",
-            tenant::executor::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
+            tenant::domain::FirewallOp::BackupConfig => "BackupConfig",
+            tenant::domain::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
+            tenant::domain::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
+            tenant::domain::FirewallOp::Reload => "Reload",
+            tenant::domain::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
+            tenant::domain::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
+            tenant::domain::FirewallOp::Enable => "Enable",
+            tenant::domain::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
         })
         .collect();
     assert_eq!(
@@ -951,7 +951,7 @@ fn destroy_real_mode_update_conf_drops_tenant_anchor_ref() {
         .firewall_ops()
         .into_iter()
         .find_map(|op| match op {
-            tenant::executor::FirewallOp::UpdateConfig { content } => Some(content),
+            tenant::domain::FirewallOp::UpdateConfig { content } => Some(content),
             _ => None,
         })
         .expect("UpdateConfig must have been issued");
@@ -971,7 +971,7 @@ fn destroy_firewall_reload_failure_surfaces_via_destroy_firewall_failed() {
     // — symmetric restore would re-reference the just-deleted anchor
     // file). Surface as destroy_firewall_failed at EX_IOERR.
     let exec = StubExecutor::new().fail_firewall_op(
-        tenant::executor::FirewallOp::Reload,
+        tenant::domain::FirewallOp::Reload,
         FirewallError::NonZero {
             code: 1,
             stderr: "syntax error".to_string(),
@@ -1003,14 +1003,14 @@ fn destroy_orphan_group_tears_down_firewall_too() {
         .firewall_ops()
         .iter()
         .map(|op| match op {
-            tenant::executor::FirewallOp::BackupConfig => "BackupConfig",
-            tenant::executor::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
-            tenant::executor::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
-            tenant::executor::FirewallOp::Reload => "Reload",
-            tenant::executor::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
-            tenant::executor::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
-            tenant::executor::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
-            tenant::executor::FirewallOp::Enable => "Enable",
+            tenant::domain::FirewallOp::BackupConfig => "BackupConfig",
+            tenant::domain::FirewallOp::RemoveAnchor { .. } => "RemoveAnchor",
+            tenant::domain::FirewallOp::UpdateConfig { .. } => "UpdateConfig",
+            tenant::domain::FirewallOp::Reload => "Reload",
+            tenant::domain::FirewallOp::FlushAnchor { .. } => "FlushAnchor",
+            tenant::domain::FirewallOp::InstallAnchor { .. } => "InstallAnchor",
+            tenant::domain::FirewallOp::RestoreConfigFromBackup => "RestoreConfigFromBackup",
+            tenant::domain::FirewallOp::Enable => "Enable",
         })
         .collect();
     assert_eq!(
@@ -1060,7 +1060,7 @@ fn destroy_invokes_flush_anchor_as_final_firewall_step() {
         .expect("at least one firewall op must run");
     assert_eq!(
         last,
-        tenant::executor::FirewallOp::FlushAnchor { name: "dev".into() },
+        tenant::domain::FirewallOp::FlushAnchor { name: "dev".into() },
         "FlushAnchor must be the final firewall op on destroy"
     );
 }
@@ -1082,7 +1082,7 @@ fn destroy_orphan_group_invokes_flush_anchor_as_final_firewall_step() {
         .expect("at least one firewall op must run");
     assert_eq!(
         last,
-        tenant::executor::FirewallOp::FlushAnchor { name: "dev".into() },
+        tenant::domain::FirewallOp::FlushAnchor { name: "dev".into() },
         "FlushAnchor must be the final firewall op on orphan-group destroy"
     );
 }

@@ -14,10 +14,10 @@
 
 use std::path::PathBuf;
 
+use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
-use tenant::domain::UserId;
-use tenant::executor::{
-    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, PathKind, StubExecutor,
+use tenant::domain::{
+    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, PathKind, UserId,
 };
 
 mod common;
@@ -180,7 +180,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
         vec![AclOp::Grant {
             path: PathBuf::from("/tmp"),
             group: "dev-tenant-share".into(),
-            mode: tenant::executor::AclMode::Rw,
+            mode: tenant::domain::AclMode::Rw,
         }]
     );
 
@@ -278,7 +278,7 @@ fn reload_single_tenant_with_existing_symlink_at_tenant_path_succeeds_idempotent
         .with_tenant_path_kind(
             "dev",
             &PathBuf::from("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(PathBuf::from("/tmp")),
+            tenant::domain::PathKind::Symlink(PathBuf::from("/tmp")),
         );
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -432,7 +432,7 @@ fn reload_routes_acl_failure_via_reapply_arms() {
             AclOp::Grant {
                 path: PathBuf::from("/tmp"),
                 group: "dev-tenant-share".into(),
-                mode: tenant::executor::AclMode::Rw,
+                mode: tenant::domain::AclMode::Rw,
             },
             AclError::NonZero {
                 code: 1,

@@ -11,8 +11,7 @@ use std::path::PathBuf;
 use tenant::doctor::{
     Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify, curated_paths,
 };
-use tenant::domain::{HostUserName, TenantUserName};
-use tenant::executor::{AccessMode, AccessOutcome};
+use tenant::domain::{AccessMode, AccessOutcome, HostUserName, TenantUserName};
 
 // ============================================================
 // Finding display — byte-exact per combination
@@ -339,7 +338,7 @@ fn guidance_filesystem_exposure_returns_none() {
         severity: Severity::Critical,
         tenant: TenantUserName::from("dev"),
         path: std::path::PathBuf::from("/Users/host/.ssh/id_rsa"),
-        access: tenant::executor::AccessMode::Read,
+        access: tenant::domain::AccessMode::Read,
     };
     assert_eq!(f.guidance(), None);
 }

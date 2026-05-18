@@ -1,6 +1,6 @@
+use tenant::adapters::stub_executor::StubExecutor;
 use tenant::adapters::stub_host_accounts::StubHostAccounts;
 use tenant::domain::UserId;
-use tenant::executor::StubExecutor;
 
 mod common;
 use common::*;
@@ -125,8 +125,8 @@ fn doctor_emits_one_finding_per_accessible_path() {
     let stub_exec = StubExecutor::new().with_probe_outcome(
         "dev",
         &target,
-        tenant::executor::AccessMode::Read,
-        tenant::executor::AccessOutcome::Allowed,
+        tenant::domain::AccessMode::Read,
+        tenant::domain::AccessOutcome::Allowed,
     );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -159,7 +159,7 @@ fn doctor_probes_full_curated_list_per_tenant() {
     let stub_exec = StubExecutor::new();
     let (code, _stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    let expected: Vec<(String, std::path::PathBuf, tenant::executor::AccessMode)> =
+    let expected: Vec<(String, std::path::PathBuf, tenant::domain::AccessMode)> =
         tenant::doctor::curated_paths(TEST_HOST, "dev", &[])
             .into_iter()
             .map(|(_, mode, path)| ("dev".to_string(), path, mode))
@@ -177,7 +177,7 @@ fn doctor_probe_substrate_failure_exits_74() {
     // Doctor surfaces via `doctor_failed`; exit 74 (EX_IOERR) parallel
     // to mode / shell / destroy substrate failures.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().fail_next_probe(tenant::executor::ProbeError::Spawn(
+    let stub_exec = StubExecutor::new().fail_next_probe(tenant::domain::ProbeError::Spawn(
         std::io::Error::other("sudo not found"),
     ));
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -201,7 +201,7 @@ fn doctor_dry_run_skips_probes() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(
         stub_exec.probes(),
-        Vec::<(String, std::path::PathBuf, tenant::executor::AccessMode)>::new(),
+        Vec::<(String, std::path::PathBuf, tenant::domain::AccessMode)>::new(),
         "dry-run must not invoke probes"
     );
     assert!(
@@ -250,8 +250,8 @@ fn doctor_verbose_then_findings_ordering() {
     let stub_exec = StubExecutor::new().with_probe_outcome(
         "dev",
         &target,
-        tenant::executor::AccessMode::Read,
-        tenant::executor::AccessOutcome::Allowed,
+        tenant::domain::AccessMode::Read,
+        tenant::domain::AccessOutcome::Allowed,
     );
     let (code, stdout, _stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
     assert_eq!(code, 0);
@@ -365,12 +365,12 @@ fn doctor_all_tenants_emits_cross_tenant_probes() {
     let dev_probes_staging = probes.iter().any(|(name, path, mode)| {
         name == "dev"
             && path == &std::path::PathBuf::from("/Users/staging")
-            && *mode == tenant::executor::AccessMode::List
+            && *mode == tenant::domain::AccessMode::List
     });
     let staging_probes_dev = probes.iter().any(|(name, path, mode)| {
         name == "staging"
             && path == &std::path::PathBuf::from("/Users/dev")
-            && *mode == tenant::executor::AccessMode::List
+            && *mode == tenant::domain::AccessMode::List
     });
     assert!(
         dev_probes_staging,
@@ -422,8 +422,8 @@ fn doctor_strict_critical_exits_2() {
     let stub_exec = StubExecutor::new().with_probe_outcome(
         "dev",
         &target,
-        tenant::executor::AccessMode::Read,
-        tenant::executor::AccessOutcome::Allowed,
+        tenant::domain::AccessMode::Read,
+        tenant::domain::AccessOutcome::Allowed,
     );
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
@@ -443,8 +443,8 @@ fn doctor_strict_warning_only_exits_1() {
     let stub_exec = StubExecutor::new().with_probe_outcome(
         "dev",
         &target,
-        tenant::executor::AccessMode::List,
-        tenant::executor::AccessOutcome::Allowed,
+        tenant::domain::AccessMode::List,
+        tenant::domain::AccessOutcome::Allowed,
     );
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
@@ -479,8 +479,8 @@ fn doctor_non_strict_critical_still_exits_0() {
     let stub_exec = StubExecutor::new().with_probe_outcome(
         "dev",
         &target,
-        tenant::executor::AccessMode::Read,
-        tenant::executor::AccessOutcome::Allowed,
+        tenant::domain::AccessMode::Read,
+        tenant::domain::AccessOutcome::Allowed,
     );
     let (code, _stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(
@@ -646,7 +646,7 @@ fn doctor_pf_rules_substrate_failure_routes_to_firewall_failed_frame() {
     // (sudoers/pam)). Exit 74 (EX_IOERR).
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubExecutor::new().fail_next_kernel_pf_rules(
-        tenant::executor::FirewallError::Spawn(std::io::Error::other("pfctl not found")),
+        tenant::domain::FirewallError::Spawn(std::io::Error::other("pfctl not found")),
     );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
@@ -765,7 +765,7 @@ fn doctor_pam_substrate_failure_routes_to_host_file_failed_frame() {
     // `doctor_host_file_failed` (the path-agnostic host-config-file
     // read failure frame). Exit 74 (EX_IOERR).
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().fail_next_pam_sudo(tenant::executor::HostFileError::Fs {
+    let stub_exec = StubExecutor::new().fail_next_pam_sudo(tenant::domain::HostFileError::Fs {
         path: "/etc/pam.d/sudo".to_string(),
         message: "permission denied".to_string(),
     });
@@ -852,9 +852,9 @@ fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
     // `FirewallError::Spawn` on read_pf_status surfaces via
     // `doctor_firewall_failed`; exit 74.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubExecutor::new().fail_next_pf_status(
-        tenant::executor::FirewallError::Spawn(std::io::Error::other("pfctl not found")),
-    );
+    let stub_exec = StubExecutor::new().fail_next_pf_status(tenant::domain::FirewallError::Spawn(
+        std::io::Error::other("pfctl not found"),
+    ));
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     assert!(
@@ -999,7 +999,7 @@ fn doctor_anchor_body_substrate_failure_routes_to_host_file_failed_frame() {
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubExecutor::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
-        .fail_next_anchor_body(tenant::executor::HostFileError::Fs {
+        .fail_next_anchor_body(tenant::domain::HostFileError::Fs {
             path: "/etc/pf.anchors/tenant-dev".to_string(),
             message: "Permission denied (os error 13)".to_string(),
         });
@@ -1189,8 +1189,8 @@ fn doctor_verbose_filesystem_exposure_omits_guidance_block() {
         .with_probe_outcome(
             "dev",
             &target,
-            tenant::executor::AccessMode::Read,
-            tenant::executor::AccessOutcome::Allowed,
+            tenant::domain::AccessMode::Read,
+            tenant::domain::AccessOutcome::Allowed,
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1296,7 +1296,7 @@ fn doctor_share_acl_present_no_finding() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1329,7 +1329,7 @@ fn doctor_share_acl_missing_emits_warning() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1378,12 +1378,12 @@ fn doctor_share_acl_missing_only_one_of_two_shares() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
         )
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/data"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/data")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/data")),
         );
     // /Users/Shared/data falls through to the stub's default listing,
     // which carries the dev-tenant-share entry → no drift.
@@ -1418,7 +1418,7 @@ fn doctor_share_acl_drift_with_strict_exits_1() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
         );
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
@@ -1485,7 +1485,7 @@ fn doctor_share_drift_substrate_failure_exits_74() {
         .with_existing_profile("dev", &profile)
         .fail_next_host_acl(
             std::path::Path::new("/Users/Shared/src"),
-            tenant::executor::ProbeError::NonZero {
+            tenant::domain::ProbeError::NonZero {
                 code: 1,
                 stderr: "ls: /Users/Shared/src: Permission denied".to_string(),
             },
@@ -1523,12 +1523,12 @@ fn doctor_share_drift_all_tenants_scoped_per_tenant() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
         )
         .with_tenant_path_kind(
             "staging",
             std::path::Path::new("/Users/staging/data"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/data")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/data")),
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1559,7 +1559,7 @@ fn doctor_share_acl_drift_verbose_emits_guidance_block() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1598,7 +1598,7 @@ fn doctor_share_symlink_absent_emits_warning() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Absent,
+            tenant::domain::PathKind::Absent,
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1633,7 +1633,7 @@ fn doctor_share_symlink_wrong_target_emits_warning() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/tmp/old")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/tmp/old")),
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1668,7 +1668,7 @@ fn doctor_share_symlink_not_symlink_emits_warning() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Other,
+            tenant::domain::PathKind::Other,
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1698,7 +1698,7 @@ fn doctor_share_symlink_matching_target_no_finding() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
+            tenant::domain::PathKind::Symlink(std::path::PathBuf::from("/Users/Shared/src")),
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1719,7 +1719,7 @@ fn doctor_share_symlink_drift_with_strict_exits_1() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Absent,
+            tenant::domain::PathKind::Absent,
         );
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
@@ -1741,7 +1741,7 @@ fn doctor_share_symlink_drift_dry_run_emits_no_finding() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Absent,
+            tenant::domain::PathKind::Absent,
         );
     let (code, stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--dry-run"]);
@@ -1763,7 +1763,7 @@ fn doctor_share_symlink_substrate_failure_exits_74() {
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let stub_exec = StubExecutor::new()
         .with_existing_profile("dev", &profile)
-        .fail_next_tenant_path_kind(tenant::executor::ProbeError::NonZero {
+        .fail_next_tenant_path_kind(tenant::domain::ProbeError::NonZero {
             code: 1,
             stderr: "sudo: command not found".to_string(),
         });
@@ -1787,7 +1787,7 @@ fn doctor_share_symlink_drift_verbose_emits_case_tailored_guidance() {
         .with_tenant_path_kind(
             "dev",
             std::path::Path::new("/Users/dev/src"),
-            tenant::executor::PathKind::Absent,
+            tenant::domain::PathKind::Absent,
         );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
     assert_eq!(code, 0, "stderr={stderr:?}");

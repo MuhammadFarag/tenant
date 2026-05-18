@@ -1,9 +1,8 @@
 use std::io;
 use std::process::ExitCode;
 
-use tenant::adapters::macos::MacosHostAccounts;
+use tenant::adapters::macos::{MacosExecutor, MacosHostAccounts};
 use tenant::domain::HostUserName;
-use tenant::executor::MacosExecutor;
 
 fn main() -> ExitCode {
     let accounts = match MacosHostAccounts::new() {

@@ -7,10 +7,10 @@ use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, curated_paths, has_env_delete_for,
     has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
 };
-use crate::domain::{GroupId, GroupName, HostAccounts, HostUserName, TenantUserName, UserId};
-use crate::executor::{
-    self, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError, FirewallOp,
-    HostFileError, Op, PathKind, ProbeError, ProfileOp, WritableOp,
+use crate::domain::{
+    AccountError, AccountOp, AclError, AclMode, AclOp, Executor, FirewallError, FirewallOp,
+    GroupId, GroupName, HostAccounts, HostFileError, HostUserName, Op, PathKind, ProbeError,
+    ProfileOp, TenantUserName, UserId, WritableOp,
 };
 use crate::firewall::{ensure_anchor_ref, remove_anchor_ref, render_anchor};
 use crate::profile::{
@@ -407,11 +407,11 @@ pub(crate) struct ReloadAllOutcome {
 /// the right mode/verbosity; the substrate's `DryRunExecutor` impl is
 /// a no-op in dry-run.
 pub(crate) struct Writer<'a> {
-    executor: &'a dyn executor::Executor,
+    executor: &'a dyn Executor,
 }
 
 impl<'a> Writer<'a> {
-    pub(crate) fn new(executor: &'a dyn executor::Executor) -> Self {
+    pub(crate) fn new(executor: &'a dyn Executor) -> Self {
         Self { executor }
     }
 
