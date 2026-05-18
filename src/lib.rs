@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -12,6 +12,9 @@ pub mod doctor;
 pub mod domain;
 pub mod firewall;
 pub mod profile;
+pub mod terminal;
+
+pub use terminal::Terminal;
 
 use domain::reporter::Reporter;
 
@@ -115,22 +118,17 @@ impl ModeLevel {
     }
 }
 
-// Composition root: each parameter is a discrete I/O capability the
-// harness injects for testability. Bundling would add a layer without
-// removing parameters.
-#[allow(clippy::too_many_arguments)]
+// `run` takes a `Terminal` bundle so every I/O capability is injectable
+// at the binary boundary; tests wire stubs by constructing a `Terminal`
+// over `Vec<u8>` writers and a `Cursor` reader.
 pub fn run(
     args: &[String],
     accounts: &dyn domain::HostAccounts,
     machine: &dyn domain::HostMachine,
     host: &HostUserName,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-    stdin: &mut dyn BufRead,
-    stdin_is_tty: bool,
-    colors: ansi::Colors,
+    mut terminal: Terminal<'_>,
 ) -> u8 {
-    let cli = match parse(args, stdout, stderr) {
+    let cli = match parse(args, &mut terminal) {
         Ok(cli) => cli,
         Err(code) => return code,
     };
@@ -141,32 +139,19 @@ pub fn run(
         machine
     };
     let tenants = domain::Tenants::new(active_machine);
-    let yes = cli.yes;
-    let mut reporter = Reporter::new(
-        stdout,
-        stderr,
-        cli.verbose,
-        cli.dry_run,
-        active_machine,
-        colors,
-    );
-    domain::commands::dispatch(
-        cli,
-        accounts,
-        &tenants,
-        host,
-        &mut reporter,
-        stdin,
-        stdin_is_tty,
-        yes,
-    )
+    let mut reporter = Reporter::new(terminal, cli.verbose, cli.dry_run, cli.yes, active_machine);
+    domain::commands::dispatch(cli, accounts, &tenants, host, &mut reporter)
 }
 
-fn parse(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<Cli, u8> {
+fn parse(args: &[String], terminal: &mut Terminal<'_>) -> Result<Cli, u8> {
     let argv = std::iter::once(OsString::from("tenant")).chain(args.iter().map(OsString::from));
     Cli::try_parse_from(argv).map_err(|e| {
         let to_stderr = e.use_stderr();
-        let target: &mut dyn Write = if to_stderr { stderr } else { stdout };
+        let target: &mut dyn Write = if to_stderr {
+            &mut *terminal.stderr
+        } else {
+            &mut *terminal.stdout
+        };
         let _ = write!(target, "{e}");
         if to_stderr { 1 } else { 0 }
     })

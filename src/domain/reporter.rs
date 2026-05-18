@@ -2,7 +2,6 @@
 //! mode/verbosity branching; callers signal lifecycle events
 //! (starting / done / refused / failed) without checking flags.
 
-use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use super::tenants::{ConflictError, NameError, ShareError, tenant_share_group_name};
@@ -11,9 +10,10 @@ use super::{
     ProbeError, TenantUserName, UserId,
 };
 use crate::ModeLevel;
-use crate::ansi::{self, Colors};
+use crate::ansi::{self};
 use crate::doctor::{Category, Finding, Severity};
 use crate::profile::{ProfileError, display_path_for};
+use crate::terminal::Terminal;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ConfirmOutcome {
@@ -21,41 +21,44 @@ pub(crate) enum ConfirmOutcome {
     Abort,
 }
 
-pub(crate) struct Reporter<'a> {
-    stdout: &'a mut dyn Write,
-    stderr: &'a mut dyn Write,
+pub(crate) struct Reporter<'t, 'm> {
+    terminal: Terminal<'t>,
     verbose: bool,
     dry_run: bool,
-    machine: &'a dyn HostMachine,
-    colors: Colors,
+    yes_flag: bool,
+    machine: &'m dyn HostMachine,
 }
 
-impl<'a> Reporter<'a> {
+impl<'t, 'm> Reporter<'t, 'm> {
     pub fn new(
-        stdout: &'a mut dyn Write,
-        stderr: &'a mut dyn Write,
+        terminal: Terminal<'t>,
         verbose: bool,
         dry_run: bool,
-        machine: &'a dyn HostMachine,
-        colors: Colors,
+        yes_flag: bool,
+        machine: &'m dyn HostMachine,
     ) -> Self {
         Self {
-            stdout,
-            stderr,
+            terminal,
             verbose,
             dry_run,
+            yes_flag,
             machine,
-            colors,
         }
+    }
+
+    /// `--yes` suppresses the prompt, not the summary: an operator on a
+    /// TTY still sees context; scripted (non-TTY real-mode) stays silent.
+    pub(crate) fn show_summary(&self) -> bool {
+        self.dry_run || self.terminal.stdin_is_tty
     }
 
     pub fn ok(&mut self, msg: &str) {
         let check = self.paint_stdout("✓", ansi::green);
-        let _ = writeln!(self.stdout, "{check} {msg}");
+        let _ = writeln!(self.terminal.stdout, "{check} {msg}");
     }
 
     pub fn section(&mut self, title: &str) {
-        if self.colors.stdout {
+        if self.terminal.colors.stdout {
             // `ansi::rule` counts escape sequences as chars when given a bolded
             // title, over-truncating the dashes — compose by hand instead.
             let bolded = ansi::bold(title);
@@ -64,15 +67,15 @@ impl<'a> Reporter<'a> {
             let raw_core = prefix.chars().count() + title.chars().count() + suffix.chars().count();
             let pad = 80_usize.saturating_sub(raw_core);
             let dashes: String = "─".repeat(pad);
-            let _ = writeln!(self.stdout, "{prefix}{bolded}{suffix}{dashes}");
+            let _ = writeln!(self.terminal.stdout, "{prefix}{bolded}{suffix}{dashes}");
         } else {
             let line = ansi::rule(title, 80);
-            let _ = writeln!(self.stdout, "{line}");
+            let _ = writeln!(self.terminal.stdout, "{line}");
         }
     }
 
     fn paint_stdout<F: FnOnce(&str) -> String>(&self, s: &str, paint: F) -> String {
-        if self.colors.stdout {
+        if self.terminal.colors.stdout {
             paint(s)
         } else {
             s.to_string()
@@ -85,7 +88,7 @@ impl<'a> Reporter<'a> {
             return;
         }
         let line = op.describe_via(self.machine);
-        let _ = writeln!(self.stdout, "$ {line}");
+        let _ = writeln!(self.terminal.stdout, "$ {line}");
     }
 
     /// `✓ <label>` business-level progress line after a successful op.
@@ -101,31 +104,28 @@ impl<'a> Reporter<'a> {
     /// Pre-execution confirmation. Auto-proceeds in dry-run, when
     /// `yes_flag` is set, or when stdin is non-TTY. Re-prompts on
     /// unrecognized input.
-    pub fn confirm(
-        &mut self,
-        default_yes: bool,
-        stdin: &mut dyn BufRead,
-        stdin_is_tty: bool,
-        yes_flag: bool,
-    ) -> ConfirmOutcome {
+    pub fn confirm(&mut self, default_yes: bool) -> ConfirmOutcome {
         if self.dry_run {
             // Preview what the real run would have asked.
             let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
-            let _ = writeln!(self.stdout, "(Real run would prompt: Proceed? {hint})");
+            let _ = writeln!(
+                self.terminal.stdout,
+                "(Real run would prompt: Proceed? {hint})"
+            );
             return ConfirmOutcome::Proceed;
         }
-        if yes_flag {
+        if self.yes_flag {
             return ConfirmOutcome::Proceed;
         }
-        if !stdin_is_tty {
+        if !self.terminal.stdin_is_tty {
             return ConfirmOutcome::Proceed;
         }
         let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
         loop {
-            let _ = write!(self.stdout, "Proceed? {hint} ");
-            let _ = self.stdout.flush();
+            let _ = write!(self.terminal.stdout, "Proceed? {hint} ");
+            let _ = self.terminal.stdout.flush();
             let mut line = String::new();
-            match stdin.read_line(&mut line) {
+            match self.terminal.stdin.read_line(&mut line) {
                 Ok(0) => return ConfirmOutcome::Abort, // EOF
                 Ok(_) => {}
                 Err(_) => return ConfirmOutcome::Abort,
@@ -142,14 +142,17 @@ impl<'a> Reporter<'a> {
                 "y" | "yes" => return ConfirmOutcome::Proceed,
                 "n" | "no" => return ConfirmOutcome::Abort,
                 _ => {
-                    let _ = writeln!(self.stdout, "Please answer y or n.");
+                    let _ = writeln!(self.terminal.stdout, "Please answer y or n.");
                 }
             }
         }
     }
 
     pub fn aborted(&mut self) {
-        let _ = writeln!(self.stdout, "Aborted by operator. No changes made.");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Aborted by operator. No changes made."
+        );
     }
 
     pub fn create_summary(
@@ -162,39 +165,39 @@ impl<'a> Reporter<'a> {
     ) {
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "About to create tenant '{name}' \u{2014} an isolated macOS account with restricted network egress."
         );
-        let _ = writeln!(self.stdout);
-        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} create user account '{name}' (UID {uid}) and group '{group}' (GID {gid})"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} add host '{host}' to '{group}' so files the tenant creates in RW shares stay host-writable"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} install a per-tenant firewall anchor (egress blocked by default; allowlist hosts declared in the profile)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} write profile config at {}",
             display_path_for(name.as_str())
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} enable pf host-wide if not already enabled"
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         self.emit_plan_section(plan);
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "Sudo needed for: user provisioning, firewall install."
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
     }
 
     /// Caller follows with `confirm(false, …)` — destroy defaults to N
@@ -207,35 +210,38 @@ impl<'a> Reporter<'a> {
         plan: Option<&[(Op<'_>, Option<&'static str>)]>,
     ) {
         let group = tenant_share_group_name(name.as_str());
-        let _ = writeln!(self.stdout, "About to destroy tenant '{name}' (UID {uid}).");
-        let _ = writeln!(self.stdout);
-        let _ = writeln!(self.stdout, "This will:");
-        let _ = writeln!(self.stdout, "  \u{2022} remove the user account");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
+            "About to destroy tenant '{name}' (UID {uid})."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
+        let _ = writeln!(self.terminal.stdout, "  \u{2022} remove the user account");
+        let _ = writeln!(
+            self.terminal.stdout,
             "  \u{2022} move /Users/{name} \u{2192} /Users/Deleted Users/{name} (recoverable until /Users/Deleted Users is emptied or the host is rebuilt)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} remove host '{host}' from '{group}'"
         );
-        let _ = writeln!(self.stdout, "  \u{2022} remove group '{group}'");
+        let _ = writeln!(self.terminal.stdout, "  \u{2022} remove group '{group}'");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} remove the firewall anchor and flush its kernel rules"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} remove profile config at {}",
             display_path_for(name.as_str())
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         self.emit_plan_section(plan);
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "Sudo needed for: user removal, firewall teardown."
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
     }
 
     /// Same default-N posture as `destroy_summary`.
@@ -247,32 +253,32 @@ impl<'a> Reporter<'a> {
     ) {
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "About to destroy orphan group '{group}' for tenant '{name}'."
         );
-        let _ = writeln!(self.stdout);
-        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} remove host '{host}' from '{group}' (idempotent if not a member)"
         );
-        let _ = writeln!(self.stdout, "  \u{2022} remove group '{group}'");
+        let _ = writeln!(self.terminal.stdout, "  \u{2022} remove group '{group}'");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} remove the firewall anchor and flush its kernel rules"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} remove profile config at {}",
             display_path_for(name.as_str())
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         self.emit_plan_section(plan);
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "Sudo needed for: group removal, firewall teardown."
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
     }
 
     pub fn mode_summary(
@@ -285,42 +291,42 @@ impl<'a> Reporter<'a> {
         let level_str = level.as_str();
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "About to apply mode '{level_str}' to tenant '{name}'."
         );
-        let _ = writeln!(self.stdout);
-        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
         if matches!(level, ModeLevel::Install) {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "  \u{2022} re-render the firewall anchor with install-tier hosts added to the allowlist"
             );
         } else {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "  \u{2022} re-render the firewall anchor at runtime tier"
             );
         }
-        let _ = writeln!(self.stdout, "  \u{2022} reload pf");
+        let _ = writeln!(self.terminal.stdout, "  \u{2022} reload pf");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} re-apply declared shares from the profile (idempotent)"
         );
         if matches!(level, ModeLevel::Install) {
-            let _ = writeln!(self.stdout);
+            let _ = writeln!(self.terminal.stdout);
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "The widened allowlist persists until 'tenant mode {name} runtime' (narrow) or 'tenant shell {name}' (auto-narrow on entry)."
             );
         }
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         self.emit_plan_section(plan);
-        let _ = writeln!(self.stdout, "Sudo needed for: firewall install.");
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout, "Sudo needed for: firewall install.");
+        let _ = writeln!(self.terminal.stdout);
     }
 
     pub fn reload_summary(
@@ -330,56 +336,59 @@ impl<'a> Reporter<'a> {
         plan: Option<&[(Op<'_>, Option<&'static str>)]>,
     ) {
         let group = tenant_share_group_name(name.as_str());
-        let _ = writeln!(self.stdout, "About to reload tenant '{name}' from profile.");
-        let _ = writeln!(self.stdout);
-        let _ = writeln!(self.stdout, "This will:");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
+            "About to reload tenant '{name}' from profile."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
+        let _ = writeln!(
+            self.terminal.stdout,
             "  \u{2022} re-render and reload the firewall anchor (runtime tier)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} re-apply each declared share from [[shares]] in the profile"
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         self.emit_plan_section(plan);
-        let _ = writeln!(self.stdout, "Sudo needed for: firewall install.");
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout, "Sudo needed for: firewall install.");
+        let _ = writeln!(self.terminal.stdout);
     }
 
     /// No confirm prompt — operator becomes the shell directly. The
     /// summary gives the pre-exec doctor audit visual context.
     pub fn shell_summary(&mut self, name: &TenantUserName, host: &HostUserName) {
         let group = tenant_share_group_name(name.as_str());
-        let _ = writeln!(self.stdout, "About to enter tenant '{name}'.");
-        let _ = writeln!(self.stdout);
-        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(self.terminal.stdout, "About to enter tenant '{name}'.");
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} narrow the firewall to runtime tier (auto-narrow)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} re-apply each declared share from [[shares]] in the profile"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} launch an interactive login shell as '{name}'"
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "Sudo needed for: firewall narrow, share reapply, login."
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
     }
 
     pub fn reload_all_summary(&mut self, host: &HostUserName, names: &[TenantUserName]) {
@@ -390,34 +399,34 @@ impl<'a> Reporter<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "About to reload {count} tenant(s) from their profiles: {list}."
         );
-        let _ = writeln!(self.stdout);
-        let _ = writeln!(self.stdout, "For each tenant this will:");
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "For each tenant this will:");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} re-render and reload the firewall anchor (runtime tier)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} ensure host '{host}' is a member of the tenant's share group (idempotent catch-up)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} re-apply declared shares from [[shares]] in the profile"
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "Per-tenant failures continue the walk; a final summary names any failed tenants."
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "Sudo needed for: firewall install (per tenant)."
         );
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
     }
 
     pub fn create_starting(&mut self, name: &TenantUserName) {
@@ -433,7 +442,7 @@ impl<'a> Reporter<'a> {
         let anchor = crate::firewall::tenant_anchor_name(name.as_str());
         self.section("Done");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "Tenant '{name}' ready (UID {uid}, GID {gid}, anchor '{anchor}')."
         );
     }
@@ -449,7 +458,7 @@ impl<'a> Reporter<'a> {
             return;
         }
         self.section("Done");
-        let _ = writeln!(self.stdout, "Tenant '{name}' destroyed.");
+        let _ = writeln!(self.terminal.stdout, "Tenant '{name}' destroyed.");
     }
 
     pub fn orphan_group_starting(&mut self, name: &TenantUserName) {
@@ -468,7 +477,7 @@ impl<'a> Reporter<'a> {
         let group = tenant_share_group_name(name.as_str());
         self.section("Done");
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "Orphan group '{group}' for tenant '{name}' destroyed."
         );
     }
@@ -480,7 +489,7 @@ impl<'a> Reporter<'a> {
     /// profile-read failure; plan rendering lives in `shell_plan`.
     pub fn shell_intent(&mut self, name: &TenantUserName) {
         if self.dry_run {
-            let _ = writeln!(self.stdout, "Would shell into '{name}'.");
+            let _ = writeln!(self.terminal.stdout, "Would shell into '{name}'.");
         } else {
             self.section(&format!("Entering tenant '{name}'"));
         }
@@ -491,17 +500,17 @@ impl<'a> Reporter<'a> {
     /// verbs relocate plan emission into their summary.
     pub fn shell_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         if self.verbose {
-            let _ = writeln!(self.stdout, "Plan (commands to execute):");
-            let _ = writeln!(self.stdout);
+            let _ = writeln!(self.terminal.stdout, "Plan (commands to execute):");
+            let _ = writeln!(self.terminal.stdout);
             self.render_plan_block(plan);
-            let _ = writeln!(self.stdout);
+            let _ = writeln!(self.terminal.stdout);
         }
     }
 
     pub fn shell_command_intent(&mut self, name: &TenantUserName, mode: ModeLevel) {
         if self.dry_run {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "Would run command as tenant '{name}' ({} tier).",
                 mode.as_str()
             );
@@ -525,67 +534,70 @@ impl<'a> Reporter<'a> {
         let group = tenant_share_group_name(name.as_str());
         let joined = argv.join(" ");
         if mode == ModeLevel::Runtime {
-            let _ = writeln!(self.stdout, "About to run a command as tenant '{name}'.");
+            let _ = writeln!(
+                self.terminal.stdout,
+                "About to run a command as tenant '{name}'."
+            );
         } else {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "About to run a command as tenant '{name}' (mode: {}).",
                 mode.as_str()
             );
         }
-        let _ = writeln!(self.stdout);
-        let _ = writeln!(self.stdout, "This will:");
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
         if mode == ModeLevel::Runtime {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "  \u{2022} ensure the firewall is at runtime tier (auto-narrow; idempotent if already there)"
             );
         } else {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "  \u{2022} widen the firewall to install tier (narrows back to runtime on completion)"
             );
         }
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
         );
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "  \u{2022} re-apply each declared share from [[shares]] in the profile"
         );
-        let _ = writeln!(self.stdout, "  \u{2022} run as '{name}': {joined}");
+        let _ = writeln!(self.terminal.stdout, "  \u{2022} run as '{name}': {joined}");
         if mode != ModeLevel::Runtime {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "  \u{2022} narrow the firewall to runtime tier (always — even if the command fails)"
             );
         }
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
         if mode == ModeLevel::Runtime {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "Sudo needed for: firewall install, share reapply, exec."
             );
         } else {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "Sudo needed for: firewall install, share reapply, exec, firewall narrow."
             );
         }
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
     }
 
     /// Yellow `⚠` stderr one-liner for narrow-on-finally failure (command
     /// form only). Does NOT override the child's exit code.
     pub fn shell_narrow_failed(&mut self, name: &TenantUserName, _err: &super::tenants::ModeError) {
-        let prefix = if self.colors.stderr {
+        let prefix = if self.terminal.colors.stderr {
             "\x1b[33m\u{26a0}\x1b[0m"
         } else {
             "\u{26a0}"
         };
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "{prefix} tenant '{name}': firewall not narrowed after command — install-tier widening still in effect; run `tenant mode {name} runtime` to recover"
         );
     }
@@ -600,11 +612,14 @@ impl<'a> Reporter<'a> {
         self.section("Done");
         if mode == ModeLevel::Install {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "Command exited with code {child_exit} (firewall narrowed back to runtime tier)."
             );
         } else {
-            let _ = writeln!(self.stdout, "Command exited with code {child_exit}.");
+            let _ = writeln!(
+                self.terminal.stdout,
+                "Command exited with code {child_exit}."
+            );
         }
     }
 
@@ -621,13 +636,16 @@ impl<'a> Reporter<'a> {
         }
         let level_str = level.as_str();
         self.section("Done");
-        let _ = writeln!(self.stdout, "Tenant '{name}' is at {level_str} tier.");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Tenant '{name}' is at {level_str} tier."
+        );
     }
 
     /// Convergent-noop. Tense-neutral; emits in both real and dry-run.
     pub fn destroy_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stdout,
+            self.terminal.stdout,
             "tenant '{name}' does not exist; nothing to do."
         );
     }
@@ -650,7 +668,7 @@ impl<'a> Reporter<'a> {
                 format!("tenant: name '{name}' is reserved (matches a system or role name)")
             }
         };
-        let _ = writeln!(self.stderr, "{msg}");
+        let _ = writeln!(self.terminal.stderr, "{msg}");
     }
 
     pub fn refuse_name_conflict(&mut self, name: &TenantUserName, err: &ConflictError) {
@@ -662,82 +680,82 @@ impl<'a> Reporter<'a> {
                 format!("tenant: user '{name}' and group '{group}' already exist")
             }
         };
-        let _ = writeln!(self.stderr, "{msg}");
+        let _ = writeln!(self.terminal.stderr, "{msg}");
     }
 
     pub fn refuse_not_a_tenant(&mut self, name: &TenantUserName, uid: UserId, floor: u32) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to destroy '{name}': UID {uid} is below tenant floor {floor}"
         );
     }
 
     pub fn refuse_system_account(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to destroy '{name}': system account (no tenant-range UID)"
         );
     }
 
     pub fn refuse_shell_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: cannot shell into '{name}': does not exist"
         );
     }
 
     pub fn refuse_shell_not_a_tenant(&mut self, name: &TenantUserName, uid: UserId, floor: u32) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to shell into '{name}': UID {uid} is below tenant floor {floor}"
         );
     }
 
     pub fn refuse_shell_system_account(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to shell into '{name}': system account (no tenant-range UID)"
         );
     }
 
     pub fn refuse_mode_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: cannot apply mode to '{name}': does not exist"
         );
     }
 
     pub fn refuse_mode_not_a_tenant(&mut self, name: &TenantUserName, uid: UserId, floor: u32) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to apply mode to '{name}': UID {uid} is below tenant floor {floor}"
         );
     }
 
     pub fn refuse_mode_system_account(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to apply mode to '{name}': system account (no tenant-range UID)"
         );
     }
 
     pub fn refuse_doctor_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: cannot run doctor on '{name}': does not exist"
         );
     }
 
     pub fn refuse_doctor_not_a_tenant(&mut self, name: &TenantUserName, uid: UserId, floor: u32) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to run doctor on '{name}': UID {uid} is below tenant floor {floor}"
         );
     }
 
     pub fn refuse_doctor_system_account(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to run doctor on '{name}': system account (no tenant-range UID)"
         );
     }
@@ -750,11 +768,11 @@ impl<'a> Reporter<'a> {
         curated: &[(Category, AccessMode, PathBuf)],
     ) {
         if self.dry_run {
-            let _ = writeln!(self.stdout, "Would run doctor on tenant '{name}'.");
+            let _ = writeln!(self.terminal.stdout, "Would run doctor on tenant '{name}'.");
         }
         if self.verbose {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "Curated sensitive paths checked for tenant '{name}':"
             );
             for (_, mode, path) in curated {
@@ -762,7 +780,7 @@ impl<'a> Reporter<'a> {
                     AccessMode::Read => "read",
                     AccessMode::List => "list",
                 };
-                let _ = writeln!(self.stdout, "  {verb} {}", path.display());
+                let _ = writeln!(self.terminal.stdout, "  {verb} {}", path.display());
             }
         }
     }
@@ -777,10 +795,10 @@ impl<'a> Reporter<'a> {
         {
             for line in guidance.lines() {
                 if line.is_empty() {
-                    let _ = writeln!(self.stdout);
+                    let _ = writeln!(self.terminal.stdout);
                 } else {
                     let styled = self.style_guidance_line(line);
-                    let _ = writeln!(self.stdout, "  {styled}");
+                    let _ = writeln!(self.terminal.stdout, "  {styled}");
                 }
             }
         }
@@ -791,14 +809,14 @@ impl<'a> Reporter<'a> {
     /// stays behind `tenant doctor -v`.
     pub fn doctor_finding_one_liner(&mut self, finding: &Finding) {
         let rendered = self.color_finding_prefix(finding);
-        let _ = writeln!(self.stdout, "{rendered}");
+        let _ = writeln!(self.terminal.stdout, "{rendered}");
     }
 
     /// Critical → red+bold; warning → yellow; info → dim. Color-off
     /// preserves the plain byte-form contract.
     fn color_finding_prefix(&self, finding: &Finding) -> String {
         let text = finding.to_string();
-        if !self.colors.stdout {
+        if !self.terminal.colors.stdout {
             return text;
         }
         match finding.severity() {
@@ -824,7 +842,7 @@ impl<'a> Reporter<'a> {
     /// Headers (unindented) get bold; body lines (indented) get dim, so
     /// the finding one-liner stays the scannable focus.
     fn style_guidance_line(&self, line: &str) -> String {
-        if !self.colors.stdout {
+        if !self.terminal.colors.stdout {
             return line.to_string();
         }
         if line.starts_with(' ') {
@@ -844,26 +862,35 @@ impl<'a> Reporter<'a> {
         }
         if finding_count == 0 {
             let _ = writeln!(
-                self.stdout,
+                self.terminal.stdout,
                 "doctor: tenant '{name}' \u{2014} no per-tenant findings."
             );
         }
     }
 
     pub fn doctor_all_tenants_noop(&mut self) {
-        let _ = writeln!(self.stdout, "doctor: no tenants to audit.");
+        let _ = writeln!(self.terminal.stdout, "doctor: no tenants to audit.");
     }
 
     pub fn doctor_failed(&mut self, err: &ProbeError) {
-        let _ = writeln!(self.stderr, "tenant: failed to probe doctor: {err}");
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to probe doctor: {err}"
+        );
     }
 
     pub fn doctor_host_file_failed(&mut self, err: &super::HostFileError) {
-        let _ = writeln!(self.stderr, "tenant: failed to read host config: {err}");
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to read host config: {err}"
+        );
     }
 
     pub fn doctor_firewall_failed(&mut self, err: &FirewallError) {
-        let _ = writeln!(self.stderr, "tenant: failed to read pf state: {err}");
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to read pf state: {err}"
+        );
     }
 
     /// Yellow ⚠ aggregate for non-critical pre-exec findings. `target`
@@ -884,7 +911,7 @@ impl<'a> Reporter<'a> {
         let line =
             format!("\u{26a0} Doctor: {count} {noun}{scope} \u{2014} run `{command}` for details");
         let painted = self.paint_stdout(&line, ansi::yellow);
-        let _ = writeln!(self.stdout, "{painted}");
+        let _ = writeln!(self.terminal.stdout, "{painted}");
     }
 
     // Failures (stderr, EX_IOERR)
@@ -892,7 +919,7 @@ impl<'a> Reporter<'a> {
     pub fn create_group_failed(&mut self, name: &TenantUserName, err: &AccountError) {
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to create group '{group}' for '{name}': {err}"
         );
     }
@@ -905,14 +932,17 @@ impl<'a> Reporter<'a> {
     ) {
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to add host '{host}' to group '{group}': {err} \
              \u{2014} host now has an orphan group; next 'tenant destroy {name}' will converge"
         );
     }
 
     pub fn create_failed(&mut self, name: &TenantUserName, err: &AccountError) {
-        let _ = writeln!(self.stderr, "tenant: failed to create '{name}': {err}");
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to create '{name}': {err}"
+        );
     }
 
     /// SECOND stderr line after `create_failed` when the rollback
@@ -920,7 +950,7 @@ impl<'a> Reporter<'a> {
     pub fn create_rollback_failed(&mut self, name: &TenantUserName, err: &AccountError) {
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: rollback of group '{group}' also failed: {err} \
              \u{2014} host now has an orphan group; next 'tenant destroy {name}' will converge"
         );
@@ -929,52 +959,58 @@ impl<'a> Reporter<'a> {
     pub fn create_profile_failed(&mut self, name: &TenantUserName, err: &ProfileError) {
         let path = display_path_for(name.as_str());
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to write profile '{path}' for '{name}': {err}"
         );
     }
 
     pub fn create_firewall_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to install firewall for '{name}': {err}"
         );
     }
 
     pub fn destroy_failed(&mut self, name: &TenantUserName, err: &AccountError) {
-        let _ = writeln!(self.stderr, "tenant: failed to destroy '{name}': {err}");
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to destroy '{name}': {err}"
+        );
     }
 
     pub fn destroy_profile_failed(&mut self, name: &TenantUserName, err: &ProfileError) {
         let path = display_path_for(name.as_str());
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to remove profile '{path}' for '{name}': {err}"
         );
     }
 
     pub fn destroy_firewall_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to tear down firewall for '{name}': {err}"
         );
     }
 
     pub fn shell_failed(&mut self, name: &TenantUserName, err: &AccountError) {
-        let _ = writeln!(self.stderr, "tenant: failed to shell into '{name}': {err}");
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to shell into '{name}': {err}"
+        );
     }
 
     pub fn shell_narrow_profile_failed(&mut self, name: &TenantUserName, err: &ProfileError) {
         let path = display_path_for(name.as_str());
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to read profile '{path}' for '{name}' before shell entry: {err}"
         );
     }
 
     pub fn shell_narrow_firewall_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to narrow firewall for '{name}' before shell entry: {err}"
         );
     }
@@ -982,14 +1018,14 @@ impl<'a> Reporter<'a> {
     pub fn mode_profile_failed(&mut self, name: &TenantUserName, err: &ProfileError) {
         let path = display_path_for(name.as_str());
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to read profile '{path}' for '{name}': {err}"
         );
     }
 
     pub fn mode_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to apply firewall mode for '{name}': {err}"
         );
     }
@@ -999,21 +1035,21 @@ impl<'a> Reporter<'a> {
 
     pub fn mode_acl_failed(&mut self, name: &TenantUserName, err: &AclError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to apply ACL for '{name}': {err}"
         );
     }
 
     pub fn mode_account_failed(&mut self, name: &TenantUserName, err: &AccountError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to install tenant-side filesystem state for '{name}': {err}"
         );
     }
 
     pub fn mode_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to probe tenant filesystem state for '{name}': {err}"
         );
     }
@@ -1021,33 +1057,36 @@ impl<'a> Reporter<'a> {
     /// `refuse_*` framing because the operator authored the conflict;
     /// the substrate never ran.
     pub fn refuse_mode_share(&mut self, name: &TenantUserName, err: &ShareError) {
-        let _ = writeln!(self.stderr, "tenant: cannot apply mode for '{name}': {err}");
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: cannot apply mode for '{name}': {err}"
+        );
     }
 
     pub fn shell_narrow_acl_failed(&mut self, name: &TenantUserName, err: &AclError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to apply ACL for '{name}' before shell entry: {err}"
         );
     }
 
     pub fn shell_narrow_account_failed(&mut self, name: &TenantUserName, err: &AccountError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to install tenant-side filesystem state for '{name}' before shell entry: {err}"
         );
     }
 
     pub fn shell_narrow_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to probe tenant filesystem state for '{name}' before shell entry: {err}"
         );
     }
 
     pub fn refuse_shell_share(&mut self, name: &TenantUserName, err: &ShareError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: cannot enter shell for '{name}': {err}"
         );
     }
@@ -1057,7 +1096,7 @@ impl<'a> Reporter<'a> {
 
     pub fn create_post_provision_acl_failed(&mut self, name: &TenantUserName, err: &AclError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: '{name}' provisioned but ACL reapply failed: {err}; \
              recover with `tenant reload {name}`"
         );
@@ -1069,7 +1108,7 @@ impl<'a> Reporter<'a> {
         err: &AccountError,
     ) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: '{name}' provisioned but tenant-side filesystem state failed: {err}; \
              recover with `tenant reload {name}`"
         );
@@ -1077,7 +1116,7 @@ impl<'a> Reporter<'a> {
 
     pub fn create_post_provision_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: '{name}' provisioned but tenant-path probe failed: {err}; \
              recover with `tenant reload {name}`"
         );
@@ -1085,7 +1124,7 @@ impl<'a> Reporter<'a> {
 
     pub fn refuse_create_post_provision_share(&mut self, name: &TenantUserName, err: &ShareError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: '{name}' provisioned but share entry is invalid: {err}; \
              edit the profile and rerun `tenant reload {name}`"
         );
@@ -1102,7 +1141,7 @@ impl<'a> Reporter<'a> {
             return;
         }
         self.section("Done");
-        let _ = writeln!(self.stdout, "Tenant '{name}' reloaded.");
+        let _ = writeln!(self.terminal.stdout, "Tenant '{name}' reloaded.");
     }
 
     /// Silent when `count == 0`; `reload_all_done_summary` handles that.
@@ -1122,7 +1161,7 @@ impl<'a> Reporter<'a> {
             return;
         }
         if succeeded == 0 && failed == 0 {
-            let _ = writeln!(self.stdout, "No tenants on this host to reload.");
+            let _ = writeln!(self.terminal.stdout, "No tenants on this host to reload.");
             return;
         }
         let total = succeeded + failed;
@@ -1132,13 +1171,13 @@ impl<'a> Reporter<'a> {
             format!("Reloaded {succeeded} of {total} tenant(s); {failed} failed.")
         };
         self.section("Done");
-        let _ = writeln!(self.stdout, "{line}");
+        let _ = writeln!(self.terminal.stdout, "{line}");
     }
 
     pub fn reload_profile_failed(&mut self, name: &TenantUserName, err: &ProfileError) {
         let path = display_path_for(name.as_str());
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to read profile '{path}' for '{name}': {err}"
         );
     }
@@ -1147,32 +1186,35 @@ impl<'a> Reporter<'a> {
     /// a tier-swap, and reload doesn't swap tiers.
     pub fn reload_firewall_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: failed to reload firewall for '{name}': {err}"
         );
     }
 
     pub fn refuse_reload_share(&mut self, name: &TenantUserName, err: &ShareError) {
-        let _ = writeln!(self.stderr, "tenant: cannot reload '{name}': {err}");
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: cannot reload '{name}': {err}"
+        );
     }
 
     pub fn refuse_reload_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: cannot reload '{name}': does not exist"
         );
     }
 
     pub fn refuse_reload_not_a_tenant(&mut self, name: &TenantUserName, uid: UserId, floor: u32) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to reload '{name}': UID {uid} is below tenant floor {floor}"
         );
     }
 
     pub fn refuse_reload_system_account(&mut self, name: &TenantUserName) {
         let _ = writeln!(
-            self.stderr,
+            self.terminal.stderr,
             "tenant: refusing to reload '{name}': system account (no tenant-range UID)"
         );
     }
@@ -1185,10 +1227,10 @@ impl<'a> Reporter<'a> {
         if entries.is_empty() {
             return;
         }
-        let _ = writeln!(self.stdout, "Plan (commands to execute):");
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout, "Plan (commands to execute):");
+        let _ = writeln!(self.terminal.stdout);
         self.render_plan_block(entries);
-        let _ = writeln!(self.stdout);
+        let _ = writeln!(self.terminal.stdout);
     }
 
     /// Intent-leads-shell-follows layout, NO blank line between entries
@@ -1206,13 +1248,13 @@ impl<'a> Reporter<'a> {
                 None => format!("  \u{2022} {intent}"),
             };
             let shell_line = self.format_shell_line(&shell);
-            let _ = writeln!(self.stdout, "{intent_line}");
-            let _ = writeln!(self.stdout, "      {shell_line}");
+            let _ = writeln!(self.terminal.stdout, "{intent_line}");
+            let _ = writeln!(self.terminal.stdout, "      {shell_line}");
         }
     }
 
     fn format_shell_line(&self, line: &str) -> String {
-        if !self.colors.stdout {
+        if !self.terminal.colors.stdout {
             return line.to_string();
         }
         if let Some(rest) = line.strip_prefix("sudo ") {

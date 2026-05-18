@@ -6,7 +6,7 @@ use tenant::domain::HostUserName;
 
 fn main() -> ExitCode {
     let accounts = match MacosHostAccounts::new() {
-        Ok(reader) => reader,
+        Ok(accounts) => accounts,
         Err(e) => {
             eprintln!("tenant: failed to query account state: {e}");
             return ExitCode::from(74); // EX_IOERR
@@ -14,14 +14,9 @@ fn main() -> ExitCode {
     };
     let machine = MacosHostMachine;
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Operator's login name is the `host` identity in doctor's curated
-    // path expansion (`/Users/<host>/.ssh/...`). USER is set by the
-    // login shell on macOS; under sudo, USER becomes `root` but
-    // SUDO_USER preserves the original invoker — prefer SUDO_USER so
-    // `sudo tenant doctor` still audits the real operator's home, not
-    // `/Users/root/*`. Final fallback is a placeholder so a missing-
-    // env edge case surfaces as "the path probes look weird" rather
-    // than a hard crash.
+    // Under sudo, USER becomes `root` but SUDO_USER preserves the
+    // real invoker — prefer it so `sudo tenant doctor` audits the
+    // operator's home, not /Users/root/*. Fallback is a placeholder.
     let host = HostUserName(
         std::env::var("SUDO_USER")
             .or_else(|_| std::env::var("USER"))
@@ -33,17 +28,13 @@ fn main() -> ExitCode {
     let stdin_is_tty = std::io::IsTerminal::is_terminal(&stdin_handle);
     let mut stdin = stdin_handle.lock();
     let colors = tenant::ansi::Colors::detect();
-    let code = tenant::run(
-        &args,
-        &accounts,
-        &machine,
-        &host,
-        // (HostUserName) borrowed from the owned wrap above.
-        &mut stdout,
-        &mut stderr,
-        &mut stdin,
+    let terminal = tenant::Terminal {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+        stdin: &mut stdin,
         stdin_is_tty,
         colors,
-    );
+    };
+    let code = tenant::run(&args, &accounts, &machine, &host, terminal);
     ExitCode::from(code)
 }

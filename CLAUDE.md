@@ -44,7 +44,13 @@ file with shipped-feature recaps.
 ```
 src/lib.rs        — public API (`run`); `Cli` + `Verb` + `ModeLevel`;
                     global `--verbose` / `--dry-run` / `--yes`. Swaps to
-                    `DryRunHostMachine` when `--dry-run`.
+                    `DryRunHostMachine` when `--dry-run`. `run` takes a
+                    `Terminal` bundle (5th arg) for all operator I/O.
+src/terminal.rs   — `Terminal { stdout, stderr, stdin, stdin_is_tty,
+                    colors }`: capability bundle for operator-side I/O,
+                    constructed once at the binary boundary (main /
+                    test helpers) and threaded as a single value through
+                    `run` → `parse` → `Reporter`.
 src/ansi.rs       — `Colors { stdout, stderr }` per-stream gate; color
                     wrappers; `rule(title, width)` section divider.
 src/domain/       — domain layer. `host_accounts.rs` defines the
@@ -101,12 +107,15 @@ src/domain/commands.rs
                     builds `ReapplyPlan` upfront for prompt-bearing
                     verbs so profile-read failures surface pre-prompt.
 src/domain/reporter.rs
-                  — operator-facing output. `section` + `ok` (✓) +
-                    `step` ($-echo) + `progress` substrate vocab.
-                    Per-verb `_intent` / `_summary` / `_done` triples;
-                    `_summary` carries optional `Plan (commands to
-                    execute):` block in verbose. `confirm()` +
-                    `aborted()`. `doctor_finding` /
+                  — operator-facing output. Owns the `Terminal`
+                    capability by value (single field; method bodies
+                    access `self.terminal.stdout` etc.). `section` +
+                    `ok` (✓) + `step` ($-echo) + `progress` substrate
+                    vocab. Per-verb `_intent` / `_summary` / `_done`
+                    triples; `_summary` carries optional `Plan (commands
+                    to execute):` block in verbose. `confirm()` +
+                    `aborted()` + `show_summary()` (truth table
+                    `dry_run || stdin_is_tty`). `doctor_finding` /
                     `doctor_finding_one_liner` /
                     `doctor_summary_pending` drive the audit surface.
 src/adapters/     — driven adapters. `stub_host_accounts.rs`
@@ -138,7 +147,8 @@ src/doctor.rs     — pure grep-and-classify. `Finding` + `Severity` +
                     `Category` + `SymlinkActual` shapes; the parse +
                     classify functions. All I/O lives in `Tenants::doctor_*`.
 src/main.rs       — composition root: prod impls + `tenant::run`.
-                    Reads `$USER`; probes stdin TTY + colors.
+                    Reads `$USER`; probes stdin TTY + colors; builds
+                    `Terminal` over real stdout/stderr/stdin.
 
 tests/cli_*.rs            — E2E, one binary per verb plus `cli.rs`
                             for parser cross-cutting; shared helpers in
@@ -221,11 +231,23 @@ it from scratch wastes a cycle and risks getting it wrong.
   / verbosity branching lives inside Reporter.
 
 - **Composition-root DI.** `tenant::run` takes `&dyn accounts::HostAccounts`
-  + `&dyn host_machine::HostMachine`. `main.rs` builds prod impls; tests
-  build `StubHostAccounts` + `StubHostMachine` / `NeverHostMachine`. Tenants +
-  Reporter constructed inside `run` from the active HostMachine; both
-  swap to `DryRunHostMachine` when `--dry-run`. Test seam stays at the
-  HostMachine boundary.
+  + `&dyn host_machine::HostMachine` + a `Terminal` bundle. `main.rs`
+  builds prod impls; tests build `StubHostAccounts` + `StubHostMachine` /
+  `NeverHostMachine`. Tenants + Reporter constructed inside `run` from
+  the active HostMachine; both swap to `DryRunHostMachine` when
+  `--dry-run`. Test seam stays at the HostMachine boundary.
+
+- **Terminal is the capability, not a bundle.** All operator-side I/O
+  (stdout / stderr / stdin / stdin_is_tty / colors) is carried by the
+  `Terminal` struct, threaded as a single value through `run` → `parse`
+  → `Reporter`. Reporter owns it by value; method bodies access
+  `self.terminal.stdout` etc. — never unpacked into separate Reporter
+  fields. Any future function that needs operator I/O takes `Terminal`
+  (or `&mut Terminal`) as a whole, even if it only writes to one field
+  — the type names "I have operator-I/O authority," not "I have these
+  three specific handles." Don't carve out `fn h(stderr: &mut dyn
+  Write)` shapes; pass `Terminal` and let the body access what it
+  needs.
 
 - **Snapshot-then-act on `HostAccounts`.** `MacosHostAccounts::new()` queries
   dscl once at composition-root construction; subsequent lookups

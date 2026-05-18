@@ -1,5 +1,3 @@
-use std::io::BufRead;
-
 use super::reporter::{ConfirmOutcome, Reporter};
 use super::{AccountOp, FirewallOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
@@ -21,20 +19,14 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch(
     cli: Cli,
     accounts: &dyn super::HostAccounts,
     tenants: &tenants::Tenants<'_>,
     host: &super::HostUserName,
     reporter: &mut Reporter,
-    stdin: &mut dyn BufRead,
-    stdin_is_tty: bool,
-    yes_flag: bool,
 ) -> u8 {
-    // `--yes` suppresses the prompt, not the summary: an operator on a
-    // TTY still sees context; scripted (non-TTY real-mode) stays silent.
-    let show_summary = cli.dry_run || stdin_is_tty;
+    let show_summary = reporter.show_summary();
     match cli.verb {
         Verb::Create { name } => {
             if let Err(e) = tenants::validate_name(&name) {
@@ -53,7 +45,7 @@ pub(crate) fn dispatch(
                 reporter.create_summary(&name, host, uid, gid, Some(&create_plan));
                 tenants.pre_exec_doctor_summary(None, host, tenants::DoctorScope::Create, reporter);
             }
-            if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
+            if reporter.confirm(true) == ConfirmOutcome::Abort {
                 reporter.aborted();
                 return 0;
             }
@@ -202,9 +194,7 @@ pub(crate) fn dispatch(
                             reporter,
                         );
                     }
-                    if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
-                        == ConfirmOutcome::Abort
-                    {
+                    if reporter.confirm(true) == ConfirmOutcome::Abort {
                         reporter.aborted();
                         return 0;
                     }
@@ -295,9 +285,7 @@ pub(crate) fn dispatch(
                                 reporter,
                             );
                         }
-                        if reporter.confirm(true, stdin, stdin_is_tty, yes_flag)
-                            == ConfirmOutcome::Abort
-                        {
+                        if reporter.confirm(true) == ConfirmOutcome::Abort {
                             reporter.aborted();
                             return 0;
                         }
@@ -322,7 +310,7 @@ pub(crate) fn dispatch(
                 if show_summary {
                     reporter.reload_all_summary(host, &names);
                 }
-                if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
+                if reporter.confirm(true) == ConfirmOutcome::Abort {
                     reporter.aborted();
                     return 0;
                 }
@@ -348,9 +336,7 @@ pub(crate) fn dispatch(
                     if show_summary {
                         reporter.destroy_orphan_summary(&name, host, Some(&orphan_plan));
                     }
-                    if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
-                        == ConfirmOutcome::Abort
-                    {
+                    if reporter.confirm(false) == ConfirmOutcome::Abort {
                         reporter.aborted();
                         return 0;
                     }
@@ -375,9 +361,7 @@ pub(crate) fn dispatch(
                         let uid = accounts.uid_for(&name).unwrap_or(super::UserId(0));
                         reporter.destroy_summary(&name, host, uid, Some(&destroy_plan));
                     }
-                    if reporter.confirm(false, stdin, stdin_is_tty, yes_flag)
-                        == ConfirmOutcome::Abort
-                    {
+                    if reporter.confirm(false) == ConfirmOutcome::Abort {
                         reporter.aborted();
                         return 0;
                     }

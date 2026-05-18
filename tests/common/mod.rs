@@ -591,17 +591,14 @@ pub fn run_with(stub: StubHostAccounts, args: &[&str]) -> (u8, String, String) {
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
     let host = HostUserName::from(TEST_HOST);
-    let code = tenant::run(
-        &args,
-        &stub,
-        &machine,
-        &host,
-        &mut stdout,
-        &mut stderr,
-        &mut stdin,
-        false, // stdin not a TTY → confirm auto-proceeds
-        tenant::ansi::Colors::default(),
-    );
+    let terminal = tenant::Terminal {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+        stdin: &mut stdin,
+        stdin_is_tty: false, // stdin not a TTY → confirm auto-proceeds
+        colors: tenant::ansi::Colors::default(),
+    };
+    let code = tenant::run(&args, &stub, &machine, &host, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -619,17 +616,14 @@ pub fn run_with_exec(
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
     let host = HostUserName::from(TEST_HOST);
-    let code = tenant::run(
-        &args,
-        &stub,
-        exec,
-        &host,
-        &mut stdout,
-        &mut stderr,
-        &mut stdin,
-        false,
-        tenant::ansi::Colors::default(),
-    );
+    let terminal = tenant::Terminal {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+        stdin: &mut stdin,
+        stdin_is_tty: false,
+        colors: tenant::ansi::Colors::default(),
+    };
+    let code = tenant::run(&args, &stub, exec, &host, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -655,17 +649,14 @@ pub fn run_with_stdin(
     let mut stdin = std::io::Cursor::new(stdin_content.to_vec());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
     let host = HostUserName::from(TEST_HOST);
-    let code = tenant::run(
-        &args,
-        &stub,
-        exec,
-        &host,
-        &mut stdout,
-        &mut stderr,
-        &mut stdin,
-        true, // simulate TTY so confirm prompts fire
-        tenant::ansi::Colors::default(),
-    );
+    let terminal = tenant::Terminal {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+        stdin: &mut stdin,
+        stdin_is_tty: true, // simulate TTY so confirm prompts fire
+        colors: tenant::ansi::Colors::default(),
+    };
+    let code = tenant::run(&args, &stub, exec, &host, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
