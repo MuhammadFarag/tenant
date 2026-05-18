@@ -83,6 +83,15 @@ impl HostMachine for NeverHostMachine {
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
         panic!("host machine unexpectedly invoked (read_host_acl): path={path:?}");
     }
+    /// Exempt from the panic-on-call contract: `tenant::run` resolves the
+    /// operator identity unconditionally after parse for plan-render
+    /// threading, so every dispatch-reaching test path crosses this method.
+    /// Returns `"operator"` (matching `common::TEST_HOST`) — a process-
+    /// identity read, not host work; the panic guard remains on every
+    /// other trait method.
+    fn current_host_user_name(&self) -> HostUserName {
+        HostUserName::from("operator")
+    }
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         panic!("host machine unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
     }

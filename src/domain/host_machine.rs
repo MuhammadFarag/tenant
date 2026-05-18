@@ -58,6 +58,11 @@ pub trait HostMachine {
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError>;
 
+    /// Identity of the operator invoking the binary, used in plan rendering
+    /// and as the host-side member of every tenant's share group. Infallible:
+    /// adapters fall back to a placeholder rather than failing the verb.
+    fn current_host_user_name(&self) -> HostUserName;
+
     /// An absent group is non-error: returns `Ok(false)`.
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError>;
 }

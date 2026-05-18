@@ -14,7 +14,7 @@ use std::io;
 use crate::adapters::NeverHostMachine;
 use crate::adapters::{StubHostMachine, StubUserDirectory};
 
-use tenant::domain::{GroupId, HostUserName, UserDirectoryError, UserId};
+use tenant::domain::{GroupId, UserDirectoryError, UserId};
 
 /// Single-failure queue: returns Err on the first call to the matching
 /// `HostUserDirectory` method, snapshots thereafter. The default fixture for
@@ -36,9 +36,12 @@ pub fn directory_fail_on_second_call() -> RefCell<VecDeque<Option<UserDirectoryE
     RefCell::new(VecDeque::from([None, Some(err)]))
 }
 
-/// Host identity passed to `tenant::run`. Production reads `$USER`; tests
-/// use a fixed placeholder so the doctor-verb's curated path expansion
-/// (`/Users/<host>/...`) is deterministic across test runs.
+/// Host identity surfaced by `HostMachine::current_host_user_name` in
+/// tests. Production reads `$USER`; tests pin a fixed placeholder so the
+/// doctor-verb's curated path expansion (`/Users/<host>/...`) and the
+/// per-verb plan rendering are deterministic across test runs.
+/// `StubHostMachine::new()` and `NeverHostMachine::current_host_user_name`
+/// both return this same string literal.
 pub const TEST_HOST: &str = "operator";
 
 /// Expected `─── <title> ───...` section divider line emitted by
@@ -524,7 +527,6 @@ pub fn run_with(stub: StubUserDirectory, args: &[&str]) -> (u8, String, String) 
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let host = HostUserName::from(TEST_HOST);
     let terminal = tenant::Terminal {
         stdout: &mut stdout,
         stderr: &mut stderr,
@@ -532,7 +534,7 @@ pub fn run_with(stub: StubUserDirectory, args: &[&str]) -> (u8, String, String) 
         stdin_is_tty: false, // stdin not a TTY → confirm auto-proceeds
         colors: tenant::ansi::Colors::default(),
     };
-    let code = tenant::run(&args, &stub, &machine, &host, terminal);
+    let code = tenant::run(&args, &stub, &machine, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -549,7 +551,6 @@ pub fn run_with_exec(
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(Vec::<u8>::new());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let host = HostUserName::from(TEST_HOST);
     let terminal = tenant::Terminal {
         stdout: &mut stdout,
         stderr: &mut stderr,
@@ -557,7 +558,7 @@ pub fn run_with_exec(
         stdin_is_tty: false,
         colors: tenant::ansi::Colors::default(),
     };
-    let code = tenant::run(&args, &stub, exec, &host, terminal);
+    let code = tenant::run(&args, &stub, exec, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -582,7 +583,6 @@ pub fn run_with_stdin(
     let mut stderr: Vec<u8> = Vec::new();
     let mut stdin = std::io::Cursor::new(stdin_content.to_vec());
     let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-    let host = HostUserName::from(TEST_HOST);
     let terminal = tenant::Terminal {
         stdout: &mut stdout,
         stderr: &mut stderr,
@@ -590,7 +590,7 @@ pub fn run_with_stdin(
         stdin_is_tty: true, // simulate TTY so confirm prompts fire
         colors: tenant::ansi::Colors::default(),
     };
-    let code = tenant::run(&args, &stub, exec, &host, terminal);
+    let code = tenant::run(&args, &stub, exec, terminal);
     (
         code,
         String::from_utf8_lossy(&stdout).into_owned(),

@@ -17,6 +17,12 @@ use tenant::profile::{ProfileError, default_profile_toml};
 
 #[derive(Default)]
 pub struct StubHostMachine {
+    /// Operator identity returned from `current_host_user_name`. Set by
+    /// `new()` to `"operator"` (matches `common::TEST_HOST`) so the
+    /// canonical `StubHostMachine::new()` lines up with shared test
+    /// fixtures without a per-test setter; `with_host` overrides.
+    host: RefCell<String>,
+
     account_ops: RefCell<Vec<AccountOp>>,
     profile_ops: RefCell<Vec<ProfileOp>>,
     firewall_ops: RefCell<Vec<FirewallOp>>,
@@ -131,11 +137,17 @@ pub struct StubHostMachine {
 impl StubHostMachine {
     pub fn new() -> Self {
         let s = Self::default();
+        *s.host.borrow_mut() = "operator".to_string();
         *s.env_policy_content.borrow_mut() =
             "Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string();
         *s.pam_sudo_content.borrow_mut() = "auth       sufficient     pam_tid.so\n".to_string();
         *s.pf_status_content.borrow_mut() = "Status: Enabled for 0 days 00:00:00\n".to_string();
         s
+    }
+
+    pub fn with_host(self, host: &str) -> Self {
+        *self.host.borrow_mut() = host.to_string();
+        self
     }
 
     pub fn fail_account_op(self, op: AccountOp, err: AccountError) -> Self {
@@ -591,6 +603,10 @@ impl HostMachine for StubHostMachine {
             ));
         }
         Ok(listing)
+    }
+
+    fn current_host_user_name(&self) -> HostUserName {
+        HostUserName::from(self.host.borrow().clone())
     }
 
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {

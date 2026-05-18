@@ -6,7 +6,12 @@ use crate::domain::{
 };
 use crate::profile::{ProfileError, default_profile_toml};
 
-pub struct DryRunHostMachine;
+/// Carries the operator identity resolved on the real (non-dry-run) machine
+/// before construction — `MacosHostMachine` reads env vars there, and dry-run
+/// preserves that answer so plan-render names the actual invoker.
+pub struct DryRunHostMachine {
+    pub host: HostUserName,
+}
 
 impl HostMachine for DryRunHostMachine {
     fn describe_account(&self, op: &AccountOp) -> String {
@@ -115,6 +120,10 @@ impl HostMachine for DryRunHostMachine {
     /// `[[shares]]`); defensive against a future default share.
     fn read_host_acl(&self, _path: &std::path::Path) -> Result<String, ProbeError> {
         Ok(String::new())
+    }
+
+    fn current_host_user_name(&self) -> HostUserName {
+        self.host.clone()
     }
 
     /// `true` so the preview doesn't fire a spurious `HostNotInShareGroup`

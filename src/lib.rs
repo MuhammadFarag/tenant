@@ -3,7 +3,7 @@ use std::io::Write;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::domain::{HostUserName, TenantUserName};
+use crate::domain::TenantUserName;
 
 pub mod adapters;
 pub mod allocation;
@@ -125,14 +125,17 @@ pub fn run(
     args: &[String],
     directory: &dyn domain::HostUserDirectory,
     machine: &dyn domain::HostMachine,
-    host: &HostUserName,
     mut terminal: Terminal<'_>,
 ) -> u8 {
     let cli = match parse(args, &mut terminal) {
         Ok(cli) => cli,
         Err(code) => return code,
     };
-    let dry_run_machine = adapters::dry_run_host_machine::DryRunHostMachine;
+    // Resolve the operator identity from the real (non-dry-run) machine
+    // BEFORE the dry-run swap, so dry-run preserves the env-var answer
+    // rather than substituting a placeholder.
+    let host = machine.current_host_user_name();
+    let dry_run_machine = adapters::dry_run_host_machine::DryRunHostMachine { host: host.clone() };
     let active_machine: &dyn domain::HostMachine = if cli.dry_run {
         &dry_run_machine
     } else {
@@ -140,7 +143,7 @@ pub fn run(
     };
     let tenants = domain::Tenants::new(active_machine);
     let mut reporter = Reporter::new(terminal, cli.verbose, cli.dry_run, cli.yes, active_machine);
-    domain::commands::dispatch(cli, directory, &tenants, host, &mut reporter)
+    domain::commands::dispatch(cli, directory, &tenants, &host, &mut reporter)
 }
 
 fn parse(args: &[String], terminal: &mut Terminal<'_>) -> Result<Cli, u8> {

@@ -526,6 +526,17 @@ impl HostMachine for MacosHostMachine {
         Ok(())
     }
 
+    fn current_host_user_name(&self) -> HostUserName {
+        // Under sudo, USER becomes `root` but SUDO_USER preserves the
+        // real invoker — prefer it so `sudo tenant doctor` audits the
+        // operator's home, not /Users/root/*. Fallback is a placeholder.
+        HostUserName(
+            env::var("SUDO_USER")
+                .or_else(|_| env::var("USER"))
+                .unwrap_or_else(|_| "operator".to_string()),
+        )
+    }
+
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         // Exit 0 ⇒ member; any non-zero (host absent, group absent) ⇒
         // false — dseditgroup conflates these and the idempotence
