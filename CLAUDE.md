@@ -71,9 +71,9 @@ src/domain/       — domain layer. `host_accounts.rs` defines the
                     `TenantUserName` / `HostUserName` / `GroupName`),
                     re-exported flat from `crate::domain`.
 src/domain/accounts.rs / accounts/
-                  — `Writer` verb methods, `ReapplyPlan` /
+                  — `Tenants` verb methods, `ReapplyPlan` /
                     `ShareOps` / `ReloadAllOutcome` / `DoctorOutcome`,
-                    and `tenant_share_group_name`. `shell_into_tenant`
+                    and `tenant_share_group_name`. `shell`
                     branches on argv-presence into `shell_interactive`
                     / `shell_command`. `build_reapply_plan` +
                     `execute_reapply_plan` shared across mode/shell/
@@ -126,7 +126,7 @@ src/firewall.rs   — pure: `render_anchor`, `ensure_anchor_ref`,
                     `tenant_anchor_name` / `_path`.
 src/doctor.rs     — pure grep-and-classify. `Finding` + `Severity` +
                     `Category` + `SymlinkActual` shapes; the parse +
-                    classify functions. All I/O lives in `Writer::doctor_*`.
+                    classify functions. All I/O lives in `Tenants::doctor_*`.
 src/main.rs       — composition root: prod impls + `tenant::run`.
                     Reads `$USER`; probes stdin TTY + colors.
 
@@ -158,7 +158,7 @@ it from scratch wastes a cycle and risks getting it wrong.
 
 - **Intent / mechanism split.** Domain ops (`AccountOp` / `ProfileOp`
   / `FirewallOp` / `AclOp`) express *what*; `MacosHostMachine` owns argv.
-  Writer never constructs argv. Tests assert on op identity (e.g.
+  Tenants never constructs argv. Tests assert on op identity (e.g.
   `exec.account_ops()[N] == AccountOp::CreateShareGroup{..}`); literal
   shell shape pinned narrowly in `tests/macos_host_machine.rs`, one test
   per variant.
@@ -170,7 +170,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   preserving per-domain error types end-to-end.
 
 - **Carve-out methods for non-unit returns.** HostMachine methods that
-  don't fit `Result<(), E>` are called directly by Writer: `login` /
+  don't fit `Result<(), E>` are called directly by Tenants: `login` /
   `exec_as_tenant` (stdio inherit, i32 child exit), content reads
   (return `String`), probe verdicts (return enum / bool).
   `AccountOp::LoginAsUser` + `ExecAsUser` exist only for plan/echo
@@ -180,7 +180,7 @@ it from scratch wastes a cycle and risks getting it wrong.
 - **Probe via HostMachine, not HostAccounts live re-read.** When a verb needs
   to re-check OS state mid-execution (destroy's `LookupUserRecord`
   residue probe is canonical), it's a regular substrate call whose
-  `Ok` vs `Err` drives a Writer branch. HostAccounts stays snapshot-then-act
+  `Ok` vs `Err` drives a Tenants branch. HostAccounts stays snapshot-then-act
   — in-memory view captured at composition-root construction.
 
 - **Doctor doesn't fit the `WritableOp` shape.** All doctor probes
@@ -206,13 +206,13 @@ it from scratch wastes a cycle and risks getting it wrong.
 ### Layering + DI
 
 - **No I/O in command logic.** `commands::dispatch` and
-  `accounts::Writer` call Reporter's verb-named methods; neither
+  `accounts::Tenants` call Reporter's verb-named methods; neither
   touches raw writers nor checks `cli.verbose` / `cli.dry_run`. Mode
   / verbosity branching lives inside Reporter.
 
 - **Composition-root DI.** `tenant::run` takes `&dyn accounts::HostAccounts`
   + `&dyn host_machine::HostMachine`. `main.rs` builds prod impls; tests
-  build `StubHostAccounts` + `StubHostMachine` / `NeverHostMachine`. Writer +
+  build `StubHostAccounts` + `StubHostMachine` / `NeverHostMachine`. Tenants +
   Reporter constructed inside `run` from the active HostMachine; both
   swap to `DryRunHostMachine` when `--dry-run`. Test seam stays at the
   HostMachine boundary.
@@ -233,7 +233,7 @@ it from scratch wastes a cycle and risks getting it wrong.
 - **Convergent semantics for teardown verbs.** `destroy <name>`
   against an absent tenant is a successful noop. Absent user +
   leftover `<name>-tenant-share` group routes to
-  `Writer::destroy_orphan_group`. Orphan path runs the full PF
+  `Tenants::destroy_orphan_group`. Orphan path runs the full PF
   teardown (each step idempotent), so partial-firewall state from a
   failed earlier create also converges.
 
@@ -269,7 +269,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   `CreateError::UserWithRollback` emits two Reporter calls (original
   error + em-dash-suffixed rollback-failed hint). Profile/Firewall
   failures leave user + group on host; recovery is `tenant destroy
-  <name>` (idempotent on PF). On PF Reload failure, Writer runs an
+  <name>` (idempotent on PF). On PF Reload failure, Tenants runs an
   automatic 4-step recovery (RestoreConfigFromBackup → RemoveAnchor
   → Reload → FlushAnchor) BEFORE surfacing the error; recovery-of-
   recovery surfaces as `FirewallError::RestoreFailed { path }` with a
@@ -451,7 +451,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   wrap the POSIX numeric identifiers; `TenantUserName(String)` /
   `HostUserName(String)` wrap the macOS short usernames in their two
   distinct roles; `GroupName(String)` wraps the macOS short group
-  name (today always `<tenant>-tenant-share`, built at the Writer
+  name (today always `<tenant>-tenant-share`, built at the Tenants
   boundary by `accounts::tenant_share_group_name`). The `UserName`
   qualifier on the name pair is deliberate: bare `HostName` is a
   polyseme with the networking term (DNS hostname / `uname -n`); the
@@ -470,7 +470,7 @@ it from scratch wastes a cycle and risks getting it wrong.
   `doctor::has_group_acl_entry(listing, group: &str)`, etc., stay as
   `&str` parameters. Callers pass `name.as_str()` from a
   `&TenantUserName` (or `group.as_str()` from a `&GroupName`). The
-  type-safety win is realized at the Writer / HostAccounts / Reporter
+  type-safety win is realized at the Tenants / HostAccounts / Reporter
   method boundaries and at ADT variants
   (`AccountOp::CreateTenantUser { name: TenantUserName, ... }`,
   `AccountOp::CreateShareGroup { group: GroupName, ... }`,

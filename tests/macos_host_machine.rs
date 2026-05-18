@@ -160,8 +160,8 @@ fn macos_describes_ensure_symlink_as_user() {
     // an existing symlink with the same target re-links to the same
     // place (no-op effect); an existing symlink to a different target
     // gets replaced; an existing REAL dir or file at `link` is the
-    // `TenantPathOccupied` case the Writer pre-checks for (substrate
-    // would error here without that guard; Writer surfaces
+    // `TenantPathOccupied` case the Tenants struct pre-checks for (substrate
+    // would error here without that guard; Tenants surfaces
     // `ShareError::TenantPathOccupied` before the substrate runs).
     let s = MacosHostMachine;
     assert_eq!(

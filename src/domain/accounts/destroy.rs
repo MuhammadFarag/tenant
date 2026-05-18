@@ -7,7 +7,7 @@ use crate::profile::ProfileError;
 
 use super::tenant_share_group_name;
 
-/// Failure surface for the destroy writers. Unlike create, destroy has
+/// Failure surface for destroy. Unlike create, destroy has
 /// no recovery path on Firewall reload failure — the symmetric "restore
 /// from backup" would re-introduce a reference to the already-removed
 /// anchor file, putting the host in a worse state.

@@ -25,7 +25,7 @@ fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
 pub(crate) fn dispatch(
     cli: Cli,
     accounts: &dyn super::HostAccounts,
-    writer: &accounts::Writer<'_>,
+    tenants: &accounts::Tenants<'_>,
     host: &super::HostUserName,
     reporter: &mut Reporter,
     stdin: &mut dyn BufRead,
@@ -51,13 +51,18 @@ pub(crate) fn dispatch(
             let create_plan = create_plan_entries(&create_plan_ops);
             if show_summary {
                 reporter.create_summary(&name, host, uid, gid, Some(&create_plan));
-                writer.pre_exec_doctor_summary(None, host, accounts::DoctorScope::Create, reporter);
+                tenants.pre_exec_doctor_summary(
+                    None,
+                    host,
+                    accounts::DoctorScope::Create,
+                    reporter,
+                );
             }
             if reporter.confirm(true, stdin, stdin_is_tty, yes_flag) == ConfirmOutcome::Abort {
                 reporter.aborted();
                 return 0;
             }
-            match writer.create_tenant(&name, host, uid, gid, reporter) {
+            match tenants.create(&name, host, uid, gid, reporter) {
                 Ok(()) => 0,
                 Err(accounts::CreateError::Group(e)) => {
                     reporter.create_group_failed(&name, &e);
@@ -121,14 +126,14 @@ pub(crate) fn dispatch(
                         } else {
                             reporter.shell_command_summary(&name, host, resolved_mode, &argv);
                         }
-                        writer.pre_exec_doctor_summary(
+                        tenants.pre_exec_doctor_summary(
                             Some(&name),
                             host,
                             accounts::DoctorScope::Shell,
                             reporter,
                         );
                     }
-                    match writer.shell_into_tenant(&name, host, &argv, resolved_mode, reporter) {
+                    match tenants.shell(&name, host, &argv, resolved_mode, reporter) {
                         Ok(code) => {
                             // Closing surface is command-form-only; the
                             // interactive form has no terminal context
@@ -185,7 +190,7 @@ pub(crate) fn dispatch(
                     // profile-read / share pre-flight failures surface
                     // pre-prompt — don't ask the operator to confirm
                     // something already doomed.
-                    let plan = match writer.build_reapply_plan(&name, host, level) {
+                    let plan = match tenants.build_reapply_plan(&name, host, level) {
                         Ok(p) => p,
                         Err(e) => {
                             surface_mode_error(reporter, &name, &e);
@@ -195,7 +200,7 @@ pub(crate) fn dispatch(
                     let plan_entries = plan.as_plan_entries();
                     if show_summary {
                         reporter.mode_summary(&name, host, level, Some(&plan_entries));
-                        writer.pre_exec_doctor_summary(
+                        tenants.pre_exec_doctor_summary(
                             Some(&name),
                             host,
                             accounts::DoctorScope::Mode,
@@ -208,7 +213,7 @@ pub(crate) fn dispatch(
                         reporter.aborted();
                         return 0;
                     }
-                    match writer.apply_tenant_mode(&name, level, &plan, reporter) {
+                    match tenants.mode(&name, level, &plan, reporter) {
                         Ok(()) => 0,
                         Err(e) => {
                             surface_mode_error(reporter, &name, &e);
@@ -238,7 +243,7 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     accounts::Eligibility::Destroyable => {
-                        match writer.doctor_tenant(host, &n, &[], reporter) {
+                        match tenants.doctor(host, &n, &[], reporter) {
                             Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
                             Err(e) => {
                                 surface_doctor_error(reporter, &e);
@@ -248,7 +253,7 @@ pub(crate) fn dispatch(
                     }
                 }
             }
-            None => match writer.doctor_all_tenants(host, accounts, reporter) {
+            None => match tenants.doctor_all(host, accounts, reporter) {
                 Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
                 Err(e) => {
                     surface_doctor_error(reporter, &e);
@@ -278,7 +283,7 @@ pub(crate) fn dispatch(
                     accounts::Eligibility::Destroyable => {
                         // Build plan pre-summary so profile-read / share
                         // pre-flight failures surface pre-prompt.
-                        let plan = match writer.build_reapply_plan(&n, host, ModeLevel::Runtime) {
+                        let plan = match tenants.build_reapply_plan(&n, host, ModeLevel::Runtime) {
                             Ok(p) => p,
                             Err(e) => {
                                 surface_reload_error(reporter, &n, &e);
@@ -288,7 +293,7 @@ pub(crate) fn dispatch(
                         let plan_entries = plan.as_plan_entries();
                         if show_summary {
                             reporter.reload_summary(&n, host, Some(&plan_entries));
-                            writer.pre_exec_doctor_summary(
+                            tenants.pre_exec_doctor_summary(
                                 Some(&n),
                                 host,
                                 accounts::DoctorScope::Reload,
@@ -301,7 +306,7 @@ pub(crate) fn dispatch(
                             reporter.aborted();
                             return 0;
                         }
-                        match writer.reload_tenant(&n, &plan, reporter) {
+                        match tenants.reload(&n, &plan, reporter) {
                             Ok(()) => 0,
                             Err(e) => {
                                 surface_reload_error(reporter, &n, &e);
@@ -316,7 +321,7 @@ pub(crate) fn dispatch(
                 // to confirm, so skip straight to the no-op summary.
                 let names = accounts.tenant_names();
                 if names.is_empty() {
-                    let outcome = writer.reload_all_tenants(accounts, host, reporter);
+                    let outcome = tenants.reload_all(accounts, host, reporter);
                     return if outcome.failed == 0 { 0 } else { EX_IOERR };
                 }
                 if show_summary {
@@ -326,7 +331,7 @@ pub(crate) fn dispatch(
                     reporter.aborted();
                     return 0;
                 }
-                let outcome = writer.reload_all_tenants(accounts, host, reporter);
+                let outcome = tenants.reload_all(accounts, host, reporter);
                 if outcome.failed == 0 { 0 } else { EX_IOERR }
             }
         },
@@ -354,7 +359,7 @@ pub(crate) fn dispatch(
                         reporter.aborted();
                         return 0;
                     }
-                    if let Err(e) = writer.destroy_orphan_group(&name, host, reporter) {
+                    if let Err(e) = tenants.destroy_orphan_group(&name, host, reporter) {
                         surface_destroy_error(reporter, &name, &e);
                         return EX_IOERR;
                     }
@@ -381,7 +386,7 @@ pub(crate) fn dispatch(
                         reporter.aborted();
                         return 0;
                     }
-                    if let Err(e) = writer.destroy_tenant(&name, host, reporter) {
+                    if let Err(e) = tenants.destroy(&name, host, reporter) {
                         surface_destroy_error(reporter, &name, &e);
                         return EX_IOERR;
                     }

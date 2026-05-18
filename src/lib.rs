@@ -140,7 +140,7 @@ pub fn run(
     } else {
         machine
     };
-    let writer = domain::accounts::Writer::new(active_machine);
+    let tenants = domain::accounts::Tenants::new(active_machine);
     let yes = cli.yes;
     let mut reporter = Reporter::new(
         stdout,
@@ -153,7 +153,7 @@ pub fn run(
     domain::commands::dispatch(
         cli,
         accounts,
-        &writer,
+        &tenants,
         host,
         &mut reporter,
         stdin,

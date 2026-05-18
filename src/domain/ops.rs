@@ -63,7 +63,7 @@ pub enum AccountOp {
     },
 
     /// Probe variant: `Ok(())` means the record exists, `Err` means
-    /// it doesn't. The writer uses that result to gate the conditional
+    /// it doesn't. The Tenants struct uses that result to gate the conditional
     /// `DeleteUserRecord` cleanup.
     LookupUserRecord {
         name: TenantUserName,
@@ -97,7 +97,7 @@ pub enum AccountOp {
 
     /// Installs the `tenant_path → host_path` symlink. An existing
     /// REAL file or directory at `link` is the `TenantPathOccupied`
-    /// case the Writer guards against before the substrate runs.
+    /// case the Tenants struct guards against before the substrate runs.
     EnsureSymlinkAsUser {
         name: TenantUserName,
         link: PathBuf,
@@ -128,7 +128,7 @@ pub enum ProfileOp {
 }
 
 /// Substrate-vocab sibling to `profile::ShareMode` (profile-vocab); the
-/// Writer maps `ShareMode → AclMode` at op-construction time. Distinct
+/// Tenants struct maps `ShareMode → AclMode` at op-construction time. Distinct
 /// types so the layer boundary is visible — if `ShareMode` grows a
 /// profile-only flag, `AclMode` stays binary and the mapping absorbs
 /// the divergence.

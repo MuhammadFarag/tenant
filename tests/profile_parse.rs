@@ -132,7 +132,7 @@ fn parse_refuses_invalid_toml_syntax() {
 // string discriminator (`"ro"` / `"rw"`) — POSIX bit-string forms
 // rejected because POSIX bit semantics differ for files vs directories.
 // `tenant_path` is stored raw (template form with `$HOME` if used); the
-// Writer expands at op-construction time. Backward-compat: missing
+// Tenants struct expands at op-construction time. Backward-compat: missing
 // `[[shares]]` array yields an empty Vec.
 
 fn toml_with_shares_section(shares_body: &str) -> String {
@@ -218,7 +218,7 @@ fn parses_multiple_share_entries_preserves_declared_order() {
 #[test]
 fn parses_share_entry_with_home_prefixed_tenant_path() {
     // `$HOME` is the only template variable; expansion happens in
-    // the Writer when it resolves the share entry. The parser stores
+    // the Tenants struct when it resolves the share entry. The parser stores
     // the raw string so the type itself signals "this is a template,
     // not yet resolved" — a substrate call against a raw template
     // would be a type mistake at construction time.
@@ -302,7 +302,7 @@ fn missing_mode_rejected() {
 
 // --- expand_tenant_path -----------------------------------------------
 //
-// `$HOME` is the only template variable. The Writer expands it to
+// `$HOME` is the only template variable. The Tenants struct expands it to
 // `/Users/<tenant>` at op-construction time; the substrate sees
 // absolute paths. Literal absolute paths flow through unchanged.
 

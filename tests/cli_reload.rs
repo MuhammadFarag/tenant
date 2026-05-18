@@ -545,7 +545,7 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
             group: "dev-tenant-share".into(),
             host: "operator".into(),
         }],
-        "reload fires AddHost unconditionally (substrate is idempotent, not Writer-side conditional)"
+        "reload fires AddHost unconditionally (substrate is idempotent, not Tenants-side conditional)"
     );
 }
 

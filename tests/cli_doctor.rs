@@ -107,8 +107,8 @@ fn doctor_rejects_invalid_start() {
 // ----- Probe orchestration + finding emission -----
 //
 // The probe carve-out (`HostMachine::probe_access_as_tenant`) lets the
-// Writer ask the substrate "can <tenant> read/list <path>?" without
-// the Writer knowing about `sudo -u` or `/usr/bin/test`. Findings are
+// Tenants struct ask the substrate "can <tenant> read/list <path>?" without
+// Tenants knowing about `sudo -u` or `/usr/bin/test`. Findings are
 // derived from `Allowed` outcomes only; `Denied`/`Unknown` produce
 // no operator-visible noise. Tests use `TEST_HOST` (the fixed host
 // identity threaded through the test helpers) so the curated path

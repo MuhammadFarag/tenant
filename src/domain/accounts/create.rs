@@ -1,12 +1,12 @@
 //! Create-verb error type. The constructor lives in
-//! `Writer::create_tenant` (in `accounts.rs`) for now.
+//! `Tenants::create` (in `accounts.rs`) for now.
 
 use crate::domain::{AccountError, FirewallError};
 use crate::profile::ProfileError;
 
 use super::ModeError;
 
-/// Failure surface for the create writer. `UserWithRollback` is the
+/// Failure surface for create. `UserWithRollback` is the
 /// worst case where rollback itself failed and the host is left with
 /// an orphan group. `HostMembership` has no automatic rollback —
 /// the host-add step is load-bearing for tenant usability.

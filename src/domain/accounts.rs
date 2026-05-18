@@ -86,18 +86,18 @@ pub(crate) struct ReloadAllOutcome {
 }
 
 /// Composes ops into verb-level flows. Real-vs-dry-run is not the
-/// Writer's concern: each method always invokes the substrate, and the
-/// Reporter + dry-run substrate handle mode-specific filtering.
-pub(crate) struct Writer<'a> {
+/// Tenants struct's concern: each method always invokes the substrate,
+/// and the Reporter + dry-run substrate handle mode-specific filtering.
+pub(crate) struct Tenants<'a> {
     machine: &'a dyn HostMachine,
 }
 
-impl<'a> Writer<'a> {
+impl<'a> Tenants<'a> {
     pub(crate) fn new(machine: &'a dyn HostMachine) -> Self {
         Self { machine }
     }
 
-    pub(crate) fn create_tenant(
+    pub(crate) fn create(
         &self,
         name: &TenantUserName,
         host: &HostUserName,
@@ -197,7 +197,7 @@ impl<'a> Writer<'a> {
         }
     }
 
-    pub(crate) fn destroy_tenant(
+    pub(crate) fn destroy(
         &self,
         name: &TenantUserName,
         host: &HostUserName,
@@ -315,7 +315,7 @@ impl<'a> Writer<'a> {
 
     /// Apply a pre-built reapply plan at the requested tier. The plan
     /// is built upstream so profile-read failures surface pre-prompt.
-    pub(crate) fn apply_tenant_mode(
+    pub(crate) fn mode(
         &self,
         name: &TenantUserName,
         level: ModeLevel,
@@ -468,7 +468,7 @@ impl<'a> Writer<'a> {
     }
 
     /// Shell-verb entry: empty argv → interactive; non-empty → command.
-    pub(crate) fn shell_into_tenant(
+    pub(crate) fn shell(
         &self,
         name: &TenantUserName,
         host: &HostUserName,
@@ -560,7 +560,7 @@ impl<'a> Writer<'a> {
     }
 
     /// Narrate, execute, narrate. Coupling the three steps means a
-    /// Writer caller can't execute without narrating either side.
+    /// Tenants caller can't execute without narrating either side.
     fn run<O: WritableOp>(&self, op: &O, reporter: &mut Reporter) -> Result<(), O::Error> {
         reporter.step(op.op_ref());
         op.execute_via(self.machine)?;
@@ -570,7 +570,7 @@ impl<'a> Writer<'a> {
 
     /// Runtime-tier reapply from a pre-built plan. Profile-read /
     /// share-pre-flight failures surface at the build site upstream.
-    pub(crate) fn reload_tenant(
+    pub(crate) fn reload(
         &self,
         name: &TenantUserName,
         plan: &ReapplyPlan,
@@ -584,7 +584,7 @@ impl<'a> Writer<'a> {
 
     /// Walk every tenant. Continue on per-tenant failure, accumulate,
     /// surface a single end-of-run summary.
-    pub(crate) fn reload_all_tenants(
+    pub(crate) fn reload_all(
         &self,
         accounts: &dyn HostAccounts,
         host: &HostUserName,
@@ -599,7 +599,7 @@ impl<'a> Writer<'a> {
         let mut failed = 0;
         for name in &names {
             let outcome = match self.build_reapply_plan(name, host, ModeLevel::Runtime) {
-                Ok(plan) => self.reload_tenant(name, &plan, reporter),
+                Ok(plan) => self.reload(name, &plan, reporter),
                 Err(err) => Err(err),
             };
             if let Err(err) = outcome {
@@ -622,7 +622,7 @@ impl<'a> Writer<'a> {
     /// pf status) run even in single-tenant mode because each affects
     /// every tenant. `others` lists the other tenants on the host for
     /// cross-tenant probes.
-    pub(crate) fn doctor_tenant(
+    pub(crate) fn doctor(
         &self,
         host: &HostUserName,
         name: &TenantUserName,
@@ -646,7 +646,7 @@ impl<'a> Writer<'a> {
     /// All-tenants audit. Host-wide checks run once; per-tenant walks
     /// follow in alphabetical order. With no tenants, host-wide checks
     /// still run (operator-relevant) before the noop message.
-    pub(crate) fn doctor_all_tenants(
+    pub(crate) fn doctor_all(
         &self,
         host: &HostUserName,
         accounts: &dyn HostAccounts,
