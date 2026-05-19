@@ -5,6 +5,7 @@ use crate::domain::TenantUserName;
 #[derive(Parser)]
 #[command(
     name = "tenant",
+    version,
     disable_help_subcommand = true,
     about = "Provision isolated macOS tenant accounts with restricted network egress.",
     long_about = "Provision macOS user accounts, primary groups (named \

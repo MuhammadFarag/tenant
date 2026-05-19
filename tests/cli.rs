@@ -131,3 +131,13 @@ fn global_dry_run_help_text_present() {
         "--dry-run help should describe the preview posture: {stdout}"
     );
 }
+
+#[test]
+fn version_flag_prints_name_and_cargo_pkg_version() {
+    let expected = format!("tenant {}\n", env!("CARGO_PKG_VERSION"));
+    for flag in ["--version", "-V"] {
+        let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &[flag]);
+        assert_eq!(code, 0, "{flag} exited with {code}; stderr={stderr:?}");
+        assert_eq!(stdout, expected, "{flag} byte-form pin failed");
+    }
+}
