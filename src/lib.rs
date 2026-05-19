@@ -22,17 +22,27 @@ pub fn run(
     machine: &dyn domain::HostMachine,
     terminal: Terminal<'_>,
 ) -> u8 {
-    // Resolve the operator identity from the real (non-dry-run) machine
-    // BEFORE the dry-run swap, so dry-run preserves the env-var answer
-    // rather than substituting a placeholder.
     let host = machine.current_host_user_name();
-    let dry_run_machine = adapters::dry_run_host_machine::DryRunHostMachine { host: host.clone() };
-    let active_machine: &dyn domain::HostMachine = if cli.dry_run {
-        &dry_run_machine
+    with_active_machine(machine, cli.dry_run, &host, |active| {
+        let tenants = domain::Tenants::new(active);
+        let mut reporter = Reporter::new(terminal, cli.verbose, cli.dry_run, cli.yes, active);
+        domain::commands::dispatch(cli, directory, &tenants, &host, &mut reporter)
+    })
+}
+
+// Reads `host` from the passed-in machine before optionally wrapping —
+// so the dry-run wrapper inherits the real env-var answer rather than a
+// placeholder.
+fn with_active_machine<R>(
+    machine: &dyn domain::HostMachine,
+    dry_run: bool,
+    host: &domain::HostUserName,
+    f: impl FnOnce(&dyn domain::HostMachine) -> R,
+) -> R {
+    if dry_run {
+        let wrapper = adapters::dry_run_host_machine::DryRunHostMachine { host: host.clone() };
+        f(&wrapper)
     } else {
-        machine
-    };
-    let tenants = domain::Tenants::new(active_machine);
-    let mut reporter = Reporter::new(terminal, cli.verbose, cli.dry_run, cli.yes, active_machine);
-    domain::commands::dispatch(cli, directory, &tenants, &host, &mut reporter)
+        f(machine)
+    }
 }
