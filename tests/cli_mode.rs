@@ -58,25 +58,26 @@ fn mode_install_dry_run_default_shows_intent() {
 #[test]
 fn mode_rejects_unknown_level() {
     // Clap's ValueEnum derivation accepts only `runtime` and `install`.
-    // Anything else fails parse with exit 1 before dispatch runs.
+    // Anything else fails parse with exit 2 (clap's standard exit code
+    // for bad arg/enum values) before dispatch runs.
     let (code, stdout, _stderr) = run_with(stub_with_tenant("dev"), &["mode", "dev", "bogus"]);
-    assert_eq!(code, 1, "clap should reject unknown level");
+    assert_eq!(code, 2, "clap should reject unknown level");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
 }
 
 #[test]
 fn mode_requires_name() {
-    // `tenant mode` with no positional → clap parse error.
+    // `tenant mode` with no positional → clap parse error (exit 2).
     let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["mode"]);
-    assert_eq!(code, 1, "clap should reject missing name");
+    assert_eq!(code, 2, "clap should reject missing name");
 }
 
 #[test]
 fn mode_requires_level() {
-    // `tenant mode dev` (no level) → clap parse error. Pins the
-    // ValueEnum being a required positional.
+    // `tenant mode dev` (no level) → clap parse error (exit 2). Pins
+    // the ValueEnum being a required positional.
     let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["mode", "dev"]);
-    assert_eq!(code, 1, "clap should reject missing level");
+    assert_eq!(code, 2, "clap should reject missing level");
 }
 
 // ----------------------------------------------------------------
@@ -215,7 +216,7 @@ fn mode_runtime_real_mode_op_shape() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(
         stdout,
-        real_success_stdout(
+        real_success_stdout_with_breadcrumb(
             "Applying mode 'runtime' to tenant 'dev'",
             &[
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
@@ -223,6 +224,7 @@ fn mode_runtime_real_mode_op_shape() {
                 "Host 'operator' added to share group 'dev-tenant-share'",
             ],
             "Tenant 'dev' is at runtime tier.",
+            Some(&mode_breadcrumb("dev")),
         ),
     );
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
@@ -436,7 +438,7 @@ fn mode_real_standard_emits_only_post_exec_confirmation() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(
         stdout,
-        real_success_stdout(
+        real_success_stdout_with_breadcrumb(
             "Applying mode 'runtime' to tenant 'dev'",
             &[
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
@@ -444,6 +446,7 @@ fn mode_real_standard_emits_only_post_exec_confirmation() {
                 "Host 'operator' added to share group 'dev-tenant-share'",
             ],
             "Tenant 'dev' is at runtime tier.",
+            Some(&mode_breadcrumb("dev")),
         ),
     );
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
@@ -475,9 +478,11 @@ fn mode_real_verbose_shows_plan_and_echo() {
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          {}\n\
-         Tenant 'dev' is at runtime tier.\n",
+         Tenant 'dev' is at runtime tier.\n\
+         {}\n",
         section_line("Applying mode 'runtime' to tenant 'dev'"),
         section_line("Done"),
+        mode_breadcrumb("dev"),
     );
     assert_eq!(stdout, want);
 }
@@ -505,9 +510,11 @@ fn mode_install_real_verbose_shows_install_level_text() {
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          {}\n\
-         Tenant 'dev' is at install tier.\n",
+         Tenant 'dev' is at install tier.\n\
+         {}\n",
         section_line("Applying mode 'install' to tenant 'dev'"),
         section_line("Done"),
+        mode_breadcrumb("dev"),
     );
     assert_eq!(stdout, want);
 }

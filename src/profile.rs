@@ -16,14 +16,40 @@ pub fn display_path_for(name: &str) -> String {
 
 /// Default profile content scaffolded at create-time. Empty hosts arrays
 /// mean "no egress allowlisted yet"; the operator edits before use.
+/// Commented `# ...` examples scaffold the common shape (allowlist
+/// entries + a `[[shares]]` block) without committing the operator to
+/// any specific entry — they're hints, not defaults.
 pub fn default_profile_toml() -> String {
-    "schema_version = 1\n\
+    "# Per-tenant profile. See `tenant help profile` for the full schema.\n\
+     # Apply edits with `tenant reload <name>`.\n\
+     \n\
+     schema_version = 1\n\
      \n\
      [allowlist.runtime]\n\
-     hosts = []\n\
+     # Hosts the tenant can reach during normal use. Uncomment to enable:\n\
+     hosts = [\n\
+     #   \"github.com\",\n\
+     #   \"api.anthropic.com\",\n\
+     ]\n\
      \n\
      [allowlist.install]\n\
-     hosts = []\n"
+     # Additional hosts the tenant can reach under `tenant mode <name> install`\n\
+     # or `tenant shell <name> --mode install -- <cmd>`. Uncomment to enable:\n\
+     hosts = [\n\
+     #   \"registry.npmjs.org\",\n\
+     #   \"pypi.org\",\n\
+     #   \"files.pythonhosted.org\",\n\
+     ]\n\
+     \n\
+     # Filesystem shares. Each [[shares]] entry grants the tenant's share group\n\
+     # access to a host path and (optionally) symlinks it under the tenant's\n\
+     # home. `mode` is \"ro\" or \"rw\"; `tenant_path` accepts `$HOME` as a path\n\
+     # prefix only. Uncomment and edit:\n\
+     #\n\
+     # [[shares]]\n\
+     # host_path = \"/Users/<host>/projects/foo\"\n\
+     # mode = \"ro\"\n\
+     # tenant_path = \"$HOME/projects/foo\"\n"
         .to_string()
 }
 

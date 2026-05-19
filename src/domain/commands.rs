@@ -1,7 +1,7 @@
 use super::reporter::{ConfirmOutcome, Reporter};
 use super::{AccountOp, FirewallOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
-use crate::{Cli, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR};
+use crate::{Cli, HelpTopic, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR};
 
 const EX_USAGE: u8 = 64;
 const EX_IOERR: u8 = 74;
@@ -383,6 +383,14 @@ pub(crate) fn dispatch(
                 }
             }
         },
+        Verb::Help { topic } => {
+            let body = match topic {
+                Some(HelpTopic::Profile) => help_body_profile(),
+                None => help_body_index(),
+            };
+            reporter.help_topic(body);
+            0
+        }
         Verb::Destroy { name } => {
             if let Err(e) = tenants::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
@@ -725,4 +733,95 @@ fn surface_create_post_provision_error(
         tenants::ModeError::Probe(e) => reporter.create_post_provision_probe_failed(name, e),
         tenants::ModeError::Share(e) => reporter.refuse_create_post_provision_share(name, e),
     }
+}
+
+/// Body for `tenant help` with no topic — lists available topics.
+fn help_body_index() -> &'static str {
+    r#"tenant help — long-form topic help
+
+Available topics:
+
+  profile    Per-tenant profile TOML schema and [[shares]] format
+
+Run `tenant help <topic>` to view a topic.
+"#
+}
+
+/// Body for `tenant help profile`. Plain text; raw string preserves the
+/// two-space indent inside sections without backslash-continuation
+/// stripping it. No ANSI styling — Reporter renders verbatim.
+fn help_body_profile() -> &'static str {
+    r#"tenant profile — per-tenant TOML configuration
+
+Location
+
+  ~/.config/tenant/profiles/<name>.toml
+
+  Read on every `tenant create` (scaffolded), `tenant mode`,
+  `tenant reload`, and `tenant shell`. Edits take effect on the
+  next `tenant reload <name>` (or `tenant shell <name>` entry).
+
+Schema
+
+  schema_version = 1
+
+  [allowlist.runtime]
+  hosts = ["github.com", "api.anthropic.com"]
+
+  [allowlist.install]
+  hosts = ["registry.npmjs.org", "pypi.org"]
+
+  Two allowlist tiers gate PF egress. Runtime is the baseline;
+  install is the widened set used under `tenant mode <name> install`
+  (persistent) or `tenant shell <name> --mode install -- <cmd>`
+  (auto-narrows back to runtime on completion).
+
+Shares
+
+  [[shares]]
+  host_path = "/Users/alice/projects/foo"
+  mode = "ro"
+  tenant_path = "$HOME/projects/foo"
+
+  Each [[shares]] entry grants the tenant's share group access to a
+  host path and (optionally) symlinks it under the tenant's home.
+
+    host_path    Literal absolute path on the host.
+    mode         "ro" (read-only) or "rw" (read-write). POSIX
+                 bit-string forms (e.g. "r--") are rejected because
+                 their file-vs-directory semantics diverge.
+    tenant_path  $HOME-templated path inside the tenant's home.
+                 $HOME resolves only as a path prefix: position 0
+                 ($HOME alone or $HOME/...). Mid-string $HOME is
+                 refused as a likely typo.
+
+  File vs directory: ro on a directory grants list+read; rw grants
+  full create/append/delete with inheritance to nested entries.
+  Files mirror the same intent. The tenant_path is created as a
+  symlink to host_path on reapply; an existing non-symlink at
+  tenant_path is refused (the operator's data could be at risk).
+
+  Removing a [[shares]] entry does NOT auto-revoke the ACL or
+  symlink — `tenant doctor <name>` surfaces orphans. Manual cleanup
+  is the operator's call.
+
+Non-goal: filesystem contents
+
+  tenant deliberately does not provision the tenant's filesystem
+  contents (no `git clone`, no `mkdir`, no template files). There
+  is no [provision] section. Bootstrap inside the tenant after
+  creation:
+
+    tenant shell <name> -- git clone https://github.com/you/repo
+
+Applying changes
+
+  Re-render the firewall anchor and re-apply shares after editing:
+
+    tenant reload <name>
+
+  Audit the result:
+
+    tenant doctor <name>
+"#
 }

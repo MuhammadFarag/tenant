@@ -140,7 +140,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     assert_eq!(
         stdout,
-        real_success_stdout(
+        real_success_stdout_with_breadcrumb(
             "Reloading tenant 'dev'",
             &[
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
@@ -150,6 +150,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
                 "Symlink /Users/dev/src → /tmp installed",
             ],
             "Tenant 'dev' reloaded.",
+            Some(&reload_breadcrumb("dev")),
         ),
     );
 
@@ -317,8 +318,11 @@ fn reload_single_tenant_verbose_emits_per_op_echo() {
         "echo should show symlink op: {stdout:?}"
     );
     assert!(
-        stdout.ends_with("Tenant 'dev' reloaded.\n"),
-        "post-exec done line last: {stdout:?}"
+        stdout.ends_with(&format!(
+            "Tenant 'dev' reloaded.\n{}\n",
+            reload_breadcrumb("dev")
+        )),
+        "post-exec done line + breadcrumb last: {stdout:?}"
     );
 }
 

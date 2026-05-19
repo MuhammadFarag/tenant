@@ -390,22 +390,47 @@ fn create_writes_default_profile_to_store() {
 fn create_writes_profile_with_correct_toml_shape() {
     // Byte-exact pin on the default profile content. Schema-version
     // floor at 1 (future migrations bump this); two empty allowlist
-    // sections matching the shape the PF anchor render reads from.
-    // No `[share]` section — that's Claude-Code-specific and out of
-    // scope for the generic Rust port.
+    // sections (the operator's edit target) plus commented-out example
+    // entries and a commented-out [[shares]] block — guidance scaffold,
+    // not active config. Re-parsing the scaffold must yield an
+    // empty-allowlists, empty-shares profile (covered by
+    // `tests/profile_parse.rs`).
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let state = exec.profile_state();
     let content = state.get("dev").expect("profile 'dev' should be present");
-    let want = "schema_version = 1\n\
+    let want = "# Per-tenant profile. See `tenant help profile` for the full schema.\n\
+                # Apply edits with `tenant reload <name>`.\n\
+                \n\
+                schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
-                hosts = []\n\
+                # Hosts the tenant can reach during normal use. Uncomment to enable:\n\
+                hosts = [\n\
+                #   \"github.com\",\n\
+                #   \"api.anthropic.com\",\n\
+                ]\n\
                 \n\
                 [allowlist.install]\n\
-                hosts = []\n";
+                # Additional hosts the tenant can reach under `tenant mode <name> install`\n\
+                # or `tenant shell <name> --mode install -- <cmd>`. Uncomment to enable:\n\
+                hosts = [\n\
+                #   \"registry.npmjs.org\",\n\
+                #   \"pypi.org\",\n\
+                #   \"files.pythonhosted.org\",\n\
+                ]\n\
+                \n\
+                # Filesystem shares. Each [[shares]] entry grants the tenant's share group\n\
+                # access to a host path and (optionally) symlinks it under the tenant's\n\
+                # home. `mode` is \"ro\" or \"rw\"; `tenant_path` accepts `$HOME` as a path\n\
+                # prefix only. Uncomment and edit:\n\
+                #\n\
+                # [[shares]]\n\
+                # host_path = \"/Users/<host>/projects/foo\"\n\
+                # mode = \"ro\"\n\
+                # tenant_path = \"$HOME/projects/foo\"\n";
     assert_eq!(content, want, "profile content mismatch");
 }
 
@@ -455,9 +480,11 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
          ✓ Firewall ruleset reloaded\n\
          ✓ Firewall enabled host-wide\n\
          {}\n\
-         Tenant 'dev' ready (UID 600, GID 600, anchor 'tenant-dev').\n",
+         Tenant 'dev' ready (UID 600, GID 600, anchor 'tenant-dev').\n\
+         {}\n",
         section_line("Creating tenant 'dev'"),
         section_line("Done"),
+        create_breadcrumb("dev"),
     );
     assert_eq!(stdout, want);
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
@@ -521,9 +548,11 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
          $ sudo pfctl -e\n\
          ✓ Firewall enabled host-wide\n\
          {}\n\
-         Tenant 'dev' ready (UID 600, GID 600, anchor 'tenant-dev').\n",
+         Tenant 'dev' ready (UID 600, GID 600, anchor 'tenant-dev').\n\
+         {}\n",
         section_line("Creating tenant 'dev'"),
         section_line("Done"),
+        create_breadcrumb("dev"),
     );
     assert_eq!(stdout, want);
 }
@@ -1421,8 +1450,11 @@ fn create_with_tty_proceeds_on_y() {
         "section divider should emit after Proceed: {stdout:?}",
     );
     assert!(
-        stdout.ends_with("Tenant 'dev' ready (UID 600, GID 600, anchor 'tenant-dev').\n"),
-        "done line should close: {stdout:?}",
+        stdout.ends_with(&format!(
+            "Tenant 'dev' ready (UID 600, GID 600, anchor 'tenant-dev').\n{}\n",
+            create_breadcrumb("dev"),
+        )),
+        "done line + breadcrumb should close: {stdout:?}",
     );
     assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }

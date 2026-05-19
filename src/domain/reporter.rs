@@ -155,6 +155,22 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    /// Dim post-success "next step" hint. Single source of truth for the
+    /// breadcrumb shape so every mutating verb's `*_done` reads
+    /// uniformly. Skips emission in dry-run (the closing `Done` section
+    /// itself is gated out) — keep the hint paired with the closing.
+    fn next_step(&mut self, msg: &str) {
+        let painted = self.paint_stdout(msg, ansi::dim);
+        let _ = writeln!(self.terminal.stdout, "{painted}");
+    }
+
+    /// Render a `tenant help <topic>` body to stdout. Body is plain text;
+    /// callers compose the exact wording. Bodies that end with `\n` get
+    /// no extra trailing newline.
+    pub fn help_topic(&mut self, body: &str) {
+        let _ = write!(self.terminal.stdout, "{body}");
+    }
+
     pub fn create_summary(
         &mut self,
         name: &TenantUserName,
@@ -445,6 +461,10 @@ impl<'t, 'm> Reporter<'t, 'm> {
             self.terminal.stdout,
             "Tenant '{name}' ready (UID {uid}, GID {gid}, anchor '{anchor}')."
         );
+        self.next_step(&format!(
+            "Next: edit {} and run `tenant reload {name}` to apply changes.",
+            display_path_for(name.as_str())
+        ));
     }
 
     pub fn destroy_starting(&mut self, name: &TenantUserName) {
@@ -459,6 +479,9 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
         self.section("Done");
         let _ = writeln!(self.terminal.stdout, "Tenant '{name}' destroyed.");
+        // No `Next: ...` breadcrumb here: the tenant is gone, so there's no
+        // actionable next-step verb to point at — the operator returns to
+        // the host prompt. Other `*_done` methods always trail a breadcrumb.
     }
 
     pub fn orphan_group_starting(&mut self, name: &TenantUserName) {
@@ -640,6 +663,9 @@ impl<'t, 'm> Reporter<'t, 'm> {
             self.terminal.stdout,
             "Tenant '{name}' is at {level_str} tier."
         );
+        self.next_step(&format!(
+            "Next: enter the tenant with `tenant shell {name}` \u{2014} the firewall auto-narrows back to runtime tier on entry."
+        ));
     }
 
     /// Convergent-noop. Tense-neutral; emits in both real and dry-run.
@@ -1250,6 +1276,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
         self.section("Done");
         let _ = writeln!(self.terminal.stdout, "Tenant '{name}' reloaded.");
+        self.next_step(&format!("Next: audit with `tenant doctor {name}`."));
     }
 
     /// Silent when `count == 0`; `reload_all_done_summary` handles that.

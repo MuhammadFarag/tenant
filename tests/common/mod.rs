@@ -23,16 +23,19 @@ use tenant::domain::{GroupId, UserDirectoryError, UserId};
 
 /// Parse `&[&str]` test args into a `Cli` value, mirroring how clap
 /// would render parse errors in production: errors via `use_stderr()`
-/// go to captured stderr with exit 1; help/version goes to captured
-/// stdout with exit 0. Test helpers absorb the parse step so callers
-/// keep the `run_with(stub, &["create", "foo"])` shape.
+/// go to captured stderr; help/version goes to captured stdout. Exit
+/// code is taken from `clap::Error::exit_code()` — 0 for help/version,
+/// 2 for parse errors (missing args / bad enum / unknown subcommand),
+/// 1 only for the rare `DisplayHelpOnMissingArgumentOrSubcommand`
+/// fallback. Test helpers absorb the parse step so callers keep the
+/// `run_with(stub, &["create", "foo"])` shape.
 fn parse_cli(args: &[&str], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<Cli, u8> {
     let argv = std::iter::once(OsString::from("tenant")).chain(args.iter().map(OsString::from));
     Cli::try_parse_from(argv).map_err(|e| {
         let to_stderr = e.use_stderr();
         let target: &mut dyn Write = if to_stderr { stderr } else { stdout };
         let _ = write!(target, "{e}");
-        if to_stderr { 1 } else { 0 }
+        e.exit_code() as u8
     })
 }
 
@@ -78,6 +81,19 @@ pub fn section_line(title: &str) -> String {
 /// closing line. Tests pass the ordered list of business labels they
 /// expect to see; the helper handles framing. Trailing newline included.
 pub fn real_success_stdout(opening_title: &str, checks: &[&str], closing: &str) -> String {
+    real_success_stdout_with_breadcrumb(opening_title, checks, closing, None)
+}
+
+/// Same as `real_success_stdout` plus an optional "Next: ..." breadcrumb
+/// emitted by the `*_done` Reporter methods. Pass `None` for verbs
+/// whose `_done` has no breadcrumb (destroy); pass `Some(line)` to
+/// append the dim-styled (colors-off shape) post-success hint.
+pub fn real_success_stdout_with_breadcrumb(
+    opening_title: &str,
+    checks: &[&str],
+    closing: &str,
+    breadcrumb: Option<&str>,
+) -> String {
     let mut out = section_line(opening_title);
     out.push('\n');
     for check in checks {
@@ -89,7 +105,32 @@ pub fn real_success_stdout(opening_title: &str, checks: &[&str], closing: &str) 
     out.push('\n');
     out.push_str(closing);
     out.push('\n');
+    if let Some(line) = breadcrumb {
+        out.push_str(line);
+        out.push('\n');
+    }
     out
+}
+
+/// Post-success breadcrumb emitted by `Reporter::create_done`. Colors-off
+/// byte form (test runners pin against this; the dim ANSI wrapping is a
+/// separate Reporter concern not exercised by E2E).
+pub fn create_breadcrumb(name: &str) -> String {
+    format!(
+        "Next: edit ~/.config/tenant/profiles/{name}.toml and run `tenant reload {name}` to apply changes."
+    )
+}
+
+/// Post-success breadcrumb emitted by `Reporter::mode_done`.
+pub fn mode_breadcrumb(name: &str) -> String {
+    format!(
+        "Next: enter the tenant with `tenant shell {name}` \u{2014} the firewall auto-narrows back to runtime tier on entry."
+    )
+}
+
+/// Post-success breadcrumb emitted by `Reporter::reload_done` (single-tenant form).
+pub fn reload_breadcrumb(name: &str) -> String {
+    format!("Next: audit with `tenant doctor {name}`.")
 }
 
 /// Real-mode-failure stdout block (no Done section, no closing line
