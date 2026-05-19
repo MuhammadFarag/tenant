@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          CRATE_VERSION=$(awk '/^\[package\]/{p=1; next} /^\[/{p=0} p && /^version = /{sub(/^version = "/,""); sub(/"$/,""); print; exit}' Cargo.toml)
+          if [ "$TAG_VERSION" != "$CRATE_VERSION" ]; then
+            echo "Tag v$TAG_VERSION does not match Cargo.toml version $CRATE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Ensure aarch64-apple-darwin target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Build release binary
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Package artifacts
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          TARBALL="tenant-${TAG}-aarch64-apple-darwin.tar.gz"
+          tar -czf "$TARBALL" -C target/aarch64-apple-darwin/release tenant
+          shasum -a 256 "$TARBALL" > "${TARBALL}.sha256"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          TARBALL="tenant-${TAG}-aarch64-apple-darwin.tar.gz"
+          PRERELEASE_FLAG=""
+          if [[ "$TAG" == *-* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" --yes
+          gh release create "$TAG" $PRERELEASE_FLAG \
+            --notes-file RELEASE_NOTES.md \
+            "$TARBALL" \
+            "${TARBALL}.sha256"

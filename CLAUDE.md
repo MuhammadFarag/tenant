@@ -600,6 +600,39 @@ just build        # release binary at target/release/tenant
 just install      # cargo install --path . (puts `tenant` on PATH via ~/.cargo/bin)
 ```
 
+### Releases
+
+- **Dev-suffix convention.** Main always carries `version = "X.Y.Z-dev"`
+  in `Cargo.toml`. `tenant --version` from a main-branch build prints
+  `tenant X.Y.Z-dev` so non-release binaries are instantly
+  distinguishable from tagged releases. Release commits are the only
+  commits where the version has no suffix.
+- **Tag matches Cargo.toml by construction.** `just release-prepare
+  X.Y.Z` is the only sanctioned way to tag. It strips `-dev`, refreshes
+  `Cargo.lock`, commits, and tags `vX.Y.Z` in one recipe.
+  `.github/workflows/release.yml` re-verifies in CI before building, as
+  belt-and-suspenders against a manually-pushed tag.
+- **Pre-1.0 bumps.** Minor (`0.1.0` → `0.2.0`) for user-visible
+  behavior changes; patch (`0.1.0` → `0.1.1`) for bugfix-only.
+- **Pre-release versions.** Use SemVer pre-release suffixes
+  (`0.1.0-alpha.1`, `0.1.0-beta`, `0.1.0-rc.2`) to ship a tagged
+  release that isn't yet stable. Pass the full version including
+  suffix to `release-prepare`. The release workflow detects the `-`
+  in the tag and passes `--prerelease` to `gh release create`, which
+  marks the release with a "Pre-release" badge on GitHub and lets
+  tooling filter it out from stable releases. After publishing a
+  pre-release, `release-bump-dev` still takes the X.Y.Z target only
+  (no suffix) — multiple pre-releases of the same X.Y.Z all bump back
+  to the same `X.Y.Z-dev` dev state.
+- **Release flow.** Edit `RELEASE_NOTES.md` with notes for the upcoming
+  version → `just release-prepare X.Y.Z` → inspect (`git show vX.Y.Z`)
+  → `just release-publish` (pushes commit + tag; Actions takes over
+  from there) → wait for the GitHub Action to publish the release →
+  `just release-bump-dev <NEXT>` to put main back into dev mode.
+- **Operator install (pre-tap).** Until the Homebrew tap lands,
+  operators install by downloading the release tarball from GitHub or
+  `cargo install --git https://github.com/MuhammadFarag/tenant`.
+
 Pre-commit hooks run `cargo fmt --check` and `cargo clippy
 --all-targets -- -D warnings` on commits touching `.rs`. Local-only
 (`language: system`). Run `pre-commit install` once after a fresh
