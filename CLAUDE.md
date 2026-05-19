@@ -42,13 +42,18 @@ file with shipped-feature recaps.
 ## File map
 
 ```
-src/lib.rs        — public API (`run`); public `Cli` + `Verb` +
-                    `ModeLevel`; global `--verbose` / `--dry-run` /
-                    `--yes`. `run` takes a parsed `Cli` (argv parsing
-                    happens at the binary boundary via `Cli::parse()` /
-                    `Cli::try_parse_from`), a `&dyn HostUserDirectory`, a
-                    `&dyn HostMachine`, and a `Terminal` bundle. Swaps to
-                    `DryRunHostMachine` when `cli.dry_run`.
+src/lib.rs        — public API: `run` entry + module tree + re-exports
+                    of `Cli` / `Verb` / `ModeLevel` (from `cli`) and
+                    `Terminal` (from `terminal`). `run` takes a parsed
+                    `Cli` + `&dyn HostUserDirectory` + `&dyn HostMachine`
+                    + `Terminal`; resolves operator identity, swaps to
+                    `DryRunHostMachine` when `cli.dry_run`, hands off to
+                    `commands::dispatch`.
+src/cli.rs        — clap surface: `Cli` + `Verb` + `ModeLevel`; global
+                    `--verbose` / `--dry-run` / `--yes`. Argv parsing
+                    happens at the binary boundary (`Cli::parse()` in
+                    `main`, `Cli::try_parse_from` in test helpers); re-
+                    exported flat from the crate root.
 src/terminal.rs   — `Terminal { stdout, stderr, stdin, stdin_is_tty,
                     colors }`: capability bundle for operator-side I/O,
                     constructed once at the binary boundary (main /
