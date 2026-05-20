@@ -87,11 +87,11 @@ fn commented_with_leading_whitespace_returns_false() {
 
 #[test]
 fn wrong_control_field_returns_false() {
-    // `required` is not `sufficient`. The Q-lock in `has_pam_tid`'s
-    // doc-comment justifies the conservative-false posture: a
-    // `required` pam_tid doesn't short-circuit, so the UX guarantee
-    // doesn't hold. Operator must use `sufficient` to satisfy the
-    // check.
+    // `required` is not `sufficient`. The design lock in
+    // `has_pam_tid`'s doc-comment justifies the conservative-false
+    // posture: a `required` pam_tid doesn't short-circuit, so the UX
+    // guarantee doesn't hold. Operator must use `sufficient` to
+    // satisfy the check.
     let pam = "auth       required       pam_tid.so\n";
     assert!(!has_pam_tid(pam));
 }

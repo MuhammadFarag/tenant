@@ -934,10 +934,10 @@ fn shell_pre_exec_doctor_critical_plus_warnings_emits_both_lines() {
 
 #[test]
 fn shell_pre_exec_doctor_verbose_does_not_emit_guidance_for_inline_critical() {
-    // Q4 lock: verb-verbose does NOT enable the doctor-verbose
-    // guidance body for inline critical findings. The aggregate line
-    // already points the operator at `tenant doctor` for detail; the
-    // inline critical stays a one-liner.
+    // Verb-verbose does NOT enable the doctor-verbose guidance body
+    // for inline critical findings. The aggregate line already points
+    // the operator at `tenant doctor` for detail; the inline critical
+    // stays a one-liner.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_pf_status_content("Status: Disabled\n");
@@ -956,9 +956,9 @@ fn shell_pre_exec_doctor_verbose_does_not_emit_guidance_for_inline_critical() {
 
 #[test]
 fn shell_pre_exec_doctor_silent_in_scripted_mode_no_summary() {
-    // Q3 lock: scripted callers (non-TTY, no --dry-run) skip the
-    // summary AND the audit. Real-mode-no-TTY emits only the
-    // section divider + ✓ progress + nothing extra above.
+    // Scripted callers (non-TTY, no --dry-run) skip the summary AND
+    // the audit. Real-mode-no-TTY emits only the section divider + ✓
+    // progress + nothing extra above.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_pf_status_content("Status: Disabled\n");
@@ -998,9 +998,9 @@ fn shell_pre_exec_doctor_exit_code_unaffected_by_findings() {
 
 #[test]
 fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
-    // Q1 lock: read_pf_status fails → frame the failure on stderr,
-    // continue with the verb. The shell verb still proceeds to
-    // shell_intent + login.
+    // read_pf_status fails → frame the failure on stderr, continue
+    // with the verb. The shell verb still proceeds to shell_intent +
+    // login.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_next_pf_status(FirewallError::NonZero {
@@ -1026,16 +1026,16 @@ fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
 // reapply on completion (idempotent if entry was Runtime; narrows
 // back to runtime if --mode install widened).
 //
-// Locks (per cycle-17 prime):
-// - Q1: `--` separator (clap `last = true`).
-// - Q2: `--mode` rejected without argv (clap `requires = "argv"`).
-// - Q3: no confirm prompt on either form.
-// - Q4: narrow-on-finally gated on widen-execution. If widen failed
-//   at `build_reapply_plan` (no substrate fired), no narrow attempt;
-//   if widen-execute fired any substrate, best-effort narrow runs
-//   inline before the Mode error surfaces.
-// - Option (a): child exit code propagates; narrow-failure stderr
-//   warning does NOT override it.
+// Design locks:
+// - `--` separator (clap `last = true`).
+// - `--mode` rejected without argv (clap `requires = "argv"`).
+// - No confirm prompt on either form.
+// - Narrow-on-finally gated on widen-execution. If widen failed at
+//   `build_reapply_plan` (no substrate fired), no narrow attempt; if
+//   widen-execute fired any substrate, best-effort narrow runs inline
+//   before the Mode error surfaces.
+// - Child exit code propagates; narrow-failure stderr warning does
+//   NOT override it.
 // ================================================================
 
 #[test]
@@ -1044,7 +1044,7 @@ fn shell_command_form_default_runtime_invokes_exec_as_tenant() {
     // Entry reapply at Runtime; child runs via exec_as_tenant; NO
     // post-child narrow (mode == Runtime → entry reapply IS the
     // runtime posture; the redundant second reapply is gated off
-    // per F2 from cycle-17 smoke).
+    // per smoke verification).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, stderr) = run_with_exec(
@@ -1173,11 +1173,11 @@ fn shell_command_form_does_not_invoke_login_carveout() {
 
 #[test]
 fn shell_interactive_form_unchanged_when_argv_empty() {
-    // Regression pin: cycle-17 verb signature change must not
-    // disturb today's interactive flow. Empty argv routes to
-    // shell_interactive which calls HostMachine::login (NOT
-    // exec_as_tenant); only the entry reapply fires (no
-    // narrow-on-finally for the interactive form).
+    // Regression pin: the verb signature change must not disturb
+    // today's interactive flow. Empty argv routes to shell_interactive
+    // which calls HostMachine::login (NOT exec_as_tenant); only the
+    // entry reapply fires (no narrow-on-finally for the interactive
+    // form).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .login_exit_code(5);
@@ -1273,12 +1273,12 @@ fn shell_command_form_runtime_mode_no_post_child_narrow() {
 
 #[test]
 fn shell_command_form_narrow_failure_surfaces_warning_and_child_exit_wins() {
-    // Option (a) + cycle-17 NarrowFailed arm: child runs cleanly
-    // (exit 0); narrow-on-finally fails. The verb returns child's
-    // exit code (0); stderr carries the yellow ⚠ warning naming
-    // `tenant mode dev runtime` for recovery. Without this pin, a
-    // future change that returned EX_IOERR on narrow-failure would
-    // surface as a silent regression in the operator's $?.
+    // NarrowFailed arm: child runs cleanly (exit 0); narrow-on-finally
+    // fails. The verb returns child's exit code (0); stderr carries
+    // the yellow ⚠ warning naming `tenant mode dev runtime` for
+    // recovery. Without this pin, a future change that returned
+    // EX_IOERR on narrow-failure would surface as a silent regression
+    // in the operator's $?.
     //
     // Stub setup: with --mode install, entry InstallAnchor body
     // contains runtime + install hosts; finally InstallAnchor body
@@ -1321,8 +1321,8 @@ fn shell_command_form_narrow_failure_surfaces_warning_and_child_exit_wins() {
 
 #[test]
 fn shell_command_form_widen_failure_at_build_skips_narrow() {
-    // Q4 lock: widen-build-failure (profile-read fails BEFORE any
-    // substrate fires) → no narrow attempt. The Mode error surfaces;
+    // Widen-build-failure (profile-read fails BEFORE any substrate
+    // fires) → no narrow attempt. The Mode error surfaces;
     // firewall_ops stays empty; exec_calls stays empty.
     let exec = StubHostMachine::new(); // no profile pre-loaded → read_profile fails
     let (code, _stdout, stderr) = run_with_exec(
@@ -1345,11 +1345,11 @@ fn shell_command_form_widen_failure_at_build_skips_narrow() {
 
 #[test]
 fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
-    // Q4 lock: InstallAnchor succeeded (on-disk body now diverged);
-    // Reload failed. The best-effort narrow runs inline so on-disk
-    // state returns to runtime, then ModeError surfaces. We pin that
-    // a SECOND InstallAnchor (runtime body) attempt followed the
-    // failed entry Reload.
+    // InstallAnchor succeeded (on-disk body now diverged); Reload
+    // failed. The best-effort narrow runs inline so on-disk state
+    // returns to runtime, then ModeError surfaces. We pin that a
+    // SECOND InstallAnchor (runtime body) attempt followed the failed
+    // entry Reload.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
@@ -1386,11 +1386,12 @@ fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
 
 #[test]
 fn shell_command_form_negative_pin_no_flush_anchor() {
-    // Doctrine pin (mirrors cycle-4's shell negative pin): the command
-    // form is convergent like the interactive form; no FlushAnchor
-    // ever fires. FlushAnchor is destroy-side load-bearing because the
-    // parent `load anchor` directive gets removed there; the command
-    // form preserves the parent directive across widen + narrow.
+    // Doctrine pin (mirrors the interactive shell negative pin): the
+    // command form is convergent like the interactive form; no
+    // FlushAnchor ever fires. FlushAnchor is destroy-side load-bearing
+    // because the parent `load anchor` directive gets removed there;
+    // the command form preserves the parent directive across widen +
+    // narrow.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
     let (_code, _stdout, _stderr) = run_with_exec(
@@ -1410,10 +1411,10 @@ fn shell_command_form_negative_pin_no_flush_anchor() {
 
 #[test]
 fn shell_command_form_share_substrate_reapplies_before_exec() {
-    // Share substrate (cycle-14 AddHostToShareGroup + cycle-13
-    // AclOp::Grant + EnsureDirAsUser + EnsureSymlinkAsUser) runs as
-    // part of the entry reapply BEFORE exec_as_tenant. Pin: account
-    // ops include AddHost; profile is read.
+    // Share substrate (AddHostToShareGroup + AclOp::Grant +
+    // EnsureDirAsUser + EnsureSymlinkAsUser) runs as part of the entry
+    // reapply BEFORE exec_as_tenant. Pin: account ops include AddHost;
+    // profile is read.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, stderr) = run_with_exec(
@@ -1527,7 +1528,7 @@ fn shell_command_real_mode_section_divider_includes_tier_when_install() {
 
 #[test]
 fn shell_command_no_confirm_prompt() {
-    // Q3 lock: command form does NOT prompt, even on TTY. We simulate
+    // Command form does NOT prompt, even on TTY. We simulate
     // a TTY via run_with_stdin with empty stdin content; if the verb
     // ever started prompting, the empty stdin would cause it to abort
     // (default-N for destroy; default-Y elsewhere). Either way, the
@@ -1681,9 +1682,10 @@ fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
         b"",
     );
 
-    // Both forms surface the same PfDisabled critical via the cycle-16
-    // doctor_finding_one_liner inline emission ("critical: pf is
-    // globally disabled" — same byte form across both verb shapes).
+    // Both forms surface the same PfDisabled critical via the doctor
+    // pre-exec aggregator's inline `doctor_finding_one_liner` emission
+    // ("critical: pf is globally disabled" — same byte form across
+    // both verb shapes).
     assert!(
         stdout_a.contains("critical: pf is globally disabled"),
         "interactive form's pre-exec audit surfaces PfDisabled: {stdout_a:?}"
@@ -1696,9 +1698,9 @@ fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
 
 #[test]
 fn shell_clap_rejects_mode_without_argv() {
-    // Q2 lock: --mode requires argv. `tenant shell dev --mode install`
-    // (no `--` separator, no command) → clap parse error at dispatch.
-    // Exit code is clap's default (2); no substrate fires.
+    // --mode requires argv. `tenant shell dev --mode install` (no `--`
+    // separator, no command) → clap parse error at dispatch. Exit code
+    // is clap's default (2); no substrate fires.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),

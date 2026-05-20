@@ -557,10 +557,9 @@ pub fn shell_summary_block(name: &str) -> String {
 }
 
 /// Pre-exec summary block for `tenant shell <name> [--mode <m>] -- <argv>`
-/// (cycle-17 command form). Same `show_summary` gating as the
-/// interactive form's `shell_summary_block`; no confirm prompt
-/// parenthetical (Q3 lock: command form is uniform with interactive
-/// shell on prompting).
+/// (command form). Same `show_summary` gating as the interactive
+/// form's `shell_summary_block`; no confirm prompt parenthetical
+/// (command form is uniform with interactive shell on prompting).
 ///
 /// `mode` is "runtime" or "install"; `argv` is the joined argv string
 /// the operator typed after `--`. Runtime tier collapses the entry

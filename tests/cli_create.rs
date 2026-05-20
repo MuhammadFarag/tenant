@@ -1642,7 +1642,7 @@ fn create_pre_exec_doctor_scope_excludes_env_leak() {
 
 #[test]
 fn create_pre_exec_doctor_silent_in_scripted_mode() {
-    // No TTY, no --dry-run → no summary, no audit (Q3 lock).
+    // No TTY, no --dry-run → no summary, no audit.
     let exec = StubHostMachine::new().with_pf_status_content("Status: Disabled\n");
     let (code, stdout, _stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
