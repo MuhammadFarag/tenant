@@ -39,7 +39,7 @@ check: check-fmt clippy test
 # or abort with `git reset --hard HEAD~1 && git tag -d vVERSION`.
 release-prepare VERSION:
     @echo '{{VERSION}}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' || (echo "VERSION must be X.Y.Z or X.Y.Z-PRERELEASE (no v prefix)" >&2; exit 1)
-    @test -z "$(git status --porcelain)" || (echo "working tree dirty; commit or stash first" >&2; exit 1)
+    @test -z "$(git status --porcelain | grep -v '^.. RELEASE_NOTES.md$')" || (echo "working tree dirty (only RELEASE_NOTES.md edits are allowed pre-prepare); commit or stash other changes first" >&2; exit 1)
     @test "$(git rev-parse --abbrev-ref HEAD)" = "main" || (echo "not on main" >&2; exit 1)
     @git fetch origin main --quiet
     @test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || (echo "local main is not up-to-date with origin/main; pull first" >&2; exit 1)
