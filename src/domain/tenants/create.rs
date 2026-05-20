@@ -2,8 +2,8 @@
 
 use crate::domain::reporter::Reporter;
 use crate::domain::{
-    AccountError, AccountOp, FirewallError, FirewallOp, GroupId, HostUserName, ProfileOp,
-    TenantUserName, UserId,
+    AccountError, AccountOp, FirewallError, FirewallOp, GroupId, HostUserName, KeychainError,
+    KeychainOp, KeychainPassword, ProfileOp, TenantUserName, UserId,
 };
 use crate::firewall::{ensure_anchor_ref, render_anchor};
 use crate::profile::{ProfileError, display_path_for, parse};
@@ -14,6 +14,11 @@ use super::{ModeError, Tenants, tenant_share_group_name};
 /// worst case where rollback itself failed and the host is left with
 /// an orphan group. `HostMembership` has no automatic rollback —
 /// the host-add step is load-bearing for tenant usability.
+///
+/// `KeychainProvision` / `KeychainStash` follow the same posture as
+/// `Profile` / `Firewall`: tenant user + group already exist, no
+/// automatic rollback, recovery is `tenant destroy <name>`. The
+/// half-provisioned state is convergent under destroy.
 #[derive(Debug)]
 pub(crate) enum CreateError {
     Group(AccountError),
@@ -23,6 +28,8 @@ pub(crate) enum CreateError {
         rollback: AccountError,
     },
     HostMembership(AccountError),
+    KeychainProvision(KeychainError),
+    KeychainStash(KeychainError),
     Profile(ProfileError),
     /// Read/parse failures on the just-written profile also flow here
     /// as `FirewallError::Fs` because they surface during the firewall
@@ -73,6 +80,42 @@ impl<'a> Tenants<'a> {
             .map_err(CreateError::HostMembership)?;
         match self.run(&add_user, reporter) {
             Ok(()) => {
+                // Bootstrap the tenant's login.keychain-db so
+                // credential-stashing apps (Claude OAuth, etc.) don't
+                // trip the "could not find the keychain" warning, and
+                // stash the protecting secret in the operator's
+                // keychain so a future shell-entry unlock pass can
+                // retrieve it. One password covers both — the
+                // keychain is unlockable only by the same secret
+                // that's been written into the operator's keychain.
+                let keychain_password = KeychainPassword::generate();
+                let create_kc = KeychainOp::CreateLoginKeychain {
+                    name: name.into(),
+                    password: keychain_password.clone(),
+                };
+                let set_default = KeychainOp::SetDefaultKeychain { name: name.into() };
+                let add_to_search = KeychainOp::AddKeychainToSearchList { name: name.into() };
+                let disable_lock = KeychainOp::DisableKeychainAutoLock { name: name.into() };
+                let stash = KeychainOp::StashPassword {
+                    name: name.into(),
+                    password: keychain_password,
+                };
+                // Partial-failure recovery: see execute_keychain
+                // comment block in src/adapters/macos/host_machine.rs.
+                // All 4 provision sub-steps share one CreateError arm
+                // (`KeychainProvision`) — operator-recovery story is
+                // `tenant destroy <name>` regardless of which step
+                // failed.
+                self.run(&create_kc, reporter)
+                    .map_err(CreateError::KeychainProvision)?;
+                self.run(&set_default, reporter)
+                    .map_err(CreateError::KeychainProvision)?;
+                self.run(&add_to_search, reporter)
+                    .map_err(CreateError::KeychainProvision)?;
+                self.run(&disable_lock, reporter)
+                    .map_err(CreateError::KeychainProvision)?;
+                self.run(&stash, reporter)
+                    .map_err(CreateError::KeychainStash)?;
                 self.run(&create_profile, reporter)
                     .map_err(CreateError::Profile)?;
                 let profile_content = self.machine.read_profile(name).map_err(|e| {

@@ -1,5 +1,5 @@
 use super::reporter::{ConfirmOutcome, Reporter};
-use super::{AccountOp, FirewallOp, Op, ProfileOp, tenants};
+use super::{AccountOp, FirewallOp, KeychainOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
 use crate::{Cli, HelpTopic, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR};
 
@@ -88,6 +88,14 @@ pub(crate) fn dispatch(
                     // rollback-failed line follows with its recovery hint.
                     reporter.create_failed(&name, &user);
                     reporter.create_rollback_failed(&name, &rollback);
+                    EX_IOERR
+                }
+                Err(tenants::CreateError::KeychainProvision(e)) => {
+                    reporter.create_keychain_provision_failed(&name, &e);
+                    EX_IOERR
+                }
+                Err(tenants::CreateError::KeychainStash(e)) => {
+                    reporter.create_keychain_stash_failed(&name, &e);
                     EX_IOERR
                 }
                 Err(tenants::CreateError::Profile(e)) => {
@@ -545,6 +553,11 @@ pub(crate) struct CreatePlanOps {
     pub(crate) add_host: AccountOp,
     pub(crate) add_user: AccountOp,
     pub(crate) rollback_group: AccountOp,
+    pub(crate) create_keychain: KeychainOp,
+    pub(crate) set_default_keychain: KeychainOp,
+    pub(crate) add_to_search_list: KeychainOp,
+    pub(crate) disable_auto_lock: KeychainOp,
+    pub(crate) stash_password: KeychainOp,
     pub(crate) create_profile: ProfileOp,
     pub(crate) backup: FirewallOp,
     pub(crate) install_anchor: FirewallOp,
@@ -563,6 +576,11 @@ fn build_create_plan_ops(
     gid: super::GroupId,
 ) -> CreatePlanOps {
     let group = tenants::tenant_share_group_name(name.as_str());
+    // Plan-side placeholder password: describe_keychain always
+    // renders `<password>` regardless of the actual bytes, so the
+    // displayed plan never reveals secret material. The real
+    // password is generated inside `Tenants::create`.
+    let plan_placeholder = super::KeychainPassword::for_plan_placeholder();
     CreatePlanOps {
         create_group: AccountOp::CreateShareGroup {
             group: group.clone(),
@@ -578,6 +596,17 @@ fn build_create_plan_ops(
             gid,
         },
         rollback_group: AccountOp::DeleteShareGroup { group },
+        create_keychain: KeychainOp::CreateLoginKeychain {
+            name: name.into(),
+            password: plan_placeholder.clone(),
+        },
+        set_default_keychain: KeychainOp::SetDefaultKeychain { name: name.into() },
+        add_to_search_list: KeychainOp::AddKeychainToSearchList { name: name.into() },
+        disable_auto_lock: KeychainOp::DisableKeychainAutoLock { name: name.into() },
+        stash_password: KeychainOp::StashPassword {
+            name: name.into(),
+            password: plan_placeholder,
+        },
         create_profile: ProfileOp::Create { name: name.into() },
         backup: FirewallOp::BackupConfig,
         install_anchor: FirewallOp::InstallAnchor {
@@ -601,6 +630,11 @@ fn create_plan_entries(ops: &CreatePlanOps) -> Vec<(Op<'_>, Option<&'static str>
         (Op::Account(&ops.add_host), None),
         (Op::Account(&ops.add_user), None),
         (Op::Account(&ops.rollback_group), Some("on rollback")),
+        (Op::Keychain(&ops.create_keychain), None),
+        (Op::Keychain(&ops.set_default_keychain), None),
+        (Op::Keychain(&ops.add_to_search_list), None),
+        (Op::Keychain(&ops.disable_auto_lock), None),
+        (Op::Keychain(&ops.stash_password), None),
         (Op::Profile(&ops.create_profile), None),
         (Op::Firewall(&ops.backup), None),
         (Op::Firewall(&ops.install_anchor), None),
@@ -618,6 +652,7 @@ pub(crate) struct DestroyPlanOps {
     pub(crate) delete_user: AccountOp,
     pub(crate) probe: AccountOp,
     pub(crate) cleanup: AccountOp,
+    pub(crate) delete_stashed_password: KeychainOp,
     pub(crate) remove_host: AccountOp,
     pub(crate) delete_group: AccountOp,
     pub(crate) delete_profile: ProfileOp,
@@ -637,6 +672,7 @@ fn build_destroy_plan_ops(
         delete_user: AccountOp::DeleteTenantUser { name: name.into() },
         probe: AccountOp::LookupUserRecord { name: name.into() },
         cleanup: AccountOp::DeleteUserRecord { name: name.into() },
+        delete_stashed_password: KeychainOp::DeleteStashedPassword { name: name.into() },
         remove_host: AccountOp::RemoveHostFromShareGroup {
             group: group.clone(),
             host: host.into(),
@@ -658,6 +694,7 @@ fn destroy_plan_entries(ops: &DestroyPlanOps) -> Vec<(Op<'_>, Option<&'static st
         (Op::Account(&ops.delete_user), None),
         (Op::Account(&ops.probe), None),
         (Op::Account(&ops.cleanup), None),
+        (Op::Keychain(&ops.delete_stashed_password), None),
         (Op::Account(&ops.remove_host), None),
         (Op::Account(&ops.delete_group), None),
         (Op::Profile(&ops.delete_profile), None),
@@ -671,6 +708,7 @@ fn destroy_plan_entries(ops: &DestroyPlanOps) -> Vec<(Op<'_>, Option<&'static st
 
 pub(crate) struct OrphanGroupPlanOps {
     pub(crate) remove_host: AccountOp,
+    pub(crate) delete_stashed_password: KeychainOp,
     pub(crate) delete_group: AccountOp,
     pub(crate) delete_profile: ProfileOp,
     pub(crate) backup: FirewallOp,
@@ -690,6 +728,7 @@ fn build_orphan_plan_ops(
             group: group.clone(),
             host: host.into(),
         },
+        delete_stashed_password: KeychainOp::DeleteStashedPassword { name: name.into() },
         delete_group: AccountOp::DeleteShareGroup { group },
         delete_profile: ProfileOp::Delete { name: name.into() },
         backup: FirewallOp::BackupConfig,
@@ -705,6 +744,7 @@ fn build_orphan_plan_ops(
 fn orphan_plan_entries(ops: &OrphanGroupPlanOps) -> Vec<(Op<'_>, Option<&'static str>)> {
     vec![
         (Op::Account(&ops.remove_host), None),
+        (Op::Keychain(&ops.delete_stashed_password), None),
         (Op::Account(&ops.delete_group), None),
         (Op::Profile(&ops.delete_profile), None),
         (Op::Firewall(&ops.backup), None),

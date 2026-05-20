@@ -202,6 +202,35 @@ impl<'a> Tenants<'a> {
         if let Some(drift) = self.check_host_in_share_group(name, host, reporter)? {
             findings.push(drift);
         }
+        // Keychain probes follow the "doctor courtesy" posture: a
+        // substrate-machinery failure surfaces via the keychain probe
+        // frame and the walk continues with the remaining checks.
+        // Other probe failures in this method propagate via `?` because
+        // they're load-bearing inputs for the firewall + share drift
+        // checks; keychain absence isn't a precondition for anything
+        // later.
+        match self.machine.tenant_keychain_present(name) {
+            Ok(true) => {}
+            Ok(false) => {
+                let finding = Finding::TenantKeychainAbsent {
+                    tenant: name.clone(),
+                };
+                reporter.doctor_finding(&finding);
+                findings.push(finding);
+            }
+            Err(e) => reporter.doctor_keychain_probe_failed(name, &e),
+        }
+        match self.machine.stash_present(name) {
+            Ok(true) => {}
+            Ok(false) => {
+                let finding = Finding::StashAbsent {
+                    tenant: name.clone(),
+                };
+                reporter.doctor_finding(&finding);
+                findings.push(finding);
+            }
+            Err(e) => reporter.doctor_stash_probe_failed(name, &e),
+        }
         reporter.doctor_done_summary(name, findings.len());
         Ok(findings)
     }

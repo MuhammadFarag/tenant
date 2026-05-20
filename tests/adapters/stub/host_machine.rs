@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use tenant::adapters::macos::MacosHostMachine;
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, PathKind, ProbeError, ProfileOp,
-    TenantUserName,
+    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp, PathKind,
+    ProbeError, ProfileOp, TenantUserName,
 };
 use tenant::profile::{ProfileError, default_profile_toml};
 
@@ -132,6 +132,32 @@ pub struct StubHostMachine {
     host_in_group_invocations: RefCell<Vec<(String, String)>>,
 
     host_in_group_failure: RefCell<Option<AccountError>>,
+
+    keychain_ops: RefCell<Vec<KeychainOp>>,
+
+    /// Unmatched lookups default to `true` so tests that don't
+    /// exercise `TenantKeychainAbsent` don't see a spurious warning.
+    tenant_keychain_state: RefCell<HashMap<String, bool>>,
+
+    tenant_keychain_probe_failure: RefCell<Option<ProbeError>>,
+
+    /// Unmatched lookups default to `true` so tests that don't
+    /// exercise `StashAbsent` don't see a spurious warning.
+    stash_state: RefCell<HashMap<String, bool>>,
+
+    stash_probe_failure: RefCell<Option<KeychainError>>,
+
+    /// Per-variant one-shot failure injection. KeychainOp variants
+    /// carry the randomly-generated password so equality-based
+    /// overrides can't be authored by tests; per-variant queues
+    /// sidestep that. Provision is split into four sub-step queues
+    /// so partial-failure tests can pin exactly which leg failed.
+    keychain_create_failure: RefCell<Option<KeychainError>>,
+    keychain_set_default_failure: RefCell<Option<KeychainError>>,
+    keychain_add_to_search_failure: RefCell<Option<KeychainError>>,
+    keychain_disable_auto_lock_failure: RefCell<Option<KeychainError>>,
+    keychain_stash_failure: RefCell<Option<KeychainError>>,
+    keychain_delete_failure: RefCell<Option<KeychainError>>,
 }
 
 impl StubHostMachine {
@@ -371,6 +397,64 @@ impl StubHostMachine {
 
     pub fn host_in_group_invocations(&self) -> Vec<(String, String)> {
         self.host_in_group_invocations.borrow().clone()
+    }
+
+    pub fn keychain_ops(&self) -> Vec<KeychainOp> {
+        self.keychain_ops.borrow().clone()
+    }
+
+    pub fn fail_next_keychain_create(self, err: KeychainError) -> Self {
+        *self.keychain_create_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn fail_next_keychain_set_default(self, err: KeychainError) -> Self {
+        *self.keychain_set_default_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn fail_next_keychain_add_to_search(self, err: KeychainError) -> Self {
+        *self.keychain_add_to_search_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn fail_next_keychain_disable_auto_lock(self, err: KeychainError) -> Self {
+        *self.keychain_disable_auto_lock_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn fail_next_keychain_stash(self, err: KeychainError) -> Self {
+        *self.keychain_stash_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn fail_next_keychain_delete(self, err: KeychainError) -> Self {
+        *self.keychain_delete_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn with_tenant_keychain_present(self, name: &str, present: bool) -> Self {
+        self.tenant_keychain_state
+            .borrow_mut()
+            .insert(name.to_string(), present);
+        self
+    }
+
+    pub fn fail_next_tenant_keychain_probe(self, err: ProbeError) -> Self {
+        *self.tenant_keychain_probe_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn with_stash_present(self, name: &str, present: bool) -> Self {
+        self.stash_state
+            .borrow_mut()
+            .insert(name.to_string(), present);
+        self
+    }
+
+    pub fn fail_next_stash_probe(self, err: KeychainError) -> Self {
+        *self.stash_probe_failure.borrow_mut() = Some(err);
+        self
     }
 }
 
@@ -623,5 +707,70 @@ impl HostMachine for StubHostMachine {
             .get(&key)
             .copied()
             .unwrap_or(true))
+    }
+
+    fn describe_keychain(&self, op: &KeychainOp) -> String {
+        MacosHostMachine.describe_keychain(op)
+    }
+
+    fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {
+        if let Some(err) = self.tenant_keychain_probe_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self
+            .tenant_keychain_state
+            .borrow()
+            .get(name.as_str())
+            .copied()
+            .unwrap_or(true))
+    }
+
+    fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError> {
+        if let Some(err) = self.stash_probe_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self
+            .stash_state
+            .borrow()
+            .get(name.as_str())
+            .copied()
+            .unwrap_or(true))
+    }
+
+    fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError> {
+        self.keychain_ops.borrow_mut().push(op.clone());
+        match op {
+            KeychainOp::CreateLoginKeychain { .. } => {
+                if let Some(err) = self.keychain_create_failure.borrow_mut().take() {
+                    return Err(err);
+                }
+            }
+            KeychainOp::SetDefaultKeychain { .. } => {
+                if let Some(err) = self.keychain_set_default_failure.borrow_mut().take() {
+                    return Err(err);
+                }
+            }
+            KeychainOp::AddKeychainToSearchList { .. } => {
+                if let Some(err) = self.keychain_add_to_search_failure.borrow_mut().take() {
+                    return Err(err);
+                }
+            }
+            KeychainOp::DisableKeychainAutoLock { .. } => {
+                if let Some(err) = self.keychain_disable_auto_lock_failure.borrow_mut().take() {
+                    return Err(err);
+                }
+            }
+            KeychainOp::StashPassword { .. } => {
+                if let Some(err) = self.keychain_stash_failure.borrow_mut().take() {
+                    return Err(err);
+                }
+            }
+            KeychainOp::DeleteStashedPassword { .. } => {
+                if let Some(err) = self.keychain_delete_failure.borrow_mut().take() {
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
     }
 }

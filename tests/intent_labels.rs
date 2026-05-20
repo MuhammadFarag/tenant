@@ -341,3 +341,127 @@ fn intent_label_differs_from_business_label_for_exec_as_user() {
         "intent_label and business_label should be distinct for ExecAsUser"
     );
 }
+
+// ============================================================
+// KeychainOp variants
+// ============================================================
+
+#[test]
+fn intent_create_login_keychain() {
+    let op = tenant::domain::KeychainOp::CreateLoginKeychain {
+        name: "dev".into(),
+        password: tenant::domain::KeychainPassword::test_dummy("ignored"),
+    };
+    assert_eq!(
+        Op::Keychain(&op).intent_label(),
+        "Create login keychain for tenant 'dev'"
+    );
+}
+
+#[test]
+fn intent_set_default_keychain() {
+    let op = tenant::domain::KeychainOp::SetDefaultKeychain { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).intent_label(),
+        "Set tenant 'dev' default keychain to login.keychain-db"
+    );
+}
+
+#[test]
+fn intent_add_keychain_to_search_list() {
+    let op = tenant::domain::KeychainOp::AddKeychainToSearchList { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).intent_label(),
+        "Add login.keychain-db to tenant 'dev' search list"
+    );
+}
+
+#[test]
+fn intent_disable_keychain_auto_lock() {
+    let op = tenant::domain::KeychainOp::DisableKeychainAutoLock { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).intent_label(),
+        "Disable auto-lock on tenant 'dev' login keychain"
+    );
+}
+
+#[test]
+fn intent_stash_password() {
+    let op = tenant::domain::KeychainOp::StashPassword {
+        name: "dev".into(),
+        password: tenant::domain::KeychainPassword::test_dummy("ignored"),
+    };
+    assert_eq!(
+        Op::Keychain(&op).intent_label(),
+        "Stash tenant 'dev' password in operator keychain"
+    );
+}
+
+#[test]
+fn intent_delete_stashed_password() {
+    let op = tenant::domain::KeychainOp::DeleteStashedPassword { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).intent_label(),
+        "Remove tenant 'dev' password from operator keychain"
+    );
+}
+
+#[test]
+fn business_create_login_keychain() {
+    let op = tenant::domain::KeychainOp::CreateLoginKeychain {
+        name: "dev".into(),
+        password: tenant::domain::KeychainPassword::test_dummy("ignored"),
+    };
+    assert_eq!(
+        Op::Keychain(&op).business_label(),
+        "Tenant 'dev' login keychain created"
+    );
+}
+
+#[test]
+fn business_set_default_keychain() {
+    let op = tenant::domain::KeychainOp::SetDefaultKeychain { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).business_label(),
+        "Tenant 'dev' default keychain set"
+    );
+}
+
+#[test]
+fn business_add_keychain_to_search_list() {
+    let op = tenant::domain::KeychainOp::AddKeychainToSearchList { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).business_label(),
+        "Tenant 'dev' keychain added to search list"
+    );
+}
+
+#[test]
+fn business_disable_keychain_auto_lock() {
+    let op = tenant::domain::KeychainOp::DisableKeychainAutoLock { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).business_label(),
+        "Tenant 'dev' keychain auto-lock disabled"
+    );
+}
+
+#[test]
+fn business_stash_password() {
+    let op = tenant::domain::KeychainOp::StashPassword {
+        name: "dev".into(),
+        password: tenant::domain::KeychainPassword::test_dummy("ignored"),
+    };
+    assert_eq!(
+        Op::Keychain(&op).business_label(),
+        "Tenant 'dev' password stashed in operator keychain"
+    );
+}
+
+#[test]
+fn business_delete_stashed_password() {
+    let op = tenant::domain::KeychainOp::DeleteStashedPassword { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).business_label(),
+        "Tenant 'dev' password removed from operator keychain"
+    );
+}

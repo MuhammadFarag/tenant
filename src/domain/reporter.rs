@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use super::tenants::{ConflictError, NameError, ShareError, tenant_share_group_name};
 use super::{
-    AccessMode, AccountError, AclError, FirewallError, GroupId, HostMachine, HostUserName, Op,
-    ProbeError, TenantUserName, UserDirectoryError, UserId,
+    AccessMode, AccountError, AclError, FirewallError, GroupId, HostMachine, HostUserName,
+    KeychainError, Op, ProbeError, TenantUserName, UserDirectoryError, UserId,
 };
 use crate::ModeLevel;
 use crate::ansi::{self};
@@ -919,6 +919,25 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    /// Stderr frame for substrate failures on the tenant-keychain
+    /// presence probe. Doctor continues the walk after emitting; the
+    /// audit is a courtesy, never an abort gate.
+    pub fn doctor_keychain_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to probe tenant '{name}' keychain presence: {err}"
+        );
+    }
+
+    /// Stderr frame for substrate failures on the operator-stash
+    /// presence probe. Doctor continues the walk after emitting.
+    pub fn doctor_stash_probe_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to probe stash presence for tenant '{name}': {err}"
+        );
+    }
+
     // HostUserDirectory (dscl) failure frames, one per call site. The five
     // `*_eligibility_probe_failed` frames carry near-identical Display
     // strings; they stay split per verb to match the sibling pattern
@@ -1124,6 +1143,39 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(
             self.terminal.stderr,
             "tenant: failed to tear down firewall for '{name}': {err}"
+        );
+    }
+
+    /// Warning frame for the destroy-side stash-delete: the rest of
+    /// destroy already removed the user + group + firewall, but
+    /// scrubbing the operator-side stash failed for a non-NotFound
+    /// reason. Em-dash hint names the manual recovery.
+    pub fn destroy_keychain_delete_warning(&mut self, name: &TenantUserName, err: &KeychainError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: warning: could not remove stashed password for '{name}': {err} \
+             \u{2014} run `security delete-generic-password -a {name} -s tenant-{name}` to scrub manually"
+        );
+    }
+
+    /// Stderr frame for `CreateError::KeychainProvision`. Tenant user
+    /// + group already exist; recovery is `tenant destroy <name>`.
+    pub fn create_keychain_provision_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to provision login keychain for '{name}': {err} \
+             \u{2014} run `tenant destroy {name}` to clean up"
+        );
+    }
+
+    /// Stderr frame for `CreateError::KeychainStash`. Tenant user +
+    /// group + keychain provisioned but the operator-side stash
+    /// failed; recovery is `tenant destroy <name>`.
+    pub fn create_keychain_stash_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to stash '{name}' password in operator keychain: {err} \
+             \u{2014} run `tenant destroy {name}` to clean up"
         );
     }
 

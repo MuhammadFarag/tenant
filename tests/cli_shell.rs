@@ -829,7 +829,7 @@ fn shell_negative_pin_share_substrate_does_not_emit_firewall_recovery_ops() {
 }
 
 // ================================================================
-// Pre-exec doctor audit (cycle 16): shell scope
+// Pre-exec doctor audit: shell scope
 // ================================================================
 //
 // Shell's audit considers PfDisabled + EnvLeak (host-wide) plus

@@ -1,6 +1,7 @@
 use super::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostUserName, Op, PathKind, ProbeError, ProfileOp, TenantUserName,
+    GroupName, HostFileError, HostUserName, KeychainError, KeychainOp, Op, PathKind, ProbeError,
+    ProfileOp, TenantUserName,
 };
 use crate::profile::ProfileError;
 
@@ -39,6 +40,9 @@ pub trait HostMachine {
     fn describe_acl(&self, op: &AclOp) -> String;
     fn execute_acl(&self, op: &AclOp) -> Result<(), AclError>;
 
+    fn describe_keychain(&self, op: &KeychainOp) -> String;
+    fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError>;
+
     fn probe_access_as_tenant(
         &self,
         name: &TenantUserName,
@@ -65,6 +69,19 @@ pub trait HostMachine {
 
     /// An absent group is non-error: returns `Ok(false)`.
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError>;
+
+    /// True iff `/Users/<tenant>/Library/Keychains/login.keychain-db`
+    /// is present on disk. Doctor consults this to surface
+    /// `Finding::TenantKeychainAbsent`. Filesystem-existence check from
+    /// the operator process — mirrors `tenant_path_kind`'s shape.
+    fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError>;
+
+    /// True iff the operator's login keychain carries a
+    /// generic-password entry under (account=tenant,
+    /// service=tenant-<tenant>). Doctor consults this to surface
+    /// `Finding::StashAbsent`. Dispatches via `security`, so all the
+    /// substrate failures map to `KeychainError`.
+    fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError>;
 }
 
 /// Leaf-op dispatch to the `HostMachine` with a domain-specific error type.

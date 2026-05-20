@@ -209,6 +209,31 @@ pub fn create_verbose_plan_entries(
             Some("on rollback"),
         ),
         (
+            format!("Create login keychain for tenant '{name}'"),
+            format!("sudo -iu {name} security create-keychain -p <password> login.keychain-db"),
+            None,
+        ),
+        (
+            format!("Set tenant '{name}' default keychain to login.keychain-db"),
+            format!("sudo -iu {name} security default-keychain -s login.keychain-db"),
+            None,
+        ),
+        (
+            format!("Add login.keychain-db to tenant '{name}' search list"),
+            format!("sudo -iu {name} security list-keychains -s login.keychain-db"),
+            None,
+        ),
+        (
+            format!("Disable auto-lock on tenant '{name}' login keychain"),
+            format!("sudo -iu {name} security set-keychain-settings login.keychain-db"),
+            None,
+        ),
+        (
+            format!("Stash tenant '{name}' password in operator keychain"),
+            format!("security add-generic-password -U -a {name} -s tenant-{name} -w <password>"),
+            None,
+        ),
+        (
             format!("Write profile config at ~/.config/tenant/profiles/{name}.toml"),
             format!("tee ~/.config/tenant/profiles/{name}.toml < default.toml"),
             None,
@@ -299,6 +324,11 @@ pub fn destroy_verbose_plan_entries(name: &str) -> Vec<(String, String, Option<&
             None,
         ),
         (
+            format!("Remove tenant '{name}' password from operator keychain"),
+            format!("security delete-generic-password -a {name} -s tenant-{name}"),
+            None,
+        ),
+        (
             format!("Remove host '{TEST_HOST}' from share group '{name}-tenant-share'"),
             format!("sudo dseditgroup -o edit -n . -d {TEST_HOST} -t user {name}-tenant-share"),
             None,
@@ -345,13 +375,19 @@ pub fn destroy_verbose_plan_block(name: &str) -> String {
     verbose_plan_section_owned(&destroy_verbose_plan_entries(name))
 }
 
-/// Pre-built plan entries for the orphan-group convergence path (8
-/// entries; no user-removal steps).
+/// Pre-built plan entries for the orphan-group convergence path (9
+/// entries; no user-removal steps, but the operator-side keychain
+/// stash still gets cleaned).
 pub fn orphan_verbose_plan_entries(name: &str) -> Vec<(String, String, Option<&'static str>)> {
     vec![
         (
             format!("Remove host '{TEST_HOST}' from share group '{name}-tenant-share'"),
             format!("sudo dseditgroup -o edit -n . -d {TEST_HOST} -t user {name}-tenant-share"),
+            None,
+        ),
+        (
+            format!("Remove tenant '{name}' password from operator keychain"),
+            format!("security delete-generic-password -a {name} -s tenant-{name}"),
             None,
         ),
         (

@@ -43,6 +43,11 @@ pub enum Category {
     /// 0644 by design and WILL surface as `Allowed`; classified
     /// `info` because the exposure is intentional.
     TenantArtifact,
+    /// Keychain-bootstrap drift: tenant's `login.keychain-db` absent,
+    /// or operator-side stash absent. Distinct category because the
+    /// (file-existence-on-disk, presence-of-stash) signal doesn't fit
+    /// the `probe_access_as_tenant` shape the other categories share.
+    Keychain,
 }
 
 /// A doctor-detected exposure.
@@ -94,6 +99,19 @@ pub enum Finding {
         host: HostUserName,
         group: GroupName,
     },
+    /// Tenant's `login.keychain-db` is absent on disk (manual delete,
+    /// or a partial-create that never landed). OAuth-class apps inside
+    /// the tenant will fire `errSecNoSuchKeychain`.
+    TenantKeychainAbsent {
+        tenant: TenantUserName,
+    },
+    /// Operator-side stash for the tenant is absent under
+    /// (account=tenant, service=tenant-<tenant>). A future shell-
+    /// entry unlock pass would have no way to retrieve the
+    /// protecting password without the stash.
+    StashAbsent {
+        tenant: TenantUserName,
+    },
 }
 
 /// What's actually present at a declared share's `tenant_path` when
@@ -117,6 +135,8 @@ impl Finding {
             Finding::AclDrift { .. } => Severity::Warning,
             Finding::SymlinkDrift { .. } => Severity::Warning,
             Finding::HostNotInShareGroup { .. } => Severity::Warning,
+            Finding::TenantKeychainAbsent { .. } => Severity::Warning,
+            Finding::StashAbsent { .. } => Severity::Warning,
         }
     }
 
@@ -468,6 +488,79 @@ Alternative
   Adds just the membership without running the full reload. Use when
   `tenant reload` is blocked by an unrelated refusal."
             )),
+            Finding::TenantKeychainAbsent { tenant } => Some(format!(
+                "Why this matters
+  Tenant '{tenant}'s login keychain at /Users/{tenant}/Library/Keychains/login.keychain-db
+  is absent. Claude OAuth and other credential-stashing apps running
+  inside the tenant fire `errSecNoSuchKeychain` warnings and have no
+  persistent place to write tokens \u{2014} every login interaction
+  re-prompts because nothing survives across sessions. The most common
+  causes are a manual `rm` against the tenant's Library/Keychains
+  directory, or a partial-create that left the file off disk.
+
+Recommended fix
+  tenant destroy {tenant} && tenant create {tenant}
+  Re-bootstraps the tenant from scratch: the destroy moves the home to
+  /Users/Deleted Users/, the create runs the 4-step keychain provision
+  sequence cleanly. Idempotent at the substrate (destroy converges on
+  absent tenants; create runs `security create-keychain` with the
+  duplicate-keychain escape hatch).
+
+Side-effects to know about
+  \u{2022} Any tenant-side state in /Users/{tenant}/ moves to
+    /Users/Deleted Users/{tenant}/ (recoverable until the host empties
+    /Users/Deleted Users or the host is rebuilt).
+  \u{2022} A fresh keychain password is generated and stashed in the
+    operator's keychain; the prior password (if any) is discarded.
+  \u{2022} Any apps the tenant had open with the old keychain attached
+    will lose their reference; restart them after the re-create.
+
+Alternative
+  sudo -iu {tenant} security create-keychain -p <password> login.keychain-db
+  Manually re-create the keychain, then run the 3 follow-up `security`
+  sub-steps (`default-keychain -s`, `list-keychains -s`,
+  `set-keychain-settings`) and `security add-generic-password -a {tenant}
+  -s tenant-{tenant} -w <password>` against the operator's keychain to
+  re-stash. Tedious; the full destroy + create path is faster and
+  matches the substrate the create flow runs."
+            )),
+            Finding::StashAbsent { tenant } => Some(format!(
+                "Why this matters
+  The operator's login keychain doesn't carry a generic-password entry
+  under (account={tenant}, service=tenant-{tenant}). A future shell-
+  entry unlock pass would read from that entry to retrieve the
+  password that protects the tenant's `login.keychain-db`; without
+  the stash, post-reboot the tenant's keychain stays locked and OAuth
+  tokens it carries become unreachable. The most common cause is a
+  manual `security delete-generic-password` run against the operator's
+  keychain, or a partial-create that landed the keychain but missed
+  the stash.
+
+Recommended fix
+  tenant destroy {tenant} && tenant create {tenant}
+  Re-bootstraps both the tenant keychain AND the operator-side stash
+  with a fresh shared password. The destroy converges on the
+  pre-existing tenant; the create generates a new password, writes it
+  to the tenant keychain, and stashes the same bytes in the operator's
+  keychain.
+
+Side-effects to know about
+  \u{2022} Any tenant-side state in /Users/{tenant}/ moves to
+    /Users/Deleted Users/{tenant}/ (recoverable until the host empties
+    /Users/Deleted Users or the host is rebuilt).
+  \u{2022} The new keychain password is unrelated to any previously-used
+    password \u{2014} apps that cached the old one will need re-auth.
+
+Alternative
+  In practice, none. The password was never written outside the
+  operator's keychain by design, so it can't be recovered after the
+  stash is gone. If the tenant's keychain happens to still be unlocked
+  and the operator can somehow reproduce the password (e.g. it was
+  captured to a password manager out-of-band), they could
+  `security add-generic-password -a {tenant} -s tenant-{tenant} -w
+  <recovered-password>` to re-stash. Without that, `destroy && create`
+  is the only path."
+            )),
         }
     }
 }
@@ -572,6 +665,17 @@ impl fmt::Display for Finding {
                  files created by tenant '{tenant}' inside RW shares are not host-writable; \
                  run `tenant reload {tenant}` to fix"
             ),
+            Finding::TenantKeychainAbsent { tenant } => write!(
+                f,
+                "warning: tenant '{tenant}' login keychain absent \u{2014} \
+                 apps inside the tenant won't be able to persist credentials"
+            ),
+            Finding::StashAbsent { tenant } => write!(
+                f,
+                "warning: stashed password absent for tenant '{tenant}' \u{2014} \
+                 a future `tenant shell` unlock pass would have nothing to retrieve; \
+                 run `tenant destroy {tenant} && tenant create {tenant}` to re-bootstrap"
+            ),
         }
     }
 }
@@ -628,6 +732,14 @@ pub fn has_env_delete_for(policy: &str, var: &str) -> bool {
 
 /// Only `Allowed` produces a finding — `Denied` and `Unknown` are
 /// the expected case for sensitive paths on a hardened host.
+///
+/// `Category::Keychain` returns `None` here: the keychain findings
+/// (`TenantKeychainAbsent` / `StashAbsent`) come from
+/// presence-probes, not the `probe_access_as_tenant` substrate that
+/// drives this classifier, so the (category, AccessOutcome) shape
+/// doesn't apply. The category is still useful as a structural label
+/// on the `Finding` variants — future cross-cutting filters can group
+/// by category without re-deriving from variant identity.
 pub fn classify(category: Category, outcome: AccessOutcome) -> Option<Severity> {
     match (category, outcome) {
         (_, AccessOutcome::Denied) | (_, AccessOutcome::Unknown) => None,
@@ -635,6 +747,7 @@ pub fn classify(category: Category, outcome: AccessOutcome) -> Option<Severity> 
         (Category::HostHomeListing, AccessOutcome::Allowed) => Some(Severity::Warning),
         (Category::CrossTenant, AccessOutcome::Allowed) => Some(Severity::Warning),
         (Category::TenantArtifact, AccessOutcome::Allowed) => Some(Severity::Info),
+        (Category::Keychain, AccessOutcome::Allowed) => None,
     }
 }
 

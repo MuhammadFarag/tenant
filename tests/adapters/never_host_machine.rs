@@ -2,8 +2,8 @@
 
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, PathKind, ProbeError, ProfileOp,
-    TenantUserName,
+    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp, PathKind,
+    ProbeError, ProfileOp, TenantUserName,
 };
 
 /// Default host machine for tests that should not reach the exec stage —
@@ -94,5 +94,17 @@ impl HostMachine for NeverHostMachine {
     }
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         panic!("host machine unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
+    }
+    fn describe_keychain(&self, op: &KeychainOp) -> String {
+        panic!("host machine unexpectedly invoked (describe_keychain) with op: {op:?}");
+    }
+    fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError> {
+        panic!("host machine unexpectedly invoked (execute_keychain) with op: {op:?}");
+    }
+    fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {
+        panic!("host machine unexpectedly invoked (tenant_keychain_present): name={name:?}");
+    }
+    fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError> {
+        panic!("host machine unexpectedly invoked (stash_present): name={name:?}");
     }
 }

@@ -1939,3 +1939,163 @@ fn doctor_all_surfaces_user_directory_error_when_tenant_enumeration_fails() {
         "expected doctor_enumeration_failed frame; stderr={stderr:?}"
     );
 }
+
+// ============================================================
+// Tenant keychain absence + operator-stash absence
+// ============================================================
+//
+// `HostMachine::tenant_keychain_present(name)` returns true iff
+// /Users/<tenant>/Library/Keychains/login.keychain-db is present
+// on disk; `stash_present(name)` returns true iff the operator's
+// keychain carries a generic-password entry under (tenant,
+// tenant-<tenant>). Both surface Warning-tier findings; recovery
+// is `tenant destroy && tenant create`. Substrate failures route
+// through dedicated stderr frames and the walk continues.
+
+#[test]
+fn doctor_tenant_keychain_absent_emits_warning() {
+    // Stub configured to report the tenant's login keychain as
+    // absent → one TenantKeychainAbsent warning. Pin the byte-exact
+    // one-liner.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new().with_tenant_keychain_present("dev", false);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' login keychain absent"),
+        "expected TenantKeychainAbsent warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("apps inside the tenant won't be able to persist credentials"),
+        "warning should name the operator impact; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_tenant_keychain_present_emits_no_warning() {
+    // Default stub state: tenant_keychain_present unmatched ⇒ true ⇒
+    // no warning. Pins the "no spurious finding" baseline.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new();
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("login keychain absent"),
+        "no TenantKeychainAbsent finding expected; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_stash_absent_emits_warning() {
+    // Stub configured to report the operator-side stash as absent →
+    // one StashAbsent warning naming the recovery path.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new().with_stash_present("dev", false);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: stashed password absent for tenant 'dev'"),
+        "expected StashAbsent warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant destroy dev && tenant create dev"),
+        "warning should name the recovery; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_stash_present_emits_no_warning() {
+    // Default stub state: stash_present unmatched ⇒ true ⇒ no
+    // warning.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new();
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("stashed password absent"),
+        "no StashAbsent finding expected; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_strict_keychain_warning_exits_1() {
+    // Both keychain findings are Warning-tier; --strict +
+    // warning-only → exit 1. Pin via TenantKeychainAbsent.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new().with_tenant_keychain_present("dev", false);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(
+        code, 1,
+        "expected exit 1 on warning+strict; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_keychain_findings_carry_guidance_in_verbose() {
+    // -v emits the 4-section guidance body for both keychain
+    // findings. Smoke-check the recovery command appears.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new()
+        .with_tenant_keychain_present("dev", false)
+        .with_stash_present("dev", false);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "-v"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("Why this matters"),
+        "verbose should emit guidance block header; stdout={stdout:?}"
+    );
+    // Recovery command appears in BOTH findings' guidance.
+    let recovery_count = stdout
+        .matches("tenant destroy dev && tenant create dev")
+        .count();
+    assert!(
+        recovery_count >= 2,
+        "both keychain findings should name the recovery in -v; \
+         found {recovery_count} occurrences; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_tenant_keychain_probe_failure_surfaces_and_walk_continues() {
+    // Substrate failure on tenant_keychain_present routes to
+    // `doctor_keychain_probe_failed` stderr frame; doctor exits 0
+    // (audit is a courtesy, not an abort gate). Stash probe still
+    // runs after.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new().fail_next_tenant_keychain_probe(
+        tenant::domain::ProbeError::Spawn(std::io::Error::other("stat failed")),
+    );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "audit-as-courtesy: probe failure does not abort");
+    assert!(
+        !stdout.contains("login keychain absent"),
+        "no finding emits when the probe itself failed; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("failed to probe tenant 'dev' keychain presence"),
+        "stderr should carry the probe-failed frame; got: {stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_stash_probe_failure_surfaces_and_walk_continues() {
+    // Substrate failure on stash_present routes to
+    // `doctor_stash_probe_failed` stderr frame; doctor still exits 0.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec =
+        StubHostMachine::new().fail_next_stash_probe(tenant::domain::KeychainError::NonZero {
+            code: 1,
+            stderr: "security: argv parse failed".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "audit-as-courtesy: probe failure does not abort");
+    assert!(
+        !stdout.contains("stashed password absent"),
+        "no finding emits when the probe itself failed; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("failed to probe stash presence for tenant 'dev'"),
+        "stderr should carry the stash-probe-failed frame; got: {stderr:?}"
+    );
+}

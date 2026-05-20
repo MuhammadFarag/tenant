@@ -8,12 +8,14 @@ pub mod reporter;
 pub mod tenants;
 
 pub use errors::{
-    AccountError, AclError, FirewallError, HostFileError, ProbeError, UserDirectoryError,
+    AccountError, AclError, FirewallError, HostFileError, KeychainError, ProbeError,
+    UserDirectoryError,
 };
 pub use host_machine::{HostMachine, WritableOp};
 pub use host_user_directory::HostUserDirectory;
-pub use ids::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
+pub use ids::{GroupId, GroupName, HostUserName, KeychainPassword, TenantUserName, UserId};
 pub use ops::{
-    AccessMode, AccessOutcome, AccountOp, AclMode, AclOp, FirewallOp, Op, PathKind, ProfileOp,
+    AccessMode, AccessOutcome, AccountOp, AclMode, AclOp, FirewallOp, KeychainOp, Op, PathKind,
+    ProfileOp,
 };
 pub(crate) use tenants::Tenants;

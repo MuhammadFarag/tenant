@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError,
-    FirewallOp, GroupName, HostFileError, HostMachine, HostUserName, PathKind, ProbeError,
-    ProfileOp, TenantUserName,
+    FirewallOp, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
+    PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
@@ -537,6 +537,97 @@ impl HostMachine for MacosHostMachine {
         )
     }
 
+    fn describe_keychain(&self, op: &KeychainOp) -> String {
+        // Password is fed on argv (`-p <pw>` / `-w <pw>`); the displayed
+        // shell-line uses `<password>` as a literal redaction marker so
+        // an operator who copies the line and runs it separately can
+        // substitute their own value. Each provision sub-step renders
+        // as its own one-line shell command — `Tenants::create` emits
+        // the four in sequence; the plan-side rendering shows them in
+        // order.
+        match op {
+            KeychainOp::CreateLoginKeychain { name, .. } => {
+                format!("sudo -iu {name} security create-keychain -p <password> login.keychain-db")
+            }
+            KeychainOp::SetDefaultKeychain { name } => {
+                format!("sudo -iu {name} security default-keychain -s login.keychain-db")
+            }
+            KeychainOp::AddKeychainToSearchList { name } => {
+                format!("sudo -iu {name} security list-keychains -s login.keychain-db")
+            }
+            KeychainOp::DisableKeychainAutoLock { name } => {
+                format!("sudo -iu {name} security set-keychain-settings login.keychain-db")
+            }
+            KeychainOp::StashPassword { name, .. } => {
+                format!("security add-generic-password -U -a {name} -s tenant-{name} -w <password>")
+            }
+            KeychainOp::DeleteStashedPassword { name } => {
+                format!("security delete-generic-password -a {name} -s tenant-{name}")
+            }
+        }
+    }
+
+    fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError> {
+        // Password lives on argv (`-p <pw>` / `-w <pw>`) — macOS
+        // `security` does NOT support stdin reads on `-p` / `-w` (the
+        // `-` argument is taken as a literal one-character password,
+        // not a stdin sentinel). `-p password` appears briefly in
+        // process args during the single `security` invocation; macOS
+        // platform limit. Brief argv exposure (~milliseconds) is
+        // accepted; alternative is the Security Framework C API via
+        // FFI, which is out of scope for solo-Mac.
+        //
+        // Partial-failure recovery: the 4 variants are emitted
+        // sequentially by `Tenants::create`; partial-state cleanup is
+        // transitive via `tenant destroy`'s `sysadminctl -deleteUser`
+        // moving the home to `/Users/Deleted Users/`. The
+        // partially-provisioned `login.keychain-db` rides along with
+        // the home, so no per-variant rollback is needed at the
+        // substrate.
+        //
+        // `CreateLoginKeychain` exits non-zero with an "already exists"
+        // stderr (historically code 25299 / errSecDuplicateKeychain,
+        // but the exit code shifts across macOS versions — see
+        // destroy's `errSecItemNotFound` 44 for the same family of
+        // non-stable codes) when the tenant's `login.keychain-db` is
+        // already present. This happens on retry after a partial
+        // create, or on any re-run where the previous tenant's home
+        // survived in `/Users/Deleted Users/` and the substrate is
+        // somehow re-attached. Treat as convergent: same posture as
+        // `pfctl -e "already enabled"` in execute_firewall and
+        // `EnsureDirAsUser`'s `mkdir -p` semantics. Match on the
+        // substring "already exists" (case-insensitive) because macOS
+        // uses both "already exists" and "Already exists" across
+        // versions; the exit code itself is not a stable contract. The
+        // remaining three provision variants are natively idempotent
+        // in macOS (they overwrite the user-pref entry) and are
+        // re-applied unconditionally so the post-state is consistent
+        // regardless of which leg of the sequence the previous attempt
+        // died on.
+        let kc = "login.keychain-db";
+        match op {
+            KeychainOp::CreateLoginKeychain { name, password } => {
+                run_security_as_tenant_allowing_duplicate(
+                    name.as_str(),
+                    &["create-keychain", "-p", password.expose_secret(), kc],
+                )
+            }
+            KeychainOp::SetDefaultKeychain { name } => {
+                run_security_as_tenant(name.as_str(), &["default-keychain", "-s", kc])
+            }
+            KeychainOp::AddKeychainToSearchList { name } => {
+                run_security_as_tenant(name.as_str(), &["list-keychains", "-s", kc])
+            }
+            KeychainOp::DisableKeychainAutoLock { name } => {
+                run_security_as_tenant(name.as_str(), &["set-keychain-settings", kc])
+            }
+            KeychainOp::StashPassword { name, password } => {
+                stash_password_in_operator_keychain(name, password)
+            }
+            KeychainOp::DeleteStashedPassword { name } => delete_stashed_password(name),
+        }
+    }
+
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         // Exit 0 ⇒ member; any non-zero (host absent, group absent) ⇒
         // false — dseditgroup conflates these and the idempotence
@@ -546,6 +637,62 @@ impl HostMachine for MacosHostMachine {
             .output()
             .map_err(AccountError::Spawn)?;
         Ok(output.status.success())
+    }
+
+    fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {
+        // Existence check via `sudo -n -u <name> /bin/test -e <path>`
+        // — NOT `std::fs::metadata` from the operator process. The
+        // keychain file lives under `/Users/<tenant>/Library/`, which
+        // is mode 0700 owned by the tenant; the operator can't
+        // traverse into it, so a bare `metadata()` returns EACCES on
+        // every healthy tenant and the probe never returns a verdict.
+        // Running `test -e` AS THE TENANT lets the kernel resolve the
+        // path inside the tenant's own permission cone — same shape
+        // `tenant_path_kind` uses for its symlink/existence probes.
+        //
+        // Exit code map: 0 → present, 1 → absent, other → sudo-auth
+        // failure (passwordless sudo not configured, terminal
+        // required, etc.) surfaces as ProbeError::NonZero.
+        let path = format!("/Users/{name}/Library/Keychains/login.keychain-db");
+        let output = Command::new("sudo")
+            .args(["-n", "-u", name.as_str(), "/bin/test", "-e", &path])
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            Some(code) => Err(ProbeError::NonZero {
+                code,
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }),
+            None => Err(ProbeError::NonZero {
+                code: -1,
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }),
+        }
+    }
+
+    fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError> {
+        // `security find-generic-password -a <name> -s tenant-<name>`
+        // against the operator's keychain. Exit 0 ⇒ present; exit 44
+        // (`errSecItemNotFound`) or "could not be found" stderr ⇒
+        // absent; anything else ⇒ substrate failure. Symmetric with
+        // `delete_stashed_password`'s NotFound handling — same
+        // exit-code convention.
+        let service = format!("tenant-{name}");
+        let output = Command::new("security")
+            .args(["find-generic-password", "-a", name.as_str(), "-s", &service])
+            .output()
+            .map_err(KeychainError::Spawn)?;
+        if output.status.success() {
+            return Ok(true);
+        }
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if code == 44 || stderr.contains("could not be found") {
+            return Ok(false);
+        }
+        Err(KeychainError::NonZero { code, stderr })
     }
 }
 
@@ -753,6 +900,107 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
 /// One source of truth so describe_acl and execute_acl render identically.
 fn acl_entry(group: &str, mode: AclMode) -> String {
     format!("group:{group} allow {}", mode.acl_bits())
+}
+
+/// `run_security_as_tenant` variant that swallows the
+/// duplicate-keychain failure as `Ok(())`. Used only by
+/// `KeychainOp::CreateLoginKeychain` in `execute_keychain`; the other
+/// three `security` sub-commands the provision flow drives are
+/// natively idempotent on macOS and use the strict helper.
+fn run_security_as_tenant_allowing_duplicate(
+    tenant: &str,
+    args: &[&str],
+) -> Result<(), KeychainError> {
+    match run_security_as_tenant(tenant, args) {
+        Ok(()) => Ok(()),
+        Err(KeychainError::NonZero { stderr, .. })
+            if stderr.to_lowercase().contains("already exists") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn stash_password_in_operator_keychain(
+    name: &TenantUserName,
+    password: &crate::domain::KeychainPassword,
+) -> Result<(), KeychainError> {
+    // `-U` upserts: replace any existing entry under the same
+    // (account, service) so a re-run after a partial create doesn't
+    // double-stash. `-w <pw>` on argv (not stdin) — same macOS
+    // platform limit as `create-keychain`; see provision comment.
+    let service = format!("tenant-{name}");
+    let output = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-a",
+            name.as_str(),
+            "-s",
+            &service,
+            "-w",
+            password.expose_secret(),
+        ])
+        .output()
+        .map_err(KeychainError::Spawn)?;
+    if !output.status.success() {
+        return Err(KeychainError::NonZero {
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn delete_stashed_password(name: &TenantUserName) -> Result<(), KeychainError> {
+    // `security delete-generic-password` exits 44 (`errSecItemNotFound`)
+    // when the entry is absent. Map that to `NotFound` so destroy
+    // converges on a legacy tenant.
+    let service = format!("tenant-{name}");
+    let output = Command::new("security")
+        .args([
+            "delete-generic-password",
+            "-a",
+            name.as_str(),
+            "-s",
+            &service,
+        ])
+        .output()
+        .map_err(KeychainError::Spawn)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let code = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if code == 44 || stderr.contains("could not be found") {
+        return Err(KeychainError::NotFound);
+    }
+    Err(KeychainError::NonZero { code, stderr })
+}
+
+fn run_security_as_tenant(tenant: &str, args: &[&str]) -> Result<(), KeychainError> {
+    // `-iu` (login-shell + user) — NOT plain `-u`. `security
+    // create-keychain login.keychain-db` resolves the relative path
+    // against `$HOME`; bare `sudo -u <tenant>` preserves the
+    // operator's HOME (so the call writes against
+    // `/Users/<operator>/Library/Keychains/`, fails with
+    // errSecWrPerm = code 195). `-i` switches HOME / USER / PWD to
+    // the tenant's login environment, so the keychain lands at the
+    // tenant's standard location: `/Users/<tenant>/Library/Keychains/login.keychain-db`.
+    let mut argv = vec!["-iu", tenant, "security"];
+    argv.extend_from_slice(args);
+    let output = Command::new("sudo")
+        .args(&argv)
+        .output()
+        .map_err(KeychainError::Spawn)?;
+    if !output.status.success() {
+        return Err(KeychainError::NonZero {
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn spawn_capturing(argv: &[String]) -> Result<(), AccountError> {

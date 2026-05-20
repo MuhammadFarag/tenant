@@ -1,4 +1,6 @@
-use tenant::domain::{AccountError, AccountOp, FirewallError, ProfileOp, UserId};
+use tenant::domain::{
+    AccountError, AccountOp, FirewallError, KeychainError, KeychainOp, ProfileOp, UserId,
+};
 
 mod adapters;
 mod common;
@@ -24,6 +26,7 @@ fn destroy_removes_profile_file_from_store() {
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
                 "Residual user record check for 'dev'",
                 "Residual user record 'dev' cleaned up",
+                "Tenant 'dev' password removed from operator keychain",
                 "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
@@ -64,6 +67,7 @@ fn destroy_succeeds_when_profile_already_absent() {
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
                 "Residual user record check for 'dev'",
                 "Residual user record 'dev' cleaned up",
+                "Tenant 'dev' password removed from operator keychain",
                 "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
@@ -88,11 +92,12 @@ fn destroy_dry_run_default_shows_intent() {
 
 #[test]
 fn destroy_dry_run_verbose_shows_mechanism() {
-    // Dry-run verbose lists the full pessimistic plan. Phase 3 grows it
-    // to 4 lines by appending `sudo dseditgroup -o delete -n .
-    // <name>-tenant-share` — unlike the V1.8 sysadminctl-cascade that
-    // caught implicit `<name>` groups, the renamed tenant-share group
-    // doesn't inherit that cleanup, so the explicit dseditgroup-delete
+    // Dry-run verbose lists the full pessimistic plan. The plan runs
+    // 4 lines: the trailing `sudo dseditgroup -o delete -n .
+    // <name>-tenant-share` is appended because — unlike the
+    // sysadminctl-cascade that caught implicit `<name>` groups — the
+    // renamed tenant-share group doesn't inherit that cleanup, so the
+    // explicit dseditgroup-delete
     // is load-bearing. Shown unconditionally because the dry-run can't
     // know what the dscl-probe will return at runtime; the operator
     // sees the full algorithm.
@@ -125,6 +130,7 @@ fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
                 "Residual user record check for 'dev'",
                 "Residual user record 'dev' cleaned up",
+                "Tenant 'dev' password removed from operator keychain",
                 "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
@@ -166,8 +172,8 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
     // verbose), then (b) per-exec echo lines prefixed with "$ " as each
     // command actually runs. Default StubHostMachine → probe says residue
     // → all four commands echo (dseditgroup-delete is the load-bearing
-    // 4th step Phase 3 adds). The trailing post-exec confirmation closes
-    // the block.
+    // 4th step the share-group cleanup adds). The trailing post-exec
+    // confirmation closes the block.
     // Scripted-real-verbose (TTY=false) drops the plan block
     // entirely (cleaner log trace; the section + $ echo + ✓ + Done
     // remains the trace surface).
@@ -183,6 +189,8 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
          ✓ Residual user record check for 'dev'\n\
          $ sudo dscl . -delete /Users/dev\n\
          ✓ Residual user record 'dev' cleaned up\n\
+         $ security delete-generic-password -a dev -s tenant-dev\n\
+         ✓ Tenant 'dev' password removed from operator keychain\n\
          $ sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n\
          ✓ Host 'operator' removed from share group 'dev-tenant-share'\n\
          $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
@@ -212,8 +220,8 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
     // The dscl-read probe returns NonZero when the DS record is absent
     // (typically eDSRecordNotFound, code 56). The destroy writer must
     // treat probe-NonZero as "no cleanup needed" and skip the
-    // sudo-dscl-delete — but the unconditional Phase-3 dseditgroup-delete
-    // still runs after, because the tenant-share group is independent
+    // sudo-dscl-delete — but the unconditional dseditgroup-delete for the
+    // tenant-share group still runs after, because that group is independent
     // of the user record. So this path has exactly three exec calls:
     // sysadminctl + dscl-read + dseditgroup-delete (no dscl-delete).
     // The plan-vs-echo asymmetry around dscl-delete remains the
@@ -235,6 +243,7 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
             "Destroying tenant 'dev'",
             &[
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
+                "Tenant 'dev' password removed from operator keychain",
                 "Host 'operator' removed from share group 'dev-tenant-share'",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
@@ -298,6 +307,7 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
                 "User account 'dev' removed (home moved to /Users/Deleted Users/dev)",
                 "Residual user record check for 'dev'",
                 "Residual user record 'dev' cleaned up",
+                "Tenant 'dev' password removed from operator keychain",
                 "Host 'operator' removed from share group 'dev-tenant-share'",
             ],
         ),
@@ -366,6 +376,8 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
          $ sudo sysadminctl -deleteUser dev\n\
          ✓ User account 'dev' removed (home moved to /Users/Deleted Users/dev)\n\
          $ dscl . -read /Users/dev\n\
+         $ security delete-generic-password -a dev -s tenant-dev\n\
+         ✓ Tenant 'dev' password removed from operator keychain\n\
          $ sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n\
          ✓ Host 'operator' removed from share group 'dev-tenant-share'\n\
          $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
@@ -508,6 +520,7 @@ fn destroy_accepts_at_floor() {
                 "User account 'edge' removed (home moved to /Users/Deleted Users/edge)",
                 "Residual user record check for 'edge'",
                 "Residual user record 'edge' cleaned up",
+                "Tenant 'edge' password removed from operator keychain",
                 "Host 'operator' removed from share group 'edge-tenant-share'",
                 "Share group 'edge-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/edge.toml",
@@ -717,6 +730,7 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
             "Destroying orphan group 'dev-tenant-share' for tenant 'dev'",
             &[
                 "Host 'operator' removed from share group 'dev-tenant-share'",
+                "Tenant 'dev' password removed from operator keychain",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -766,6 +780,7 @@ fn destroy_orphan_group_also_removes_profile_if_present() {
             "Destroying orphan group 'dev-tenant-share' for tenant 'dev'",
             &[
                 "Host 'operator' removed from share group 'dev-tenant-share'",
+                "Tenant 'dev' password removed from operator keychain",
                 "Share group 'dev-tenant-share' removed",
                 "Profile removed at ~/.config/tenant/profiles/dev.toml",
                 "Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup",
@@ -834,6 +849,8 @@ fn destroy_real_mode_verbose_for_orphan_group() {
         "{}\n\
          $ sudo dseditgroup -o edit -n . -d operator -t user dev-tenant-share\n\
          ✓ Host 'operator' removed from share group 'dev-tenant-share'\n\
+         $ security delete-generic-password -a dev -s tenant-dev\n\
+         ✓ Tenant 'dev' password removed from operator keychain\n\
          $ sudo dseditgroup -o delete -n . dev-tenant-share\n\
          ✓ Share group 'dev-tenant-share' removed\n\
          $ rm -f ~/.config/tenant/profiles/dev.toml\n\
@@ -858,7 +875,7 @@ fn destroy_real_mode_verbose_for_orphan_group() {
 
 #[test]
 fn destroy_noop_when_neither_user_nor_tenant_share_group_present() {
-    // Specificity pin: a bare-name group (left over from pre-Phase-3
+    // Specificity pin: a bare-name group (left over from legacy
     // creation, or unrelated host state) does NOT classify as
     // OrphanGroup — only the suffixed `<name>-tenant-share` does. Empty
     // users + bare `dev` group → `NotPresent` noop, exit 0, no exec.
@@ -1094,6 +1111,32 @@ fn destroy_orphan_group_invokes_flush_anchor_as_final_firewall_step() {
     );
 }
 
+#[test]
+fn destroy_orphan_group_cleans_stash() {
+    // Orphan-group convergence: a tenant whose user account was manually removed
+    // (e.g. `sudo sysadminctl -deleteUser dev`) but whose share group
+    // survived still has an operator-side keychain stash from its
+    // original `tenant create`. The OrphanGroup convergence path must
+    // include the keychain delete so the stash doesn't linger after
+    // `tenant destroy <name>` reports success — otherwise the operator
+    // ends up with orphan passwords accumulating across re-creates
+    // with no surface that flags them.
+    let stub = StubUserDirectory {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubHostMachine::new();
+    let (code, _stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        exec.keychain_ops()
+            .iter()
+            .any(|op| matches!(op, KeychainOp::DeleteStashedPassword { name } if name == "dev")),
+        "DeleteStashedPassword must fire on orphan-group destroy; got: {:?}",
+        exec.keychain_ops()
+    );
+}
+
 // ================================================================
 // Pre-execution confirmation prompt
 // ================================================================
@@ -1192,5 +1235,110 @@ fn destroy_surfaces_user_directory_error_when_uid_lookup_fails() {
     assert!(
         stderr.starts_with("tenant: failed to look up UID for 'dev': "),
         "expected destroy_uid_lookup_failed frame; stderr={stderr:?}"
+    );
+}
+
+// ============================================================
+// Keychain teardown
+// ============================================================
+
+/// destroy's op stream includes `DeleteStashedPassword`
+/// AFTER `DeleteUserRecord` (or its skipped probe), BEFORE the host /
+/// group / profile cleanup.
+#[test]
+fn destroy_emits_keychain_delete_after_user_cleanup() {
+    let exec = StubHostMachine::new();
+    let (code, _, _) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0);
+    let keychain_ops = exec.keychain_ops();
+    assert_eq!(
+        keychain_ops.len(),
+        1,
+        "expected exactly one keychain op (DeleteStashedPassword)"
+    );
+    assert!(
+        matches!(
+            &keychain_ops[0],
+            KeychainOp::DeleteStashedPassword { name } if name.as_str() == "dev"
+        ),
+        "expected DeleteStashedPassword for 'dev'; got: {:?}",
+        keychain_ops[0]
+    );
+}
+
+/// legacy tenant (created before keychain bootstrap landed) has no stash —
+/// substrate returns `KeychainError::NotFound` and destroy
+/// CONVERGES, exiting 0 with no warning. The keychain ✓ line is
+/// silently omitted because nothing was actually removed.
+#[test]
+fn destroy_succeeds_silently_when_stash_absent() {
+    let exec = StubHostMachine::new().fail_next_keychain_delete(KeychainError::NotFound);
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("password removed from operator keychain"),
+        "expected no keychain ✓ line on NotFound; stdout={stdout:?}"
+    );
+    assert!(
+        !stderr.contains("warning"),
+        "expected no warning on NotFound; stderr={stderr:?}"
+    );
+}
+
+/// a non-NotFound failure on `DeleteStashedPassword`
+/// emits a warning to stderr but destroy continues and exits 0. The
+/// rest of the teardown (host / group / profile / firewall) still
+/// runs.
+#[test]
+fn destroy_warns_and_continues_when_stash_delete_fails() {
+    let exec = StubHostMachine::new().fail_next_keychain_delete(KeychainError::NonZero {
+        code: 50,
+        stderr: "security: keychain locked\n".into(),
+    });
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "expected destroy to converge; stderr={stderr:?}");
+    assert!(
+        stderr.contains("warning: could not remove stashed password for 'dev'"),
+        "expected warning frame; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("`security delete-generic-password -a dev -s tenant-dev`"),
+        "expected manual-recovery hint in warning; stderr={stderr:?}"
+    );
+    // The rest of the teardown ran — firewall ops are the tail end,
+    // so their presence is the proof.
+    assert!(
+        stdout.contains("Kernel rules under anchor 'tenant-dev' flushed"),
+        "expected firewall teardown to complete; stdout={stdout:?}"
+    );
+}
+
+/// Verbose-mode counterpart to the failure pin: when `security
+/// delete-generic-password` fails for a non-NotFound reason, the
+/// operator must still see the `$` echo for the attempted command
+/// (matches the verbose-mode contract used by every other op).
+/// The `✓` is omitted (no successful mutation) and the warning lands
+/// on stderr — but the substrate command that was warned about is
+/// visible on stdout.
+#[test]
+fn destroy_verbose_emits_step_echo_before_keychain_delete_warning() {
+    let exec = StubHostMachine::new().fail_next_keychain_delete(KeychainError::NonZero {
+        code: 50,
+        stderr: "security: keychain locked\n".into(),
+    });
+    let (code, stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
+    assert_eq!(code, 0, "expected destroy to converge; stderr={stderr:?}");
+    assert!(
+        stdout.contains("$ security delete-generic-password -a dev -s tenant-dev"),
+        "expected `$` echo for the attempted delete command; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("✓ Tenant 'dev' password removed from operator keychain"),
+        "expected no ✓ line on failure; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("warning: could not remove stashed password for 'dev'"),
+        "expected warning frame on stderr; stderr={stderr:?}"
     );
 }

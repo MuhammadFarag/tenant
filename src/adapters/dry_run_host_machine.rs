@@ -1,8 +1,8 @@
 use crate::adapters::macos::MacosHostMachine;
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, PathKind, ProbeError, ProfileOp,
-    TenantUserName,
+    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp, PathKind,
+    ProbeError, ProfileOp, TenantUserName,
 };
 use crate::profile::{ProfileError, default_profile_toml};
 
@@ -133,6 +133,26 @@ impl HostMachine for DryRunHostMachine {
         _host: &HostUserName,
         _group: &GroupName,
     ) -> Result<bool, AccountError> {
+        Ok(true)
+    }
+
+    fn describe_keychain(&self, op: &KeychainOp) -> String {
+        MacosHostMachine.describe_keychain(op)
+    }
+
+    fn execute_keychain(&self, _op: &KeychainOp) -> Result<(), KeychainError> {
+        Ok(())
+    }
+
+    /// `true` so the preview doesn't fire a spurious
+    /// `TenantKeychainAbsent` finding.
+    fn tenant_keychain_present(&self, _name: &TenantUserName) -> Result<bool, ProbeError> {
+        Ok(true)
+    }
+
+    /// `true` so the preview doesn't fire a spurious `StashAbsent`
+    /// finding.
+    fn stash_present(&self, _name: &TenantUserName) -> Result<bool, KeychainError> {
         Ok(true)
     }
 }

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use crate::domain::{GroupId, GroupName, HostUserName, TenantUserName, UserId};
+use crate::domain::{GroupId, GroupName, HostUserName, KeychainPassword, TenantUserName, UserId};
 
-use super::errors::{AccountError, AclError, FirewallError};
+use super::errors::{AccountError, AclError, FirewallError, KeychainError};
 use super::host_machine::{HostMachine, WritableOp};
 use crate::profile::ProfileError;
 
@@ -206,6 +206,62 @@ pub enum FirewallOp {
     Enable,
 }
 
+/// Keychain operations: pre-create the tenant's `login.keychain-db`
+/// so credential-stashing apps (Claude OAuth, etc.) don't trip the
+/// "could not find the keychain" warning, and persist the protecting
+/// secret in the operator's keychain so a future non-interactive
+/// unlock pass can retrieve it. `Stash` / `DeleteStashed` write to
+/// the OPERATOR's login keychain (no `sudo`); the four `*Keychain*`
+/// provision variants write the TENANT's login keychain via
+/// `sudo -iu <name> security`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeychainOp {
+    /// `security create-keychain -p <pw> login.keychain-db`. The
+    /// `password` is the secret protecting the new keychain (also
+    /// stashed in operator's keychain via `StashPassword`). Natively
+    /// idempotent against an existing keychain — see
+    /// `execute_keychain`'s comment block in
+    /// adapters/macos/host_machine.rs.
+    CreateLoginKeychain {
+        name: TenantUserName,
+        password: KeychainPassword,
+    },
+
+    /// `security default-keychain -s login.keychain-db`. Sets the
+    /// tenant's default keychain pointer in their per-user prefs.
+    /// Natively idempotent (overwrites the pointer).
+    SetDefaultKeychain { name: TenantUserName },
+
+    /// `security list-keychains -s login.keychain-db`. Replaces the
+    /// tenant's keychain search list with just the new one (+ the
+    /// system keychain that macOS preserves implicitly).
+    AddKeychainToSearchList { name: TenantUserName },
+
+    /// `security set-keychain-settings login.keychain-db` (no flags
+    /// = no auto-lock timer, no lock-on-sleep). Load-bearing for the
+    /// "Claude OAuth tokens persist across sessions" guarantee.
+    DisableKeychainAutoLock { name: TenantUserName },
+
+    /// `security add-generic-password -U -a <name> -s tenant-<name>
+    /// -w <password>` against the operator's login keychain. Password
+    /// lives on argv: macOS `security` does NOT support stdin reads
+    /// on `-w` (the `-` argument is taken as a literal one-character
+    /// password, not a stdin sentinel). Brief argv exposure
+    /// (~milliseconds, single `security` invocation) is accepted;
+    /// alternative is the Security Framework C API via FFI, which is
+    /// out of scope for solo-Mac. Service-name `tenant-<name>` is the
+    /// contract a future shell-entry unlock pass reads from.
+    StashPassword {
+        name: TenantUserName,
+        password: KeychainPassword,
+    },
+
+    /// `security delete-generic-password -a <name> -s tenant-<name>`.
+    /// Maps an absent entry (legacy tenant, prior destroy) to
+    /// `KeychainError::NotFound` so `destroy` can converge.
+    DeleteStashedPassword { name: TenantUserName },
+}
+
 /// Display-only wrapper used for uniform describe-dispatch. Execution
 /// stays on the bare per-domain ADTs (via `WritableOp`) so per-domain
 /// error types are preserved end-to-end.
@@ -214,6 +270,7 @@ pub enum Op<'a> {
     Profile(&'a ProfileOp),
     Firewall(&'a FirewallOp),
     Acl(&'a AclOp),
+    Keychain(&'a KeychainOp),
 }
 
 impl<'a> Op<'a> {
@@ -224,6 +281,7 @@ impl<'a> Op<'a> {
             Op::Profile(op) => machine.describe_profile(op),
             Op::Firewall(op) => machine.describe_firewall(op),
             Op::Acl(op) => machine.describe_acl(op),
+            Op::Keychain(op) => machine.describe_keychain(op),
         }
     }
 
@@ -236,6 +294,7 @@ impl<'a> Op<'a> {
             Op::Profile(op) => profile_business_label(op),
             Op::Firewall(op) => firewall_business_label(op),
             Op::Acl(op) => acl_business_label(op),
+            Op::Keychain(op) => keychain_business_label(op),
         }
     }
 
@@ -250,6 +309,7 @@ impl<'a> Op<'a> {
             Op::Profile(op) => profile_intent_label(op),
             Op::Firewall(op) => firewall_intent_label(op),
             Op::Acl(op) => acl_intent_label(op),
+            Op::Keychain(op) => keychain_intent_label(op),
         }
     }
 }
@@ -361,6 +421,29 @@ fn acl_business_label(op: &AclOp) -> String {
     }
 }
 
+fn keychain_business_label(op: &KeychainOp) -> String {
+    match op {
+        KeychainOp::CreateLoginKeychain { name, .. } => {
+            format!("Tenant '{name}' login keychain created")
+        }
+        KeychainOp::SetDefaultKeychain { name } => {
+            format!("Tenant '{name}' default keychain set")
+        }
+        KeychainOp::AddKeychainToSearchList { name } => {
+            format!("Tenant '{name}' keychain added to search list")
+        }
+        KeychainOp::DisableKeychainAutoLock { name } => {
+            format!("Tenant '{name}' keychain auto-lock disabled")
+        }
+        KeychainOp::StashPassword { name, .. } => {
+            format!("Tenant '{name}' password stashed in operator keychain")
+        }
+        KeychainOp::DeleteStashedPassword { name } => {
+            format!("Tenant '{name}' password removed from operator keychain")
+        }
+    }
+}
+
 fn account_intent_label(op: &AccountOp) -> String {
     match op {
         AccountOp::CreateShareGroup { group, gid } => {
@@ -459,6 +542,29 @@ fn acl_intent_label(op: &AclOp) -> String {
     }
 }
 
+fn keychain_intent_label(op: &KeychainOp) -> String {
+    match op {
+        KeychainOp::CreateLoginKeychain { name, .. } => {
+            format!("Create login keychain for tenant '{name}'")
+        }
+        KeychainOp::SetDefaultKeychain { name } => {
+            format!("Set tenant '{name}' default keychain to login.keychain-db")
+        }
+        KeychainOp::AddKeychainToSearchList { name } => {
+            format!("Add login.keychain-db to tenant '{name}' search list")
+        }
+        KeychainOp::DisableKeychainAutoLock { name } => {
+            format!("Disable auto-lock on tenant '{name}' login keychain")
+        }
+        KeychainOp::StashPassword { name, .. } => {
+            format!("Stash tenant '{name}' password in operator keychain")
+        }
+        KeychainOp::DeleteStashedPassword { name } => {
+            format!("Remove tenant '{name}' password from operator keychain")
+        }
+    }
+}
+
 impl WritableOp for AccountOp {
     type Error = AccountError;
     fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), AccountError> {
@@ -496,5 +602,15 @@ impl WritableOp for AclOp {
     }
     fn op_ref(&self) -> Op<'_> {
         Op::Acl(self)
+    }
+}
+
+impl WritableOp for KeychainOp {
+    type Error = KeychainError;
+    fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), KeychainError> {
+        machine.execute_keychain(self)
+    }
+    fn op_ref(&self) -> Op<'_> {
+        Op::Keychain(self)
     }
 }

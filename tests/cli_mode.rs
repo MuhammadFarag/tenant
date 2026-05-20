@@ -989,7 +989,7 @@ fn mode_install_tier_does_not_change_share_substrate() {
 }
 
 // ================================================================
-// Pre-exec doctor audit (cycle 16): mode scope
+// Pre-exec doctor audit: mode scope
 // ================================================================
 //
 // Mode's audit considers PfDisabled (host-wide) + PfRuleDrift +

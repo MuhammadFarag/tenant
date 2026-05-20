@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use tenant::domain::{
-    AccountError, AccountOp, AclMode, AclOp, FirewallError, GroupId, ProfileOp, UserId,
+    AccountError, AccountOp, AclMode, AclOp, FirewallError, GroupId, KeychainError, KeychainOp,
+    ProfileOp, UserId,
 };
 
 mod adapters;
@@ -40,17 +41,17 @@ fn create_accepts_single_letter_name() {
 
 #[test]
 fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
-    // Phase 3 changes the plan from one argv to three: dseditgroup-create
-    // (group-first so the user's home directory lands on the tenant-share
-    // group, not staff), sysadminctl-addUser (pointing -GID at the just-
-    // created group), and an unconditional `# on rollback` line that
-    // documents what happens if sysadminctl fails after the group was
-    // created. The rollback line is in the plan but not in the `$` echo
-    // block — that asymmetry is the operator-visible signal of whether
-    // the rollback fired (mirrors the destroy-side dscl-cleanup
-    // convention shipped in V1.8). UID and GID allocators are decoupled
-    // post-Phase-3 but both happen to bottom-out at TENANT_UID_FLOOR=600
-    // when both spaces are empty.
+    // The plan is three argv lines: dseditgroup-create (group-first so
+    // the user's home directory lands on the tenant-share group, not
+    // staff), sysadminctl-addUser (pointing -GID at the just-created
+    // group), and an unconditional `# on rollback` line that documents
+    // what happens if sysadminctl fails after the group was created.
+    // The rollback line is in the plan but not in the `$` echo block —
+    // that asymmetry is the operator-visible signal of whether the
+    // rollback fired (mirrors the destroy-side dscl-cleanup
+    // convention). UID and GID allocators are decoupled but both
+    // happen to bottom-out at TENANT_UID_FLOOR=600 when both spaces
+    // are empty.
     let (code, stdout, _stderr) = run_with(
         StubUserDirectory::default(),
         &["create", "dev", "--dry-run", "-v"],
@@ -81,7 +82,7 @@ fn verbose_shows_lowest_free_uid_with_gap_and_gid_at_floor() {
     // First decoupled-allocation evidence: UID space has a gap so the
     // allocator returns 602, but the GID space is empty (stub_with_used_uids
     // only populates uid_by_name, leaving gid_by_name empty) so the GID
-    // allocator returns 600. Phase 3 explicitly does NOT force UID == GID
+    // allocator returns 600. The design explicitly does NOT force UID == GID
     // — the two allocators consult their own spaces and may diverge.
     let (code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[600, 601, 603]),
@@ -307,8 +308,8 @@ fn create_surfaces_user_directory_error_when_conflict_probe_fails() {
 
 #[test]
 fn create_rejects_when_tenant_share_group_exists() {
-    // Phase 3 names the primary group `<name>-tenant-share` (not bare
-    // `<name>`). The conflict check now refuses when that suffixed name is
+    // The primary group is named `<name>-tenant-share` (not bare
+    // `<name>`). The conflict check refuses when that suffixed name is
     // already taken, regardless of what the bare-name group looks like.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
@@ -341,8 +342,8 @@ fn create_rejects_when_user_and_tenant_share_group_exist() {
 
 #[test]
 fn create_accepts_when_bare_name_group_exists_but_not_suffix() {
-    // Phase 3 only reserves `<name>-tenant-share` as conflict territory.
-    // A pre-existing bare-name group is no longer something tenant creates
+    // Only `<name>-tenant-share` is reserved as conflict territory.
+    // A pre-existing bare-name group is not something tenant creates
     // (sysadminctl is invoked with -GID pointing at the explicit
     // tenant-share group's GID, not asking sysadminctl to mint a new group
     // named after the user) so a bare `dev` group on the host is harmless.
@@ -473,6 +474,11 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Tenant 'dev' login keychain created\n\
+         ✓ Tenant 'dev' default keychain set\n\
+         ✓ Tenant 'dev' keychain added to search list\n\
+         ✓ Tenant 'dev' keychain auto-lock disabled\n\
+         ✓ Tenant 'dev' password stashed in operator keychain\n\
          ✓ Profile written to ~/.config/tenant/profiles/dev.toml\n\
          ✓ Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
@@ -510,6 +516,14 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
         exec.profile_ops(),
         vec![ProfileOp::Create { name: "dev".into() }],
     );
+    // Keychain provisioning (4 sub-step ops) + stash all ran after
+    // CreateTenantUser — 5 ops total.
+    let keychain_ops = exec.keychain_ops();
+    assert_eq!(
+        keychain_ops.len(),
+        5,
+        "expected 4 provision sub-steps + StashPassword, got: {keychain_ops:?}",
+    );
 }
 
 #[test]
@@ -535,6 +549,16 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         $ sudo -iu dev security create-keychain -p <password> login.keychain-db\n\
+         ✓ Tenant 'dev' login keychain created\n\
+         $ sudo -iu dev security default-keychain -s login.keychain-db\n\
+         ✓ Tenant 'dev' default keychain set\n\
+         $ sudo -iu dev security list-keychains -s login.keychain-db\n\
+         ✓ Tenant 'dev' keychain added to search list\n\
+         $ sudo -iu dev security set-keychain-settings login.keychain-db\n\
+         ✓ Tenant 'dev' keychain auto-lock disabled\n\
+         $ security add-generic-password -U -a dev -s tenant-dev -w <password>\n\
+         ✓ Tenant 'dev' password stashed in operator keychain\n\
          $ tee ~/.config/tenant/profiles/dev.toml < default.toml\n\
          ✓ Profile written to ~/.config/tenant/profiles/dev.toml\n\
          $ sudo cp /etc/pf.conf /etc/pf.conf.tenant-backup\n\
@@ -581,7 +605,12 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ User account 'dev' provisioned (UID 600)\n",
+         ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Tenant 'dev' login keychain created\n\
+         ✓ Tenant 'dev' default keychain set\n\
+         ✓ Tenant 'dev' keychain added to search list\n\
+         ✓ Tenant 'dev' keychain auto-lock disabled\n\
+         ✓ Tenant 'dev' password stashed in operator keychain\n",
         section_line("Creating tenant 'dev'"),
     );
     assert_eq!(stdout, want_stdout);
@@ -627,12 +656,12 @@ fn dry_run_bypasses_injected_host_machine() {
 
 #[test]
 fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
-    // Phase 3 issues two exec calls: dseditgroup-create first, sysadminctl
-    // second. `StubHostMachine::failing(78)` fails ALL calls, so the first
-    // call (dseditgroup-create) trips. The expected behavior is: stop
-    // immediately (no sysadminctl, no rollback — there's nothing to roll
-    // back because dseditgroup-create itself failed), exit EX_IOERR, and
-    // emit the new `create_group_failed` shape that names the group
+    // The create flow issues two exec calls: dseditgroup-create first,
+    // sysadminctl second. `StubHostMachine::failing(78)` fails ALL calls,
+    // so the first call (dseditgroup-create) trips. The expected behavior
+    // is: stop immediately (no sysadminctl, no rollback — there's nothing
+    // to roll back because dseditgroup-create itself failed), exit
+    // EX_IOERR, and emit the `create_group_failed` shape that names the group
     // explicitly so the operator knows the user wasn't touched.
     let exec = StubHostMachine::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) =
@@ -698,11 +727,12 @@ fn create_add_host_failure_aborts_with_orphan_group_recovery_hint() {
 
 #[test]
 fn create_sysadminctl_failure_rolls_back_dseditgroup() {
-    // The partial-failure case Phase 3 was designed for: CreateShareGroup
-    // succeeded, but CreateTenantUser failed. Without rollback the host
-    // would carry an orphan `<name>-tenant-share` group with no
-    // corresponding user. The writer must invoke a DeleteShareGroup op
-    // to converge back to the pre-create state, then surface the
+    // The partial-failure case the group-first ordering was designed for:
+    // CreateShareGroup succeeded, but CreateTenantUser failed. Without
+    // rollback the host would carry an orphan `<name>-tenant-share`
+    // group with no corresponding user. The writer must invoke a
+    // DeleteShareGroup op to converge back to the pre-create state,
+    // then surface the
     // *original* user-creation failure as the error (the rollback
     // succeeded so it's not separately reportable). Three account ops
     // in total.
@@ -1050,6 +1080,11 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Tenant 'dev' login keychain created\n\
+         ✓ Tenant 'dev' default keychain set\n\
+         ✓ Tenant 'dev' keychain added to search list\n\
+         ✓ Tenant 'dev' keychain auto-lock disabled\n\
+         ✓ Tenant 'dev' password stashed in operator keychain\n\
          ✓ Profile written to ~/.config/tenant/profiles/dev.toml\n\
          ✓ Backed up /etc/pf.conf to /etc/pf.conf.tenant-backup\n",
         section_line("Creating tenant 'dev'"),
@@ -1542,7 +1577,7 @@ fn create_with_invalid_input_reprompts_then_accepts() {
 }
 
 // ================================================================
-// Pre-exec doctor audit (cycle 16): create scope
+// Pre-exec doctor audit: create scope
 // ================================================================
 //
 // Create's audit considers PfDisabled only (host-wide). No tenant
@@ -1670,4 +1705,269 @@ fn create_surfaces_user_directory_error_when_gid_allocation_fails() {
         stderr.starts_with("tenant: failed to allocate GID: "),
         "expected create_gid_allocation_failed frame; stderr={stderr:?}"
     );
+}
+
+// ============================================================
+// Keychain bootstrap
+//
+// `keychain_ops()` records every `execute_keychain` invocation in
+// order. The op variants carry the randomly-generated password, so
+// tests that need to assert on the password identity extract it from
+// the recorded op rather than constructing the variant for equality
+// (each invocation generates a fresh secret).
+// ============================================================
+
+/// Two consecutive `tenant create` invocations generate distinct
+/// passwords. Defends against a regression that hard-codes the
+/// password or seeds the RNG deterministically. The password lives
+/// on the first provision sub-step (`CreateLoginKeychain`).
+#[test]
+fn create_uses_fresh_keychain_password_each_invocation() {
+    let exec1 = StubHostMachine::new();
+    let (code1, _, _) = run_with_exec(StubUserDirectory::default(), &exec1, &["create", "alpha"]);
+    assert_eq!(code1, 0);
+    let exec2 = StubHostMachine::new();
+    let (code2, _, _) = run_with_exec(StubUserDirectory::default(), &exec2, &["create", "beta"]);
+    assert_eq!(code2, 0);
+
+    let pw1 = match &exec1.keychain_ops()[0] {
+        KeychainOp::CreateLoginKeychain { password, .. } => password.expose_secret().to_string(),
+        other => panic!("expected CreateLoginKeychain, got: {other:?}"),
+    };
+    let pw2 = match &exec2.keychain_ops()[0] {
+        KeychainOp::CreateLoginKeychain { password, .. } => password.expose_secret().to_string(),
+        other => panic!("expected CreateLoginKeychain, got: {other:?}"),
+    };
+    assert_ne!(
+        pw1, pw2,
+        "two consecutive creates must generate distinct keychain passwords"
+    );
+}
+
+/// Within a single create, the password threads through
+/// `CreateLoginKeychain` (the first provision sub-step that carries a
+/// password) and `StashPassword` — both must carry the SAME bytes so
+/// a future shell-entry unlock pass can retrieve the same secret. The
+/// 3 middle provision sub-steps (`SetDefaultKeychain` /
+/// `AddKeychainToSearchList` / `DisableKeychainAutoLock`) don't carry
+/// passwords and are excluded from this pin.
+#[test]
+fn create_provision_and_stash_share_the_same_password() {
+    let exec = StubHostMachine::new();
+    let (code, _, _) = run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0);
+    let ops = exec.keychain_ops();
+    assert_eq!(
+        ops.len(),
+        5,
+        "expected 4 provision sub-steps + StashPassword (5 ops), got: {ops:?}"
+    );
+    let create_pw = match &ops[0] {
+        KeychainOp::CreateLoginKeychain { name, password } => {
+            assert_eq!(name.as_str(), "dev");
+            password.expose_secret().to_string()
+        }
+        other => panic!("expected CreateLoginKeychain first, got: {other:?}"),
+    };
+    // The 3 middle provision sub-steps carry no password; pin their
+    // identity but not the password.
+    assert!(
+        matches!(&ops[1], KeychainOp::SetDefaultKeychain { name } if name.as_str() == "dev"),
+        "expected SetDefaultKeychain second, got: {:?}",
+        ops[1]
+    );
+    assert!(
+        matches!(&ops[2], KeychainOp::AddKeychainToSearchList { name } if name.as_str() == "dev"),
+        "expected AddKeychainToSearchList third, got: {:?}",
+        ops[2]
+    );
+    assert!(
+        matches!(&ops[3], KeychainOp::DisableKeychainAutoLock { name } if name.as_str() == "dev"),
+        "expected DisableKeychainAutoLock fourth, got: {:?}",
+        ops[3]
+    );
+    let stash_pw = match &ops[4] {
+        KeychainOp::StashPassword { name, password } => {
+            assert_eq!(name.as_str(), "dev");
+            password.expose_secret().to_string()
+        }
+        other => panic!("expected StashPassword fifth, got: {other:?}"),
+    };
+    assert_eq!(
+        create_pw, stash_pw,
+        "create-keychain + stash must carry the same secret"
+    );
+    assert!(
+        !create_pw.is_empty(),
+        "generated password must be non-empty"
+    );
+}
+
+/// `KeychainPassword`'s Debug never leaks the raw bytes.
+/// Belt-and-suspenders against accidental `{:?}` formatting in
+/// future error trails / log lines / panics.
+#[test]
+fn keychain_password_debug_is_redacted() {
+    let pw = tenant::domain::KeychainPassword::test_dummy("super-secret-value");
+    let formatted = format!("{pw:?}");
+    assert!(
+        formatted.contains("<redacted>"),
+        "Debug should contain '<redacted>'; got: {formatted}"
+    );
+    assert!(
+        !formatted.contains("super-secret-value"),
+        "Debug must not leak the raw password; got: {formatted}"
+    );
+}
+
+/// dry-run plan never renders the real password bytes.
+/// Even though the verbose plan section renders the keychain ops,
+/// `describe_keychain` substitutes `<password>` as a literal redaction
+/// marker.
+#[test]
+fn create_dry_run_plan_redacts_password() {
+    let (code, stdout, _) = run_with(
+        StubUserDirectory::default(),
+        &["create", "dev", "--dry-run", "-v"],
+    );
+    assert_eq!(code, 0);
+    // The plan body should reference the generic `<password>`
+    // placeholder used by describe_keychain — NOT any actual
+    // password bytes.
+    assert!(
+        stdout.contains("-p <password>"),
+        "expected literal '<password>' in dry-run plan; stdout was: {stdout}"
+    );
+}
+
+/// `KeychainError` on the FIRST provision sub-step
+/// (`CreateLoginKeychain`) surfaces as `EX_IOERR` + the dedicated
+/// stderr frame; tenant user + group are already on host (no
+/// automatic rollback — recovery is `tenant destroy <name>`, matching
+/// the Profile / Firewall posture). After the ADT split, failures on
+/// later sub-steps share the same `CreateError::KeychainProvision`
+/// arm; this test pins step-1 specifically.
+#[test]
+fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
+    let exec = StubHostMachine::new().fail_next_keychain_create(KeychainError::NonZero {
+        code: 51,
+        stderr: "security: SecKeychainCreate -25297 The user name or passphrase is incorrect.\n"
+            .into(),
+    });
+    let (code, stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
+    // Pre-failure ✓ stream is operator-visible: group + host + user
+    // all succeeded before the keychain step. CreateLoginKeychain
+    // fired (and failed) — no ✓ line for it; no later keychain ops.
+    let want_stdout = format!(
+        "{}\n\
+         ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ User account 'dev' provisioned (UID 600)\n",
+        section_line("Creating tenant 'dev'"),
+    );
+    assert_eq!(stdout, want_stdout);
+    assert!(
+        stderr.starts_with("tenant: failed to provision login keychain for 'dev':"),
+        "expected create_keychain_provision_failed frame; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("run `tenant destroy dev` to clean up"),
+        "expected recovery hint; stderr={stderr:?}"
+    );
+    // Three account ops ran (group + host-add + user), one keychain
+    // op attempted (the failing CreateLoginKeychain). No automatic
+    // rollback.
+    assert_eq!(exec.account_ops().len(), 3, "account ops not rolled back");
+    assert_eq!(exec.keychain_ops().len(), 1);
+    assert!(
+        matches!(
+            exec.keychain_ops()[0],
+            KeychainOp::CreateLoginKeychain { .. }
+        ),
+        "expected CreateLoginKeychain; got: {:?}",
+        exec.keychain_ops()[0]
+    );
+}
+
+/// Partial-failure visibility unlocked by the ADT split: if the
+/// SECOND provision sub-step (`SetDefaultKeychain`) fails, the first
+/// step's ✓ already emitted. Pre-split, this state was invisible to
+/// tests because the whole 4-call sequence was bundled inside the
+/// substrate adapter; the split surfaces partial progress at the
+/// reporter / op-identity layer.
+#[test]
+fn create_partial_keychain_provision_failure_at_step_2_surfaces() {
+    let exec = StubHostMachine::new().fail_next_keychain_set_default(KeychainError::NonZero {
+        code: 51,
+        stderr: "security: default-keychain failed\n".into(),
+    });
+    let (code, stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
+    // CreateLoginKeychain emitted its ✓ before the failure.
+    let want_stdout = format!(
+        "{}\n\
+         ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Tenant 'dev' login keychain created\n",
+        section_line("Creating tenant 'dev'"),
+    );
+    assert_eq!(stdout, want_stdout);
+    assert!(
+        stderr.starts_with("tenant: failed to provision login keychain for 'dev':"),
+        "expected create_keychain_provision_failed frame; stderr={stderr:?}"
+    );
+    // Two keychain ops attempted: CreateLoginKeychain (ok),
+    // SetDefaultKeychain (failed). The later three didn't fire.
+    let ops = exec.keychain_ops();
+    assert_eq!(ops.len(), 2, "expected 2 keychain ops, got: {ops:?}");
+    assert!(
+        matches!(&ops[0], KeychainOp::CreateLoginKeychain { .. }),
+        "first op should be CreateLoginKeychain; got: {:?}",
+        ops[0]
+    );
+    assert!(
+        matches!(&ops[1], KeychainOp::SetDefaultKeychain { .. }),
+        "second op should be SetDefaultKeychain; got: {:?}",
+        ops[1]
+    );
+}
+
+/// A Stash failure leaves the keychain fully provisioned (all 4 sub-
+/// steps succeeded) but unreachable by a future shell-entry unlock
+/// pass. Same posture — recovery is `tenant destroy <name>`.
+#[test]
+fn create_keychain_stash_failure_surfaces_with_keychain_provisioned() {
+    let exec = StubHostMachine::new().fail_next_keychain_stash(KeychainError::NonZero {
+        code: 45,
+        stderr: "security: SecKeychainAddGenericPassword -25299 duplicate.\n".into(),
+    });
+    let (code, stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
+    let want_stdout = format!(
+        "{}\n\
+         ✓ Share group 'dev-tenant-share' created (GID 600)\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Tenant 'dev' login keychain created\n\
+         ✓ Tenant 'dev' default keychain set\n\
+         ✓ Tenant 'dev' keychain added to search list\n\
+         ✓ Tenant 'dev' keychain auto-lock disabled\n",
+        section_line("Creating tenant 'dev'"),
+    );
+    assert_eq!(stdout, want_stdout);
+    assert!(
+        stderr.starts_with("tenant: failed to stash 'dev' password in operator keychain:"),
+        "expected create_keychain_stash_failed frame; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("run `tenant destroy dev` to clean up"),
+        "expected recovery hint; stderr={stderr:?}"
+    );
+    // All 4 provision sub-steps + the failing stash = 5 keychain ops.
+    assert_eq!(exec.keychain_ops().len(), 5);
 }

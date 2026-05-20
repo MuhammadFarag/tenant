@@ -4,6 +4,8 @@
 //! keeps the pair parallel.
 
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -231,5 +233,79 @@ impl FromStr for TenantUserName {
     type Err = std::convert::Infallible;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self(s.to_string()))
+    }
+}
+
+/// Random secret used to protect the tenant's login keychain AND
+/// stashed in the operator's keychain so a future non-interactive
+/// unlock pass works. Distinct from any macOS account password.
+/// Hex-encoded 32-byte
+/// random read from `/dev/urandom`; `Debug` redacts the value so
+/// accidental `{:?}` formatting in logs / error trails / panics never
+/// leaks the secret.
+#[derive(Clone, PartialEq, Eq)]
+pub struct KeychainPassword(String);
+
+impl KeychainPassword {
+    /// Read 32 bytes from `/dev/urandom`, hex-encode. Macos-only target
+    /// → no fallback path. Panics on read failure: the OS RNG being
+    /// unreachable is not an actionable error for the operator and the
+    /// alternative is silently shipping a weak password.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        let mut f = File::open("/dev/urandom").expect("/dev/urandom must be readable");
+        f.read_exact(&mut bytes)
+            .expect("/dev/urandom read must succeed");
+        let mut hex = String::with_capacity(64);
+        for b in bytes {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        Self(hex)
+    }
+
+    /// Borrow the password as `&str`. Named after the `secrecy` crate
+    /// convention so future log/format misuse looks obviously wrong at
+    /// the call site (`format!("{}", pw.expose_secret())` reads as a
+    /// red flag in a way that `pw.as_str()` does not). The two
+    /// legitimate consumers — the `security create-keychain -p <pw>`
+    /// and `security add-generic-password -w <pw>` argv builders in
+    /// `adapters/macos/host_machine.rs` — pass the password to argv
+    /// briefly and are commented as the platform-limit carve-out.
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+
+    /// Plan-rendering placeholder. The verbose plan section renders
+    /// keychain ops via `describe_keychain`, which substitutes
+    /// `<password>` for the actual bytes regardless of value — but a
+    /// `KeychainPassword` still has to be constructed for the
+    /// `KeychainOp` variant. `pub(crate)` keeps external library
+    /// consumers from threading arbitrary strings into `Tenants::create`
+    /// and bypassing `/dev/urandom`-backed `generate()`.
+    pub(crate) fn for_plan_placeholder() -> Self {
+        Self("<plan-placeholder>".to_string())
+    }
+
+    /// Test-fixture constructor. Deliberately named so that any
+    /// production-code call site is a visible smell at review: the
+    /// only sanctioned way to construct a real password is `generate()`
+    /// (which reads `/dev/urandom`). Integration tests in `tests/`
+    /// need this to build fixture `KeychainOp` variants whose password
+    /// value is never inspected (describe-side substitutes `<password>`,
+    /// stub-side ignores the value). `#[cfg(test)]` doesn't reach
+    /// integration tests, so naming-enforcement is what we have —
+    /// `KeychainPassword::test_dummy("admin")` in a production diff
+    /// fails review on sight.
+    pub fn test_dummy(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// `<redacted>` so accidental log/panic output never leaks the secret.
+impl fmt::Debug for KeychainPassword {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("KeychainPassword")
+            .field(&"<redacted>")
+            .finish()
     }
 }

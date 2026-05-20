@@ -3,10 +3,11 @@
 //! `Tenants::destroy_orphan_group` orchestrators.
 
 use crate::allocation::TENANT_UID_FLOOR;
+use crate::domain::host_machine::WritableOp;
 use crate::domain::reporter::Reporter;
 use crate::domain::{
-    AccountError, AccountOp, FirewallError, FirewallOp, HostUserDirectory, HostUserName, ProfileOp,
-    TenantUserName, UserDirectoryError, UserId,
+    AccountError, AccountOp, FirewallError, FirewallOp, HostUserDirectory, HostUserName,
+    KeychainError, KeychainOp, ProfileOp, TenantUserName, UserDirectoryError, UserId,
 };
 use crate::firewall::remove_anchor_ref;
 use crate::profile::ProfileError;
@@ -101,6 +102,34 @@ impl<'a> Tenants<'a> {
             Err(other) => return Err(DestroyError::Account(other)),
         }
 
+        // Remove the operator-side stashed password. Warn-and-
+        // continue: a tenant created before keychain bootstrap landed
+        // has no stash — `NotFound` is the convergent case (no `✓`
+        // narration, since nothing actually mutated state). Other
+        // failures are operator-side data we couldn't clean; surface
+        // a warning but don't fail the whole verb.
+        //
+        // `step()` fires unconditionally — matches the verbose-mode
+        // contract used by every other op ("`$` echo says what was
+        // attempted, regardless of outcome"). `progress()` fires only
+        // on Ok — matches `Tenants::run`'s semantics. On the
+        // convergent NotFound path, the `$` line still emits in
+        // verbose mode so operators scanning logs see the substrate
+        // command that ran.
+        let delete_stash = KeychainOp::DeleteStashedPassword { name: name.into() };
+        reporter.step(delete_stash.op_ref());
+        match self.machine.execute_keychain(&delete_stash) {
+            Ok(()) => {
+                reporter.progress(delete_stash.op_ref());
+            }
+            Err(KeychainError::NotFound) => {
+                // Convergent: substrate ran, nothing stashed → no ✓.
+            }
+            Err(other) => {
+                reporter.destroy_keychain_delete_warning(name, &other);
+            }
+        }
+
         self.run(&remove_host, reporter)?;
         self.run(&delete_group, reporter)?;
         self.run(&delete_profile, reporter)
@@ -152,6 +181,31 @@ impl<'a> Tenants<'a> {
         reporter.orphan_group_starting(name);
 
         self.run(&remove_host, reporter)?;
+
+        // Same operator-side stash cleanup as `destroy`. A tenant
+        // that landed in OrphanGroup state via a partial create may
+        // still have a stashed password; without this, the entry
+        // lingers in the operator's keychain indefinitely. Same
+        // warn-and-continue posture as the main destroy path:
+        // `step()` fires unconditionally (verbose-mode `$` echo
+        // matches every other op); `progress()` fires only on Ok.
+        // `NotFound` is the convergent legacy-tenant case (no `✓`,
+        // just the `$` line in verbose); other failures emit a
+        // warning but don't fail the whole convergence path.
+        let delete_stash = KeychainOp::DeleteStashedPassword { name: name.into() };
+        reporter.step(delete_stash.op_ref());
+        match self.machine.execute_keychain(&delete_stash) {
+            Ok(()) => {
+                reporter.progress(delete_stash.op_ref());
+            }
+            Err(KeychainError::NotFound) => {
+                // Convergent: substrate ran, nothing stashed → no ✓.
+            }
+            Err(other) => {
+                reporter.destroy_keychain_delete_warning(name, &other);
+            }
+        }
+
         self.run(&delete_group, reporter)?;
         self.run(&delete_profile, reporter)
             .map_err(DestroyError::Profile)?;

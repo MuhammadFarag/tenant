@@ -156,3 +156,39 @@ impl fmt::Display for AclError {
         }
     }
 }
+
+/// Failure surface for `security`-driven keychain operations.
+/// `NotFound` is a distinct variant so `destroy` can treat an absent
+/// stash on a tenant created before keychain bootstrap landed as
+/// success rather than an IO failure.
+#[derive(Debug)]
+pub enum KeychainError {
+    Spawn(io::Error),
+    NonZero {
+        code: i32,
+        stderr: String,
+    },
+    /// Stashed password absent in the operator's keychain. Destroy
+    /// converges on this; a future shell-entry unlock pass would
+    /// refuse on this.
+    NotFound,
+}
+
+impl fmt::Display for KeychainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeychainError::Spawn(e) => write!(f, "failed to spawn security: {e}"),
+            KeychainError::NonZero { code, stderr } => {
+                let trimmed = stderr.trim();
+                if trimmed.is_empty() {
+                    write!(f, "security exited with code {code}")
+                } else {
+                    write!(f, "security exited with code {code}: {trimmed}")
+                }
+            }
+            KeychainError::NotFound => {
+                write!(f, "stashed password not found in operator keychain")
+            }
+        }
+    }
+}

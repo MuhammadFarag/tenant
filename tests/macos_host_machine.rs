@@ -383,3 +383,111 @@ fn macos_describes_acl_revoke_rw() {
          /Users/Shared/sandbox/dev",
     );
 }
+
+// ============================================================
+// Keychain describe-string pins
+// ============================================================
+//
+// Provision is four ADT variants, one substrate call each (the split
+// landed when the 4-call bundle was broken up so each step is its own
+// op-identity assertion target). Each describe-string is its own pin
+// here.
+
+#[test]
+fn macos_describes_create_login_keychain() {
+    let s = MacosHostMachine;
+    let op = tenant::domain::KeychainOp::CreateLoginKeychain {
+        name: "dev".into(),
+        password: tenant::domain::KeychainPassword::test_dummy("ignored-by-describe"),
+    };
+    assert_eq!(
+        s.describe_keychain(&op),
+        "sudo -iu dev security create-keychain -p <password> login.keychain-db"
+    );
+}
+
+#[test]
+fn macos_describes_set_default_keychain() {
+    let s = MacosHostMachine;
+    let op = tenant::domain::KeychainOp::SetDefaultKeychain { name: "dev".into() };
+    assert_eq!(
+        s.describe_keychain(&op),
+        "sudo -iu dev security default-keychain -s login.keychain-db"
+    );
+}
+
+#[test]
+fn macos_describes_add_keychain_to_search_list() {
+    let s = MacosHostMachine;
+    let op = tenant::domain::KeychainOp::AddKeychainToSearchList { name: "dev".into() };
+    assert_eq!(
+        s.describe_keychain(&op),
+        "sudo -iu dev security list-keychains -s login.keychain-db"
+    );
+}
+
+#[test]
+fn macos_describes_disable_keychain_auto_lock() {
+    let s = MacosHostMachine;
+    let op = tenant::domain::KeychainOp::DisableKeychainAutoLock { name: "dev".into() };
+    assert_eq!(
+        s.describe_keychain(&op),
+        "sudo -iu dev security set-keychain-settings login.keychain-db"
+    );
+}
+
+#[test]
+fn macos_describes_stash_password_with_argv_redaction_marker() {
+    let s = MacosHostMachine;
+    let op = tenant::domain::KeychainOp::StashPassword {
+        name: "dev".into(),
+        password: tenant::domain::KeychainPassword::test_dummy("ignored-by-describe"),
+    };
+    assert_eq!(
+        s.describe_keychain(&op),
+        "security add-generic-password -U -a dev -s tenant-dev -w <password>"
+    );
+}
+
+#[test]
+fn macos_describes_delete_stashed_password() {
+    let s = MacosHostMachine;
+    let op = tenant::domain::KeychainOp::DeleteStashedPassword { name: "dev".into() };
+    assert_eq!(
+        s.describe_keychain(&op),
+        "security delete-generic-password -a dev -s tenant-dev"
+    );
+}
+
+// `tenant_keychain_present` smoke. Defends against the EACCES-vs-NotFound
+// substrate bug where calling `std::fs::metadata` from the operator
+// process against `/Users/<tenant>/Library/...` returns
+// PermissionDenied — because Library is mode 0700 — and surfaces as
+// ProbeError::Spawn instead of a clean Ok(false). The fix runs the
+// existence check AS THE TENANT via `sudo -n -u <name> /bin/test -e
+// <path>`; this test exercises that path against `root`, whose
+// home (`/var/root/`) doesn't contain a `Library/Keychains/login.keychain-db`
+// on a default macOS install — so the probe should return Ok(false).
+// `#[ignore]` because the test requires passwordless `sudo -n -u root`,
+// which isn't configured in headless CI environments.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn macos_tenant_keychain_present_returns_false_for_absent_path() {
+    use tenant::domain::{HostMachine, TenantUserName};
+    let machine = MacosHostMachine;
+    // `root` exists on every macOS host. The keychain path under
+    // `/Users/root/...` doesn't (root's home is `/var/root/`); the
+    // probe builds the `/Users/<name>/Library/Keychains/login.keychain-db`
+    // path literally, so this is a deterministic-absent case that the
+    // old `std::fs::metadata` impl would have surfaced as
+    // ProbeError::Spawn (EACCES traversing into `/Users/root/`'s
+    // absent parent) rather than a clean Ok(false).
+    let verdict = machine
+        .tenant_keychain_present(&TenantUserName::from("root"))
+        .expect("sudo -n -u root /bin/test should yield a kernel verdict");
+    assert!(
+        !verdict,
+        "keychain at /Users/root/Library/Keychains/login.keychain-db must not exist"
+    );
+}

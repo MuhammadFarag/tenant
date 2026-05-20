@@ -355,6 +355,22 @@ it from scratch wastes a cycle and risks getting it wrong.
   `tenant reload <name>`, NOT another `tenant create` (would refuse
   on name-conflict).
 
+- **`KeychainOp::CreateLoginKeychain` is idempotent against duplicate
+  keychain.** The first of the 4 `security` calls
+  (`create-keychain`) exits non-zero with stderr "already exists" if
+  the tenant's `login.keychain-db` already exists on disk (retry
+  after a partial create, or any re-attached `/Users/Deleted Users/`
+  home). The substrate adapter swallows that one error as `Ok(())`
+  and re-applies the remaining three calls (`default-keychain -s`,
+  `list-keychains -s`, `set-keychain-settings`), which are natively
+  idempotent. Same posture as `pfctl -e "already enabled"` and
+  `chmod +a` ACL grants. Detection is on the stderr substring
+  (case-insensitive), not on a specific exit code — macOS shifts the
+  code across versions. The other 3 calls are not pre-guarded; if
+  they fail, partial state (just the keychain file) remains and is
+  cleaned transitively by `tenant destroy` moving the home to
+  `/Users/Deleted Users/`.
+
 - **PF anchor flush is load-bearing on destroy paths.** `pfctl -f
   /etc/pf.conf` does NOT garbage-collect anchors whose `load anchor`
   directive has been removed. Without `pfctl -a tenant-<name> -F all`,

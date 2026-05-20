@@ -583,7 +583,7 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
 }
 
 // ================================================================
-// Pre-exec doctor audit (cycle 16): reload scope
+// Pre-exec doctor audit: reload scope
 // ================================================================
 //
 // Reload's audit considers PfDisabled host-wide + the full per-tenant
