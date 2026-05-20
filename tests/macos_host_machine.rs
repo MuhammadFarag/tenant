@@ -459,6 +459,30 @@ fn macos_describes_delete_stashed_password() {
     );
 }
 
+// Argv-tail pin for the shell-entry unlock pass. `unlock_tenant_keychain`
+// is a HostMachine carve-out (non-unit-error-shaped probe-style call, no
+// `KeychainOp` variant, no `describe_*` surface) that routes through
+// `run_security_as_tenant`; the unlock-specific tail is extracted into
+// `unlock_keychain_argv` to give this test a byte-exact seam.
+// Production + test consume the same helper, so any drift fails here
+// exactly once. The `sudo -iu <name> security` prefix is pinned by
+// `run_security_as_tenant`'s own sibling coverage.
+#[test]
+fn macos_unlock_keychain_argv_tail() {
+    use tenant::adapters::macos::host_machine::unlock_keychain_argv;
+    use tenant::domain::KeychainPassword;
+    let password = KeychainPassword::test_dummy("test-keychain-pw");
+    assert_eq!(
+        unlock_keychain_argv(&password),
+        vec![
+            "unlock-keychain",
+            "-p",
+            "test-keychain-pw",
+            "login.keychain-db",
+        ],
+    );
+}
+
 // `tenant_keychain_present` smoke. Defends against the EACCES-vs-NotFound
 // substrate bug where calling `std::fs::metadata` from the operator
 // process against `/Users/<tenant>/Library/...` returns

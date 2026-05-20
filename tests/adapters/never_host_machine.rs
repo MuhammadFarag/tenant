@@ -2,8 +2,8 @@
 
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp, PathKind,
-    ProbeError, ProfileOp, TenantUserName,
+    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
+    KeychainPassword, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 
 /// Default host machine for tests that should not reach the exec stage —
@@ -106,5 +106,18 @@ impl HostMachine for NeverHostMachine {
     }
     fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError> {
         panic!("host machine unexpectedly invoked (stash_present): name={name:?}");
+    }
+    fn find_stashed_password(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<KeychainPassword, KeychainError> {
+        panic!("host machine unexpectedly invoked (find_stashed_password): name={name:?}");
+    }
+    fn unlock_tenant_keychain(
+        &self,
+        name: &TenantUserName,
+        _password: &KeychainPassword,
+    ) -> Result<(), KeychainError> {
+        panic!("host machine unexpectedly invoked (unlock_tenant_keychain): name={name:?}");
     }
 }

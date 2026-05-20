@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use tenant::domain::{AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, UserId};
+use tenant::domain::{
+    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, KeychainError, UserId,
+};
 
 mod adapters;
 mod common;
@@ -11,12 +13,20 @@ use common::*;
 fn shell_dry_run_default_shows_intent() {
     // Smallest red→green for the new verb. `stub_with_tenant("dev")` gives
     // us a tenant-range user (UID 600) so eligibility classifies as
-    // shellable; dry-run + NeverHostMachine guarantees we don't actually
-    // shell out.
+    // shellable; dry-run swaps in `DryRunHostMachine` so we don't
+    // actually shell out. `DryRunHostMachine::find_stashed_password`
+    // returns `NotFound` defensively (dry-run shouldn't need real
+    // passwords), so the pre-spawn keychain pass routes through the
+    // `StashAbsent` refusal arm — the dry-run preview mirrors what a
+    // legacy tenant (no operator-side stash) would see in real mode.
     let (code, stdout, stderr) = run_with(stub_with_tenant("dev"), &["shell", "dev", "--dry-run"]);
-    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    assert_eq!(code, 64, "exit code = {code}; stderr={stderr:?}");
     let want = format!("{}Would shell into 'dev'.\n", shell_summary_block("dev"));
     assert_eq!(stdout, want);
+    assert!(
+        stderr.contains("stashed password absent"),
+        "expected stash-absent refusal frame; stderr={stderr:?}"
+    );
 }
 
 #[test]
@@ -27,12 +37,15 @@ fn shell_dry_run_verbose_shows_mechanism() {
     // InstallAnchor describe line uses the placeholder body — its
     // describe ignores the body field, so the line is stable across
     // the empty-body plan placeholder and the real-body op at execute
-    // time.
+    // time. Exit 64 because `DryRunHostMachine::find_stashed_password`
+    // returns `NotFound` and the pre-spawn keychain pass routes
+    // through the `StashAbsent` refusal arm; the plan still renders
+    // because it's built and emitted before the unlock pass.
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["shell", "dev", "--dry-run", "-v"],
     );
-    assert_eq!(code, 0);
+    assert_eq!(code, 64);
     // Shell's verbose plan uses the intent-leads-shell-follows layout
     // (shell has no prompt, so the plan stays in the verb rather than
     // moving into a summary). 4 entries: Install + Reload + AddHost
@@ -66,16 +79,21 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
     // the shell after login returns. The narrow runs silently in standard
     // mode (no `$` echo); only the intent line emits.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     // Section + ✓ for each substrate step before login. No closing
-    // line — login transfers control to the shell.
+    // line — login transfers control to the shell. The keychain
+    // unlock pass emits its own ✓ between the reapply and login (the
+    // tenant's `login.keychain-db` is unlocked from the
+    // operator-stashed password before the child shell starts).
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
-         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Tenant 'dev' login keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want);
@@ -92,11 +110,106 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
 }
 
 #[test]
+fn shell_refuses_when_stash_absent() {
+    // Legacy-tenant pin: a tenant created before the bootstrap-stash
+    // landed has no entry in the operator's keychain, so the pre-spawn
+    // unlock pass routes through `ShellError::StashAbsent`. The dispatch
+    // arm surfaces `Reporter::shell_refuse_stash_absent` and exits 64
+    // (EX_USAGE, not EX_IOERR — operator needs to re-bootstrap, not the
+    // substrate is broken). NO `with_default_stash` call here: the
+    // default `StubHostMachine::find_stashed_password` returns
+    // `KeychainError::NotFound`, which is the exact condition that
+    // triggers the refusal. Refusal fires AFTER `execute_reapply_plan`,
+    // so stdout carries the section header + reapply ✓ stream that
+    // landed before the unlock pass; the keychain ✓ line does NOT
+    // appear (unlock never succeeded). Login + exec carve-outs MUST
+    // NOT fire — the refusal is the explicit contract that we don't
+    // hand control to a tenant whose keychain we can't unlock.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
+    let want_stdout = format!(
+        "{}\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall ruleset reloaded\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
+        section_line("Entering tenant 'dev'"),
+    );
+    assert_eq!(stdout, want_stdout);
+    assert_eq!(
+        stderr,
+        "tenant: refusing to enter 'dev': stashed password absent \
+         \u{2014} run `tenant destroy dev && tenant create dev` to re-bootstrap\n"
+    );
+    assert!(
+        exec.logins().is_empty(),
+        "login must NOT fire when the keychain stash is absent: {:?}",
+        exec.logins()
+    );
+    assert!(
+        exec.exec_calls().is_empty(),
+        "exec_as_tenant must NOT fire when the keychain stash is absent: {:?}",
+        exec.exec_calls()
+    );
+}
+
+#[test]
+fn shell_surfaces_substrate_failure_on_unlock_call() {
+    // Stash present + `security unlock-keychain` failed at the substrate.
+    // Distinct from `shell_refuses_when_stash_absent`: there's no
+    // operator action to take (the stash is present; the substrate
+    // itself broke), so the dispatch routes through `EX_IOERR` not
+    // `EX_USAGE`. The Reporter frame integrates `KeychainError::Display`
+    // verbatim — no recovery hint, parallel to other shell substrate
+    // failures (`shell_failed`, `shell_narrow_firewall_failed`).
+    // Stdout carries the reapply ✓ stream (which landed before the
+    // unlock attempt) but NOT the keychain ✓ (the unlock substrate
+    // call failed before the success line could emit). Login + exec
+    // carve-outs MUST NOT fire — substrate failure short-circuits
+    // before we hand control to the tenant.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .fail_next_unlock_tenant_keychain(KeychainError::NonZero {
+            code: 51,
+            stderr: "The user name or passphrase you entered is not correct.".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
+    let want_stdout = format!(
+        "{}\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall ruleset reloaded\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
+        section_line("Entering tenant 'dev'"),
+    );
+    assert_eq!(stdout, want_stdout);
+    assert_eq!(
+        stderr,
+        "tenant: failed to unlock login keychain for 'dev': \
+         security exited with code 51: \
+         The user name or passphrase you entered is not correct.\n"
+    );
+    assert!(
+        exec.logins().is_empty(),
+        "login must NOT fire on unlock substrate failure: {:?}",
+        exec.logins()
+    );
+    assert!(
+        exec.exec_calls().is_empty(),
+        "exec_as_tenant must NOT fire on unlock substrate failure: {:?}",
+        exec.exec_calls()
+    );
+}
+
+#[test]
 fn shell_real_mode_verbose_shows_plan_and_echo() {
     // Real+verbose: intent + plan + `$` echoes (narrow's InstallAnchor
     // + Reload precede the LoginAsUser). No post-exec line.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"]);
     assert_eq!(code, 0);
@@ -126,6 +239,7 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
          ✓ Firewall ruleset reloaded\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Tenant 'dev' login keychain unlocked\n\
          $ sudo -iu dev\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -295,16 +409,19 @@ fn shell_propagates_child_exit_code() {
     // so the auto-narrow succeeds before login fires.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .login_exit_code(5);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 5, "stderr={stderr:?}");
     // Section + ✓ stream from the narrow reapply land before login
-    // fires.
+    // fires. The keychain unlock pass adds its own ✓ between the
+    // reapply and login.
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
-         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Tenant 'dev' login keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want);
@@ -317,13 +434,17 @@ fn shell_dry_run_bypasses_injected_host_machine() {
     // Dry-run swap-in of DryRunHostMachine means the StubHostMachine wired by
     // the test never sees a call. Mirrors `dry_run_bypasses_injected_host_machine`
     // and `destroy_dry_run_bypasses_injected_host_machine` for create/destroy.
+    // Exit 64 because `DryRunHostMachine::find_stashed_password` returns
+    // `NotFound` (the dry-run preview mirrors the legacy-tenant refusal
+    // shape from real mode); the swap-in pin is unchanged — the injected
+    // host machine still sees zero calls.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "--dry-run"],
     );
-    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(code, 64, "stderr={stderr:?}");
     let want = format!("{}Would shell into 'dev'.\n", shell_summary_block("dev"));
     assert_eq!(stdout, want);
     assert!(
@@ -366,7 +487,8 @@ fn shell_narrows_to_runtime_before_login() {
     // Pin: firewall_ops = [InstallAnchor(runtime body), Reload];
     // login fires after the narrow; ordering matters.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     let expected_body = tenant::firewall::render_anchor("dev", &[]);
@@ -397,7 +519,8 @@ fn shell_refusal_does_not_invoke_narrow() {
     // it explicit with a StubHostMachine whose firewall_ops + logins are
     // observable, pinning the contract at the verb level.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["shell", "ghost"]);
     assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
@@ -432,7 +555,8 @@ fn shell_does_not_invoke_flush_anchor() {
     // load-bearing. A defensive FlushAnchor here would wipe rules
     // we're simultaneously installing.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, _stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0);
     for op in exec.firewall_ops() {
@@ -515,6 +639,7 @@ fn shell_aborts_when_install_anchor_fails() {
     // a failed InstallAnchor.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .fail_firewall_op(
             FirewallOp::InstallAnchor {
                 name: "dev".into(),
@@ -559,6 +684,7 @@ fn shell_aborts_when_reload_fails() {
     // `mode_reload_failure_surfaces_without_recovery`).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .fail_firewall_op(
             FirewallOp::Reload,
             FirewallError::NonZero {
@@ -616,7 +742,9 @@ fn shell_install_anchor_body_excludes_install_hosts() {
         &["api.example.com"],
         &["nodejs.org", "storage.googleapis.com"],
     );
-    let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_default_stash("dev");
     let (code, _stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0);
     let expected_body = tenant::firewall::render_anchor("dev", &["api.example.com".to_string()]);
@@ -649,6 +777,7 @@ fn shell_auto_reapply_includes_share_substrate() {
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
+        .with_default_stash("dev")
         .login_exit_code(0);
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "exit = {code}; stderr={stderr:?}");
@@ -677,7 +806,9 @@ fn shell_refuses_when_host_path_missing_does_not_launch_login() {
         &[],
         &[("/nonexistent/missing/shell-sentinel", "rw", "$HOME/src")],
     );
-    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_default_stash("dev");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
     assert!(
@@ -702,6 +833,7 @@ fn shell_routes_acl_substrate_failure_via_shell_narrow_acl_frame() {
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
+        .with_default_stash("dev")
         .fail_acl_op(
             AclOp::Grant {
                 path: PathBuf::from("/tmp"),
@@ -733,6 +865,7 @@ fn shell_routes_sudo_u_substrate_failure_via_shell_narrow_account_frame() {
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
+        .with_default_stash("dev")
         .fail_account_op(
             AccountOp::EnsureSymlinkAsUser {
                 name: "dev".into(),
@@ -768,6 +901,7 @@ fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
+        .with_default_stash("dev")
         .login_exit_code(0);
     let (code, stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -809,6 +943,7 @@ fn shell_negative_pin_share_substrate_does_not_emit_firewall_recovery_ops() {
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
+        .with_default_stash("dev")
         .login_exit_code(0);
     let (code, _stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0);
@@ -856,7 +991,8 @@ fn shell_pre_exec_doctor_silent_when_host_is_clean() {
     // stub injection — the audit tests pin behavior through real
     // mode + TTY which exercises the actual StubHostMachine reads).
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, stdout, _stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
     assert_eq!(code, 0);
@@ -877,6 +1013,7 @@ fn shell_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
     // `doctor_finding` framing — critical: prefix + the finding text.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n");
     let (code, stdout, _stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
@@ -895,6 +1032,7 @@ fn shell_pre_exec_doctor_aggregates_warnings_into_single_line() {
     // operator runs doctor for detail.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .with_env_policy_content("");
     let (code, stdout, _stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
@@ -916,6 +1054,7 @@ fn shell_pre_exec_doctor_critical_plus_warnings_emits_both_lines() {
     // aggregate line counting 2 warnings (plural).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n")
         .with_env_policy_content("")
         .with_host_in_group("operator", "dev-tenant-share", false);
@@ -940,6 +1079,7 @@ fn shell_pre_exec_doctor_verbose_does_not_emit_guidance_for_inline_critical() {
     // stays a one-liner.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n");
     let (code, stdout, _stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"], b"");
@@ -961,6 +1101,7 @@ fn shell_pre_exec_doctor_silent_in_scripted_mode_no_summary() {
     // progress + nothing extra above.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n");
     let (code, stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0);
@@ -985,6 +1126,7 @@ fn shell_pre_exec_doctor_exit_code_unaffected_by_findings() {
     // on successful login. `--strict` stays doctor-only.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n")
         .with_env_policy_content("")
         .login_exit_code(0);
@@ -1003,6 +1145,7 @@ fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
     // login.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .fail_next_pf_status(FirewallError::NonZero {
             code: 1,
             stderr: "sudo: a password is required".into(),
@@ -1046,7 +1189,8 @@ fn shell_command_form_default_runtime_invokes_exec_as_tenant() {
     // runtime posture; the redundant second reapply is gated off
     // per smoke verification).
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -1089,7 +1233,9 @@ fn shell_command_form_install_mode_widens_then_narrows() {
     // when the profile carries install hosts, so the firewall_ops
     // pin captures the asymmetric pair shape.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
-    let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_default_stash("dev");
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -1135,6 +1281,7 @@ fn shell_command_form_propagates_child_exit_code() {
     // shell_propagates_child_exit_code (which targets login).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .exec_exit_code(7);
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1152,7 +1299,8 @@ fn shell_command_form_does_not_invoke_login_carveout() {
     // The two carve-outs serve different forms; routing must split
     // cleanly at the empty-argv check.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, _stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -1180,6 +1328,7 @@ fn shell_interactive_form_unchanged_when_argv_empty() {
     // form).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .login_exit_code(5);
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(
@@ -1217,6 +1366,7 @@ fn shell_command_form_install_mode_narrow_on_finally_runs_when_child_fails() {
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
+        .with_default_stash("dev")
         .exec_exit_code(42);
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1253,7 +1403,8 @@ fn shell_command_form_runtime_mode_no_post_child_narrow() {
     // pf to the same ruleset for zero on-disk delta. Pin: exactly
     // ONE Reload op on the runtime-mode path.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, _stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -1289,6 +1440,7 @@ fn shell_command_form_narrow_failure_surfaces_warning_and_child_exit_wins() {
     let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
+        .with_default_stash("dev")
         .fail_firewall_op(
             FirewallOp::InstallAnchor {
                 name: "dev".into(),
@@ -1353,6 +1505,7 @@ fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
+        .with_default_stash("dev")
         .fail_next_firewall(FirewallError::NonZero {
             code: 1,
             stderr: "pf reload failed".into(),
@@ -1393,7 +1546,9 @@ fn shell_command_form_negative_pin_no_flush_anchor() {
     // the command form preserves the parent directive across widen +
     // narrow.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
-    let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_default_stash("dev");
     let (_code, _stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -1416,7 +1571,8 @@ fn shell_command_form_share_substrate_reapplies_before_exec() {
     // reapply BEFORE exec_as_tenant. Pin: account ops include AddHost;
     // profile is read.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -1446,13 +1602,17 @@ fn shell_command_dry_run_default_shows_intent() {
     // Flow 1 from the prime (default-runtime command form, standard mode):
     // summary block + dry-run preamble line (`Would run command as
     // tenant 'dev' (runtime tier).`). No plan in standard dry-run.
+    // Exit 64 because `DryRunHostMachine::find_stashed_password`
+    // returns `NotFound` and the pre-spawn keychain pass routes
+    // through the `StashAbsent` refusal arm — the dry-run preview
+    // mirrors the legacy-tenant refusal shape.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "--dry-run", "--", "ls", "/tmp"],
     );
-    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(code, 64, "stderr={stderr:?}");
     let want = format!(
         "{}Would run command as tenant 'dev' (runtime tier).\n",
         shell_command_summary_block("dev", "runtime", "ls /tmp"),
@@ -1465,6 +1625,9 @@ fn shell_command_dry_run_install_mode_includes_widen_and_narrow_bullets() {
     // Flow 2 from the prime (install-mode command form, standard mode):
     // headline carries `(mode: install)`; entry bullet says "widen",
     // extra finally-narrow bullet; sudo line names firewall narrow.
+    // Exit 64 because `DryRunHostMachine::find_stashed_password`
+    // returns `NotFound` and the pre-spawn keychain pass routes
+    // through the `StashAbsent` refusal arm.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1481,7 +1644,7 @@ fn shell_command_dry_run_install_mode_includes_widen_and_narrow_bullets() {
             "echo hi",
         ],
     );
-    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(code, 64, "stderr={stderr:?}");
     let want = format!(
         "{}Would run command as tenant 'dev' (install tier).\n",
         shell_command_summary_block("dev", "install", "bash -c echo hi"),
@@ -1496,7 +1659,9 @@ fn shell_command_real_mode_section_divider_includes_tier_when_install() {
     // exact header bytes for both via section_line so a future width
     // tweak moves both sides together.
     let runtime_profile = tenant::profile::default_profile_toml();
-    let exec = StubHostMachine::new().with_existing_profile("dev", &runtime_profile);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &runtime_profile)
+        .with_default_stash("dev");
     let (_code, stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
@@ -1512,7 +1677,9 @@ fn shell_command_real_mode_section_divider_includes_tier_when_install() {
     );
 
     let install_profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
-    let exec2 = StubHostMachine::new().with_existing_profile("dev", &install_profile);
+    let exec2 = StubHostMachine::new()
+        .with_existing_profile("dev", &install_profile)
+        .with_default_stash("dev");
     let (_code, stdout2, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec2,
@@ -1535,7 +1702,8 @@ fn shell_command_no_confirm_prompt() {
     // shape would change. Pin: clean execution + no "Proceed?" in
     // stdout.
     let exec = StubHostMachine::new()
-        .with_existing_profile("dev", &tenant::profile::default_profile_toml());
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
     let (code, stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
@@ -1560,6 +1728,7 @@ fn shell_command_narrow_failure_warning_uses_warning_glyph() {
     let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
+        .with_default_stash("dev")
         .fail_firewall_op(
             FirewallOp::InstallAnchor {
                 name: "dev".into(),
@@ -1587,6 +1756,7 @@ fn shell_command_closing_runtime_mode_bare_exit_line() {
     // finally (per F2). Matches the prime's Flow 1 spec.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .exec_exit_code(7);
     let (code, stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1617,6 +1787,7 @@ fn shell_command_closing_install_mode_includes_narrow_back_suffix() {
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
+        .with_default_stash("dev")
         .exec_exit_code(0);
     let (code, stdout, _stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1643,6 +1814,7 @@ fn shell_command_closing_does_not_emit_on_interactive_form() {
     // …" line afterwards. Empty argv is the discriminator in dispatch.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
         .login_exit_code(0);
     let (_code, stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert!(
@@ -1665,6 +1837,7 @@ fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
     let make_exec = || {
         StubHostMachine::new()
             .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+            .with_default_stash("dev")
             .with_pf_status_content("Status: Disabled\n")
     };
 
@@ -1714,6 +1887,99 @@ fn shell_clap_rejects_mode_without_argv() {
             && exec.exec_calls().is_empty()
             && exec.logins().is_empty(),
         "no substrate fires on clap parse rejection"
+    );
+}
+
+// ================================================================
+// Keychain shell-entry unlock pass
+// ================================================================
+//
+// `tenant shell <name>` retrieves the operator-stashed password and
+// unlocks the tenant's `login.keychain-db` BEFORE handing off to
+// login / exec_as_tenant. The unlock pass is the LAST step before
+// exec (after `execute_reapply_plan`). Already-unlocked is a no-op
+// at the substrate; the operator sees `✓ Tenant 'X' login keychain
+// unlocked` either way so a silent regression is visible.
+
+#[test]
+fn shell_unlocks_keychain_before_login() {
+    // Stash pre-loaded via `with_stash`. Shell runs the happy path;
+    // assert the byte-exact stdout includes the unlock ✓ between the
+    // reapply ✓ stream and login. Substrate ordering is enforced by
+    // `Tenants::shell` placing the unlock between reapply and login;
+    // the unlock_calls() recording pins that the substrate fired.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_stash("dev", tenant::domain::KeychainPassword::test_dummy("hexpw"));
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let want = format!(
+        "{}\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall ruleset reloaded\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Tenant 'dev' login keychain unlocked\n",
+        section_line("Entering tenant 'dev'"),
+    );
+    assert_eq!(stdout, want);
+    assert_eq!(
+        exec.unlock_calls(),
+        vec!["dev".to_string()],
+        "unlock_tenant_keychain must fire exactly once for the tenant"
+    );
+    assert_eq!(exec.logins(), vec!["dev".to_string()]);
+}
+
+#[test]
+fn shell_command_form_also_unlocks() {
+    // Cycle-4 pin: the unlock pass plugs in at the SHARED pre-spawn point
+    // (`Tenants::unlock_tenant_keychain`) used by both branches of
+    // `Tenants::shell`, so the command form gets the same unlock pass as
+    // the interactive form. Sibling to `shell_unlocks_keychain_before_login`
+    // (interactive) — the byte-exact stdout pins ordering: the keychain ✓
+    // sits between the reapply ✓ stream and the closing `Done` section
+    // (which only emits AFTER `exec_as_tenant` returns), so the unlock
+    // substrate fired BEFORE the child command. `logins()` must be empty:
+    // command form uses `exec_as_tenant`, not the `login` carve-out — pin
+    // that to differentiate from the interactive analog.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "echo", "hi"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let want = format!(
+        "{}\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
+         ✓ Firewall ruleset reloaded\n\
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Tenant 'dev' login keychain unlocked\n\
+         {}\n\
+         Command exited with code 0.\n",
+        section_line("Running command as tenant 'dev'"),
+        section_line("Done"),
+    );
+    assert_eq!(stdout, want);
+    assert_eq!(
+        exec.unlock_calls(),
+        vec!["dev".to_string()],
+        "unlock_tenant_keychain must fire exactly once for the tenant"
+    );
+    assert_eq!(
+        exec.exec_calls(),
+        vec![(
+            "dev".to_string(),
+            vec!["echo".to_string(), "hi".to_string()],
+        )],
+        "command form invokes exec_as_tenant with the operator's argv"
+    );
+    assert!(
+        exec.logins().is_empty(),
+        "command form must NOT invoke the login carve-out: {:?}",
+        exec.logins()
     );
 }
 

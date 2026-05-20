@@ -21,6 +21,8 @@ A container is the standard answer. The agent gets its own filesystem, its own n
 
 After provisioning, you enter the tenant with `tenant shell <name>` (interactive login) or `tenant shell <name> -- <cmd>` (single command). Both auto-narrow the firewall to runtime tier on entry and reapply declared shares. Any drift from a previous install-tier session is reset before the shell starts.
 
+`tenant shell` also unlocks the tenant's login keychain before exec: it retrieves the password stashed at `tenant create` time from your operator keychain and runs `security unlock-keychain`. This keeps Claude OAuth tokens and other keychain-stored secrets reachable across host reboots, since macOS re-locks every keychain at boot. Tenants created before the keychain bootstrap shipped lack the stash; for those, `tenant shell` refuses with a one-time migration hint: `tenant destroy <name> && tenant create <name>`.
+
 ## Quick start
 
 Install `tenant`. Three options:

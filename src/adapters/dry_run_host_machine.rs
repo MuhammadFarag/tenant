@@ -1,8 +1,8 @@
 use crate::adapters::macos::MacosHostMachine;
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp, PathKind,
-    ProbeError, ProfileOp, TenantUserName,
+    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
+    KeychainPassword, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::profile::{ProfileError, default_profile_toml};
 
@@ -154,5 +154,20 @@ impl HostMachine for DryRunHostMachine {
     /// finding.
     fn stash_present(&self, _name: &TenantUserName) -> Result<bool, KeychainError> {
         Ok(true)
+    }
+
+    fn find_stashed_password(
+        &self,
+        _name: &TenantUserName,
+    ) -> Result<KeychainPassword, KeychainError> {
+        Err(KeychainError::NotFound)
+    }
+
+    fn unlock_tenant_keychain(
+        &self,
+        _name: &TenantUserName,
+        _password: &KeychainPassword,
+    ) -> Result<(), KeychainError> {
+        Ok(())
     }
 }

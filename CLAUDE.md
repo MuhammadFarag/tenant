@@ -371,6 +371,29 @@ it from scratch wastes a cycle and risks getting it wrong.
   cleaned transitively by `tenant destroy` moving the home to
   `/Users/Deleted Users/`.
 
+- **`tenant shell` unlocks the tenant's login keychain before exec.**
+  Shared pre-spawn step on both `shell_interactive` and `shell_command`
+  paths (after `execute_reapply_plan`, before `HostMachine::login` /
+  `exec_as_tenant`): `find_stashed_password` retrieves the operator-
+  keychain stash via `security find-generic-password -a <name> -s
+  tenant-<name> -w`, then `unlock_tenant_keychain` runs `sudo -iu
+  <name> security unlock-keychain -p <pw> login.keychain-db`. Both
+  are HostMachine carve-outs (non-unit returns; no `KeychainOp`
+  variant — the unlock pass is mechanism, not a planned op).
+  `KeychainPassword::from_existing(String)` is the `pub(crate)`
+  constructor for substrate-retrieved passwords; only the macOS
+  adapter reaches it. `KeychainError::NotFound` → `ShellError::
+  StashAbsent` → `EX_USAGE` (64) with a refusal frame naming
+  `tenant destroy <name> && tenant create <name>` verbatim (legacy-
+  tenant migration); any other `KeychainError` → `ShellError::
+  UnlockFailed` → `EX_IOERR` (74). Already-unlocked is a successful
+  no-op on the substrate side; no idempotence guard in our code. No
+  `Finding::TenantKeychainLocked` doctor probe — `security show-
+  keychain-info` via `sudo -iu` triggers SecurityAgent on Darwin
+  25.x, ruling out any non-interactive state probe; sandbox prior
+  art converged on the same unconditional-unlock-at-shell-entry
+  architecture.
+
 - **PF anchor flush is load-bearing on destroy paths.** `pfctl -f
   /etc/pf.conf` does NOT garbage-collect anchors whose `load anchor`
   directive has been removed. Without `pfctl -a tenant-<name> -F all`,

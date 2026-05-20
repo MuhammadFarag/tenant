@@ -286,6 +286,17 @@ impl KeychainPassword {
         Self("<plan-placeholder>".to_string())
     }
 
+    /// Wrap a password value retrieved from the substrate (operator
+    /// keychain via `security find-generic-password -w`). `pub(crate)`
+    /// so only the macOS adapter can construct one from substrate
+    /// output; external library consumers are routed through
+    /// `generate()` for fresh provisioning, never through arbitrary
+    /// strings. Distinct from `for_plan_placeholder()` (plan-render
+    /// only) and `test_dummy()` (test-fixture only).
+    pub(crate) fn from_existing(s: String) -> Self {
+        Self(s)
+    }
+
     /// Test-fixture constructor. Deliberately named so that any
     /// production-code call site is a visible smell at review: the
     /// only sanctioned way to construct a real password is `generate()`

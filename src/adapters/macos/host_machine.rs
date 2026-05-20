@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError,
     FirewallOp, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    PathKind, ProbeError, ProfileOp, TenantUserName,
+    KeychainPassword, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
@@ -672,6 +672,63 @@ impl HostMachine for MacosHostMachine {
         }
     }
 
+    fn find_stashed_password(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<KeychainPassword, KeychainError> {
+        // `security find-generic-password -a <name> -s tenant-<name> -w`
+        // against the operator's keychain. `-w` writes the password
+        // bytes to stdout. Exit code map mirrors `stash_present` /
+        // `delete_stashed_password`: exit 44 (`errSecItemNotFound`) or
+        // "could not be found" stderr ⇒ NotFound; anything else
+        // non-zero ⇒ substrate failure.
+        let service = format!("tenant-{name}");
+        let output = Command::new("security")
+            .args([
+                "find-generic-password",
+                "-a",
+                name.as_str(),
+                "-s",
+                &service,
+                "-w",
+            ])
+            .output()
+            .map_err(KeychainError::Spawn)?;
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+            return Ok(KeychainPassword::from_existing(raw.trim().to_string()));
+        }
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if code == 44 || stderr.contains("could not be found") {
+            return Err(KeychainError::NotFound);
+        }
+        Err(KeychainError::NonZero { code, stderr })
+    }
+
+    fn unlock_tenant_keychain(
+        &self,
+        name: &TenantUserName,
+        password: &KeychainPassword,
+    ) -> Result<(), KeychainError> {
+        // `sudo -iu <name> security unlock-keychain -p <pw>
+        // login.keychain-db`. `-iu` is load-bearing on the same grounds
+        // as the provision-flow `run_security_as_tenant` calls (HOME /
+        // USER / PWD must switch to the tenant so the relative
+        // `login.keychain-db` resolves under their Library/Keychains).
+        // Password on argv — same platform-limit carve-out as
+        // `create-keychain -p` (see provision comment block).
+        //
+        // Routes through `run_security_as_tenant` (same helper as every
+        // other `sudo -iu <name> security ...` call site in this file)
+        // so the prefix is built in one place. The unlock-specific tail
+        // is extracted into `unlock_keychain_argv` for the byte-exact
+        // test pin in `tests/macos_host_machine.rs`.
+        let args = unlock_keychain_argv(password);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_security_as_tenant(name.as_str(), &refs)
+    }
+
     fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError> {
         // `security find-generic-password -a <name> -s tenant-<name>`
         // against the operator's keychain. Exit 0 ⇒ present; exit 44
@@ -977,6 +1034,27 @@ fn delete_stashed_password(name: &TenantUserName) -> Result<(), KeychainError> {
         return Err(KeychainError::NotFound);
     }
     Err(KeychainError::NonZero { code, stderr })
+}
+
+/// Post-`sudo -iu <name> security` args for the keychain-unlock
+/// substrate call — the tail consumed by `run_security_as_tenant`.
+/// Single source of the unlock-specific argv shape: production
+/// (`<MacosHostMachine as HostMachine>::unlock_tenant_keychain`) builds
+/// it and feeds it to `run_security_as_tenant`; the byte-exact test pin
+/// in `tests/macos_host_machine.rs` asserts on the same value. The
+/// `sudo -iu <name> security` prefix is locked by
+/// `run_security_as_tenant`'s own argv build and covered by its
+/// sibling pins. `pub` so the integration test can reach it via
+/// `tenant::adapters::macos::host_machine::unlock_keychain_argv`; not
+/// re-exported from the `macos` module to keep it out of the prominent
+/// public surface.
+pub fn unlock_keychain_argv(password: &KeychainPassword) -> Vec<String> {
+    vec![
+        "unlock-keychain".to_string(),
+        "-p".to_string(),
+        password.expose_secret().to_string(),
+        "login.keychain-db".to_string(),
+    ]
 }
 
 fn run_security_as_tenant(tenant: &str, args: &[&str]) -> Result<(), KeychainError> {

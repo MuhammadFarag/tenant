@@ -1,7 +1,7 @@
 use super::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostUserName, KeychainError, KeychainOp, Op, PathKind, ProbeError,
-    ProfileOp, TenantUserName,
+    GroupName, HostFileError, HostUserName, KeychainError, KeychainOp, KeychainPassword, Op,
+    PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::profile::ProfileError;
 
@@ -82,6 +82,23 @@ pub trait HostMachine {
     /// `Finding::StashAbsent`. Dispatches via `security`, so all the
     /// substrate failures map to `KeychainError`.
     fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError>;
+
+    /// Retrieve the operator-stashed password via
+    /// `security find-generic-password -a <name> -s tenant-<name> -w`.
+    /// Stash-absent maps to `KeychainError::NotFound`.
+    fn find_stashed_password(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<KeychainPassword, KeychainError>;
+
+    /// Unlock the tenant's `login.keychain-db` via
+    /// `sudo -iu <name> security unlock-keychain -p <pw> login.keychain-db`.
+    /// Already-unlocked exits 0 on the substrate — no idempotence guard.
+    fn unlock_tenant_keychain(
+        &self,
+        name: &TenantUserName,
+        password: &KeychainPassword,
+    ) -> Result<(), KeychainError>;
 }
 
 /// Leaf-op dispatch to the `HostMachine` with a domain-specific error type.

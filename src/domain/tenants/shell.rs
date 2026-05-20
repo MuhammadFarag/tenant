@@ -4,7 +4,7 @@
 
 use crate::ModeLevel;
 use crate::domain::reporter::Reporter;
-use crate::domain::{AccountError, AccountOp, HostUserName, Op, TenantUserName};
+use crate::domain::{AccountError, AccountOp, HostUserName, KeychainError, Op, TenantUserName};
 
 use super::reapply::ReapplyPlan;
 use super::{ModeError, Tenants};
@@ -12,7 +12,12 @@ use super::{ModeError, Tenants};
 /// Failure surface for `shell` (interactive + command forms).
 /// `NarrowFailed` is exercised only by the command form when the
 /// post-child narrow-on-finally reapply fails; the dispatcher emits
-/// a warning and propagates the child's exit code.
+/// a warning and propagates the child's exit code. `StashAbsent`
+/// fires when the operator-side keychain entry is missing (legacy
+/// tenants) — refuse-with-EX_USAGE because the operator needs to
+/// re-bootstrap (`tenant destroy && tenant create`). `UnlockFailed`
+/// fires on substrate failures of either the retrieval or unlock
+/// call — surfaces as EX_IOERR.
 #[derive(Debug)]
 pub(crate) enum ShellError {
     Account(AccountError),
@@ -21,6 +26,10 @@ pub(crate) enum ShellError {
         child_exit: i32,
         narrow_err: ModeError,
     },
+    StashAbsent {
+        name: TenantUserName,
+    },
+    UnlockFailed(KeychainError),
 }
 
 impl<'a> Tenants<'a> {
@@ -58,6 +67,7 @@ impl<'a> Tenants<'a> {
         reporter.shell_plan(&plan_entries);
         self.execute_reapply_plan(&reapply_plan, reporter)
             .map_err(ShellError::Mode)?;
+        self.unlock_tenant_keychain(name, reporter)?;
         reporter.step(Op::Account(&login));
         self.machine.login(name).map_err(ShellError::Account)
     }
@@ -97,6 +107,8 @@ impl<'a> Tenants<'a> {
             return Err(ShellError::Mode(entry_err));
         }
 
+        self.unlock_tenant_keychain(name, reporter)?;
+
         let child_result = self.machine.exec_as_tenant(name, argv);
 
         let narrow_result = if mode == ModeLevel::Runtime {
@@ -114,5 +126,34 @@ impl<'a> Tenants<'a> {
             }),
             (Err(spawn_err), _) => Err(ShellError::Account(spawn_err)),
         }
+    }
+
+    /// Shared pre-spawn step (both interactive + command forms): retrieve
+    /// the operator-stashed password, unlock the tenant's
+    /// `login.keychain-db`, emit the `✓` line. Already-unlocked is a
+    /// no-op at the substrate (exit 0 either way); the ✓ still emits
+    /// so a silent regression where the pass skipped would be visible.
+    /// The dry-run posture lives in the `DryRunHostMachine` carve-outs:
+    /// `find_stashed_password` returns `NotFound` and the dispatch arm
+    /// surfaces the refusal frame — matches the production refusal
+    /// shape so a dry-run preview mirrors what a real run would do
+    /// against a legacy tenant.
+    fn unlock_tenant_keychain(
+        &self,
+        name: &TenantUserName,
+        reporter: &mut Reporter,
+    ) -> Result<(), ShellError> {
+        let password = match self.machine.find_stashed_password(name) {
+            Ok(pw) => pw,
+            Err(KeychainError::NotFound) => {
+                return Err(ShellError::StashAbsent { name: name.clone() });
+            }
+            Err(other) => return Err(ShellError::UnlockFailed(other)),
+        };
+        self.machine
+            .unlock_tenant_keychain(name, &password)
+            .map_err(ShellError::UnlockFailed)?;
+        reporter.shell_keychain_unlocked(name);
+        Ok(())
     }
 }

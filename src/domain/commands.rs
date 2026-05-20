@@ -184,6 +184,18 @@ pub(crate) fn dispatch(
                             reporter.shell_command_done(child_exit, ModeLevel::Runtime);
                             child_exit.clamp(0, 255) as u8
                         }
+                        Err(tenants::ShellError::StashAbsent { name: refused }) => {
+                            reporter.shell_refuse_stash_absent(&refused);
+                            EX_USAGE
+                        }
+                        Err(tenants::ShellError::UnlockFailed(err)) => {
+                            // Substrate breakage on retrieval or unlock — surfaces
+                            // as EX_IOERR, parallel to other shell substrate
+                            // failures. StashAbsent (operator action required)
+                            // routes separately above.
+                            reporter.shell_unlock_failed(&name, &err);
+                            EX_IOERR
+                        }
                     }
                 }
             }

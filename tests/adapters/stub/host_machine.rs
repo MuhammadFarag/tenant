@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use tenant::adapters::macos::MacosHostMachine;
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp, PathKind,
-    ProbeError, ProfileOp, TenantUserName,
+    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
+    KeychainPassword, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use tenant::profile::{ProfileError, default_profile_toml};
 
@@ -146,6 +146,22 @@ pub struct StubHostMachine {
     stash_state: RefCell<HashMap<String, bool>>,
 
     stash_probe_failure: RefCell<Option<KeychainError>>,
+
+    /// Retrievable stashed passwords for `find_stashed_password`.
+    /// Distinct from `stash_state` (bool-valued, doctor probe). An
+    /// entry present here lets the unlock pass retrieve the password;
+    /// absent ⇒ `KeychainError::NotFound`.
+    stash_passwords: RefCell<HashMap<String, KeychainPassword>>,
+
+    /// Per-method failure injection for the unlock pass. Both are
+    /// one-shot (consumed by `.take()`) so a single test can pin
+    /// "stash retrieval fails" vs "unlock substrate fails" cleanly.
+    find_stashed_password_failure: RefCell<Option<KeychainError>>,
+    unlock_tenant_keychain_failure: RefCell<Option<KeychainError>>,
+
+    /// Recorder for `unlock_tenant_keychain` invocations — tests pin
+    /// "the unlock fired for tenant X exactly once" via `unlock_calls()`.
+    unlock_calls: RefCell<Vec<String>>,
 
     /// Per-variant one-shot failure injection. KeychainOp variants
     /// carry the randomly-generated password so equality-based
@@ -456,6 +472,39 @@ impl StubHostMachine {
         *self.stash_probe_failure.borrow_mut() = Some(err);
         self
     }
+
+    /// Pre-load a retrievable stash entry for `find_stashed_password`.
+    /// Companion to `with_stash_present` (which only sets the
+    /// bool-valued doctor flag); this one stores the actual password
+    /// value the unlock pass retrieves.
+    pub fn with_stash(self, name: &str, password: KeychainPassword) -> Self {
+        self.stash_passwords
+            .borrow_mut()
+            .insert(name.to_string(), password);
+        self
+    }
+
+    /// Convenience: pre-load a stash with a fixed test-dummy password.
+    /// Most shell happy-path tests don't care about the password value
+    /// (Stub's `unlock_tenant_keychain` ignores it); this shorthand
+    /// keeps the call sites focused on what the test IS exercising.
+    pub fn with_default_stash(self, name: &str) -> Self {
+        self.with_stash(name, KeychainPassword::test_dummy("test-stashed-pw"))
+    }
+
+    pub fn fail_next_find_stashed_password(self, err: KeychainError) -> Self {
+        *self.find_stashed_password_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn fail_next_unlock_tenant_keychain(self, err: KeychainError) -> Self {
+        *self.unlock_tenant_keychain_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn unlock_calls(&self) -> Vec<String> {
+        self.unlock_calls.borrow().clone()
+    }
 }
 
 impl HostMachine for StubHostMachine {
@@ -735,6 +784,32 @@ impl HostMachine for StubHostMachine {
             .get(name.as_str())
             .copied()
             .unwrap_or(true))
+    }
+
+    fn find_stashed_password(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<KeychainPassword, KeychainError> {
+        if let Some(err) = self.find_stashed_password_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        self.stash_passwords
+            .borrow()
+            .get(name.as_str())
+            .cloned()
+            .ok_or(KeychainError::NotFound)
+    }
+
+    fn unlock_tenant_keychain(
+        &self,
+        name: &TenantUserName,
+        _password: &KeychainPassword,
+    ) -> Result<(), KeychainError> {
+        self.unlock_calls.borrow_mut().push(name.to_string());
+        if let Some(err) = self.unlock_tenant_keychain_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError> {
