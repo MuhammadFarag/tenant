@@ -23,13 +23,31 @@ After provisioning, you enter the tenant with `tenant shell <name>` (interactive
 
 ## Quick start
 
-Clone the repo, then install the binary:
+Install `tenant`. Three options:
+
+**Pre-built binary** (Apple Silicon macOS only):
 
 ```sh
+RELEASE=v0.1.0-alpha.1   # check the releases page for the latest tag
+curl -L "https://github.com/MuhammadFarag/tenant/releases/download/$RELEASE/tenant-$RELEASE-aarch64-apple-darwin.tar.gz" | tar -xz
+sudo mv tenant /usr/local/bin/
+```
+
+**Build from source at a tagged release**:
+
+```sh
+cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.1
+```
+
+**Build from a local clone**:
+
+```sh
+git clone https://github.com/MuhammadFarag/tenant
+cd tenant
 cargo install --path .
 ```
 
-This places `tenant` at `~/.cargo/bin/tenant`. Make sure that directory is on your `PATH`.
+Cargo-installed binaries land at `~/.cargo/bin/tenant`. Make sure that directory is on your `PATH`. Verify with `tenant --version`.
 
 Create a tenant:
 
