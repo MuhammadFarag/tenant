@@ -76,7 +76,7 @@ impl<'a> Tenants<'a> {
                 .machine
                 .tenant_path_kind(name, &tenant_path)
                 .map_err(ModeError::Probe)?;
-            if matches!(kind, PathKind::Other) {
+            if matches!(kind, PathKind::Dir | PathKind::Other) {
                 return Err(ModeError::Share(ShareError::TenantPathOccupied {
                     path: tenant_path,
                 }));

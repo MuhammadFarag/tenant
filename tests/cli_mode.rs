@@ -222,6 +222,7 @@ fn mode_runtime_real_mode_op_shape() {
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
                 "Host 'operator' added to share group 'dev-tenant-share'",
+                "Co-working directory ensured at /Users/Shared/tenants/dev",
             ],
             "Tenant 'dev' is at runtime tier.",
             Some(&mode_breadcrumb("dev")),
@@ -257,11 +258,19 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
     assert_eq!(code, 0);
     assert_eq!(
         exec.account_ops(),
-        vec![AccountOp::AddHostToShareGroup {
-            group: "dev-tenant-share".into(),
-            host: "operator".into(),
-        }],
-        "mode should fire exactly one account op: the catch-up AddHost"
+        vec![
+            AccountOp::AddHostToShareGroup {
+                group: "dev-tenant-share".into(),
+                host: "operator".into(),
+            },
+            AccountOp::EnsureCoworkDir {
+                path: PathBuf::from("/Users/Shared/tenants/dev"),
+                owner: "operator".into(),
+                group: "dev-tenant-share".into(),
+                mode: 0o2770,
+            },
+        ],
+        "mode should fire AddHost + cowork-dir catch-up account ops"
     );
     assert!(
         exec.profile_ops().is_empty(),
@@ -444,6 +453,7 @@ fn mode_real_standard_emits_only_post_exec_confirmation() {
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
                 "Host 'operator' added to share group 'dev-tenant-share'",
+                "Co-working directory ensured at /Users/Shared/tenants/dev",
             ],
             "Tenant 'dev' is at runtime tier.",
             Some(&mode_breadcrumb("dev")),
@@ -477,6 +487,12 @@ fn mode_real_verbose_shows_plan_and_echo() {
          ✓ Firewall ruleset reloaded\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         $ sudo mkdir -p /Users/Shared/tenants/dev\n\
+         $ sudo chown operator:dev-tenant-share /Users/Shared/tenants/dev\n\
+         $ sudo chmod 2770 /Users/Shared/tenants/dev\n\
+         $ sudo chmod -R +a \"group:dev-tenant-share allow \
+         read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          {}\n\
          Tenant 'dev' is at runtime tier.\n\
          {}\n",
@@ -509,6 +525,12 @@ fn mode_install_real_verbose_shows_install_level_text() {
          ✓ Firewall ruleset reloaded\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         $ sudo mkdir -p /Users/Shared/tenants/dev\n\
+         $ sudo chown operator:dev-tenant-share /Users/Shared/tenants/dev\n\
+         $ sudo chmod 2770 /Users/Shared/tenants/dev\n\
+         $ sudo chmod -R +a \"group:dev-tenant-share allow \
+         read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          {}\n\
          Tenant 'dev' is at install tier.\n\
          {}\n",
@@ -531,6 +553,7 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
     // Verbose plan lives inside the summary in intent-leads-shell-
     // follows layout (3 entries: InstallAnchor, Reload,
     // AddHostToShareGroup; default profile has no `[[shares]]`).
+    let cowork = cowork_dir_shell_lines("dev");
     let plan = verbose_plan_section(&[
         (
             "Install firewall anchor at /etc/pf.anchors/tenant-dev",
@@ -541,6 +564,11 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
         (
             "Add host 'operator' to share group 'dev-tenant-share'",
             "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
+            None,
+        ),
+        (
+            "Ensure co-working directory at /Users/Shared/tenants/dev",
+            cowork.as_str(),
             None,
         ),
     ]);

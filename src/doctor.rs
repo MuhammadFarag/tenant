@@ -343,7 +343,7 @@ Side-effects to know about
     narrow drops it; rerun `mode install` afterward if still needed.
 
 Alternative
-  chmod +a \"group:{group} allow read,write,execute,delete,append,file_inherit,directory_inherit\" {path}
+  chmod -R +a \"group:{group} allow read,write,execute,delete,append,file_inherit,directory_inherit\" {path}
   Re-applies just this one entry. Use when `tenant reload` is blocked
   by an unrelated refusal. The bit list shown is the `rw` default;
   for read-only shares omit `write,delete,append`."

@@ -623,7 +623,7 @@ Side-effects to know about
     narrow drops it; rerun `mode install` afterward if still needed.
 
 Alternative
-  chmod +a \"group:dev-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/src
+  chmod -R +a \"group:dev-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/src
   Re-applies just this one entry. Use when `tenant reload` is blocked
   by an unrelated refusal. The bit list shown is the `rw` default;
   for read-only shares omit `write,delete,append`.";

@@ -66,6 +66,11 @@ fn shell_dry_run_verbose_shows_mechanism() {
                 "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
                 None,
             ),
+            (
+                "Ensure co-working directory at /Users/Shared/tenants/dev",
+                cowork_dir_shell_lines("dev").as_str(),
+                None,
+            ),
             ("Log in as 'dev'", "sudo -iu dev", None),
         ]),
     );
@@ -93,6 +98,7 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -101,11 +107,19 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
     assert_eq!(exec.logins(), vec!["dev".to_string()]);
     assert_eq!(
         exec.account_ops(),
-        vec![AccountOp::AddHostToShareGroup {
-            group: "dev-tenant-share".into(),
-            host: "operator".into(),
-        }],
-        "shell auto-narrow includes the AddHost catch-up op"
+        vec![
+            AccountOp::AddHostToShareGroup {
+                group: "dev-tenant-share".into(),
+                host: "operator".into(),
+            },
+            AccountOp::EnsureCoworkDir {
+                path: PathBuf::from("/Users/Shared/tenants/dev"),
+                owner: "operator".into(),
+                group: "dev-tenant-share".into(),
+                mode: 0o2770,
+            },
+        ],
+        "shell auto-narrow includes AddHost + cowork-dir catch-up ops"
     );
 }
 
@@ -133,7 +147,8 @@ fn shell_refuses_when_stash_absent() {
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
-         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want_stdout);
@@ -181,7 +196,8 @@ fn shell_surfaces_substrate_failure_on_unlock_call() {
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
-         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want_stdout);
@@ -228,6 +244,11 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
             "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
             None,
         ),
+        (
+            "Ensure co-working directory at /Users/Shared/tenants/dev",
+            cowork_dir_shell_lines("dev").as_str(),
+            None,
+        ),
         ("Log in as 'dev'", "sudo -iu dev", None),
     ]);
     let want = format!(
@@ -239,6 +260,12 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
          ✓ Firewall ruleset reloaded\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         $ sudo mkdir -p /Users/Shared/tenants/dev\n\
+         $ sudo chown operator:dev-tenant-share /Users/Shared/tenants/dev\n\
+         $ sudo chmod 2770 /Users/Shared/tenants/dev\n\
+         $ sudo chmod -R +a \"group:dev-tenant-share allow \
+         read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n\
          $ sudo -iu dev\n",
         section_line("Entering tenant 'dev'"),
@@ -421,6 +448,7 @@ fn shell_propagates_child_exit_code() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -893,11 +921,10 @@ fn shell_routes_sudo_u_substrate_failure_via_shell_narrow_account_frame() {
 
 #[test]
 fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
-    // Round-1 review fix: the upfront plan block must list every op
-    // that will fire (PF + per-share + LoginAsUser), so the
-    // operator's plan/echo asymmetry contract holds when shares are
-    // declared. Before the fix, share ops echoed without appearing
-    // in the plan.
+    // The upfront plan block must list every op that will fire
+    // (PF + per-share + LoginAsUser), so the operator's plan/echo
+    // asymmetry contract holds when shares are declared. Share ops
+    // must appear in the plan, not just the echo stream.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -921,7 +948,7 @@ fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
         "plan must list Reload: {stdout:?}"
     );
     assert!(
-        stdout.contains("  chmod +a \"group:dev-tenant-share allow"),
+        stdout.contains("  chmod -R +a \"group:dev-tenant-share allow"),
         "plan must list Grant: {stdout:?}"
     );
     assert!(
@@ -1918,6 +1945,7 @@ fn shell_unlocks_keychain_before_login() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -1956,6 +1984,7 @@ fn shell_command_form_also_unlocks() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n\
          {}\n\
          Command exited with code 0.\n",

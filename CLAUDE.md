@@ -74,9 +74,9 @@ src/domain/       — domain layer. `host_user_directory.rs` defines the
                     `read_kernel_pf_rules`, `read_pam_sudo`,
                     `read_pf_status`, `read_anchor_body`,
                     `read_host_acl`, `tenant_path_kind`,
-                    `host_in_group`) plus the `WritableOp` bridge
-                    trait. `ops.rs` carries the `Op` ADT over
-                    `AccountOp` / `ProfileOp` / `FirewallOp` /
+                    `host_path_kind`, `host_in_group`) plus the
+                    `WritableOp` bridge trait. `ops.rs` carries the
+                    `Op` ADT over `AccountOp` / `ProfileOp` / `FirewallOp` /
                     `AclOp` plus the four `impl WritableOp for *Op`
                     blocks. `errors.rs` carries the per-domain error
                     types (`AccountError`, `UserDirectoryError`, `AclError`,
@@ -87,7 +87,8 @@ src/domain/       — domain layer. `host_user_directory.rs` defines the
 src/domain/tenants.rs / tenants/
                   — facade: `Tenants` struct + `new()` + the generic
                     `run<O: WritableOp>` narrate-execute-narrate
-                    dispatcher + `tenant_share_group_name`. Each
+                    dispatcher + `tenant_share_group_name` +
+                    `cowork_dir_path` + `guard_cowork_dir_kind`. Each
                     per-verb submodule owns its complete code (error
                     type + `impl Tenants` block + bound helpers /
                     data carriers) via split impl blocks across
@@ -230,6 +231,17 @@ it from scratch wastes a cycle and risks getting it wrong.
   HostUserDirectory is for inventory queries (presence, IDs, enumeration)
   consumed up front in dispatch; per-mutation follow-up probes
   belong on HostMachine alongside the mutation they verify.
+
+- **Host-side vs tenant-side path probes.** Two carve-outs answer
+  "what's at this path?": `tenant_path_kind` probes via `sudo -n -u
+  <tenant>` — used for paths whose accessibility depends on the
+  tenant's perspective (declared share `tenant_path`s);
+  `host_path_kind` probes via host filesystem directly (no sudo) —
+  used for paths the host owns by design (cowork dirs). Pick by
+  ownership semantics, not by what's already wired: the tenant-side
+  probe doesn't work when the tenant user is absent (orphan-group
+  destroy, post-`DeleteTenantUser` tail steps), so a host-owned
+  path's check must use `host_path_kind` to work uniformly.
 
 - **Doctor doesn't fit the `WritableOp` shape.** All doctor probes
   are HostMachine carve-out methods, NOT `Op<'a>` variants. Probes are
@@ -454,19 +466,45 @@ it from scratch wastes a cycle and risks getting it wrong.
   `ShareError::HostPathMissing` / `TenantPathOccupied`. Removed
   entries are NOT auto-revoked; doctor surfaces orphans.
 
-- **`AclOp::Grant` / `Revoke` are chmod-+a-natively-idempotent.** Map
-  to `chmod +a/-a "group:<g> allow <bits>" <path>` (no sudo). Bit
-  lists: ro = `read,execute,file_inherit,directory_inherit`; rw =
+- **`AclOp::Grant` / `Revoke` are chmod-+a-natively-idempotent.** Grant
+  maps to `chmod -R +a "group:<g> allow <bits>" <path>`; Revoke maps
+  to `chmod -a "group:<g> allow <bits>" <path>` (no sudo, no `-R`).
+  Bit lists: ro = `read,execute,file_inherit,directory_inherit`; rw =
   `read,write,execute,delete,append,file_inherit,directory_inherit`.
   macOS chmod +a is natively idempotent; no substring-match pre-check
   (macOS canonicalizes bit names on storage, so `read,write,execute`
   → `list,add_file,search`, defeating exact-match comparison).
+  Grant recurses so shares declared on already-populated host
+  directories reach existing children; `file_inherit,directory_inherit`
+  only cover future children. Revoke stays single-pass: `chmod -R -a`
+  fails on any tree node missing the ACE (cp doesn't preserve macOS
+  ACLs), and top-level revoke is sufficient — inherited child ACEs
+  become orphan-inert once the share group is removed downstream in
+  the destroy sequence.
+
+- **`chmod -R +a` adds the ACE as a direct entry on every visited
+  node, even when the node already carries the same ACE as an
+  inherited entry** (macOS chmod doesn't deduplicate across the
+  direct-vs-inherited boundary). Files that existed at apply time
+  and previously picked up the ACE via `file_inherit` end up with
+  two `ls -le` entries after the next recursive grant: one direct,
+  one inherited. chmod +a stays idempotent against direct
+  duplicates, so subsequent reapplies don't accumulate further —
+  the cruft is a one-time +1 per such file, bounded and
+  functionally inert (both entries grant the same bits to the same
+  group). Not worth a strip-and-regrant pass: `chmod -R -a` would
+  fail on any node missing the ACE (same asymmetry that keeps
+  Revoke single-pass).
 
 - **`tenant_path_kind` returns `PathKind { Absent, Symlink(target),
-  Other }`.** Used by `build_share_ops` to refuse `TenantPathOccupied`
-  when kind is `Other`; `Symlink` is the idempotent re-link case.
-  Target stored verbatim from readlink so `SymlinkDrift` can compare
-  against declared `host_path` in one substrate trip.
+  Dir, Other }`.** `Dir` distinguishes a real directory from `Other`
+  (regular file, fifo, socket, etc.) so the cowork-dir pre-flight
+  can accept an existing dir (mkdir-p no-ops) while refusing `Other`.
+  Shares' `build_share_ops` refuses both `Dir` and `Other` as
+  `TenantPathOccupied` — for a tenant-side symlink, a real file and
+  a real dir are equally blocking. `Symlink` is the idempotent
+  re-link case. Target stored verbatim from readlink so `SymlinkDrift`
+  can compare against declared `host_path` in one substrate trip.
 
 - **Host operator is a secondary member of every tenant's share
   group.** Added at create via `AddHostToShareGroup` between
@@ -478,6 +516,90 @@ it from scratch wastes a cycle and risks getting it wrong.
   snapshots a process's supplementary group list at process creation,
   so the operator's CURRENT shell can't observe new membership until
   a new Terminal window opens.
+
+#### Co-working dirs
+
+- **Per-tenant co-working directory at `/Users/Shared/tenants/<name>`.**
+  Owner is the host operator, primary group is
+  `<name>-tenant-share`, mode `2770` (setgid + group-rwx + zero-other),
+  with an inheritable rw ACL grant on the directory itself. ACL bits
+  match a rw `[[shares]]` entry exactly:
+  `read,write,execute,delete,append,file_inherit,directory_inherit`.
+  Setgid propagates the share group to children at creation time;
+  the inheritable ACL propagates the rw bits — together they make
+  files created inside the dir collaboratively reachable by both
+  the tenant and the host through the share group, without requiring
+  a tenant umask change.
+
+- **Cowork dirs are CREATED by tenant, not granted on pre-existing
+  content.** Inverse posture to `[[shares]]`, which grant the share
+  group an ACL on a host-owned path that already exists. The cowork
+  dir's mode + ACL are tenant-managed end-to-end; the substrate
+  `mkdir`s the path, `chown`s it, applies the mode, and grants the
+  inheritable ACL.
+
+- **`AccountOp::EnsureCoworkDir` is one variant, four substrate
+  calls.** `mkdir -p` → `chown <host>:<share-group>` → `chmod 2770`
+  → `chmod -R +a` with the rw bits. Each call is natively idempotent
+  on macOS: `mkdir -p` no-ops on an existing dir, `chown` / `chmod`
+  are state-setters, and `chmod -R +a` follows the rw-share Grant
+  posture. `describe_account` returns a `\n`-separated multi-line
+  string and `Reporter::step` / `render_plan_block` emit one
+  privilege-aware line per substrate call.
+
+- **Same op fires at create AND at every reapply.** `Tenants::create`
+  inserts `EnsureCoworkDir` between `CreateTenantUser` and the
+  keychain bootstrap; `build_reapply_plan` inserts it between
+  `AddHostToShareGroup` and the per-share grants. The recursive ACL
+  pass at every reapply heals drift and picks up tenant-added
+  subdirectories between cycles. Failures during create surface via
+  `CreateError::CoworkDir` at `EX_IOERR`; recovery is
+  `tenant destroy <name>` (same posture as
+  `Profile` / `Firewall` / `KeychainProvision`).
+
+- **Path builder lives at the Tenants boundary.**
+  `tenants::cowork_dir_path(name: &str) -> PathBuf` returns
+  `/Users/Shared/tenants/<name>`; centralized so dispatch and the
+  Tenants per-verb files share one source. Like
+  `tenant_share_group_name`, it takes `&str` (the newtype
+  `TenantUserName` lifts at the ADT variant boundary, not the
+  builder).
+
+- **Cowork-path kind-check fires on BOTH create AND every reapply.**
+  `mkdir -p` errors on a regular file at the path and silently
+  follows a symlink, leaving the subsequent chown + chmod pass
+  mutating the link's target. `Tenants::create` and
+  `build_reapply_plan` (reload / mode / shell) both probe the path
+  before constructing `EnsureCoworkDir`: `Absent` and `Dir` continue,
+  `Symlink(_)` and `Other` refuse with
+  `AccountError::CoworkDirOccupied { path, kind }` — flowing through
+  `CreateError::CoworkDir` on create and `ModeError::Account` on
+  reapply. Probe failure rides the existing `AccountError::Spawn` /
+  `NonZero` shape via a small adapter; no new error type. The
+  shared helper lives in `src/domain/tenants.rs` as
+  `guard_cowork_dir_kind` alongside `cowork_dir_path`. The check
+  exists to prevent the substrate from following a symlink at the
+  cowork path — that's a state-machine concern (corrupt prior op,
+  hand-edit, leftover between sessions), not a race window.
+
+- **`tenant destroy <name>` does NOT remove the cowork dir.** The
+  dir holds operator-authored work; auto-deleting it is the failure
+  mode we're avoiding. Both destroy paths (`Tenants::destroy` and
+  `Tenants::destroy_orphan_group`) emit a one-line stdout notice at
+  the tail of the success surface — between the last `✓` and the
+  `─── Done ───` divider — naming the tenant and the intact path so
+  the operator knows what was left behind across back-to-back
+  destroys. The notice probes via `HostMachine::host_path_kind`
+  (host-side, no sudo) — works uniformly across both destroy paths
+  regardless of whether the tenant user is still resolvable.
+  Convergent: probe returns `Absent` → no notice; probe returns
+  `Dir | Symlink(_) | Other` → notice fires; probe error → yellow
+  `⚠` stderr warning naming the path (same posture as the pre-exec
+  doctor pass — courtesy surface, never an abort gate) and destroy
+  continues. Distinct from `tenant_path_kind` by design: the cowork
+  dir is host-owned, so probing through the tenant's identity would
+  break on the orphan-group path (tenant absent by definition) and
+  on the post-`DeleteTenantUser` tail of the full path.
 
 ### Doctor
 

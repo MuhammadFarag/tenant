@@ -176,6 +176,22 @@ pub fn verbose_plan_section(entries: &[(&str, &str, Option<&str>)]) -> String {
     out
 }
 
+/// Plan-side rendering of the `EnsureCoworkDir` op's four-call
+/// sequence. The variant carries a multi-line describe string; the
+/// plan helper splices each substrate line under the same intent
+/// bullet with the six-space indent shared by single-line entries.
+pub fn cowork_dir_shell_lines(name: &str) -> String {
+    let path = format!("/Users/Shared/tenants/{name}");
+    let group = format!("{name}-tenant-share");
+    format!(
+        "sudo mkdir -p {path}\n      \
+         sudo chown {TEST_HOST}:{group} {path}\n      \
+         sudo chmod 2770 {path}\n      \
+         sudo chmod -R +a \"group:{group} allow \
+         read,write,execute,delete,append,file_inherit,directory_inherit\" {path}",
+    )
+}
+
 /// Pre-built plan entries for the `create` verb in the
 /// intent-leads-shell-follows layout. Returns the 14-entry list every
 /// `tenant create <name> -v` invocation expects (UID/GID substituted),
@@ -207,6 +223,11 @@ pub fn create_verbose_plan_entries(
             format!("Remove share group '{name}-tenant-share'"),
             format!("sudo dseditgroup -o delete -n . {name}-tenant-share"),
             Some("on rollback"),
+        ),
+        (
+            format!("Ensure co-working directory at /Users/Shared/tenants/{name}"),
+            cowork_dir_shell_lines(name),
+            None,
         ),
         (
             format!("Create login keychain for tenant '{name}'"),

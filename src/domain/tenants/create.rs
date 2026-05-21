@@ -8,7 +8,7 @@ use crate::domain::{
 use crate::firewall::{ensure_anchor_ref, render_anchor};
 use crate::profile::{ProfileError, display_path_for, parse};
 
-use super::{ModeError, Tenants, tenant_share_group_name};
+use super::{ModeError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
 
 /// Failure surface for create. `UserWithRollback` is the
 /// worst case where rollback itself failed and the host is left with
@@ -28,6 +28,11 @@ pub(crate) enum CreateError {
         rollback: AccountError,
     },
     HostMembership(AccountError),
+    /// Co-working directory provisioning failed. Same posture as
+    /// `KeychainProvision` / `Profile` / `Firewall`: tenant user +
+    /// group already exist, no automatic rollback, recovery is
+    /// `tenant destroy <name>`.
+    CoworkDir(AccountError),
     KeychainProvision(KeychainError),
     KeychainStash(KeychainError),
     Profile(ProfileError),
@@ -80,6 +85,30 @@ impl<'a> Tenants<'a> {
             .map_err(CreateError::HostMembership)?;
         match self.run(&add_user, reporter) {
             Ok(()) => {
+                // Provision the per-tenant co-working directory. The
+                // four-step substrate (mkdir → chown → chmod 2770 →
+                // chmod -R +a) is natively idempotent on macOS, so
+                // the same op fires unconditionally on every reapply
+                // as catch-up. Failures share the keychain provision's
+                // recovery posture — tenant user + group present,
+                // `tenant destroy <name>` converges.
+                //
+                // Pre-flight kind-check refuses when the path already
+                // holds a non-directory entry: mkdir -p errors on a
+                // regular file (operator typo, stray `touch`) and
+                // silently follows a symlink, leaving the subsequent
+                // chown/chmod pass mutating the target.
+                let cowork_path = cowork_dir_path(name.as_str());
+                guard_cowork_dir_kind(self.machine, &cowork_path)
+                    .map_err(CreateError::CoworkDir)?;
+                let ensure_cowork = AccountOp::EnsureCoworkDir {
+                    path: cowork_path,
+                    owner: host.into(),
+                    group: group.clone(),
+                    mode: 0o2770,
+                };
+                self.run(&ensure_cowork, reporter)
+                    .map_err(CreateError::CoworkDir)?;
                 // Bootstrap the tenant's login.keychain-db so
                 // credential-stashing apps (Claude OAuth, etc.) don't
                 // trip the "could not find the keychain" warning, and

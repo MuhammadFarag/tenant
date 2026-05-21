@@ -117,6 +117,19 @@ pub struct StubHostMachine {
 
     tenant_path_kind_failure: RefCell<Option<ProbeError>>,
 
+    /// Pre-loaded kinds for `host_path_kind`. Unmatched paths default
+    /// to `PathKind::Absent` — matches what an untouched host looks
+    /// like to the cowork-dir probe.
+    host_path_kinds: RefCell<HashMap<PathBuf, PathKind>>,
+
+    /// One-shot failure injection for `host_path_kind`. Consumed by
+    /// the next call.
+    host_path_kind_failure: RefCell<Option<ProbeError>>,
+
+    /// Records every path looked up via `host_path_kind`, in call
+    /// order. Lets tests pin which paths the host-side probe touched.
+    host_path_kind_calls: RefCell<Vec<PathBuf>>,
+
     /// Unmatched lookups default to a synthesized listing satisfying
     /// `doctor::has_group_acl_entry` for every plausibly-named tenant
     /// group, so tests that don't exercise AclDrift don't see spurious
@@ -383,6 +396,26 @@ impl StubHostMachine {
     pub fn fail_next_tenant_path_kind(self, err: ProbeError) -> Self {
         *self.tenant_path_kind_failure.borrow_mut() = Some(err);
         self
+    }
+
+    /// Pre-load the kind `host_path_kind` returns for a given path.
+    /// Mirrors `with_tenant_path_kind`'s shape but keyed on path alone
+    /// — the host-side probe doesn't carry a tenant identity.
+    pub fn with_host_path_kind(self, path: &std::path::Path, kind: PathKind) -> Self {
+        self.host_path_kinds
+            .borrow_mut()
+            .insert(path.to_path_buf(), kind);
+        self
+    }
+
+    pub fn fail_next_host_path_kind(self, err: ProbeError) -> Self {
+        *self.host_path_kind_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    /// Snapshot of every `host_path_kind` call, in invocation order.
+    pub fn host_path_kind_calls(&self) -> Vec<PathBuf> {
+        self.host_path_kind_calls.borrow().clone()
     }
 
     pub fn with_host_acl(self, path: &std::path::Path, listing: &str) -> Self {
@@ -717,6 +750,21 @@ impl HostMachine for StubHostMachine {
             }
         }
         Ok(PathKind::Absent)
+    }
+
+    fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
+        self.host_path_kind_calls
+            .borrow_mut()
+            .push(path.to_path_buf());
+        if let Some(err) = self.host_path_kind_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self
+            .host_path_kinds
+            .borrow()
+            .get(path)
+            .cloned()
+            .unwrap_or(PathKind::Absent))
     }
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {

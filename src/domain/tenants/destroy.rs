@@ -6,13 +6,14 @@ use crate::allocation::TENANT_UID_FLOOR;
 use crate::domain::host_machine::WritableOp;
 use crate::domain::reporter::Reporter;
 use crate::domain::{
-    AccountError, AccountOp, FirewallError, FirewallOp, HostUserDirectory, HostUserName,
-    KeychainError, KeychainOp, ProfileOp, TenantUserName, UserDirectoryError, UserId,
+    AccountError, AccountOp, FirewallError, FirewallOp, HostMachine, HostUserDirectory,
+    HostUserName, KeychainError, KeychainOp, PathKind, ProfileOp, TenantUserName,
+    UserDirectoryError, UserId,
 };
 use crate::firewall::remove_anchor_ref;
 use crate::profile::ProfileError;
 
-use super::{Tenants, tenant_share_group_name};
+use super::{Tenants, cowork_dir_path, tenant_share_group_name};
 
 /// Failure surface for destroy. Unlike create, destroy has
 /// no recovery path on Firewall reload failure — the symmetric "restore
@@ -153,6 +154,8 @@ impl<'a> Tenants<'a> {
         self.run(&flush_anchor, reporter)
             .map_err(DestroyError::Firewall)?;
 
+        report_cowork_dir_if_present(self.machine, name, reporter);
+
         reporter.destroy_done(name);
         Ok(())
     }
@@ -228,7 +231,32 @@ impl<'a> Tenants<'a> {
         self.run(&flush_anchor, reporter)
             .map_err(DestroyError::Firewall)?;
 
+        report_cowork_dir_if_present(self.machine, name, reporter);
+
         reporter.orphan_group_done(name);
         Ok(())
+    }
+}
+
+/// Probe the cowork dir at the tail of destroy. Host-side probe (no
+/// sudo, no tenant impersonation) so it's timing-independent — the
+/// tenant user has been deleted by now on the full path and was never
+/// present on the orphan path; both converge here. Absence → silent
+/// noop; `Dir | Symlink | Other` → "left intact" notice; probe error
+/// → `⚠` stderr warning and destroy completes.
+fn report_cowork_dir_if_present(
+    machine: &dyn HostMachine,
+    name: &TenantUserName,
+    reporter: &mut Reporter,
+) {
+    let path = cowork_dir_path(name.as_str());
+    match machine.host_path_kind(&path) {
+        Ok(PathKind::Dir | PathKind::Symlink(_) | PathKind::Other) => {
+            reporter.destroy_cowork_dir_intact(name, &path);
+        }
+        Ok(PathKind::Absent) => {}
+        Err(err) => {
+            reporter.destroy_cowork_probe_failed(name, &path, &err);
+        }
     }
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tenant::domain::{
     AccountError, AccountOp, AclMode, AclOp, FirewallError, GroupId, KeychainError, KeychainOp,
-    ProfileOp, UserId,
+    PathKind, ProfileOp, UserId,
 };
 
 mod adapters;
@@ -474,6 +474,7 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain created\n\
          ✓ Tenant 'dev' default keychain set\n\
          ✓ Tenant 'dev' keychain added to search list\n\
@@ -509,6 +510,12 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
                 name: "dev".into(),
                 uid: UserId(600),
                 gid: GroupId(600)
+            },
+            AccountOp::EnsureCoworkDir {
+                path: PathBuf::from("/Users/Shared/tenants/dev"),
+                owner: "operator".into(),
+                group: "dev-tenant-share".into(),
+                mode: 0o2770,
             },
         ],
     );
@@ -549,6 +556,12 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          $ sudo sysadminctl -addUser dev -fullName \"Tenant: dev\" -shell /bin/zsh -UID 600 -GID 600\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         $ sudo mkdir -p /Users/Shared/tenants/dev\n\
+         $ sudo chown operator:dev-tenant-share /Users/Shared/tenants/dev\n\
+         $ sudo chmod 2770 /Users/Shared/tenants/dev\n\
+         $ sudo chmod -R +a \"group:dev-tenant-share allow \
+         read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          $ sudo -iu dev security create-keychain -p <password> login.keychain-db\n\
          ✓ Tenant 'dev' login keychain created\n\
          $ sudo -iu dev security default-keychain -s login.keychain-db\n\
@@ -606,6 +619,7 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain created\n\
          ✓ Tenant 'dev' default keychain set\n\
          ✓ Tenant 'dev' keychain added to search list\n\
@@ -619,13 +633,13 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
         "tenant: failed to write profile '~/.config/tenant/profiles/dev.toml' \
          for 'dev': disk full\n"
     );
-    // Three account ops (CreateShareGroup + AddHostToShareGroup +
-    // CreateTenantUser) — no rollback, since the locked policy is
-    // "leave user+group present on profile failure".
+    // Four account ops (CreateShareGroup + AddHostToShareGroup +
+    // CreateTenantUser + EnsureCoworkDir) — no rollback, since the
+    // locked policy is "leave user+group present on profile failure".
     assert_eq!(
         exec.account_ops().len(),
-        3,
-        "expected CreateShareGroup + AddHostToShareGroup + CreateTenantUser; no rollback"
+        4,
+        "expected CreateShareGroup + AddHostToShareGroup + CreateTenantUser + EnsureCoworkDir; no rollback"
     );
     // Profile is absent from the simulated state (the write failed) —
     // pins the fact that the failure is a real failure, not a silent
@@ -1080,6 +1094,7 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain created\n\
          ✓ Tenant 'dev' default keychain set\n\
          ✓ Tenant 'dev' keychain added to search list\n\
@@ -1095,11 +1110,12 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
         "tenant: failed to install firewall for 'dev': \
          filesystem error at /etc/pf.anchors/tenant-dev: permission denied\n"
     );
-    // CreateShareGroup + AddHost + CreateTenantUser = 3 account ops.
+    // CreateShareGroup + AddHost + CreateTenantUser + EnsureCoworkDir
+    // = 4 account ops.
     assert_eq!(
         exec.account_ops().len(),
-        3,
-        "create-share-group + add-host + create-tenant-user all ran"
+        4,
+        "create-share-group + add-host + create-tenant-user + ensure-cowork-dir all ran"
     );
     assert!(
         exec.has_profile("dev"),
@@ -1857,14 +1873,16 @@ fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Pre-failure ✓ stream is operator-visible: group + host + user
-    // all succeeded before the keychain step. CreateLoginKeychain
-    // fired (and failed) — no ✓ line for it; no later keychain ops.
+    // Pre-failure ✓ stream is operator-visible: group + host + user +
+    // cowork dir all succeeded before the keychain step.
+    // CreateLoginKeychain fired (and failed) — no ✓ line for it; no
+    // later keychain ops.
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ User account 'dev' provisioned (UID 600)\n",
+         ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n",
         section_line("Creating tenant 'dev'"),
     );
     assert_eq!(stdout, want_stdout);
@@ -1876,10 +1894,10 @@ fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
         stderr.contains("run `tenant destroy dev` to clean up"),
         "expected recovery hint; stderr={stderr:?}"
     );
-    // Three account ops ran (group + host-add + user), one keychain
-    // op attempted (the failing CreateLoginKeychain). No automatic
-    // rollback.
-    assert_eq!(exec.account_ops().len(), 3, "account ops not rolled back");
+    // Four account ops ran (group + host-add + user + cowork dir),
+    // one keychain op attempted (the failing CreateLoginKeychain).
+    // No automatic rollback.
+    assert_eq!(exec.account_ops().len(), 4, "account ops not rolled back");
     assert_eq!(exec.keychain_ops().len(), 1);
     assert!(
         matches!(
@@ -1912,6 +1930,7 @@ fn create_partial_keychain_provision_failure_at_step_2_surfaces() {
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain created\n",
         section_line("Creating tenant 'dev'"),
     );
@@ -1953,6 +1972,7 @@ fn create_keychain_stash_failure_surfaces_with_keychain_provisioned() {
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
+         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain created\n\
          ✓ Tenant 'dev' default keychain set\n\
          ✓ Tenant 'dev' keychain added to search list\n\
@@ -1970,4 +1990,107 @@ fn create_keychain_stash_failure_surfaces_with_keychain_provisioned() {
     );
     // All 4 provision sub-steps + the failing stash = 5 keychain ops.
     assert_eq!(exec.keychain_ops().len(), 5);
+}
+
+/// A regular file at `/Users/Shared/tenants/<name>` (operator typo,
+/// stray `touch`) trips the pre-flight before any cowork-dir mkdir
+/// fires. Exit `EX_IOERR`, stderr frame names the path + kind, and
+/// the `EnsureCoworkDir` op never runs (only group + host-add + user
+/// from earlier reach the substrate).
+#[test]
+fn create_refuses_when_cowork_path_is_a_regular_file() {
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new().with_host_path_kind(&cowork_path, PathKind::Other);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(
+        code, 74,
+        "EX_IOERR expected on cowork-path occupancy; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.starts_with("tenant: failed to provision co-working directory for 'dev':"),
+        "expected create_cowork_dir_failed frame; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("/Users/Shared/tenants/dev"),
+        "stderr should name the cowork path: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("a non-directory entry"),
+        "stderr should name the unexpected kind: {stderr:?}"
+    );
+    // CreateShareGroup + AddHostToShareGroup + CreateTenantUser ran;
+    // EnsureCoworkDir refused before execution.
+    assert_eq!(
+        exec.account_ops().len(),
+        3,
+        "expected group + host + user only (no cowork op); got: {:?}",
+        exec.account_ops()
+    );
+    assert!(
+        !exec
+            .account_ops()
+            .iter()
+            .any(|op| matches!(op, AccountOp::EnsureCoworkDir { .. })),
+        "EnsureCoworkDir must not reach the substrate when path is occupied",
+    );
+}
+
+/// Symlink at the cowork path silently steers mkdir/chown/chmod to
+/// the link's target — pre-flight refuses with the resolved target
+/// named in the kind half of the message so the operator can locate
+/// the offending link.
+#[test]
+fn create_refuses_when_cowork_path_is_a_symlink() {
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new().with_host_path_kind(
+        &cowork_path,
+        PathKind::Symlink(PathBuf::from("/tmp/elsewhere")),
+    );
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(
+        code, 74,
+        "EX_IOERR expected on symlink occupancy; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.starts_with("tenant: failed to provision co-working directory for 'dev':"),
+        "expected create_cowork_dir_failed frame; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("/Users/Shared/tenants/dev"),
+        "stderr should name the cowork path: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("a symlink to /tmp/elsewhere"),
+        "stderr should name the symlink target: {stderr:?}"
+    );
+    assert!(
+        !exec
+            .account_ops()
+            .iter()
+            .any(|op| matches!(op, AccountOp::EnsureCoworkDir { .. })),
+        "EnsureCoworkDir must not reach the substrate when path is a symlink",
+    );
+}
+
+/// An existing directory at the cowork path is a clean restart case
+/// (mkdir -p no-ops, chown/chmod re-own and re-bit). Pre-flight
+/// accepts and the full create flow proceeds.
+#[test]
+fn create_accepts_when_cowork_path_is_already_a_directory() {
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new().with_host_path_kind(&cowork_path, PathKind::Dir);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(
+        code, 0,
+        "create should proceed when cowork path is a directory; stderr={stderr:?}"
+    );
+    assert!(
+        exec.account_ops()
+            .iter()
+            .any(|op| matches!(op, AccountOp::EnsureCoworkDir { .. })),
+        "EnsureCoworkDir should run on an existing directory",
+    );
 }

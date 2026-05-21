@@ -297,7 +297,7 @@ impl<'a> Tenants<'a> {
             let kind = self.machine.tenant_path_kind(name, &tenant_path)?;
             let actual_opt = match kind {
                 PathKind::Absent => Some(SymlinkActual::Absent),
-                PathKind::Other => Some(SymlinkActual::NotSymlink),
+                PathKind::Dir | PathKind::Other => Some(SymlinkActual::NotSymlink),
                 PathKind::Symlink(target) => {
                     if target == share.host_path {
                         None
@@ -484,7 +484,7 @@ impl<'a> Tenants<'a> {
                 Ok(kind) => {
                     let actual_opt = match kind {
                         PathKind::Absent => Some(SymlinkActual::Absent),
-                        PathKind::Other => Some(SymlinkActual::NotSymlink),
+                        PathKind::Dir | PathKind::Other => Some(SymlinkActual::NotSymlink),
                         PathKind::Symlink(target) => {
                             if target == share.host_path {
                                 None

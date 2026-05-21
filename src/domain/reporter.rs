@@ -82,13 +82,18 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// `$ <rendered>` per-step echo. Real+verbose only.
+    /// `$ <rendered>` per-step echo. Real+verbose only. Multi-line
+    /// describes (e.g. `EnsureCoworkDir`'s four-call sequence) emit
+    /// one `$` prefix per substrate call so the operator sees the
+    /// complete mechanism rather than a joined blob.
     pub fn step(&mut self, op: Op<'_>) {
         if self.dry_run || !self.verbose {
             return;
         }
-        let line = op.describe_via(self.machine);
-        let _ = writeln!(self.terminal.stdout, "$ {line}");
+        let rendered = op.describe_via(self.machine);
+        for line in rendered.lines() {
+            let _ = writeln!(self.terminal.stdout, "$ {line}");
+        }
     }
 
     /// `✓ <label>` business-level progress line after a successful op.
@@ -1184,6 +1189,46 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    /// Stdout one-liner emitted at the tail of both destroy paths
+    /// (full + orphan-group convergence) when the cowork dir at
+    /// `/Users/Shared/tenants/<name>` is still present. The dir is
+    /// intentionally preserved — it holds operator-authored work and
+    /// auto-deleting it is the failure mode we're avoiding. Naming
+    /// the tenant disambiguates back-to-back destroys; naming the
+    /// path tells the operator exactly what to clean up.
+    pub fn destroy_cowork_dir_intact(&mut self, name: &TenantUserName, path: &std::path::Path) {
+        if self.dry_run {
+            return;
+        }
+        let display = path.display();
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Co-working directory for tenant '{name}' left intact at {display}."
+        );
+    }
+
+    /// Yellow `⚠` stderr warning when the upfront cowork-dir probe
+    /// fails. Mirrors the doctor-pass posture (substrate-machinery
+    /// failures surface as warnings; the verb proceeds). Naming the
+    /// path lets the operator verify manually.
+    pub fn destroy_cowork_probe_failed(
+        &mut self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+        err: &ProbeError,
+    ) {
+        let prefix = if self.terminal.colors.stderr {
+            "\x1b[33m\u{26a0}\x1b[0m"
+        } else {
+            "\u{26a0}"
+        };
+        let display = path.display();
+        let _ = writeln!(
+            self.terminal.stderr,
+            "{prefix} Co-working directory check for tenant '{name}' failed: {err} \u{2014} manually verify {display}"
+        );
+    }
+
     /// Warning frame for the destroy-side stash-delete: the rest of
     /// destroy already removed the user + group + firewall, but
     /// scrubbing the operator-side stash failed for a non-NotFound
@@ -1193,6 +1238,16 @@ impl<'t, 'm> Reporter<'t, 'm> {
             self.terminal.stderr,
             "tenant: warning: could not remove stashed password for '{name}': {err} \
              \u{2014} run `security delete-generic-password -a {name} -s tenant-{name}` to scrub manually"
+        );
+    }
+
+    /// Stderr frame for `CreateError::CoworkDir`. Tenant user + group
+    /// already exist; recovery is `tenant destroy <name>`.
+    pub fn create_cowork_dir_failed(&mut self, name: &TenantUserName, err: &AccountError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to provision co-working directory for '{name}': {err} \
+             \u{2014} run `tenant destroy {name}` to clean up"
         );
     }
 
@@ -1472,9 +1527,14 @@ impl<'t, 'm> Reporter<'t, 'm> {
                 Some(note) => format!("  \u{2022} {intent}  # {note}"),
                 None => format!("  \u{2022} {intent}"),
             };
-            let shell_line = self.format_shell_line(&shell);
             let _ = writeln!(self.terminal.stdout, "{intent_line}");
-            let _ = writeln!(self.terminal.stdout, "      {shell_line}");
+            // Multi-line describes (e.g. `EnsureCoworkDir`'s four-call
+            // sequence) get one indented shell line per substrate call
+            // under the same intent bullet.
+            for line in shell.lines() {
+                let shell_line = self.format_shell_line(line);
+                let _ = writeln!(self.terminal.stdout, "      {shell_line}");
+            }
         }
     }
 

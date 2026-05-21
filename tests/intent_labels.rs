@@ -152,6 +152,34 @@ fn intent_add_host_to_share_group() {
 }
 
 #[test]
+fn intent_ensure_cowork_dir() {
+    let op = AccountOp::EnsureCoworkDir {
+        path: PathBuf::from("/Users/Shared/tenants/dev"),
+        owner: "operator".into(),
+        group: "dev-tenant-share".into(),
+        mode: 0o2770,
+    };
+    assert_eq!(
+        Op::Account(&op).intent_label(),
+        "Ensure co-working directory at /Users/Shared/tenants/dev"
+    );
+}
+
+#[test]
+fn business_ensure_cowork_dir() {
+    let op = AccountOp::EnsureCoworkDir {
+        path: PathBuf::from("/Users/Shared/tenants/dev"),
+        owner: "operator".into(),
+        group: "dev-tenant-share".into(),
+        mode: 0o2770,
+    };
+    assert_eq!(
+        Op::Account(&op).business_label(),
+        "Co-working directory ensured at /Users/Shared/tenants/dev"
+    );
+}
+
+#[test]
 fn intent_remove_host_from_share_group() {
     let op = AccountOp::RemoveHostFromShareGroup {
         group: "dev-tenant-share".into(),

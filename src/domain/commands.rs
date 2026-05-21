@@ -90,6 +90,10 @@ pub(crate) fn dispatch(
                     reporter.create_rollback_failed(&name, &rollback);
                     EX_IOERR
                 }
+                Err(tenants::CreateError::CoworkDir(e)) => {
+                    reporter.create_cowork_dir_failed(&name, &e);
+                    EX_IOERR
+                }
                 Err(tenants::CreateError::KeychainProvision(e)) => {
                     reporter.create_keychain_provision_failed(&name, &e);
                     EX_IOERR
@@ -565,6 +569,7 @@ pub(crate) struct CreatePlanOps {
     pub(crate) add_host: AccountOp,
     pub(crate) add_user: AccountOp,
     pub(crate) rollback_group: AccountOp,
+    pub(crate) ensure_cowork_dir: AccountOp,
     pub(crate) create_keychain: KeychainOp,
     pub(crate) set_default_keychain: KeychainOp,
     pub(crate) add_to_search_list: KeychainOp,
@@ -607,7 +612,15 @@ fn build_create_plan_ops(
             uid,
             gid,
         },
-        rollback_group: AccountOp::DeleteShareGroup { group },
+        rollback_group: AccountOp::DeleteShareGroup {
+            group: group.clone(),
+        },
+        ensure_cowork_dir: AccountOp::EnsureCoworkDir {
+            path: tenants::cowork_dir_path(name.as_str()),
+            owner: host.into(),
+            group,
+            mode: 0o2770,
+        },
         create_keychain: KeychainOp::CreateLoginKeychain {
             name: name.into(),
             password: plan_placeholder.clone(),
@@ -642,6 +655,7 @@ fn create_plan_entries(ops: &CreatePlanOps) -> Vec<(Op<'_>, Option<&'static str>
         (Op::Account(&ops.add_host), None),
         (Op::Account(&ops.add_user), None),
         (Op::Account(&ops.rollback_group), Some("on rollback")),
+        (Op::Account(&ops.ensure_cowork_dir), None),
         (Op::Keychain(&ops.create_keychain), None),
         (Op::Keychain(&ops.set_default_keychain), None),
         (Op::Keychain(&ops.add_to_search_list), None),

@@ -146,6 +146,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
                 "Host 'operator' added to share group 'dev-tenant-share'",
+                "Co-working directory ensured at /Users/Shared/tenants/dev",
                 "ACL granted to group 'dev-tenant-share' on /tmp",
                 "Symlink /Users/dev/src → /tmp installed",
             ],
@@ -256,7 +257,7 @@ fn reload_verbose_plan_block_includes_share_ops() {
         "plan must list Grant intent: {stdout:?}"
     );
     assert!(
-        stdout.contains("      chmod +a \"group:dev-tenant-share allow"),
+        stdout.contains("      chmod -R +a \"group:dev-tenant-share allow"),
         "plan must list Grant shell line: {stdout:?}"
     );
     assert!(
@@ -310,8 +311,8 @@ fn reload_single_tenant_verbose_emits_per_op_echo() {
         "echo should show InstallAnchor: {stdout:?}"
     );
     assert!(
-        stdout.contains("$ chmod +a \"group:dev-tenant-share allow"),
-        "echo should show chmod +a: {stdout:?}"
+        stdout.contains("$ chmod -R +a \"group:dev-tenant-share allow"),
+        "echo should show chmod -R +a: {stdout:?}"
     );
     assert!(
         stdout.contains("$ sudo -n -u dev /bin/ln -sfn /tmp /Users/dev/src\n"),
@@ -421,6 +422,90 @@ fn reload_refuses_when_tenant_path_occupied() {
     assert!(
         stderr.contains("/Users/dev/src"),
         "should name the occupied tenant_path: {stderr:?}"
+    );
+}
+
+/// Symlink at the cowork path between sessions (corrupt prior op,
+/// hand-edit, leftover) silently steers a subsequent `mkdir -p` to
+/// the link target. Reload pre-flight kind-checks the cowork path
+/// inside `build_reapply_plan` and refuses BEFORE any substrate op
+/// fires — exit 74 + `mode_account_failed` frame, zero substrate
+/// invocations.
+#[test]
+fn reload_refuses_when_cowork_path_is_a_symlink() {
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_path_kind(
+            &cowork_path,
+            PathKind::Symlink(PathBuf::from("/tmp/elsewhere")),
+        );
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
+    assert!(
+        stderr.contains("failed to install tenant-side filesystem state for 'dev'"),
+        "expected mode_account_failed frame: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("/Users/Shared/tenants/dev"),
+        "stderr should name the cowork path: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("a symlink to /tmp/elsewhere"),
+        "stderr should name the symlink target: {stderr:?}"
+    );
+    // Substrate must not have been touched: pre-flight refuses inside
+    // build_reapply_plan, so neither the PF reapply nor the AddHost /
+    // EnsureCoworkDir / share ops reach the recorder.
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "no firewall ops expected on pre-flight refusal: {:?}",
+        exec.firewall_ops()
+    );
+    assert!(
+        exec.account_ops().is_empty(),
+        "no account ops expected on pre-flight refusal: {:?}",
+        exec.account_ops()
+    );
+    assert!(
+        exec.acl_ops().is_empty(),
+        "no ACL ops expected on pre-flight refusal: {:?}",
+        exec.acl_ops()
+    );
+}
+
+/// Regular file at the cowork path (corrupt prior op, leftover from
+/// a hand-edit) trips the same pre-flight as the symlink case. Same
+/// exit code + frame; covers the `PathKind::Other` branch.
+#[test]
+fn reload_refuses_when_cowork_path_is_a_regular_file() {
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_path_kind(&cowork_path, PathKind::Other);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
+    assert!(
+        stderr.contains("failed to install tenant-side filesystem state for 'dev'"),
+        "expected mode_account_failed frame: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("/Users/Shared/tenants/dev"),
+        "stderr should name the cowork path: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("a non-directory entry"),
+        "stderr should name the unexpected kind: {stderr:?}"
+    );
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "no firewall ops expected on pre-flight refusal: {:?}",
+        exec.firewall_ops()
+    );
+    assert!(
+        exec.account_ops().is_empty(),
+        "no account ops expected on pre-flight refusal: {:?}",
+        exec.account_ops()
     );
 }
 
@@ -545,21 +630,30 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
     assert_eq!(code, 0);
     assert_eq!(
         exec.account_ops(),
-        vec![AccountOp::AddHostToShareGroup {
-            group: "dev-tenant-share".into(),
-            host: "operator".into(),
-        }],
-        "reload fires AddHost unconditionally (substrate is idempotent, not Tenants-side conditional)"
+        vec![
+            AccountOp::AddHostToShareGroup {
+                group: "dev-tenant-share".into(),
+                host: "operator".into(),
+            },
+            AccountOp::EnsureCoworkDir {
+                path: PathBuf::from("/Users/Shared/tenants/dev"),
+                owner: "operator".into(),
+                group: "dev-tenant-share".into(),
+                mode: 0o2770,
+            },
+        ],
+        "reload fires AddHost + cowork-dir catch-up unconditionally (substrate is idempotent, not Tenants-side conditional)"
     );
 }
 
 #[test]
 fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
-    // Reapply ordering lock: AddHost runs INSIDE execute_reapply_plan
-    // AFTER the PF reapply (InstallAnchor + Reload) and BEFORE the
-    // per-share ops (Acl::Grant + EnsureSymlinkAsUser). Verify by
-    // observing the cross-domain order: firewall_ops happen first,
-    // then the one account op (AddHost), then the acl op.
+    // Reapply ordering lock: AddHost + EnsureCoworkDir run INSIDE
+    // execute_reapply_plan AFTER the PF reapply (InstallAnchor +
+    // Reload) and BEFORE the per-share ops (Acl::Grant +
+    // EnsureSymlinkAsUser). Verify by observing the cross-domain
+    // order: firewall_ops happen first, then the account ops
+    // (AddHost + EnsureCoworkDir), then the acl op.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, _stderr) =
@@ -572,13 +666,19 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
                 group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
+            AccountOp::EnsureCoworkDir {
+                path: PathBuf::from("/Users/Shared/tenants/dev"),
+                owner: "operator".into(),
+                group: "dev-tenant-share".into(),
+                mode: 0o2770,
+            },
             AccountOp::EnsureSymlinkAsUser {
                 name: "dev".into(),
                 link: PathBuf::from("/Users/dev/src"),
                 target: PathBuf::from("/tmp"),
             },
         ],
-        "AddHost recorded before the share-substrate ops"
+        "AddHost + cowork-dir recorded before the share-substrate ops"
     );
 }
 

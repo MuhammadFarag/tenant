@@ -1,10 +1,23 @@
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
+
+use super::ops::PathKind;
 
 #[derive(Debug)]
 pub enum AccountError {
     Spawn(io::Error),
-    NonZero { code: i32, stderr: String },
+    NonZero {
+        code: i32,
+        stderr: String,
+    },
+    /// The cowork-dir pre-flight saw the target path already occupied
+    /// by something other than a directory we can re-own. Operator
+    /// must remove the existing entry before re-running.
+    CoworkDirOccupied {
+        path: PathBuf,
+        kind: PathKind,
+    },
 }
 
 impl fmt::Display for AccountError {
@@ -18,6 +31,24 @@ impl fmt::Display for AccountError {
                 } else {
                     write!(f, "process exited with code {code}: {trimmed}")
                 }
+            }
+            AccountError::CoworkDirOccupied { path, kind } => {
+                let kind_str = match kind {
+                    PathKind::Symlink(target) => {
+                        format!("a symlink to {}", target.display())
+                    }
+                    PathKind::Other => "a non-directory entry".to_string(),
+                    // Dir + Absent never reach the refuse branch; spelled
+                    // out for completeness if a probe misclassifies.
+                    PathKind::Dir => "a directory".to_string(),
+                    PathKind::Absent => "absent".to_string(),
+                };
+                write!(
+                    f,
+                    "co-working directory path {} is occupied by {kind_str}; \
+                     remove it before re-running",
+                    path.display(),
+                )
             }
         }
     }

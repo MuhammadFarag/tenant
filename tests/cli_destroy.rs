@@ -1,5 +1,8 @@
+use std::path::PathBuf;
+
 use tenant::domain::{
-    AccountError, AccountOp, FirewallError, KeychainError, KeychainOp, ProfileOp, UserId,
+    AccountError, AccountOp, FirewallError, KeychainError, KeychainOp, PathKind, ProbeError,
+    ProfileOp, UserId,
 };
 
 mod adapters;
@@ -1340,5 +1343,182 @@ fn destroy_verbose_emits_step_echo_before_keychain_delete_warning() {
     assert!(
         stderr.contains("warning: could not remove stashed password for 'dev'"),
         "expected warning frame on stderr; stderr={stderr:?}"
+    );
+}
+
+// ============================================================
+// Co-working directory left-intact notice
+// ============================================================
+
+/// Cowork dir at `/Users/Shared/tenants/<name>` is intentionally
+/// preserved across destroy — the operator owns its contents. When
+/// the dir exists at destroy time, destroy emits a one-line notice
+/// naming the path so the operator knows what was left behind.
+#[test]
+fn destroy_emits_notice_when_cowork_dir_present() {
+    let exec = StubHostMachine::new()
+        .with_host_path_kind(&PathBuf::from("/Users/Shared/tenants/dev"), PathKind::Dir);
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "Co-working directory for tenant 'dev' left intact at /Users/Shared/tenants/dev."
+        ),
+        "expected cowork-intact notice; stdout={stdout:?}"
+    );
+    // Notice sits between the last ✓ and the `Done` divider — the
+    // closing surface still ends with `Tenant 'dev' destroyed.`.
+    assert!(
+        stdout.contains("Tenant 'dev' destroyed."),
+        "expected destroy_done closing; stdout={stdout:?}"
+    );
+}
+
+/// Cowork dir absent at destroy time (the typical case for legacy
+/// tenants created before the primitive landed, or after the operator
+/// removed it manually) → no notice. Consistent with destroy's
+/// convergent posture: absent state is success, not error, and not
+/// worth narrating.
+#[test]
+fn destroy_omits_notice_when_cowork_dir_absent() {
+    // Default StubHostMachine returns PathKind::Absent for any
+    // unregistered path — no preload needed.
+    let exec = StubHostMachine::new();
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("Co-working directory"),
+        "expected no cowork notice when path is absent; stdout={stdout:?}"
+    );
+}
+
+/// Cowork dir is a symlink or a regular file (operator hand-edited
+/// state). The path is occupied by something we didn't create, but
+/// it's still "intact" from the destroy verb's perspective — we left
+/// it alone. Notice still fires so the operator sees the path naming.
+#[test]
+fn destroy_emits_notice_when_cowork_path_is_symlink_or_other() {
+    for kind in [
+        PathKind::Symlink(PathBuf::from("/some/other/place")),
+        PathKind::Other,
+    ] {
+        let exec = StubHostMachine::new()
+            .with_host_path_kind(&PathBuf::from("/Users/Shared/tenants/dev"), kind.clone());
+        let (code, stdout, stderr) =
+            run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+        assert_eq!(code, 0, "kind={kind:?}, stderr={stderr:?}");
+        assert!(
+            stdout.contains(
+                "Co-working directory for tenant 'dev' left intact at /Users/Shared/tenants/dev."
+            ),
+            "expected cowork-intact notice for kind={kind:?}; stdout={stdout:?}"
+        );
+    }
+}
+
+/// Probe failure on the cowork-dir kind read surfaces a stderr `⚠`
+/// warning naming the path; destroy proceeds and exits 0. Mirrors
+/// the doctor-pass posture (substrate-machinery failures warn; the
+/// verb never aborts on a courtesy read).
+#[test]
+fn destroy_warns_and_continues_when_cowork_probe_fails() {
+    let exec = StubHostMachine::new().fail_next_host_path_kind(ProbeError::Spawn(
+        std::io::Error::other("synthetic probe failure"),
+    ));
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("Co-working directory"),
+        "expected no stdout notice on probe failure; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains(
+            "\u{26a0} Co-working directory check for tenant 'dev' failed: \
+             failed to spawn probe: synthetic probe failure \
+             \u{2014} manually verify /Users/Shared/tenants/dev"
+        ),
+        "expected ⚠ warning on stderr; stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("Tenant 'dev' destroyed."),
+        "destroy must still complete normally; stdout={stdout:?}"
+    );
+}
+
+/// Orphan-group convergence path fires the same notice: a partial
+/// create that left the cowork dir behind needs the operator to
+/// know it exists for cleanup, even though the tenant user is
+/// already gone. The host-side probe is the load-bearing piece —
+/// the tenant user is absent BY DEFINITION on this path, so a
+/// `sudo -n -u <name>` probe would always fail; the host-owned
+/// filesystem read works regardless.
+#[test]
+fn destroy_orphan_group_emits_notice_when_cowork_dir_present() {
+    let stub = StubUserDirectory {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubHostMachine::new()
+        .with_host_path_kind(&PathBuf::from("/Users/Shared/tenants/dev"), PathKind::Dir);
+    let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "Co-working directory for tenant 'dev' left intact at /Users/Shared/tenants/dev."
+        ),
+        "expected cowork-intact notice on orphan-group path; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("Orphan group 'dev-tenant-share' for tenant 'dev' destroyed."),
+        "orphan-group closing must still emit; stdout={stdout:?}"
+    );
+}
+
+/// Symmetric coverage on the orphan-group path: absent cowork dir
+/// → no notice.
+#[test]
+fn destroy_orphan_group_omits_notice_when_cowork_dir_absent() {
+    let stub = StubUserDirectory {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubHostMachine::new();
+    let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("Co-working directory"),
+        "expected no cowork notice when path is absent on orphan path; stdout={stdout:?}"
+    );
+}
+
+/// Probe failure on the orphan-group path surfaces the same `⚠`
+/// warning as the full destroy path. Production-critical: under
+/// the old upfront probe via `tenant_path_kind`, this path ALWAYS
+/// hit the warning (the tenant user is absent by definition on
+/// the orphan path, and `sudo -n -u <absent-user>` always fails).
+/// The host-side probe must work uniformly — a synthesized failure
+/// surfaces the warning, an absent cowork dir stays silent.
+#[test]
+fn destroy_orphan_group_warns_and_continues_when_cowork_probe_fails() {
+    let stub = StubUserDirectory {
+        groups: vec!["dev-tenant-share".to_string()],
+        ..Default::default()
+    };
+    let exec = StubHostMachine::new().fail_next_host_path_kind(ProbeError::Spawn(
+        std::io::Error::other("synthetic probe failure"),
+    ));
+    let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stderr.contains(
+            "\u{26a0} Co-working directory check for tenant 'dev' failed: \
+             failed to spawn probe: synthetic probe failure \
+             \u{2014} manually verify /Users/Shared/tenants/dev"
+        ),
+        "expected ⚠ warning on stderr; stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("Orphan group 'dev-tenant-share' for tenant 'dev' destroyed."),
+        "orphan-group convergence must still complete; stdout={stdout:?}"
     );
 }

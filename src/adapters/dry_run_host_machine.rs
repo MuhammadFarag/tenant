@@ -116,6 +116,14 @@ impl HostMachine for DryRunHostMachine {
         Ok(PathKind::Absent)
     }
 
+    /// Delegates to the real machine: the cowork-dir probe is a direct
+    /// fs read with no `sudo` shell-out, so it's safe to run under dry-run
+    /// and gives the preview an accurate verdict on whether the destroy
+    /// notice would fire.
+    fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
+        MacosHostMachine.host_path_kind(path)
+    }
+
     /// Empty listing. Unreachable today (default profile has no
     /// `[[shares]]`); defensive against a future default share.
     fn read_host_acl(&self, _path: &std::path::Path) -> Result<String, ProbeError> {

@@ -17,13 +17,16 @@ pub enum AccessMode {
 
 /// Kind of filesystem entry at a tenant-side path, as the tenant sees
 /// it. `Symlink(target)` carries the resolved target so doctor can
-/// compare against the declared `host_path`; `Other` (a real file or
-/// directory occupies the path) triggers `TenantPathOccupied` —
-/// substrate never clobbers real operator data.
+/// compare against the declared `host_path`. `Dir` distinguishes a
+/// real directory from `Other` (regular file, fifo, socket, etc.) —
+/// the cowork-dir pre-flight accepts an existing `Dir` (mkdir-p
+/// no-ops) but refuses `Other`. Shares treat both as occupants
+/// (substrate never clobbers real operator data, regardless of kind).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathKind {
     Absent,
     Symlink(std::path::PathBuf),
+    Dir,
     Other,
 }
 
@@ -115,6 +118,21 @@ pub enum AccountOp {
     RemoveHostFromShareGroup {
         group: GroupName,
         host: HostUserName,
+    },
+
+    /// Provision the per-tenant co-working directory under
+    /// `/Users/Shared/tenants/<name>`. Owner is the host operator,
+    /// primary group is the tenant's share group, mode `2770`
+    /// (setgid, group-rwx, zero-other). The inheritable rw ACL grant
+    /// on the dir propagates collaborative bits to tenant-created
+    /// descendants; `chmod -R +a` is recursive so the catch-up path
+    /// picks up children added between reapply cycles. All four
+    /// substrate calls are natively idempotent on macOS.
+    EnsureCoworkDir {
+        path: PathBuf,
+        owner: HostUserName,
+        group: GroupName,
+        mode: u32,
     },
 }
 
@@ -360,6 +378,9 @@ fn account_business_label(op: &AccountOp) -> String {
         AccountOp::RemoveHostFromShareGroup { group, host } => {
             format!("Host '{host}' removed from share group '{group}'")
         }
+        AccountOp::EnsureCoworkDir { path, .. } => {
+            format!("Co-working directory ensured at {}", path.display())
+        }
     }
 }
 
@@ -486,6 +507,9 @@ fn account_intent_label(op: &AccountOp) -> String {
         }
         AccountOp::RemoveHostFromShareGroup { group, host } => {
             format!("Remove host '{host}' from share group '{group}'")
+        }
+        AccountOp::EnsureCoworkDir { path, .. } => {
+            format!("Ensure co-working directory at {}", path.display())
         }
     }
 }

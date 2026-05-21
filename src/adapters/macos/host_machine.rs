@@ -5,7 +5,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::io::Write as IoWrite;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,6 +55,26 @@ impl HostMachine for MacosHostMachine {
             AccountOp::RemoveHostFromShareGroup { group, host } => {
                 format!("sudo dseditgroup -o edit -n . -d {host} -t user {group}")
             }
+            AccountOp::EnsureCoworkDir {
+                path,
+                owner,
+                group,
+                mode,
+            } => {
+                // Four-call sequence; render one line per substrate
+                // invocation so the verbose plan + `$` echo each carry
+                // the complete mechanism. `acl_entry` matches the rw
+                // AclMode bits so the inheritable grant lines up
+                // byte-for-byte with a rw share's `chmod +a` entry.
+                let path = path.display();
+                let entry = acl_entry(group.as_str(), AclMode::Rw);
+                format!(
+                    "sudo mkdir -p {path}\n\
+                     sudo chown {owner}:{group} {path}\n\
+                     sudo chmod {mode:04o} {path}\n\
+                     sudo chmod -R +a \"{entry}\" {path}"
+                )
+            }
         }
     }
 
@@ -65,6 +85,22 @@ impl HostMachine for MacosHostMachine {
             if !self.host_in_group(host, group)? {
                 return Ok(());
             }
+        }
+        if let AccountOp::EnsureCoworkDir {
+            path,
+            owner,
+            group,
+            mode,
+        } = op
+        {
+            // Four substrate calls in sequence — every one is natively
+            // idempotent on macOS: `mkdir -p` no-ops on an existing
+            // directory, `chown` / `chmod` are state-setters, and the
+            // recursive `chmod -R +a` ACL pass picks up tenant-added
+            // children between reapply cycles. The rw bit list matches
+            // what `AclMode::Rw` produces, so the cowork dir's
+            // inheritable grant is byte-identical to a rw share's.
+            return execute_ensure_cowork_dir(path, owner, group, *mode);
         }
         let argv = match op {
             AccountOp::LoginAsUser { .. } => {
@@ -439,6 +475,16 @@ impl HostMachine for MacosHostMachine {
                 stderr: String::from_utf8_lossy(&symlink_out.stderr).into_owned(),
             });
         }
+        // `test -d` first so an existing directory comes back as Dir;
+        // `test -e` then catches any other non-symlink entry (file,
+        // fifo, socket, etc.) as Other.
+        let dir_out = Command::new("sudo")
+            .args(["-n", "-u", name.as_str(), "/bin/test", "-d", &path_str])
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        if let Some(0) = dir_out.status.code() {
+            return Ok(PathKind::Dir);
+        }
         let exists_out = Command::new("sudo")
             .args(["-n", "-u", name.as_str(), "/bin/test", "-e", &path_str])
             .output()
@@ -454,6 +500,31 @@ impl HostMachine for MacosHostMachine {
                 code: -1,
                 stderr: String::from_utf8_lossy(&exists_out.stderr).into_owned(),
             }),
+        }
+    }
+
+    fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
+        // Direct fs read from the operator process — the cowork dir
+        // (and any future host-owned path) is owned by the host with a
+        // mode the operator can stat. No `sudo` shell-out, no
+        // tenant-perspective probe; works uniformly whether the tenant
+        // user exists or not. `symlink_metadata` (not `metadata`) so a
+        // symlink at the path resolves as `Symlink(_)`, mirroring the
+        // semantics of `tenant_path_kind`.
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                let ft = meta.file_type();
+                if ft.is_symlink() {
+                    let target = fs::read_link(path).map_err(ProbeError::Spawn)?;
+                    Ok(PathKind::Symlink(target))
+                } else if ft.is_dir() {
+                    Ok(PathKind::Dir)
+                } else {
+                    Ok(PathKind::Other)
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(PathKind::Absent),
+            Err(e) => Err(ProbeError::Spawn(e)),
         }
     }
 
@@ -478,45 +549,56 @@ impl HostMachine for MacosHostMachine {
     fn describe_acl(&self, op: &AclOp) -> String {
         // Literal double-quotes around the entry match the form an
         // operator would type at a prompt.
-        let (flag, path, group, mode) = match op {
+        let (recurse, flag, path, group, mode) = match op {
             AclOp::Grant {
                 path, group, mode, ..
-            } => ("+a", path, group, mode),
+            } => (Some("-R "), "+a", path, group, mode),
             AclOp::Revoke {
                 path, group, mode, ..
-            } => ("-a", path, group, mode),
+            } => (None, "-a", path, group, mode),
         };
         format!(
-            "chmod {flag} \"{}\" {}",
+            "chmod {}{flag} \"{}\" {}",
+            recurse.unwrap_or(""),
             acl_entry(group.as_str(), *mode),
             path.display(),
         )
     }
 
     fn execute_acl(&self, op: &AclOp) -> Result<(), AclError> {
-        // macOS chmod +a is natively idempotent. No substring-match
-        // pre-check: macOS canonicalizes bit names on storage (we write
-        // `read,write,execute` and storage carries
-        // `list,add_file,search`), so substring comparison would always
-        // miss. Grant runs chmod unconditionally.
+        // Grant uses `-R +a` so a share declared on an already-populated
+        // host directory reaches existing children, not just the top-
+        // level path; `file_inherit,directory_inherit` only cover future
+        // children. chmod +a is natively idempotent (duplicate-add is a
+        // no-op per node), and macOS canonicalizes bit names on storage
+        // (`read,write,execute` → `list,add_file,search`), so any
+        // substring-match pre-check would always miss — Grant runs
+        // unconditionally.
         //
-        // Revoke on an absent entry surfaces as `AclError::NonZero`
-        // ("No matching ACL entry") — no production path exercises it
-        // today.
-        let (flag, path, group, mode) = match op {
+        // Revoke is single-pass (no `-R`): `chmod -R -a` fails on any
+        // tree node missing the ACE (e.g. files copied in via `cp`,
+        // which doesn't preserve macOS ACLs). Top-level revoke is the
+        // semantic operation; inherited child ACEs become orphan-inert
+        // once the share group is removed later in the destroy sequence.
+        let (recurse, flag, path, group, mode) = match op {
             AclOp::Grant {
                 path, group, mode, ..
-            } => ("+a", path, group, mode),
+            } => (Some("-R"), "+a", path, group, mode),
             AclOp::Revoke {
                 path, group, mode, ..
-            } => ("-a", path, group, mode),
+            } => (None, "-a", path, group, mode),
         };
         let entry = acl_entry(group.as_str(), *mode);
         let path_str = path.display().to_string();
-        let output = Command::new("chmod")
-            .args([flag, &entry, &path_str])
-            .output()
-            .map_err(AclError::Spawn)?;
+        let output = match recurse {
+            Some(r) => Command::new("chmod")
+                .args([r, flag, &entry, &path_str])
+                .output(),
+            None => Command::new("chmod")
+                .args([flag, &entry, &path_str])
+                .output(),
+        }
+        .map_err(AclError::Spawn)?;
         if !output.status.success() {
             return Err(AclError::NonZero {
                 code: output.status.code().unwrap_or(-1),
@@ -951,7 +1033,45 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             "user".into(),
             group.0.clone(),
         ],
+        AccountOp::EnsureCoworkDir { .. } => {
+            panic!(
+                "AccountOp::EnsureCoworkDir is a four-call sequence — \
+                 execute via execute_ensure_cowork_dir, not account_argv"
+            )
+        }
     }
+}
+
+/// Cowork-dir provisioning: mkdir -p → chown → chmod 2770 → chmod -R +a.
+/// Substrate-mechanism stays here so describe + execute share the same
+/// argv composition.
+fn execute_ensure_cowork_dir(
+    path: &Path,
+    owner: &HostUserName,
+    group: &GroupName,
+    mode: u32,
+) -> Result<(), AccountError> {
+    let path_str = path.display().to_string();
+    let mode_arg = format!("{mode:04o}");
+    let chown_arg = format!("{}:{}", owner.as_str(), group.as_str());
+    let entry = acl_entry(group.as_str(), AclMode::Rw);
+    let steps: [Vec<String>; 4] = [
+        vec!["sudo".into(), "mkdir".into(), "-p".into(), path_str.clone()],
+        vec!["sudo".into(), "chown".into(), chown_arg, path_str.clone()],
+        vec!["sudo".into(), "chmod".into(), mode_arg, path_str.clone()],
+        vec![
+            "sudo".into(),
+            "chmod".into(),
+            "-R".into(),
+            "+a".into(),
+            entry,
+            path_str,
+        ],
+    ];
+    for step in &steps {
+        spawn_capturing(step)?;
+    }
+    Ok(())
 }
 
 /// One source of truth so describe_acl and execute_acl render identically.

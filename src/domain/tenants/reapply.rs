@@ -12,7 +12,7 @@ use crate::firewall::render_anchor;
 use crate::profile::{Profile, ProfileError, parse};
 
 use super::shares::ShareOps;
-use super::{ShareError, Tenants, tenant_share_group_name};
+use super::{ShareError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
 
 /// Failure surface for `mode` and (by reuse) the `shell` auto-narrow,
 /// `reload`, and the create-side post-provision share step. ModeError
@@ -40,16 +40,21 @@ pub(crate) struct ReapplyPlan {
     pub(crate) install_anchor: FirewallOp,
     pub(crate) reload: FirewallOp,
     pub(crate) add_host: AccountOp,
+    /// Catch-up provisioning of `/Users/Shared/tenants/<name>`.
+    /// Re-fires on every reapply (the substrate is idempotent and the
+    /// recursive ACL pass heals drift on tenant-added children).
+    pub(crate) ensure_cowork_dir: AccountOp,
     pub(crate) share_ops: Vec<ShareOps>,
 }
 
 impl ReapplyPlan {
     pub(crate) fn as_plan_entries(&self) -> Vec<(Op<'_>, Option<&'static str>)> {
         let mut entries: Vec<(Op<'_>, Option<&'static str>)> =
-            Vec::with_capacity(3 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
+            Vec::with_capacity(4 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
         entries.push((Op::Firewall(&self.install_anchor), None));
         entries.push((Op::Firewall(&self.reload), None));
         entries.push((Op::Account(&self.add_host), None));
+        entries.push((Op::Account(&self.ensure_cowork_dir), None));
         for share in &self.share_ops {
             entries.push((Op::Acl(&share.grant), None));
             if let Some(ensure_dir) = &share.ensure_dir {
@@ -115,15 +120,31 @@ impl<'a> Tenants<'a> {
             body: render_anchor(name.as_str(), &hosts),
         };
         let reload = FirewallOp::Reload;
+        let group = tenant_share_group_name(name.as_str());
         let add_host = AccountOp::AddHostToShareGroup {
-            group: tenant_share_group_name(name.as_str()),
+            group: group.clone(),
             host: host.into(),
+        };
+        // Pre-flight kind-check fires on every reapply (reload / mode
+        // / shell): the cowork-path is a stable host-managed dir, but
+        // a hand-edit or leftover from a corrupt prior op can replace
+        // it with a symlink. `mkdir -p <symlink>` silently follows;
+        // the subsequent chown / chmod / chmod -R then mutate the
+        // link target. State-machine concern, not a race.
+        let cowork_path = cowork_dir_path(name.as_str());
+        guard_cowork_dir_kind(self.machine, &cowork_path).map_err(ModeError::Account)?;
+        let ensure_cowork_dir = AccountOp::EnsureCoworkDir {
+            path: cowork_path,
+            owner: host.into(),
+            group,
+            mode: 0o2770,
         };
         let share_ops = self.build_share_ops(name, &parsed_profile)?;
         Ok(ReapplyPlan {
             install_anchor,
             reload,
             add_host,
+            ensure_cowork_dir,
             share_ops,
         })
     }
@@ -141,6 +162,8 @@ impl<'a> Tenants<'a> {
         self.run(&plan.reload, reporter)
             .map_err(ModeError::Firewall)?;
         self.run(&plan.add_host, reporter)
+            .map_err(ModeError::Account)?;
+        self.run(&plan.ensure_cowork_dir, reporter)
             .map_err(ModeError::Account)?;
         self.execute_share_ops(&plan.share_ops, reporter)
     }

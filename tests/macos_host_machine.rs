@@ -195,6 +195,34 @@ fn macos_describes_add_host_to_share_group() {
 }
 
 #[test]
+fn macos_describes_ensure_cowork_dir_renders_four_substrate_calls() {
+    // The per-tenant co-working directory is provisioned via four
+    // substrate calls under a single op variant. `describe_account`
+    // renders them as one `\n`-separated string; the reporter's
+    // verbose plan + `$` echo iterate over `.lines()` so each call
+    // surfaces as its own operator-facing line. ACL bits match the
+    // rw share's entry so the byte-for-byte form on the inheritable
+    // grant lines up with what `chmod +a` produces for an `AclOp::
+    // Grant { mode: Rw, .. }`.
+    let s = MacosHostMachine;
+    let op = AccountOp::EnsureCoworkDir {
+        path: PathBuf::from("/Users/Shared/tenants/dev"),
+        owner: "operator".into(),
+        group: "dev-tenant-share".into(),
+        mode: 0o2770,
+    };
+    assert_eq!(
+        s.describe_account(&op),
+        "sudo mkdir -p /Users/Shared/tenants/dev\n\
+         sudo chown operator:dev-tenant-share /Users/Shared/tenants/dev\n\
+         sudo chmod 2770 /Users/Shared/tenants/dev\n\
+         sudo chmod -R +a \"group:dev-tenant-share allow \
+         read,write,execute,delete,append,file_inherit,directory_inherit\" \
+         /Users/Shared/tenants/dev",
+    );
+}
+
+#[test]
 fn macos_describes_remove_host_from_share_group() {
     // Destroy-side counter to `AddHostToShareGroup`. The substrate
     // runs `dseditgroup -o checkmember -m <host> <group>` internally
@@ -323,8 +351,13 @@ fn macos_describes_flush_anchor() {
 // frame names the host_path so the cause is locatable.
 //
 // EntryEnsureKind (Grant/Revoke) maps to the `+a` / `-a` chmod arg.
-// The substrate is idempotent: production checks ACL presence via
-// `ls -lde <path>` before invoking chmod — sandbox's pattern.
+// Grant uses `-R` so shares declared on already-populated host
+// directories reach existing children, not just the top-level path;
+// `file_inherit,directory_inherit` only cover future children. Revoke
+// is single-pass because `chmod -R -a` fails on any tree node missing
+// the ACE (cp doesn't preserve macOS ACLs); top-level revoke is the
+// semantic operation, and inherited child ACEs become orphan-inert
+// once the share group is removed downstream in destroy.
 
 #[test]
 fn macos_describes_acl_grant_ro() {
@@ -335,7 +368,7 @@ fn macos_describes_acl_grant_ro() {
             group: "dev-tenant-share".into(),
             mode: AclMode::Ro,
         }),
-        "chmod +a \"group:dev-tenant-share allow read,execute,file_inherit,directory_inherit\" \
+        "chmod -R +a \"group:dev-tenant-share allow read,execute,file_inherit,directory_inherit\" \
          /Users/Shared/sandbox/dev",
     );
 }
@@ -349,7 +382,7 @@ fn macos_describes_acl_grant_rw() {
             group: "dev-tenant-share".into(),
             mode: AclMode::Rw,
         }),
-        "chmod +a \"group:dev-tenant-share allow \
+        "chmod -R +a \"group:dev-tenant-share allow \
          read,write,execute,delete,append,file_inherit,directory_inherit\" \
          /Users/Shared/sandbox/dev",
     );

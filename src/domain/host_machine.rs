@@ -37,6 +37,13 @@ pub trait HostMachine {
         path: &std::path::Path,
     ) -> Result<PathKind, ProbeError>;
 
+    /// Reads filesystem kind of a host-side path via the host's identity
+    /// (no `sudo`, no tenant impersonation). Use this for paths the host
+    /// owns by design — cowork dirs, operator-managed state. Use
+    /// `tenant_path_kind` for paths whose accessibility depends on the
+    /// tenant's perspective (declared share `tenant_path`s).
+    fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError>;
+
     fn describe_acl(&self, op: &AclOp) -> String;
     fn execute_acl(&self, op: &AclOp) -> Result<(), AclError>;
 
