@@ -867,9 +867,36 @@ Shares
   symlink to host_path on reapply; an existing non-symlink at
   tenant_path is refused (the operator's data could be at risk).
 
+  Recursive apply: `tenant reload` walks each share's host_path
+  tree (`chmod -R +a`), so children that pre-date the share's
+  first apply — or new content the operator adds to the host_path
+  between reloads — pick up the share-group ACE on the next
+  reload. macOS file_inherit/directory_inherit flags cover
+  children created after the apply; the recursive walk covers
+  everything else.
+
   Removing a [[shares]] entry does NOT auto-revoke the ACL or
   symlink — `tenant doctor <name>` surfaces orphans. Manual cleanup
   is the operator's call.
+
+Co-working directory (auto-provisioned, not configurable)
+
+  /Users/Shared/tenants/<name>/
+
+  Provisioned by `tenant create` alongside the profile and re-
+  applied on every `tenant reload` / `tenant mode` / `tenant shell`.
+  Owned `<host>:<name>-tenant-share`, mode 2770 (setgid + group-rwx
+  + zero-other), with an inheritable rw ACL granting the share
+  group full access. Host and tenant both have rwx via group
+  membership; files either side creates inside it stay
+  read/writable by the other via the inheritable ACL (no umask
+  fiddling required inside the tenant).
+
+  Unlike [[shares]] (which grant access to pre-existing host
+  paths), the co-working directory is a fresh tenant-managed
+  workspace. `tenant destroy <name>` does NOT remove it — the dir
+  may hold operator-authored work, and destroy emits a notice
+  line naming the path so the operator can clean up manually.
 
 Non-goal: filesystem contents
 

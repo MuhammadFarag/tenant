@@ -11,9 +11,11 @@ use crate::domain::TenantUserName;
     long_about = "Provision macOS user accounts, primary groups (named \
                   `<name>-tenant-share`) in a project-reserved UID/GID range \
                   (>= 600), a per-tenant profile (TOML at \
-                  `~/.config/tenant/profiles/<name>.toml`), and a per-tenant \
+                  `~/.config/tenant/profiles/<name>.toml`), a per-tenant \
                   PF anchor (`/etc/pf.anchors/tenant-<name>`, referenced from \
-                  `/etc/pf.conf`)."
+                  `/etc/pf.conf`), and a per-tenant co-working directory at \
+                  `/Users/Shared/tenants/<name>/` co-owned by host and tenant \
+                  for collaborative work."
 )]
 pub struct Cli {
     /// Show the `Plan (commands to execute):` block in mutating-verb
@@ -38,7 +40,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Verb {
-    /// Provision a new tenant: user account, share group, profile, PF anchor.
+    /// Provision a new tenant: user account, share group, profile, PF anchor, co-working dir.
     ///
     /// Creates user `<name>` and group `<name>-tenant-share` in the
     /// tenant-reserved UID/GID range (>= 600), writes a scaffolded
@@ -47,6 +49,11 @@ pub enum Verb {
     /// declared in the profile), and enables PF host-wide if not
     /// already enabled. The invoking host is added to the tenant's
     /// share group so RW shares the tenant creates stay host-writable.
+    ///
+    /// Also provisions a co-working directory at
+    /// `/Users/Shared/tenants/<name>/` (mode 2770 + inheritable rw ACL
+    /// for the share group) where host and tenant collaborate — files
+    /// either side creates inside it are read/writable by the other.
     ///
     /// Recovery on partial failure: re-run `tenant destroy <name>`
     /// (idempotent / convergent) to clear any leftover host state.
@@ -64,6 +71,10 @@ pub enum Verb {
     /// from the share group, removes the share group, removes the PF
     /// anchor and flushes its in-kernel rules, and removes the profile.
     ///
+    /// The co-working directory at `/Users/Shared/tenants/<name>/` is
+    /// left intact (it may hold operator-authored work); a notice line
+    /// names the path so the operator can clean up manually.
+    ///
     /// Refuses with `EX_USAGE` if the named account exists but has a
     /// UID below the tenant floor (600) — that's not a tenant we
     /// provisioned. An orphan group (user gone, `<name>-tenant-share`
@@ -80,9 +91,12 @@ pub enum Verb {
     /// Always lands at runtime tier — install-tier widening stays the
     /// explicit `tenant mode <name> install` operator action. Re-renders
     /// and reloads the PF anchor from the current profile, re-applies
-    /// declared `[[shares]]` (ACL grants + `$HOME`-rooted symlinks),
-    /// and re-adds the host to the share group (catch-up for tenants
-    /// provisioned before the host membership step existed).
+    /// declared `[[shares]]` (ACL grants recurse over each `host_path`
+    /// tree so existing children pick up the share-group ACE) plus
+    /// `$HOME`-rooted symlinks, re-applies the co-working directory
+    /// (mode + recursive ACL — picks up subdirs the tenant added between
+    /// reloads), and re-adds the host to the share group (catch-up for
+    /// tenants provisioned before the host membership step existed).
     ///
     /// Bare `tenant reload` enumerates every tenant on the host and
     /// reloads each in turn; per-tenant failures don't abort the walk —
