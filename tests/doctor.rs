@@ -623,10 +623,13 @@ Side-effects to know about
     narrow drops it; rerun `mode install` afterward if still needed.
 
 Alternative
-  chmod -R +a \"group:dev-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/src
+  sudo chmod -R +a \"group:dev-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/src
   Re-applies just this one entry. Use when `tenant reload` is blocked
   by an unrelated refusal. The bit list shown is the `rw` default;
-  for read-only shares omit `write,delete,append`.";
+  for read-only shares omit `write,delete,append`. `sudo` is required
+  because files written by the tenant inside the share (caches, build
+  output) are tenant-owned, and POSIX requires owner-or-root to modify
+  ACLs.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 

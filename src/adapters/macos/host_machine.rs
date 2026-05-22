@@ -548,64 +548,63 @@ impl HostMachine for MacosHostMachine {
 
     fn describe_acl(&self, op: &AclOp) -> String {
         // Literal double-quotes around the entry match the form an
-        // operator would type at a prompt.
-        let (recurse, flag, path, group, mode) = match op {
+        // operator would type at a prompt. Grant runs under `sudo`
+        // (see `execute_acl` for the WHY); Revoke does not.
+        let entry_str = |group: &GroupName, mode: AclMode| acl_entry(group.as_str(), mode);
+        match op {
             AclOp::Grant {
                 path, group, mode, ..
-            } => (Some("-R "), "+a", path, group, mode),
+            } => format!(
+                "sudo chmod -R +a \"{}\" {}",
+                entry_str(group, *mode),
+                path.display(),
+            ),
             AclOp::Revoke {
                 path, group, mode, ..
-            } => (None, "-a", path, group, mode),
-        };
-        format!(
-            "chmod {}{flag} \"{}\" {}",
-            recurse.unwrap_or(""),
-            acl_entry(group.as_str(), *mode),
-            path.display(),
-        )
+            } => format!(
+                "chmod -a \"{}\" {}",
+                entry_str(group, *mode),
+                path.display(),
+            ),
+        }
     }
 
     fn execute_acl(&self, op: &AclOp) -> Result<(), AclError> {
-        // Grant uses `-R +a` so a share declared on an already-populated
-        // host directory reaches existing children, not just the top-
-        // level path; `file_inherit,directory_inherit` only cover future
-        // children. chmod +a is natively idempotent (duplicate-add is a
-        // no-op per node), and macOS canonicalizes bit names on storage
-        // (`read,write,execute` → `list,add_file,search`), so any
-        // substring-match pre-check would always miss — Grant runs
-        // unconditionally.
+        // Grant uses `sudo chmod -R +a` so the recursive ACL pass reaches
+        // existing children regardless of ownership. Files created by
+        // the tenant inside a rw share are tenant-owned (e.g.
+        // `.ruff_cache/`, build artifacts, anything the tenant writes),
+        // and POSIX requires owner-or-root to modify a file's ACL —
+        // being in the share group with rw doesn't include
+        // `writesecurity`. Without sudo, the second reapply after a
+        // tenant has written into the share fails with EPERM on every
+        // tenant-owned descendant. `chmod +a` is natively idempotent
+        // (duplicate-add is a no-op per node), and macOS canonicalizes
+        // bit names on storage (`read,write,execute` →
+        // `list,add_file,search`), so any substring-match pre-check
+        // would always miss — Grant runs unconditionally.
         //
-        // Revoke is single-pass (no `-R`): `chmod -R -a` fails on any
-        // tree node missing the ACE (e.g. files copied in via `cp`,
-        // which doesn't preserve macOS ACLs). Top-level revoke is the
-        // semantic operation; inherited child ACEs become orphan-inert
-        // once the share group is removed later in the destroy sequence.
-        let (recurse, flag, path, group, mode) = match op {
+        // Revoke stays bare: it's single-pass at the top-level of the
+        // share host_path, which is host-owned by design. `chmod -R -a`
+        // would fail on any tree node missing the ACE (e.g. files
+        // copied in via `cp`, which doesn't preserve macOS ACLs).
+        // Top-level revoke is the semantic operation; inherited child
+        // ACEs become orphan-inert once the share group is removed
+        // later in the destroy sequence.
+        let (argv_prefix, path, group, mode): (&[&str], _, _, _) = match op {
             AclOp::Grant {
                 path, group, mode, ..
-            } => (Some("-R"), "+a", path, group, mode),
+            } => (&["sudo", "chmod", "-R", "+a"], path, group, mode),
             AclOp::Revoke {
                 path, group, mode, ..
-            } => (None, "-a", path, group, mode),
+            } => (&["chmod", "-a"], path, group, mode),
         };
         let entry = acl_entry(group.as_str(), *mode);
         let path_str = path.display().to_string();
-        let output = match recurse {
-            Some(r) => Command::new("chmod")
-                .args([r, flag, &entry, &path_str])
-                .output(),
-            None => Command::new("chmod")
-                .args([flag, &entry, &path_str])
-                .output(),
-        }
-        .map_err(AclError::Spawn)?;
-        if !output.status.success() {
-            return Err(AclError::NonZero {
-                code: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            });
-        }
-        Ok(())
+        let mut argv: Vec<&str> = argv_prefix.to_vec();
+        argv.push(&entry);
+        argv.push(&path_str);
+        spawn_acl(&argv)
     }
 
     fn current_host_user_name(&self) -> HostUserName {
@@ -1211,6 +1210,23 @@ fn spawn_capturing(argv: &[String]) -> Result<(), AccountError> {
         .map_err(AccountError::Spawn)?;
     if !output.status.success() {
         return Err(AccountError::NonZero {
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn spawn_acl(argv: &[&str]) -> Result<(), AclError> {
+    let (program, rest) = argv
+        .split_first()
+        .ok_or_else(|| AclError::Spawn(io::Error::other("argv is empty")))?;
+    let output = Command::new(program)
+        .args(rest)
+        .output()
+        .map_err(AclError::Spawn)?;
+    if !output.status.success() {
+        return Err(AclError::NonZero {
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });

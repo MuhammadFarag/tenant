@@ -467,8 +467,8 @@ it from scratch wastes a cycle and risks getting it wrong.
   entries are NOT auto-revoked; doctor surfaces orphans.
 
 - **`AclOp::Grant` / `Revoke` are chmod-+a-natively-idempotent.** Grant
-  maps to `chmod -R +a "group:<g> allow <bits>" <path>`; Revoke maps
-  to `chmod -a "group:<g> allow <bits>" <path>` (no sudo, no `-R`).
+  maps to `sudo chmod -R +a "group:<g> allow <bits>" <path>`; Revoke
+  maps to `chmod -a "group:<g> allow <bits>" <path>` (no sudo, no `-R`).
   Bit lists: ro = `read,execute,file_inherit,directory_inherit`; rw =
   `read,write,execute,delete,append,file_inherit,directory_inherit`.
   macOS chmod +a is natively idempotent; no substring-match pre-check
@@ -476,11 +476,18 @@ it from scratch wastes a cycle and risks getting it wrong.
   → `list,add_file,search`, defeating exact-match comparison).
   Grant recurses so shares declared on already-populated host
   directories reach existing children; `file_inherit,directory_inherit`
-  only cover future children. Revoke stays single-pass: `chmod -R -a`
-  fails on any tree node missing the ACE (cp doesn't preserve macOS
-  ACLs), and top-level revoke is sufficient — inherited child ACEs
-  become orphan-inert once the share group is removed downstream in
-  the destroy sequence.
+  only cover future children. Grant runs under `sudo` because files
+  the tenant writes inside a rw share (`.ruff_cache/`, build output,
+  anything the tenant creates while working) are tenant-owned, and
+  POSIX requires owner-or-root to modify a file's ACL — being in the
+  share group with rw doesn't include `writesecurity`. Without sudo,
+  the second reapply after a tenant has written into the share fails
+  with EPERM on every tenant-owned descendant. Revoke stays single-
+  pass because `chmod -R -a` fails on any tree node missing the ACE
+  (cp doesn't preserve macOS ACLs), and top-level revoke at the host-
+  owned share root is sufficient — inherited child ACEs become
+  orphan-inert once the share group is removed downstream in the
+  destroy sequence.
 
 - **`chmod -R +a` adds the ACE as a direct entry on every visited
   node, even when the node already carries the same ACE as an

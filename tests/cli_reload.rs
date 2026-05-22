@@ -257,7 +257,7 @@ fn reload_verbose_plan_block_includes_share_ops() {
         "plan must list Grant intent: {stdout:?}"
     );
     assert!(
-        stdout.contains("      chmod -R +a \"group:dev-tenant-share allow"),
+        stdout.contains("      sudo chmod -R +a \"group:dev-tenant-share allow"),
         "plan must list Grant shell line: {stdout:?}"
     );
     assert!(
@@ -311,8 +311,8 @@ fn reload_single_tenant_verbose_emits_per_op_echo() {
         "echo should show InstallAnchor: {stdout:?}"
     );
     assert!(
-        stdout.contains("$ chmod -R +a \"group:dev-tenant-share allow"),
-        "echo should show chmod -R +a: {stdout:?}"
+        stdout.contains("$ sudo chmod -R +a \"group:dev-tenant-share allow"),
+        "echo should show sudo chmod -R +a: {stdout:?}"
     );
     assert!(
         stdout.contains("$ sudo -n -u dev /bin/ln -sfn /tmp /Users/dev/src\n"),

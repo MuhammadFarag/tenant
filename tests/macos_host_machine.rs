@@ -368,7 +368,7 @@ fn macos_describes_acl_grant_ro() {
             group: "dev-tenant-share".into(),
             mode: AclMode::Ro,
         }),
-        "chmod -R +a \"group:dev-tenant-share allow read,execute,file_inherit,directory_inherit\" \
+        "sudo chmod -R +a \"group:dev-tenant-share allow read,execute,file_inherit,directory_inherit\" \
          /Users/Shared/sandbox/dev",
     );
 }
@@ -382,7 +382,7 @@ fn macos_describes_acl_grant_rw() {
             group: "dev-tenant-share".into(),
             mode: AclMode::Rw,
         }),
-        "chmod -R +a \"group:dev-tenant-share allow \
+        "sudo chmod -R +a \"group:dev-tenant-share allow \
          read,write,execute,delete,append,file_inherit,directory_inherit\" \
          /Users/Shared/sandbox/dev",
     );

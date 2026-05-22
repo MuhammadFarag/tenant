@@ -948,7 +948,7 @@ fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
         "plan must list Reload: {stdout:?}"
     );
     assert!(
-        stdout.contains("  chmod -R +a \"group:dev-tenant-share allow"),
+        stdout.contains("  sudo chmod -R +a \"group:dev-tenant-share allow"),
         "plan must list Grant: {stdout:?}"
     );
     assert!(
