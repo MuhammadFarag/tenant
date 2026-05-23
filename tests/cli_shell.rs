@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use tenant::domain::{
-    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, KeychainError, UserId,
+    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, KeychainError, PathKind,
+    UserId,
 };
 
 mod adapters;
@@ -66,11 +67,6 @@ fn shell_dry_run_verbose_shows_mechanism() {
                 "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
                 None,
             ),
-            (
-                "Ensure co-working directory at /Users/Shared/tenants/dev",
-                cowork_dir_shell_lines("dev").as_str(),
-                None,
-            ),
             ("Log in as 'dev'", "sudo -iu dev", None),
         ]),
     );
@@ -98,7 +94,6 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -107,19 +102,11 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
     assert_eq!(exec.logins(), vec!["dev".to_string()]);
     assert_eq!(
         exec.account_ops(),
-        vec![
-            AccountOp::AddHostToShareGroup {
-                group: "dev-tenant-share".into(),
-                host: "operator".into(),
-            },
-            AccountOp::EnsureCoworkDir {
-                path: PathBuf::from("/Users/Shared/tenants/dev"),
-                owner: "operator".into(),
-                group: "dev-tenant-share".into(),
-                mode: 0o2770,
-            },
-        ],
-        "shell auto-narrow includes AddHost + cowork-dir catch-up ops"
+        vec![AccountOp::AddHostToShareGroup {
+            group: "dev-tenant-share".into(),
+            host: "operator".into(),
+        }],
+        "shell auto-narrow includes only AddHost under Light scope"
     );
 }
 
@@ -147,8 +134,7 @@ fn shell_refuses_when_stash_absent() {
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
-         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n",
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want_stdout);
@@ -196,8 +182,7 @@ fn shell_surfaces_substrate_failure_on_unlock_call() {
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
-         ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n",
+         ✓ Host 'operator' added to share group 'dev-tenant-share'\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want_stdout);
@@ -229,9 +214,10 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"]);
     assert_eq!(code, 0);
-    // Shell's verbose plan uses the intent-leads-shell-follows layout
-    // (shell has no prompt, so the plan stays in the verb rather than
-    // moving into a summary).
+    // Shell's verbose plan uses the intent-leads-shell-follows
+    // layout (shell has no prompt, so the plan stays in the verb
+    // rather than moving into a summary). Light scope OMITS the
+    // cowork-dir provisioning lines.
     let plan = verbose_plan_section(&[
         (
             "Install firewall anchor at /etc/pf.anchors/tenant-dev",
@@ -242,11 +228,6 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
         (
             "Add host 'operator' to share group 'dev-tenant-share'",
             "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
-            None,
-        ),
-        (
-            "Ensure co-working directory at /Users/Shared/tenants/dev",
-            cowork_dir_shell_lines("dev").as_str(),
             None,
         ),
         ("Log in as 'dev'", "sudo -iu dev", None),
@@ -260,12 +241,6 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
          ✓ Firewall ruleset reloaded\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         $ sudo mkdir -p /Users/Shared/tenants/dev\n\
-         $ sudo chown operator:dev-tenant-share /Users/Shared/tenants/dev\n\
-         $ sudo chmod 2770 /Users/Shared/tenants/dev\n\
-         $ sudo chmod -R +a \"group:dev-tenant-share allow \
-         read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n\
          $ sudo -iu dev\n",
         section_line("Entering tenant 'dev'"),
@@ -448,7 +423,6 @@ fn shell_propagates_child_exit_code() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -798,10 +772,10 @@ fn shell_install_anchor_body_excludes_install_hosts() {
 // `shell_narrow_*_failed` family (distinct from `mode_*_failed`).
 
 #[test]
-fn shell_auto_reapply_includes_share_substrate() {
-    // Same op shape as mode-share happy-path, but exercised through
-    // the shell verb. Login must still fire after the share substrate
-    // succeeds.
+fn shell_auto_reapply_emits_tenant_side_symlink_only() {
+    // Shell parallel to the mode-share happy-path: no Grant under
+    // Light, only the tenant-side EnsureSymlinkAsUser fires. Login
+    // launches after.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -810,7 +784,11 @@ fn shell_auto_reapply_includes_share_substrate() {
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "exit = {code}; stderr={stderr:?}");
 
-    assert_eq!(exec.acl_ops().len(), 1, "expected single Grant op");
+    assert!(
+        exec.acl_ops().is_empty(),
+        "shell (Light scope) emits no AclOp::Grant; got {:?}",
+        exec.acl_ops()
+    );
     let symlink_ops: Vec<_> = exec
         .account_ops()
         .into_iter()
@@ -820,7 +798,7 @@ fn shell_auto_reapply_includes_share_substrate() {
     assert_eq!(
         exec.logins(),
         vec!["dev".to_string()],
-        "login must fire after successful share reapply"
+        "login must fire after successful light reapply"
     );
 }
 
@@ -854,10 +832,12 @@ fn shell_refuses_when_host_path_missing_does_not_launch_login() {
 }
 
 #[test]
-fn shell_routes_acl_substrate_failure_via_shell_narrow_acl_frame() {
-    // Substrate failure on the host-side ACL grant during shell
-    // auto-reapply surfaces with shell-contextual framing (distinct
-    // from mode_acl_failed). Login MUST NOT launch.
+fn shell_ignores_acl_grant_failure_injection_under_light_scope() {
+    // Negative pin: shell under Light never emits Grant, so the
+    // injected ACL failure is unreachable. A regression that
+    // re-introduced Grant on shell would trip on this injection;
+    // the ACL-failure-routing contract still applies on reload
+    // (see cli_reload.rs).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -874,14 +854,19 @@ fn shell_routes_acl_substrate_failure_via_shell_narrow_acl_frame() {
             },
         );
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
-    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
-    assert!(
-        stderr.contains("failed to apply ACL for 'dev' before shell entry"),
-        "stderr should be framed by shell_narrow_acl_failed: {stderr:?}"
+    assert_eq!(
+        code, 0,
+        "Light-scope shell never emits Grant, so the injected ACL failure is unreachable; stderr={stderr:?}"
     );
     assert!(
-        exec.logins().is_empty(),
-        "login must NOT fire on share-substrate failure"
+        exec.acl_ops().is_empty(),
+        "no AclOp should have fired under Light scope; got {:?}",
+        exec.acl_ops()
+    );
+    assert_eq!(
+        exec.logins(),
+        vec!["dev".to_string()],
+        "login should still fire (no ACL pass on shell entry)"
     );
 }
 
@@ -920,11 +905,11 @@ fn shell_routes_sudo_u_substrate_failure_via_shell_narrow_account_frame() {
 }
 
 #[test]
-fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
-    // The upfront plan block must list every op that will fire
-    // (PF + per-share + LoginAsUser), so the operator's plan/echo
-    // asymmetry contract holds when shares are declared. Share ops
-    // must appear in the plan, not just the echo stream.
+fn shell_verbose_plan_block_lists_light_ops_alongside_login() {
+    // Upfront plan must list every op that will fire (PF + AddHost
+    // + per-share EnsureSymlinkAsUser + LoginAsUser) and explicitly
+    // NOT the recursive `chmod -R +a` or cowork-dir provisioning
+    // lines — those are Full-scope only.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -936,9 +921,8 @@ fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
         &["shell", "dev", "--verbose"],
     );
     assert_eq!(code, 0);
-    // Plan block must contain InstallAnchor, Reload, AclOp::Grant,
-    // EnsureSymlinkAsUser, and LoginAsUser — same lines that fire
-    // via `$` echo. Two-space indent identifies the plan block.
+    // Plan block must contain InstallAnchor, Reload, AddHost,
+    // EnsureSymlinkAsUser, and LoginAsUser. NO Grant. NO cowork.
     assert!(
         stdout.contains("  sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
         "plan must list InstallAnchor: {stdout:?}"
@@ -948,8 +932,12 @@ fn shell_verbose_plan_block_lists_share_ops_alongside_pf_and_login() {
         "plan must list Reload: {stdout:?}"
     );
     assert!(
-        stdout.contains("  sudo chmod -R +a \"group:dev-tenant-share allow"),
-        "plan must list Grant: {stdout:?}"
+        !stdout.contains("chmod -R +a"),
+        "plan must NOT list recursive Grant under Light: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("co-working directory"),
+        "plan must NOT list cowork-dir provisioning under Light: {stdout:?}"
     );
     assert!(
         stdout.contains("  sudo -n -u dev /bin/ln -sfn /tmp /Users/dev/src\n"),
@@ -1945,7 +1933,6 @@ fn shell_unlocks_keychain_before_login() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -1984,7 +1971,6 @@ fn shell_command_form_also_unlocks() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          ✓ Tenant 'dev' login keychain unlocked\n\
          {}\n\
          Command exited with code 0.\n",
@@ -2026,5 +2012,312 @@ fn shell_surfaces_user_directory_error_when_eligibility_probe_fails() {
     assert!(
         stderr.starts_with("tenant: failed to check shell eligibility for 'dev': "),
         "expected shell_eligibility_probe_failed frame; stderr={stderr:?}"
+    );
+}
+
+// ================================================================
+// Light reapply on shell (all three forms)
+// ================================================================
+//
+// `tenant shell` uses Light reapply scope: per-share `AclOp::Grant`
+// and `AccountOp::EnsureCoworkDir` (both recursive `chmod -R +a`
+// passes) are skipped. Inheritable ACE bits propagate the grant to
+// tenant-created children; drift cases surface via `tenant doctor`
+// and are remediated by `tenant reload`.
+
+#[test]
+fn shell_interactive_uses_light_reapply_skipping_recursive_acl_passes() {
+    // Interactive shell auto-narrow: acl_ops is empty, account_ops
+    // contains no EnsureCoworkDir; PF narrow + AddHost + per-share
+    // EnsureSymlinkAsUser fire; login follows.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+
+    assert!(
+        exec.acl_ops().is_empty(),
+        "shell (Light scope) must NOT emit AclOp::Grant; got {:?}",
+        exec.acl_ops()
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "shell (Light scope) must NOT emit EnsureCoworkDir; got {cowork_ops:?}"
+    );
+    assert_eq!(
+        exec.logins(),
+        vec!["dev".to_string()],
+        "login should fire exactly once after the light narrow"
+    );
+}
+
+#[test]
+fn shell_command_runtime_uses_light_reapply_skipping_recursive_acl_passes() {
+    // Command form, runtime tier: single Light entry reapply (no
+    // post-child narrow — tier is already runtime).
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+
+    assert!(
+        exec.acl_ops().is_empty(),
+        "shell -- cmd (Light scope) must NOT emit Grant; got {:?}",
+        exec.acl_ops()
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "shell -- cmd (Light scope) must NOT emit EnsureCoworkDir; got {cowork_ops:?}"
+    );
+    assert_eq!(
+        exec.exec_calls().len(),
+        1,
+        "expected single exec_as_tenant call; got {:?}",
+        exec.exec_calls()
+    );
+    assert_eq!(
+        exec.firewall_ops().len(),
+        2,
+        "expected single PF reapply (no narrow) under runtime command form; got {:?}",
+        exec.firewall_ops()
+    );
+}
+
+#[test]
+fn shell_command_install_uses_light_reapply_on_both_entry_and_narrow() {
+    // Command form, install tier: entry widen + post-child narrow
+    // both use Light scope. Two PF reapplies = 4 firewall ops; no
+    // Grant + no EnsureCoworkDir on either pass.
+    let toml = profile_with_shares(
+        &["github.com"],
+        &["pypi.org"],
+        &[("/tmp", "rw", "$HOME/src")],
+    );
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "pip"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+
+    assert!(
+        exec.acl_ops().is_empty(),
+        "shell --mode install (Light scope) must NOT emit Grant on either pass; got {:?}",
+        exec.acl_ops()
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "shell --mode install (Light scope) must NOT emit EnsureCoworkDir on either pass; got {cowork_ops:?}"
+    );
+    assert_eq!(
+        exec.firewall_ops().len(),
+        4,
+        "expected two PF reapplies (entry-widen + post-child-narrow) = 4 ops; got {:?}",
+        exec.firewall_ops()
+    );
+    assert_eq!(
+        exec.exec_calls().len(),
+        1,
+        "expected single exec_as_tenant call between the two PF reapplies; got {:?}",
+        exec.exec_calls()
+    );
+}
+
+#[test]
+fn shell_interactive_silently_succeeds_when_cowork_path_is_symlink_under_light_scope() {
+    // Inverse of `reload_refuses_when_cowork_path_is_a_symlink`. Under
+    // Light scope omits the kind-check, so a symlinked cowork
+    // path does NOT abort shell entry. Negative pin paralleling
+    // `mode_silently_succeeds_when_cowork_path_is_symlink_under_light_scope`.
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_host_path_kind(
+            &cowork_path,
+            PathKind::Symlink(PathBuf::from("/tmp/elsewhere")),
+        );
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(
+        code, 0,
+        "shell (Light scope) must not refuse on corrupted cowork path; stderr={stderr:?}"
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "shell must NOT emit EnsureCoworkDir against a symlinked cowork path; got {cowork_ops:?}"
+    );
+    assert_eq!(
+        exec.logins(),
+        vec!["dev".to_string()],
+        "login must still fire — shell light scope ignores the cowork drift"
+    );
+}
+
+#[test]
+fn shell_command_runtime_silently_succeeds_when_cowork_path_is_absent_under_light_scope() {
+    // Command-form parallel to the symlink test, for absent cowork
+    // path. Light scope skips both provisioning and the kind-check;
+    // the child command runs.
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_host_path_kind(&cowork_path, PathKind::Absent);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+    );
+    assert_eq!(
+        code, 0,
+        "shell -- cmd (Light scope) must not refuse on absent cowork path; stderr={stderr:?}"
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "shell -- cmd must NOT emit EnsureCoworkDir against an absent cowork path; got {cowork_ops:?}"
+    );
+    assert_eq!(
+        exec.exec_calls().len(),
+        1,
+        "exec_as_tenant should still fire under absent cowork path; got {:?}",
+        exec.exec_calls()
+    );
+}
+
+#[test]
+fn shell_command_install_silently_succeeds_when_cowork_path_is_symlink_under_light_scope() {
+    // Command-form (install) — both PF passes (entry widen +
+    // post-child narrow) build under Light scope, so neither trips
+    // the kind-check on a symlinked cowork path.
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_host_path_kind(
+            &cowork_path,
+            PathKind::Symlink(PathBuf::from("/tmp/elsewhere")),
+        );
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "pip"],
+    );
+    assert_eq!(
+        code, 0,
+        "shell --mode install (Light scope) must not refuse on either pass; stderr={stderr:?}"
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "shell --mode install must NOT emit EnsureCoworkDir on either pass; got {cowork_ops:?}"
+    );
+}
+
+// ================================================================
+// Cowork-dir drift detection in shell's pre-exec doctor
+// ================================================================
+//
+// Companion to mode's drift surface. Shell doesn't auto-heal
+// cowork-dir drift under Light scope; pre-exec doctor surfaces it
+// so the operator can exit + reload.
+
+#[test]
+fn shell_pre_exec_doctor_surfaces_cowork_acl_drift() {
+    // ACL listing missing the share-group ACE → CoworkAclDrift.
+    let cowork_path = std::path::PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_host_acl(
+            &cowork_path,
+            " 0: user:operator allow list,add_file,search\n",
+        );
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains(
+            "\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
+        ),
+        "cowork ACL drift must surface as a Warning aggregate on shell entry; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_after_reload_heals_cowork_drift_emits_no_doctor_aggregate() {
+    // Round-trip pin: with the stub's default-clean cowork ACL
+    // listing (the state a successful Full reload would leave),
+    // shell entry's pre-exec doctor emits no aggregate. Catches a
+    // regression where `has_group_acl_entry` / `read_host_acl`
+    // accidentally trips CoworkAclDrift on a healed host.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:"),
+        "after a clean reload the next shell entry must emit no doctor aggregate; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_doctor_surfaces_cowork_dir_absent() {
+    // Cowork dir absent → CoworkDirAbsent aggregates; shell still
+    // enters (audit is a courtesy).
+    let cowork_path = std::path::PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_host_path_kind(&cowork_path, PathKind::Absent);
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains(
+            "\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
+        ),
+        "cowork dir absence must surface as a Warning aggregate on shell entry; stdout={stdout:?}"
     );
 }

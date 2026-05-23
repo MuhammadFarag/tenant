@@ -30,20 +30,34 @@ pub(crate) enum ModeError {
     Share(ShareError),
 }
 
-/// Pre-built op list for a profile-to-tenant reapply. Construction is
-/// separated from execution so verb methods can render the upfront
-/// plan over the same ops the substrate will run.
+/// `Light` (mode + shell) omits the recursive ACL passes —
+/// `AclOp::Grant` per share AND `AccountOp::EnsureCoworkDir`.
+/// Inheritable ACE bits (`file_inherit,directory_inherit`) propagate
+/// the grant to tenant-created children, so the recursive walk on
+/// every entry is redundant in the steady state. Drift on
+/// pre-existing files / externally-stripped ACL / missing cowork
+/// dir is surfaced by doctor and remediated by `tenant reload`.
 ///
-/// `add_host` is the catch-up op that restores host membership for
-/// legacy tenants created before host membership was wired into create.
+/// `Full` (reload + create's post-provision) includes both. Create's
+/// first apply needs the recursive grant to reach files that
+/// pre-existed at the host_path before the inheritable ACE landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReapplyScope {
+    Light,
+    Full,
+}
+
+/// Pre-built op list for a profile-to-tenant reapply. Construction
+/// is separated from execution so verb methods can render the
+/// upfront plan over the same ops the substrate will run.
+///
+/// `ensure_cowork_dir` and per-share `grant` are `Option` — `None`
+/// under Light scope.
 pub(crate) struct ReapplyPlan {
     pub(crate) install_anchor: FirewallOp,
     pub(crate) reload: FirewallOp,
     pub(crate) add_host: AccountOp,
-    /// Catch-up provisioning of `/Users/Shared/tenants/<name>`.
-    /// Re-fires on every reapply (the substrate is idempotent and the
-    /// recursive ACL pass heals drift on tenant-added children).
-    pub(crate) ensure_cowork_dir: AccountOp,
+    pub(crate) ensure_cowork_dir: Option<AccountOp>,
     pub(crate) share_ops: Vec<ShareOps>,
 }
 
@@ -54,9 +68,13 @@ impl ReapplyPlan {
         entries.push((Op::Firewall(&self.install_anchor), None));
         entries.push((Op::Firewall(&self.reload), None));
         entries.push((Op::Account(&self.add_host), None));
-        entries.push((Op::Account(&self.ensure_cowork_dir), None));
+        if let Some(cowork) = &self.ensure_cowork_dir {
+            entries.push((Op::Account(cowork), None));
+        }
         for share in &self.share_ops {
-            entries.push((Op::Acl(&share.grant), None));
+            if let Some(grant) = &share.grant {
+                entries.push((Op::Acl(grant), None));
+            }
             if let Some(ensure_dir) = &share.ensure_dir {
                 entries.push((Op::Account(ensure_dir), None));
             }
@@ -100,14 +118,15 @@ impl<'a> Tenants<'a> {
         Ok(())
     }
 
-    /// Build the op list for a profile-to-tenant reapply at `level`.
-    /// Pre-flight refusals (host_path existence, tenant_path occupancy)
-    /// surface before any op fires.
+    /// Build the op list for a profile-to-tenant reapply at `level`
+    /// under the given `scope`. Pre-flight refusals (host_path
+    /// existence, tenant_path occupancy) surface before any op fires.
     pub(crate) fn build_reapply_plan(
         &self,
         name: &TenantUserName,
         host: &HostUserName,
         level: ModeLevel,
+        scope: ReapplyScope,
     ) -> Result<ReapplyPlan, ModeError> {
         let profile_content = self
             .machine
@@ -125,21 +144,23 @@ impl<'a> Tenants<'a> {
             group: group.clone(),
             host: host.into(),
         };
-        // Pre-flight kind-check fires on every reapply (reload / mode
-        // / shell): the cowork-path is a stable host-managed dir, but
-        // a hand-edit or leftover from a corrupt prior op can replace
-        // it with a symlink. `mkdir -p <symlink>` silently follows;
-        // the subsequent chown / chmod / chmod -R then mutate the
-        // link target. State-machine concern, not a race.
-        let cowork_path = cowork_dir_path(name.as_str());
-        guard_cowork_dir_kind(self.machine, &cowork_path).map_err(ModeError::Account)?;
-        let ensure_cowork_dir = AccountOp::EnsureCoworkDir {
-            path: cowork_path,
-            owner: host.into(),
-            group,
-            mode: 0o2770,
+        // Kind-check fires only when EnsureCoworkDir will: `mkdir -p`
+        // silently follows a symlink, and the subsequent chown /
+        // chmod / chmod -R would then mutate the link target.
+        let ensure_cowork_dir = match scope {
+            ReapplyScope::Full => {
+                let cowork_path = cowork_dir_path(name.as_str());
+                guard_cowork_dir_kind(self.machine, &cowork_path).map_err(ModeError::Account)?;
+                Some(AccountOp::EnsureCoworkDir {
+                    path: cowork_path,
+                    owner: host.into(),
+                    group,
+                    mode: 0o2770,
+                })
+            }
+            ReapplyScope::Light => None,
         };
-        let share_ops = self.build_share_ops(name, &parsed_profile)?;
+        let share_ops = self.build_share_ops(name, &parsed_profile, scope)?;
         Ok(ReapplyPlan {
             install_anchor,
             reload,
@@ -150,8 +171,9 @@ impl<'a> Tenants<'a> {
     }
 
     /// PF reapply first; a Reload failure aborts before any share
-    /// mutation. `add_host` fires before the per-share ops because host
-    /// needs the membership for the inheritable ACL grant to flow through.
+    /// mutation. `add_host` fires before the per-share ops because
+    /// the host needs the membership for the inheritable ACL grant
+    /// to flow through.
     pub(crate) fn execute_reapply_plan(
         &self,
         plan: &ReapplyPlan,
@@ -163,8 +185,9 @@ impl<'a> Tenants<'a> {
             .map_err(ModeError::Firewall)?;
         self.run(&plan.add_host, reporter)
             .map_err(ModeError::Account)?;
-        self.run(&plan.ensure_cowork_dir, reporter)
-            .map_err(ModeError::Account)?;
+        if let Some(cowork) = &plan.ensure_cowork_dir {
+            self.run(cowork, reporter).map_err(ModeError::Account)?;
+        }
         self.execute_share_ops(&plan.share_ops, reporter)
     }
 
@@ -198,10 +221,11 @@ impl<'a> Tenants<'a> {
         }
         let mut failed = 0;
         for name in &names {
-            let outcome = match self.build_reapply_plan(name, host, ModeLevel::Runtime) {
-                Ok(plan) => self.reload(name, &plan, reporter),
-                Err(err) => Err(err),
-            };
+            let outcome =
+                match self.build_reapply_plan(name, host, ModeLevel::Runtime, ReapplyScope::Full) {
+                    Ok(plan) => self.reload(name, &plan, reporter),
+                    Err(err) => Err(err),
+                };
             if let Err(err) = outcome {
                 failed += 1;
                 match &err {

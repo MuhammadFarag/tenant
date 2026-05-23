@@ -547,7 +547,7 @@ pub fn mode_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -
          \u{2022} {re_render}\n  \
          \u{2022} reload pf\n  \
          \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
-         \u{2022} re-apply declared shares from the profile (idempotent)\n{install_tail}\
+         \u{2022} refresh tenant-side symlinks for declared shares\n{install_tail}\
          \n\
          {plan}\
          Sudo needed for: firewall install.\n\
@@ -569,10 +569,10 @@ pub fn shell_summary_block(name: &str) -> String {
          This will:\n  \
          \u{2022} narrow the firewall to runtime tier (auto-narrow)\n  \
          \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
-         \u{2022} re-apply each declared share from [[shares]] in the profile\n  \
+         \u{2022} refresh tenant-side symlinks for declared shares\n  \
          \u{2022} launch an interactive login shell as '{name}'\n\
          \n\
-         Sudo needed for: firewall narrow, share reapply, login.\n\
+         Sudo needed for: firewall narrow, tenant-side symlinks, login.\n\
          \n",
     )
 }
@@ -593,14 +593,14 @@ pub fn shell_command_summary_block(name: &str, mode: &str, argv: &str) -> String
             " (mode: install)",
             "widen the firewall to install tier (narrows back to runtime on completion)",
             Some("narrow the firewall to runtime tier (always \u{2014} even if the command fails)"),
-            "Sudo needed for: firewall install, share reapply, exec, firewall narrow.",
+            "Sudo needed for: firewall install, tenant-side symlinks, exec, firewall narrow.",
         )
     } else {
         (
             "",
             "ensure the firewall is at runtime tier (auto-narrow; idempotent if already there)",
             None,
-            "Sudo needed for: firewall install, share reapply, exec.",
+            "Sudo needed for: firewall install, tenant-side symlinks, exec.",
         )
     };
     let mut s = format!(
@@ -609,7 +609,7 @@ pub fn shell_command_summary_block(name: &str, mode: &str, argv: &str) -> String
          This will:\n  \
          \u{2022} {entry_bullet}\n  \
          \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
-         \u{2022} re-apply each declared share from [[shares]] in the profile\n  \
+         \u{2022} refresh tenant-side symlinks for declared shares\n  \
          \u{2022} run as '{name}': {argv}\n",
     );
     if let Some(finally) = finally_bullet {

@@ -413,6 +413,25 @@ impl StubHostMachine {
         self
     }
 
+    /// Cowork dir healthy: pre-load `host_path_kind` → `Dir` AND a
+    /// listing carrying the share-group ACE. Use when a test
+    /// doesn't load a profile (the gated synthesizers wouldn't kick
+    /// in) but still wants neither `CoworkDirAbsent` nor
+    /// `CoworkAclDrift` to fire.
+    pub fn with_present_cowork_dir(self, name: &str) -> Self {
+        let path = tenant::domain::tenants::cowork_dir_path(name);
+        self.host_path_kinds
+            .borrow_mut()
+            .insert(path.clone(), PathKind::Dir);
+        self.host_acl_state.borrow_mut().insert(
+            path,
+            format!(
+                " 0: group:{name}-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\n"
+            ),
+        );
+        self
+    }
+
     /// Snapshot of every `host_path_kind` call, in invocation order.
     pub fn host_path_kind_calls(&self) -> Vec<PathBuf> {
         self.host_path_kind_calls.borrow().clone()
@@ -759,12 +778,24 @@ impl HostMachine for StubHostMachine {
         if let Some(err) = self.host_path_kind_failure.borrow_mut().take() {
             return Err(err);
         }
-        Ok(self
-            .host_path_kinds
-            .borrow()
-            .get(path)
-            .cloned()
-            .unwrap_or(PathKind::Absent))
+        if let Some(kind) = self.host_path_kinds.borrow().get(path) {
+            return Ok(kind.clone());
+        }
+        // Cowork paths default to `Dir` only when the tenant has a
+        // profile loaded — same gate as the host-ACL synthesizer
+        // below. Tests that don't pre-load a profile still see the
+        // legacy "missing pre-load = Absent" default (destroy's
+        // cowork-notice probe relies on this).
+        if let Some(name) = path
+            .strip_prefix(tenant::domain::tenants::COWORK_DIR_PARENT)
+            .ok()
+            .and_then(|p| p.to_str())
+            .filter(|s| !s.is_empty() && !s.contains('/'))
+            && self.profile_state.borrow().contains_key(name)
+        {
+            return Ok(PathKind::Dir);
+        }
+        Ok(PathKind::Absent)
     }
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
@@ -774,14 +805,31 @@ impl HostMachine for StubHostMachine {
         if let Some(listing) = self.host_acl_state.borrow().get(path) {
             return Ok(listing.clone());
         }
-        // Emit one synthetic ACL entry per known tenant (via
-        // profile_state's keys) so tests that don't exercise AclDrift
-        // see the matching entry for every tenant they audit.
+        // Synthesize one share-group ACE per known tenant so tests
+        // that don't exercise AclDrift see a matching entry. Add a
+        // cowork-dir ACE on the canonical path when the tenant has
+        // a profile loaded — same gate as `host_path_kind`. Drift
+        // tests override via `with_host_acl(cowork_path, …)`.
         let mut listing = String::new();
-        for name in self.profile_state.borrow().keys() {
+        let profiles = self.profile_state.borrow();
+        for name in profiles.keys() {
             listing.push_str(&format!(
                 " 0: group:{name}-tenant-share allow list,add_file,search\n"
             ));
+        }
+        if let Some(name) = path
+            .strip_prefix(tenant::domain::tenants::COWORK_DIR_PARENT)
+            .ok()
+            .and_then(|p| p.to_str())
+            .filter(|s| !s.is_empty() && !s.contains('/'))
+            && profiles.contains_key(name)
+        {
+            let needle = format!("group:{name}-tenant-share allow");
+            if !listing.contains(&needle) {
+                listing.push_str(&format!(
+                    " 0: group:{name}-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\n"
+                ));
+            }
         }
         Ok(listing)
     }

@@ -16,12 +16,17 @@ Verbs:
   requested tier + reload pf.
 - `tenant shell <name> [--mode install|runtime] [-- <cmd>]` — enter
   the tenant. Empty argv = interactive login; non-empty argv after
-  `--` = single-command form. Auto-narrows + reapplies shares on
-  entry; install-mode widens for the call and narrows back on
+  `--` = single-command form. Auto-narrows the firewall + refreshes
+  host group membership + tenant-side symlinks (Light reapply
+  scope — no recursive ACL passes; drift is surfaced via pre-exec
+  doctor); install-mode widens for the call and narrows back on
   completion. Child exit propagates; narrow-on-finally failure emits
   a `⚠` stderr warning without overriding the child's exit.
-- `tenant reload [<name>]` — reapply profile to host state. No-arg
-  walks every tenant; exits 0 / 74.
+- `tenant reload [<name>]` — the canonical "apply everything" verb:
+  Full reapply scope (PF + host membership + tenant-side symlinks +
+  recursive `AclOp::Grant` per share + `EnsureCoworkDir`). Mode/shell
+  skip the recursive ACL passes (Light scope); reload heals their
+  drift. No-arg walks every tenant; exits 0 / 74.
 - `tenant doctor [<name>]` — read-only audit (paths, sudoers, pf,
   anchor, shares, group membership). `--strict` maps max severity to
   exit 1 / 2.
@@ -98,9 +103,10 @@ src/domain/tenants.rs / tenants/
                     `create`), `destroy.rs` (`DestroyError`,
                     `Eligibility`, `destroy_eligibility`, `destroy`,
                     `destroy_orphan_group`), `reapply.rs`
-                    (`ModeError`, `ReapplyPlan`, `ReloadAllOutcome`,
-                    `hosts_for_level`, `mode`, `build_reapply_plan`,
-                    `execute_reapply_plan`, `reload`, `reload_all`),
+                    (`ModeError`, `ReapplyScope`, `ReapplyPlan`,
+                    `ReloadAllOutcome`, `hosts_for_level`, `mode`,
+                    `build_reapply_plan`, `execute_reapply_plan`,
+                    `reload`, `reload_all`),
                     `shares.rs` (`ShareError`, `ShareOps`,
                     `build_share_ops`, `execute_share_ops`,
                     `reapply_shares_post_provision`), `shell.rs`
@@ -419,15 +425,30 @@ it from scratch wastes a cycle and risks getting it wrong.
 
 ### Reapply (mode / shell / reload)
 
+- **`ReapplyScope::{Light, Full}` splits reapply by cost.** Light
+  (mode + shell) omits the recursive ACL passes — `AclOp::Grant`
+  per share AND `EnsureCoworkDir` (whose 4th substrate call is
+  recursive `chmod -R +a`). PF anchor + Reload + `AddHostToShareGroup`
+  + per-share `EnsureDirAsUser` + `EnsureSymlinkAsUser` still fire.
+  Inheritable ACE bits (`file_inherit,directory_inherit`) propagate
+  the grant to tenant-created children automatically, so the
+  recursive walk on every entry is redundant in the steady state.
+  Full (reload + create's post-provision) includes both recursive
+  passes. Drift on the
+  Light-skipped pieces is surfaced by `Finding::AclDrift` /
+  `CoworkAclDrift` / `CoworkDirAbsent` via pre-exec doctor + the
+  full doctor verb; remediation is `tenant reload <name>`.
+
 - **Mode/shell/reload share `build_reapply_plan` +
-  `execute_reapply_plan`.** All three reapply the profile (PF anchor
-  at requested tier + per-share `AclOp::Grant` + optional
-  `EnsureDirAsUser` + `EnsureSymlinkAsUser`). Build is separated from
-  execute so dispatch can render the upfront plan and surface
+  `execute_reapply_plan` parameterized by scope.** Build is separated
+  from execute so dispatch can render the upfront plan and surface
   profile-read failures pre-prompt. Share pass runs AFTER PF reapply
   lands so a Reload failure aborts before any ACL/symlink mutation.
   `execute_share_ops` is shared with `reapply_shares_post_provision`
-  (create's post-Enable share pass; skips PF).
+  (create's post-Enable share pass; skips PF; hardcoded
+  `ReapplyScope::Full` because create's first apply needs the
+  recursive grant to reach files that pre-existed at the host_path
+  before the inheritable ACE landed).
 
 - **`tenant shell` collapses interactive + command forms.** Argv
   presence is the discriminator. Prior-art lock: kubectl / docker /
@@ -474,9 +495,13 @@ it from scratch wastes a cycle and risks getting it wrong.
   macOS chmod +a is natively idempotent; no substring-match pre-check
   (macOS canonicalizes bit names on storage, so `read,write,execute`
   → `list,add_file,search`, defeating exact-match comparison).
-  Grant recurses so shares declared on already-populated host
-  directories reach existing children; `file_inherit,directory_inherit`
-  only cover future children. Grant runs under `sudo` because files
+  Grant fires only under `ReapplyScope::Full` (reload +
+  create-post-provision); mode/shell (Light scope) OMIT it. Grant
+  recurses so shares declared on already-populated host directories
+  reach existing children on the Full passes;
+  `file_inherit,directory_inherit` cover children created AFTER the
+  first apply. Drift on pre-existing files is surfaced by doctor's
+  `AclDrift` and remediated by `tenant reload`. Grant runs under `sudo` because files
   the tenant writes inside a rw share (`.ruff_cache/`, build output,
   anything the tenant creates while working) are tenant-owned, and
   POSIX requires owner-or-root to modify a file's ACL — being in the
@@ -554,40 +579,51 @@ it from scratch wastes a cycle and risks getting it wrong.
   string and `Reporter::step` / `render_plan_block` emit one
   privilege-aware line per substrate call.
 
-- **Same op fires at create AND at every reapply.** `Tenants::create`
-  inserts `EnsureCoworkDir` between `CreateTenantUser` and the
-  keychain bootstrap; `build_reapply_plan` inserts it between
-  `AddHostToShareGroup` and the per-share grants. The recursive ACL
-  pass at every reapply heals drift and picks up tenant-added
-  subdirectories between cycles. Failures during create surface via
-  `CreateError::CoworkDir` at `EX_IOERR`; recovery is
-  `tenant destroy <name>` (same posture as
-  `Profile` / `Firewall` / `KeychainProvision`).
+- **`EnsureCoworkDir` fires at create AND under Full reapply (reload
+  only).** `Tenants::create` inserts it between `CreateTenantUser`
+  and the keychain bootstrap; `build_reapply_plan` inserts it under
+  `ReapplyScope::Full` only (reload + create-post-provision). Light
+  scope (mode + shell) OMITS the op entirely — its 4th substrate
+  call is recursive `chmod -R +a`. Inheritable bits on the
+  cowork-dir root propagate the rw ACE to tenant-created children,
+  so skipping the recursive walk on every shell entry is
+  structurally sound in the steady state. Drift on the cowork dir (deleted externally, ACE
+  stripped, inherited ACE divergence) is surfaced by doctor's
+  `CoworkDirAbsent` + `CoworkAclDrift` findings; remediation is
+  `tenant reload <name>`. Failures during create surface via
+  `CreateError::CoworkDir` at `EX_IOERR`; recovery is `tenant
+  destroy <name>` (same posture as `Profile` / `Firewall` /
+  `KeychainProvision`).
 
 - **Path builder lives at the Tenants boundary.**
   `tenants::cowork_dir_path(name: &str) -> PathBuf` returns
-  `/Users/Shared/tenants/<name>`; centralized so dispatch and the
-  Tenants per-verb files share one source. Like
-  `tenant_share_group_name`, it takes `&str` (the newtype
-  `TenantUserName` lifts at the ADT variant boundary, not the
-  builder).
+  `/Users/Shared/tenants/<name>`; the `COWORK_DIR_PARENT` constant
+  carries the prefix so dispatch, the Tenants per-verb files, and
+  the test/dry-run host-machine synthesizers share one source. Like
+  `tenant_share_group_name`, the path builder takes `&str` (the
+  newtype `TenantUserName` lifts at the ADT variant boundary, not
+  the builder).
 
-- **Cowork-path kind-check fires on BOTH create AND every reapply.**
+- **Cowork-path kind-check fires under Full reapply scope only.**
   `mkdir -p` errors on a regular file at the path and silently
   follows a symlink, leaving the subsequent chown + chmod pass
-  mutating the link's target. `Tenants::create` and
-  `build_reapply_plan` (reload / mode / shell) both probe the path
-  before constructing `EnsureCoworkDir`: `Absent` and `Dir` continue,
+  mutating the link's target. `Tenants::create` and Full-scope
+  `build_reapply_plan` (reload) both probe the path before
+  constructing `EnsureCoworkDir`: `Absent` and `Dir` continue,
   `Symlink(_)` and `Other` refuse with
   `AccountError::CoworkDirOccupied { path, kind }` — flowing through
   `CreateError::CoworkDir` on create and `ModeError::Account` on
-  reapply. Probe failure rides the existing `AccountError::Spawn` /
-  `NonZero` shape via a small adapter; no new error type. The
-  shared helper lives in `src/domain/tenants.rs` as
-  `guard_cowork_dir_kind` alongside `cowork_dir_path`. The check
-  exists to prevent the substrate from following a symlink at the
-  cowork path — that's a state-machine concern (corrupt prior op,
-  hand-edit, leftover between sessions), not a race window.
+  reload. Light scope (mode + shell) SKIPS both the op and the
+  guard; a corrupted cowork path doesn't abort mode/shell. Doctor's
+  `CoworkDirAbsent` probe surfaces the absent case (`Symlink/Other`
+  variants are absent-from-the-doctor-domain — a follow-up; today's
+  drift surface covers ACL drift + absence only). Probe failure
+  rides the existing `AccountError::Spawn` / `NonZero` shape via a
+  small adapter; no new error type. The shared helper lives in
+  `src/domain/tenants.rs` as `guard_cowork_dir_kind` alongside
+  `cowork_dir_path`. The check exists to prevent the substrate from
+  following a symlink at the cowork path — state-machine concern,
+  not a race window.
 
 - **`tenant destroy <name>` does NOT remove the cowork dir.** The
   dir holds operator-authored work; auto-deleting it is the failure
@@ -624,7 +660,16 @@ it from scratch wastes a cycle and risks getting it wrong.
 - **`DoctorScope::Shell` covers both shell forms** (no
   `DoctorScope::Exec` variant). Interactive and command forms share
   the audit-relevance set: `PfDisabled` host-wide + `EnvLeak`
-  host-wide + all per-tenant drift.
+  host-wide + all per-tenant drift (PfRuleDrift, AnchorBodyDrift,
+  AclDrift, SymlinkDrift, CoworkAclDrift, CoworkDirAbsent,
+  HostNotInShareGroup).
+
+- **`DoctorScope::Mode` shares the per-tenant drift set with `Shell`
+  and `Reload`.** Mode uses Light reapply, so it no longer
+  auto-heals share/cowork state — the pre-exec audit surfaces the
+  drift the operator would otherwise hit silently. `EnvLeak` stays
+  Shell-only (only shell's exec inherits the operator's
+  `SSH_AUTH_SOCK`).
 
 - **Only unqualified `Defaults env_delete` counts as protection.**
   Sudo's `Defaults` supports qualifiers (`Defaults:user`,

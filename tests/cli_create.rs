@@ -2094,3 +2094,63 @@ fn create_accepts_when_cowork_path_is_already_a_directory() {
         "EnsureCoworkDir should run on an existing directory",
     );
 }
+
+// ================================================================
+// Full reapply scope on create-post-provision
+// ================================================================
+//
+// Create's post-provision share pass calls
+// `reapply_shares_post_provision`, which hard-codes
+// `ReapplyScope::Full`. The recursive `chmod -R +a` reaches files
+// that pre-existed at the host_path before the inheritable ACE
+// landed; without it, operators with populated host_paths would
+// find their files invisible to the tenant on day one.
+
+#[test]
+fn create_post_provision_share_pass_uses_full_reapply_scope_emitting_grant() {
+    // Pin for `reapply_shares_post_provision`'s hardcoded
+    // `ReapplyScope::Full`. A Full→Light flip on that callsite
+    // zeroes the grant count and trips this pin. Pins the share
+    // pass only; cowork-dir emission has its own pin
+    // (`create_emits_cowork_dir_during_provisioning`) because
+    // EnsureCoworkDir originates in `Tenants::create` directly,
+    // not in `reapply_shares_post_provision`.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new().with_create_profile_content("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "create happy path; stderr={stderr:?}");
+
+    let grant_count = exec
+        .acl_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AclOp::Grant { .. }))
+        .count();
+    assert_eq!(
+        grant_count, 1,
+        "create's post-provision share pass (Full scope) must emit exactly one AclOp::Grant per declared share"
+    );
+}
+
+#[test]
+fn create_emits_cowork_dir_during_provisioning() {
+    // Pin: exactly one EnsureCoworkDir emitted at create-time. The
+    // call originates in `Tenants::create` (NOT in
+    // `reapply_shares_post_provision`); kept in a separate test so
+    // a regression points at the right callsite.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new().with_create_profile_content("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "create happy path; stderr={stderr:?}");
+
+    let cowork_count = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .count();
+    assert_eq!(
+        cowork_count, 1,
+        "create must emit exactly one EnsureCoworkDir during provisioning"
+    );
+}

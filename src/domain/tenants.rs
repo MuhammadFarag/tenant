@@ -15,7 +15,7 @@ pub mod validation;
 pub(crate) use create::CreateError;
 pub(crate) use destroy::{DestroyError, Eligibility, destroy_eligibility};
 pub(crate) use doctor::{DoctorError, DoctorScope};
-pub(crate) use reapply::ModeError;
+pub(crate) use reapply::{ModeError, ReapplyScope};
 pub(crate) use shares::ShareError;
 pub(crate) use shell::ShellError;
 pub use validation::{ConflictError, NameError, check_conflict, validate_name};
@@ -25,12 +25,17 @@ pub fn tenant_share_group_name(name: &str) -> GroupName {
     GroupName(format!("{name}-tenant-share"))
 }
 
+/// Parent path of every per-tenant co-working directory. Shared
+/// with the test + dry-run host-machine synthesizers so a future
+/// move (e.g. to `/private/var/tenants`) updates one constant.
+pub const COWORK_DIR_PARENT: &str = "/Users/Shared/tenants";
+
 /// Single source of truth for the per-tenant co-working directory
 /// path: `/Users/Shared/tenants/<name>`. Owned by the host operator
 /// with the tenant's share group as primary, mode 2770 + an
 /// inheritable rw ACL granting collaborative access to both sides.
 pub fn cowork_dir_path(name: &str) -> PathBuf {
-    PathBuf::from(format!("/Users/Shared/tenants/{name}"))
+    PathBuf::from(format!("{COWORK_DIR_PARENT}/{name}"))
 }
 
 /// Pre-flight: `mkdir -p` against an existing regular file errors,
@@ -38,13 +43,11 @@ pub fn cowork_dir_path(name: &str) -> PathBuf {
 /// chown and chmod -R then mutate whatever lives at the link's
 /// target. Probe-failure rides the existing `AccountError` shape so
 /// it flows through the caller's `CoworkDir` / `Account` arm without
-/// new plumbing. Fires on BOTH create AND every reapply (reload /
-/// mode / shell): the kind-check prevents the substrate from
-/// following a symlink at the cowork path, which is a state-machine
-/// concern, not a race window. Probes host-side: the cowork dir is
-/// owned by the host operator (the tenant user may not even exist
-/// yet at create-time), and its kind doesn't depend on the tenant's
-/// perspective.
+/// new plumbing. Fires on create + Full-scope reapply (the only
+/// paths that construct `EnsureCoworkDir`). Probes host-side: the
+/// cowork dir is owned by the host operator (the tenant user may
+/// not even exist yet at create-time), and its kind doesn't depend
+/// on the tenant's perspective.
 pub(super) fn guard_cowork_dir_kind(
     machine: &dyn HostMachine,
     path: &Path,

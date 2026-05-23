@@ -335,7 +335,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
         let _ = writeln!(
             self.terminal.stdout,
-            "  \u{2022} re-apply declared shares from the profile (idempotent)"
+            "  \u{2022} refresh tenant-side symlinks for declared shares"
         );
         if matches!(level, ModeLevel::Install) {
             let _ = writeln!(self.terminal.stdout);
@@ -398,7 +398,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
         let _ = writeln!(
             self.terminal.stdout,
-            "  \u{2022} re-apply each declared share from [[shares]] in the profile"
+            "  \u{2022} refresh tenant-side symlinks for declared shares"
         );
         let _ = writeln!(
             self.terminal.stdout,
@@ -407,7 +407,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
         let _ = writeln!(
             self.terminal.stdout,
-            "Sudo needed for: firewall narrow, share reapply, login."
+            "Sudo needed for: firewall narrow, tenant-side symlinks, login."
         );
         let _ = writeln!(self.terminal.stdout);
     }
@@ -592,7 +592,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
         let _ = writeln!(
             self.terminal.stdout,
-            "  \u{2022} re-apply each declared share from [[shares]] in the profile"
+            "  \u{2022} refresh tenant-side symlinks for declared shares"
         );
         let _ = writeln!(self.terminal.stdout, "  \u{2022} run as '{name}': {joined}");
         if mode != ModeLevel::Runtime {
@@ -605,12 +605,12 @@ impl<'t, 'm> Reporter<'t, 'm> {
         if mode == ModeLevel::Runtime {
             let _ = writeln!(
                 self.terminal.stdout,
-                "Sudo needed for: firewall install, share reapply, exec."
+                "Sudo needed for: firewall install, tenant-side symlinks, exec."
             );
         } else {
             let _ = writeln!(
                 self.terminal.stdout,
-                "Sudo needed for: firewall install, share reapply, exec, firewall narrow."
+                "Sudo needed for: firewall install, tenant-side symlinks, exec, firewall narrow."
             );
         }
         let _ = writeln!(self.terminal.stdout);

@@ -6,7 +6,7 @@ use crate::ModeLevel;
 use crate::domain::reporter::Reporter;
 use crate::domain::{AccountError, AccountOp, HostUserName, KeychainError, Op, TenantUserName};
 
-use super::reapply::ReapplyPlan;
+use super::reapply::{ReapplyPlan, ReapplyScope};
 use super::{ModeError, Tenants};
 
 /// Failure surface for `shell` (interactive + command forms).
@@ -48,7 +48,8 @@ impl<'a> Tenants<'a> {
         self.shell_command(name, host, argv, mode, reporter)
     }
 
-    /// Auto-narrows to runtime, reapplies shares, then logs in.
+    /// Light reapply (PF + host membership + tenant-side symlinks),
+    /// then unlock the keychain and log in.
     fn shell_interactive(
         &self,
         name: &TenantUserName,
@@ -59,7 +60,7 @@ impl<'a> Tenants<'a> {
         // the verb context even if the pre-flight profile read fails.
         reporter.shell_intent(name);
         let reapply_plan = self
-            .build_reapply_plan(name, host, ModeLevel::Runtime)
+            .build_reapply_plan(name, host, ModeLevel::Runtime, ReapplyScope::Light)
             .map_err(ShellError::Mode)?;
         let login = AccountOp::LoginAsUser { name: name.into() };
         let mut plan_entries = reapply_plan.as_plan_entries();
@@ -95,14 +96,14 @@ impl<'a> Tenants<'a> {
         reporter.shell_command_intent(name, mode);
 
         let entry_plan: ReapplyPlan = self
-            .build_reapply_plan(name, host, mode)
+            .build_reapply_plan(name, host, mode, ReapplyScope::Light)
             .map_err(ShellError::Mode)?;
 
         if let Err(entry_err) = self.execute_reapply_plan(&entry_plan, reporter) {
             // Best-effort narrow; drop any secondary failure on the floor —
             // the operator's primary signal is the entry failure.
             let _ = self
-                .build_reapply_plan(name, host, ModeLevel::Runtime)
+                .build_reapply_plan(name, host, ModeLevel::Runtime, ReapplyScope::Light)
                 .and_then(|p| self.execute_reapply_plan(&p, reporter));
             return Err(ShellError::Mode(entry_err));
         }
@@ -114,7 +115,7 @@ impl<'a> Tenants<'a> {
         let narrow_result = if mode == ModeLevel::Runtime {
             Ok(())
         } else {
-            self.build_reapply_plan(name, host, ModeLevel::Runtime)
+            self.build_reapply_plan(name, host, ModeLevel::Runtime, ReapplyScope::Light)
                 .and_then(|p| self.execute_reapply_plan(&p, reporter))
         };
 

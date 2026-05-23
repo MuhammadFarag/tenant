@@ -1,4 +1,4 @@
-use tenant::domain::UserId;
+use tenant::domain::{PathKind, UserId};
 
 mod adapters;
 mod common;
@@ -141,9 +141,11 @@ fn doctor_emits_one_finding_per_accessible_path() {
 fn doctor_clean_host_emits_no_findings_summary() {
     // No `with_probe_outcome` calls — every probe defaults to
     // `Denied`. A clean host produces no findings; the operator
-    // sees the convergent summary line.
+    // sees the convergent summary line. `with_present_cowork_dir`
+    // seats the cowork-presence baseline so the doctor's absence
+    // probe doesn't fire on the default-Absent stub state.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubHostMachine::new();
+    let stub_exec = StubHostMachine::new().with_present_cowork_dir("dev");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
@@ -459,7 +461,7 @@ fn doctor_strict_no_findings_exits_0() {
     // Clean host — every probe Denied → 0 findings → --strict → exit 0.
     // Pin: --strict doesn't manufacture exit-1 out of nothing.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubHostMachine::new();
+    let stub_exec = StubHostMachine::new().with_present_cowork_dir("dev");
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
     assert_eq!(
@@ -517,7 +519,7 @@ fn doctor_pf_rules_present_no_finding() {
     // produces no PfRuleDrift finding. Pin: doctor still exits 0
     // and the operator-visible summary is "no findings".
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubHostMachine::new();
+    let stub_exec = StubHostMachine::new().with_present_cowork_dir("dev");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -736,7 +738,9 @@ fn doctor_pam_tid_info_does_not_trip_strict() {
     // --strict's exit-1). Pin against a regression that bumps
     // TouchIdMissing to Warning by accident.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubHostMachine::new().with_pam_sudo_content("");
+    let stub_exec = StubHostMachine::new()
+        .with_pam_sudo_content("")
+        .with_present_cowork_dir("dev");
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
     assert_eq!(code, 0, "Info should not trip --strict; stderr={stderr:?}");
@@ -976,11 +980,13 @@ fn doctor_anchor_body_profile_unreadable_skips_check() {
     // Profile-read failure → SKIP the anchor-body check (no finding
     // emitted from this check). Other checks still run; exit 0;
     // clean summary. Negative pin: AnchorBodyDrift must NOT
-    // false-positive on profile-missing state.
+    // false-positive on profile-missing state. Cowork dir is
+    // host-managed (independent of the profile), so seat its
+    // presence to isolate this test on the anchor-body check.
     let stub_reader = make_tenant_stub_reader("dev");
     // No `with_existing_profile` → read_profile returns an error.
     // No `with_anchor_body` → default (renders empty-allowlist).
-    let stub_exec = StubHostMachine::new();
+    let stub_exec = StubHostMachine::new().with_present_cowork_dir("dev");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -1460,10 +1466,12 @@ fn doctor_share_drift_skips_when_profile_unreadable() {
     // Profile-read failure SKIPS the share-drift check silently —
     // same posture as the anchor-body-drift check. No AclDrift;
     // clean summary; exit 0. A future ProfileMissing finding would
-    // surface the profile state separately.
+    // surface the profile state separately. Cowork dir is
+    // independent of the profile; seat its presence so the test
+    // isolates the share-drift skip behavior.
     let stub_reader = make_tenant_stub_reader("dev");
     // No `with_existing_profile` → read_profile returns an error.
-    let stub_exec = StubHostMachine::new();
+    let stub_exec = StubHostMachine::new().with_present_cowork_dir("dev");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
@@ -1846,10 +1854,14 @@ fn doctor_clean_when_host_is_member() {
 #[test]
 fn doctor_strict_exit_1_on_host_not_in_share_group_alone() {
     // HostNotInShareGroup is Warning-tier; --strict + warning-only
-    // → exit 1. Mirrors the AclDrift strict-mode test.
+    // → exit 1. `with_present_cowork_dir` keeps the "alone" framing
+    // intact — without it, the default-Absent cowork dir would also
+    // fire CoworkDirAbsent and the test couldn't tell which warning
+    // tripped --strict.
     let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec =
-        StubHostMachine::new().with_host_in_group("operator", "dev-tenant-share", false);
+    let stub_exec = StubHostMachine::new()
+        .with_host_in_group("operator", "dev-tenant-share", false)
+        .with_present_cowork_dir("dev");
     let (code, _stdout, stderr) =
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
     assert_eq!(
@@ -2097,5 +2109,76 @@ fn doctor_stash_probe_failure_surfaces_and_walk_continues() {
     assert!(
         stderr.contains("failed to probe stash presence for tenant 'dev'"),
         "stderr should carry the stash-probe-failed frame; got: {stderr:?}"
+    );
+}
+
+// ================================================================
+// Cowork-dir drift surfaces via `tenant doctor`
+// ================================================================
+//
+// The cowork dir is host-managed-not-share-declared, so its drift
+// gets dedicated Finding variants (CoworkAclDrift + CoworkDirAbsent)
+// with cowork-specific guidance.
+
+#[test]
+fn doctor_cowork_acl_missing_emits_warning() {
+    // Listing without the share-group ACE → CoworkAclDrift.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let cowork_path = std::path::PathBuf::from("/Users/Shared/tenants/dev");
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_acl(
+            &cowork_path,
+            // Operator ACE only; no group:dev-tenant-share entry.
+            " 0: user:operator allow list,add_file,search\n",
+        );
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' co-working directory ACL drift"),
+        "expected CoworkAclDrift warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("dev-tenant-share"),
+        "CoworkAclDrift should name the expected group; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("/Users/Shared/tenants/dev"),
+        "CoworkAclDrift should name the drifted cowork path; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant reload dev"),
+        "CoworkAclDrift should name the recovery command; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_cowork_dir_absent_emits_warning() {
+    // Cowork dir absent → CoworkDirAbsent. Negative pin: absence
+    // short-circuits the ACL probe (assertion below).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let cowork_path = std::path::PathBuf::from("/Users/Shared/tenants/dev");
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_path_kind(&cowork_path, PathKind::Absent);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("warning: tenant 'dev' co-working directory missing"),
+        "expected CoworkDirAbsent warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("/Users/Shared/tenants/dev"),
+        "CoworkDirAbsent should name the missing cowork path; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("tenant reload dev"),
+        "CoworkDirAbsent should name the recovery command; stdout={stdout:?}"
+    );
+    // Negative pin: absence short-circuits the ACL probe, so we
+    // should NOT also see an AclDrift warning fire.
+    assert!(
+        !stdout.contains("co-working directory ACL drift"),
+        "absence must short-circuit the ACL probe; stdout={stdout:?}"
     );
 }

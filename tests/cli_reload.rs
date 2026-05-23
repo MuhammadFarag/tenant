@@ -821,3 +821,80 @@ fn reload_all_surfaces_user_directory_error_when_tenant_enumeration_fails() {
         "expected reload_all_enumeration_failed frame; stderr={stderr:?}"
     );
 }
+
+// ================================================================
+// Reload uses Full reapply scope
+// ================================================================
+//
+// Reload is the canonical "apply everything" verb. Mode + shell use
+// Light scope; reload + create-post-provision use Full. A
+// refactor that accidentally flipped reload's `build_reapply_plan`
+// callsite to Light would silently break the convergence guarantee
+// operators depend on after editing the profile or healing drift.
+
+#[test]
+fn reload_uses_full_reapply_scope_emitting_grant_and_cowork() {
+    // Reload with a declared share MUST emit one AclOp::Grant per
+    // share + one EnsureCoworkDir. A Full→Light flip on reload's
+    // dispatch callsite zeroes both counts and trips this pin.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0, "reload happy path; stderr={stderr:?}");
+
+    let grant_count = exec
+        .acl_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AclOp::Grant { .. }))
+        .count();
+    assert_eq!(
+        grant_count, 1,
+        "reload (Full scope) must emit exactly one AclOp::Grant per declared share"
+    );
+
+    let cowork_count = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .count();
+    assert_eq!(
+        cowork_count, 1,
+        "reload (Full scope) must emit exactly one EnsureCoworkDir"
+    );
+}
+
+#[test]
+fn reload_all_uses_full_reapply_scope_per_tenant_emitting_grant_and_cowork() {
+    // No-arg reload's per-tenant `build_reapply_plan` callsite
+    // lives inside `reload_all`, INDEPENDENT of the single-tenant
+    // dispatch callsite. A Full→Light flip on that line alone would
+    // slip past the single-tenant pin above. Exercise two tenants
+    // with declared shares; assert BOTH receive Full scope.
+    let dev_toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let staging_toml = profile_with_shares(&[], &[], &[("/var", "ro", "$HOME/var-mirror")]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &dev_toml)
+        .with_existing_profile("staging", &staging_toml);
+    let (code, _stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
+    assert_eq!(code, 0, "reload-all happy path; stderr={stderr:?}");
+
+    let grant_count = exec
+        .acl_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AclOp::Grant { .. }))
+        .count();
+    assert_eq!(
+        grant_count, 2,
+        "reload-all (Full scope) must emit one AclOp::Grant per tenant per declared share (2 total here)"
+    );
+
+    let cowork_count = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .count();
+    assert_eq!(
+        cowork_count, 2,
+        "reload-all (Full scope) must emit one EnsureCoworkDir per tenant (2 total here)"
+    );
+}

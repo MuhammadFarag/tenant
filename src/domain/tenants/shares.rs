@@ -8,7 +8,7 @@ use crate::domain::reporter::Reporter;
 use crate::domain::{AccountOp, AclMode, AclOp, PathKind, TenantUserName};
 use crate::profile::{Profile, ShareMode, expand_tenant_path};
 
-use super::reapply::ModeError;
+use super::reapply::{ModeError, ReapplyScope};
 use super::{Tenants, tenant_share_group_name};
 
 /// Pre-flight refusals from the share-reapply substrate.
@@ -40,16 +40,17 @@ impl fmt::Display for ShareError {
 }
 
 /// One per-share entry's op triple. `ensure_dir` is `None` when the
-/// tenant_path's parent is the tenant home itself.
+/// tenant_path's parent is the tenant home itself. `grant` is `None`
+/// under Light scope.
 pub(crate) struct ShareOps {
-    pub(crate) grant: AclOp,
+    pub(crate) grant: Option<AclOp>,
     pub(crate) ensure_dir: Option<AccountOp>,
     pub(crate) ensure_link: AccountOp,
 }
 
 impl ShareOps {
     pub(crate) fn op_count(&self) -> usize {
-        2 + if self.ensure_dir.is_some() { 1 } else { 0 }
+        1 + usize::from(self.grant.is_some()) + usize::from(self.ensure_dir.is_some())
     }
 }
 
@@ -58,6 +59,7 @@ impl<'a> Tenants<'a> {
         &self,
         name: &TenantUserName,
         parsed_profile: &Profile,
+        scope: ReapplyScope,
     ) -> Result<Vec<ShareOps>, ModeError> {
         if parsed_profile.shares.is_empty() {
             return Ok(Vec::new());
@@ -85,10 +87,13 @@ impl<'a> Tenants<'a> {
                 ShareMode::Ro => AclMode::Ro,
                 ShareMode::Rw => AclMode::Rw,
             };
-            let grant = AclOp::Grant {
-                path: share.host_path.clone(),
-                group: group.clone(),
-                mode: acl_mode,
+            let grant = match scope {
+                ReapplyScope::Full => Some(AclOp::Grant {
+                    path: share.host_path.clone(),
+                    group: group.clone(),
+                    mode: acl_mode,
+                }),
+                ReapplyScope::Light => None,
             };
             // Skip parent-dir ensure when the parent is the tenant home itself.
             let ensure_dir = tenant_path.parent().and_then(|parent| {
@@ -115,15 +120,18 @@ impl<'a> Tenants<'a> {
         Ok(out)
     }
 
-    /// Share-only reapply at create-time. Skips the PF reapply already
-    /// done by the create-time firewall sequence.
+    /// Share-only reapply at create-time. Skips the PF reapply
+    /// already done by the create-time firewall sequence. Always
+    /// `Full` scope — create's first apply needs the recursive
+    /// grant to reach files that pre-existed at the host_path
+    /// before the inheritable ACE landed.
     pub(crate) fn reapply_shares_post_provision(
         &self,
         name: &TenantUserName,
         parsed_profile: &Profile,
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
-        let share_ops = self.build_share_ops(name, parsed_profile)?;
+        let share_ops = self.build_share_ops(name, parsed_profile, ReapplyScope::Full)?;
         self.execute_share_ops(&share_ops, reporter)
     }
 
@@ -133,7 +141,9 @@ impl<'a> Tenants<'a> {
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
         for share in share_ops {
-            self.run(&share.grant, reporter).map_err(ModeError::Acl)?;
+            if let Some(grant) = &share.grant {
+                self.run(grant, reporter).map_err(ModeError::Acl)?;
+            }
             if let Some(ensure_dir) = &share.ensure_dir {
                 self.run(ensure_dir, reporter).map_err(ModeError::Account)?;
             }

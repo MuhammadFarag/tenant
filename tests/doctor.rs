@@ -634,6 +634,153 @@ Alternative
 }
 
 // ============================================================
+// Finding::CoworkAclDrift — Display + severity + guidance
+// ============================================================
+//
+// Distinct variant from AclDrift: the cowork dir is host-managed,
+// not share-declared, so the guidance narrative differs.
+
+#[test]
+fn finding_display_cowork_acl_drift() {
+    let f = Finding::CoworkAclDrift {
+        tenant: TenantUserName::from("dev"),
+        path: std::path::PathBuf::from("/Users/Shared/tenants/dev"),
+        group: "dev-tenant-share".into(),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' co-working directory ACL drift \u{2014} group 'dev-tenant-share' missing on /Users/Shared/tenants/dev; \
+         run `tenant reload dev` to re-apply"
+    );
+}
+
+#[test]
+fn finding_cowork_acl_drift_severity_is_warning() {
+    let f = Finding::CoworkAclDrift {
+        tenant: TenantUserName::from("dev"),
+        path: std::path::PathBuf::from("/Users/Shared/tenants/dev"),
+        group: "dev-tenant-share".into(),
+    };
+    assert_eq!(f.severity(), Severity::Warning);
+}
+
+#[test]
+fn guidance_cowork_acl_drift_byte_form() {
+    let f = Finding::CoworkAclDrift {
+        tenant: TenantUserName::from("dev"),
+        path: std::path::PathBuf::from("/Users/Shared/tenants/dev"),
+        group: "dev-tenant-share".into(),
+    };
+    let expected = "Why this matters
+  The co-working directory /Users/Shared/tenants/dev is the host\u{2194}tenant collaboration
+  surface for tenant 'dev'. Files created on either side inside
+  this directory inherit the `dev-tenant-share` group's rw ACE (via
+  `file_inherit,directory_inherit`), which is what keeps the operator
+  and the tenant mutually reachable. The current `ls -lde` listing is
+  missing the group entry on the directory itself \u{2014} new files
+  created inside will NOT inherit the rw bits, and existing files
+  that previously inherited may become inaccessible from the other
+  side. Common causes: a manual `chmod -a` on the cowork-dir root, a
+  Time Machine restore that dropped extended ACLs, or a legacy
+  tenant whose cowork dir was never provisioned with the ACE.
+
+Recommended fix
+  tenant reload dev
+  Re-runs the full reapply (PF + shares + cowork dir), which includes
+  `EnsureCoworkDir`'s `chmod -R +a` pass on /Users/Shared/tenants/dev. macOS `chmod +a`
+  is natively idempotent; safe to run regardless of the current ACL
+  state. `tenant mode` and `tenant shell` do NOT touch the cowork dir
+  under their light reapply scope \u{2014} reload is the canonical
+  remediation.
+
+Side-effects to know about
+  \u{2022} The PF anchor is re-rendered at runtime tier as a side effect
+    of `tenant reload`. If install-tier widening was active when the
+    operator last ran `tenant mode dev install`, the narrow drops
+    it; rerun `mode install` afterward if still needed.
+  \u{2022} The recursive ACL pass walks every existing child of the
+    cowork dir. On a populated workspace this may take a few seconds.
+
+Alternative
+  sudo chmod -R +a \"group:dev-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev
+  Re-applies just the cowork-dir ACL grant. Same bit list
+  `EnsureCoworkDir` uses; `sudo` is required because files inside the
+  cowork dir are tenant-owned, and POSIX requires owner-or-root to
+  modify ACLs.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+// ============================================================
+// Finding::CoworkDirAbsent — Display + severity + guidance
+// ============================================================
+//
+// Sibling variant to CoworkAclDrift covering the dir-doesn't-exist
+// case (rm'd externally, never provisioned for an older tenant).
+// Distinct variant because there's no ACL to grant if there's no
+// directory.
+
+#[test]
+fn finding_display_cowork_dir_absent() {
+    let f = Finding::CoworkDirAbsent {
+        tenant: TenantUserName::from("dev"),
+        path: std::path::PathBuf::from("/Users/Shared/tenants/dev"),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' co-working directory missing at /Users/Shared/tenants/dev; \
+         run `tenant reload dev` to re-create"
+    );
+}
+
+#[test]
+fn finding_cowork_dir_absent_severity_is_warning() {
+    let f = Finding::CoworkDirAbsent {
+        tenant: TenantUserName::from("dev"),
+        path: std::path::PathBuf::from("/Users/Shared/tenants/dev"),
+    };
+    assert_eq!(f.severity(), Severity::Warning);
+}
+
+#[test]
+fn guidance_cowork_dir_absent_byte_form() {
+    let f = Finding::CoworkDirAbsent {
+        tenant: TenantUserName::from("dev"),
+        path: std::path::PathBuf::from("/Users/Shared/tenants/dev"),
+    };
+    let expected = "Why this matters
+  The co-working directory /Users/Shared/tenants/dev is the per-tenant
+  collaboration surface (host operator + tenant share writable access
+  via the `dev-tenant-share` group, mode 2770, inheritable rw ACL).
+  It's missing from disk \u{2014} `rm -rf` from the host side, a
+  Time Machine restore that skipped the path, or a legacy tenant
+  whose cowork dir was never provisioned. The tenant has no shared
+  workspace until it's re-provisioned.
+
+Recommended fix
+  tenant reload dev
+  Re-runs the full reapply (PF + shares + cowork dir), which includes
+  `EnsureCoworkDir`'s four-call sequence: `mkdir -p` + `chown` +
+  `chmod 2770` + `chmod -R +a` for the inheritable rw ACE. All four
+  calls are natively idempotent; safe to re-run.
+
+Side-effects to know about
+  \u{2022} The PF anchor is re-rendered at runtime tier as a side effect
+    of `tenant reload`. If install-tier widening was active when the
+    operator last ran `tenant mode dev install`, the narrow drops
+    it; rerun `mode install` afterward if still needed.
+  \u{2022} The directory is created empty. Any files that previously
+    lived inside (if the dir was rm'd, not just lost its ACE) are
+    NOT recovered \u{2014} restore from backup separately if needed.
+
+Alternative
+  sudo mkdir -p /Users/Shared/tenants/dev && sudo chown $USER:dev-tenant-share /Users/Shared/tenants/dev && sudo chmod 2770 /Users/Shared/tenants/dev && sudo chmod -R +a \"group:dev-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev
+  Re-provisions just the cowork dir manually. Same four substrate
+  calls `EnsureCoworkDir` runs. `sudo` is required for ownership and
+  mode-bit changes outside the operator's home.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+// ============================================================
 // Finding::SymlinkDrift — Display + severity + guidance
 // ============================================================
 //

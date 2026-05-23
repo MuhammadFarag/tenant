@@ -199,6 +199,9 @@ impl<'a> Tenants<'a> {
         for drift in self.check_share_drift(name, reporter)? {
             findings.push(drift);
         }
+        for drift in self.check_cowork_drift(name, reporter)? {
+            findings.push(drift);
+        }
         if let Some(drift) = self.check_host_in_share_group(name, host, reporter)? {
             findings.push(drift);
         }
@@ -320,6 +323,40 @@ impl<'a> Tenants<'a> {
         Ok(findings)
     }
 
+    /// Probe the cowork directory for absence and ACL drift.
+    /// Absence short-circuits the ACL probe (no ACL on a missing
+    /// path). Substrate failures propagate via `?` to abort the
+    /// audit, consistent with the other reading probes.
+    fn check_cowork_drift(
+        &self,
+        name: &TenantUserName,
+        reporter: &mut Reporter,
+    ) -> Result<Vec<Finding>, DoctorError> {
+        let cowork_path = super::cowork_dir_path(name.as_str());
+        let mut findings: Vec<Finding> = Vec::new();
+        if matches!(self.machine.host_path_kind(&cowork_path)?, PathKind::Absent) {
+            let finding = Finding::CoworkDirAbsent {
+                tenant: name.clone(),
+                path: cowork_path,
+            };
+            reporter.doctor_finding(&finding);
+            findings.push(finding);
+            return Ok(findings);
+        }
+        let group = tenant_share_group_name(name.as_str());
+        let listing = self.machine.read_host_acl(&cowork_path)?;
+        if !has_group_acl_entry(&listing, group.as_str()) {
+            let finding = Finding::CoworkAclDrift {
+                tenant: name.clone(),
+                path: cowork_path,
+                group,
+            };
+            reporter.doctor_finding(&finding);
+            findings.push(finding);
+        }
+        Ok(findings)
+    }
+
     /// Compare on-disk anchor body against the runtime-tier render.
     /// An unreadable / unparseable profile skips the check silently.
     /// Runtime-tier only: install-tier widening outside a shell session
@@ -413,10 +450,17 @@ impl<'a> Tenants<'a> {
                 }
             }
 
-            // Share drift — shell + reload only. Mode's focus is the
-            // firewall tier; reload's job IS share convergence.
-            if matches!(scope, DoctorScope::Shell | DoctorScope::Reload) {
+            // Share + cowork drift surfaces on shell + mode (Light
+            // scope skips the recursive ACL pass that would heal it)
+            // and on reload (the recursive pass will run; surfacing
+            // pending drift pre-prompt lets the operator decide
+            // whether to proceed).
+            if matches!(
+                scope,
+                DoctorScope::Shell | DoctorScope::Mode | DoctorScope::Reload
+            ) {
                 self.collect_share_drift(tenant, reporter, &mut record);
+                self.collect_cowork_drift(tenant, reporter, &mut record);
                 match self
                     .machine
                     .host_in_group(host, &tenant_share_group_name(tenant.as_str()))
@@ -505,6 +549,48 @@ impl<'a> Tenants<'a> {
                 Err(e) => {
                     reporter.doctor_failed(&e);
                 }
+            }
+        }
+    }
+
+    /// Probe the cowork directory: emit `CoworkDirAbsent` if it's
+    /// gone, else `CoworkAclDrift` if the share-group ACE is
+    /// missing. Absence short-circuits the ACL probe. Substrate
+    /// failures surface via `doctor_failed` and the walk continues.
+    fn collect_cowork_drift<F: FnMut(Finding)>(
+        &self,
+        name: &TenantUserName,
+        reporter: &mut Reporter,
+        record: &mut F,
+    ) {
+        let cowork_path = super::cowork_dir_path(name.as_str());
+        match self.machine.host_path_kind(&cowork_path) {
+            Ok(PathKind::Absent) => {
+                record(Finding::CoworkDirAbsent {
+                    tenant: name.clone(),
+                    path: cowork_path,
+                });
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                reporter.doctor_failed(&e);
+                return;
+            }
+        }
+        let group = tenant_share_group_name(name.as_str());
+        match self.machine.read_host_acl(&cowork_path) {
+            Ok(listing) => {
+                if !has_group_acl_entry(&listing, group.as_str()) {
+                    record(Finding::CoworkAclDrift {
+                        tenant: name.clone(),
+                        path: cowork_path,
+                        group,
+                    });
+                }
+            }
+            Err(e) => {
+                reporter.doctor_failed(&e);
             }
         }
     }

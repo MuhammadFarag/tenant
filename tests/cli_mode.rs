@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tenant::domain::{AccountOp, AclMode, AclOp, FirewallError, FirewallOp, PathKind, UserId};
+use tenant::domain::{AccountOp, FirewallError, FirewallOp, PathKind, UserId};
 
 mod adapters;
 mod common;
@@ -222,7 +222,6 @@ fn mode_runtime_real_mode_op_shape() {
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
                 "Host 'operator' added to share group 'dev-tenant-share'",
-                "Co-working directory ensured at /Users/Shared/tenants/dev",
             ],
             "Tenant 'dev' is at runtime tier.",
             Some(&mode_breadcrumb("dev")),
@@ -249,8 +248,9 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
     // PLUS the `AddHostToShareGroup` catch-up step. No
     // CreateTenantUser / DeleteUserRecord, no ProfileOp::Create /
     // Delete — those belong to create / destroy. No login — that
-    // belongs to shell. A regression that accidentally wired mode
-    // through, say, a ProfileOp::Create would trip this.
+    // belongs to shell. No EnsureCoworkDir — that belongs to Full
+    // reapply (reload + create-post-provision). A regression that
+    // wired mode through, say, a ProfileOp::Create would trip this.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, _stderr) =
@@ -258,19 +258,11 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
     assert_eq!(code, 0);
     assert_eq!(
         exec.account_ops(),
-        vec![
-            AccountOp::AddHostToShareGroup {
-                group: "dev-tenant-share".into(),
-                host: "operator".into(),
-            },
-            AccountOp::EnsureCoworkDir {
-                path: PathBuf::from("/Users/Shared/tenants/dev"),
-                owner: "operator".into(),
-                group: "dev-tenant-share".into(),
-                mode: 0o2770,
-            },
-        ],
-        "mode should fire AddHost + cowork-dir catch-up account ops"
+        vec![AccountOp::AddHostToShareGroup {
+            group: "dev-tenant-share".into(),
+            host: "operator".into(),
+        }],
+        "mode should fire only AddHost under Light scope"
     );
     assert!(
         exec.profile_ops().is_empty(),
@@ -453,7 +445,6 @@ fn mode_real_standard_emits_only_post_exec_confirmation() {
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
                 "Host 'operator' added to share group 'dev-tenant-share'",
-                "Co-working directory ensured at /Users/Shared/tenants/dev",
             ],
             "Tenant 'dev' is at runtime tier.",
             Some(&mode_breadcrumb("dev")),
@@ -487,12 +478,6 @@ fn mode_real_verbose_shows_plan_and_echo() {
          ✓ Firewall ruleset reloaded\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         $ sudo mkdir -p /Users/Shared/tenants/dev\n\
-         $ sudo chown operator:dev-tenant-share /Users/Shared/tenants/dev\n\
-         $ sudo chmod 2770 /Users/Shared/tenants/dev\n\
-         $ sudo chmod -R +a \"group:dev-tenant-share allow \
-         read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          {}\n\
          Tenant 'dev' is at runtime tier.\n\
          {}\n",
@@ -507,7 +492,9 @@ fn mode_real_verbose_shows_plan_and_echo() {
 fn mode_install_real_verbose_shows_install_level_text() {
     // Same plan/echo shape as runtime mode (anchor body content
     // differs but the describe text doesn't include the body).
-    // The "install" level appears in the intent + done lines.
+    // The "install" level appears in the intent + done lines. Under
+    // Light scope the cowork-dir provisioning is omitted; the
+    // recursive ACL pass belongs to `tenant reload`.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) = run_with_exec(
@@ -525,12 +512,6 @@ fn mode_install_real_verbose_shows_install_level_text() {
          ✓ Firewall ruleset reloaded\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         $ sudo mkdir -p /Users/Shared/tenants/dev\n\
-         $ sudo chown operator:dev-tenant-share /Users/Shared/tenants/dev\n\
-         $ sudo chmod 2770 /Users/Shared/tenants/dev\n\
-         $ sudo chmod -R +a \"group:dev-tenant-share allow \
-         read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev\n\
-         ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
          {}\n\
          Tenant 'dev' is at install tier.\n\
          {}\n",
@@ -551,9 +532,9 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
     );
     assert_eq!(code, 0);
     // Verbose plan lives inside the summary in intent-leads-shell-
-    // follows layout (3 entries: InstallAnchor, Reload,
-    // AddHostToShareGroup; default profile has no `[[shares]]`).
-    let cowork = cowork_dir_shell_lines("dev");
+    // follows layout. Light scope → 3 entries (InstallAnchor, Reload,
+    // AddHostToShareGroup); default profile has no `[[shares]]` and
+    // the EnsureCoworkDir op is omitted under Light.
     let plan = verbose_plan_section(&[
         (
             "Install firewall anchor at /etc/pf.anchors/tenant-dev",
@@ -564,11 +545,6 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
         (
             "Add host 'operator' to share group 'dev-tenant-share'",
             "sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share",
-            None,
-        ),
-        (
-            "Ensure co-working directory at /Users/Shared/tenants/dev",
-            cowork.as_str(),
             None,
         ),
     ]);
@@ -785,30 +761,22 @@ fn mode_profile_read_failure_surfaces_before_prompt() {
 #[test]
 fn mode_runtime_with_shares_emits_per_share_substrate_ops() {
     // Single rw share: `/tmp` (real host_path; always exists) →
-    // `$HOME/src` (tenant-side). Mode reapply runs:
+    // `$HOME/src` (tenant-side). Mode reapply under Light scope:
     //   PF: InstallAnchor + Reload
-    //   Shares: AclOp::Grant + AccountOp::EnsureDirAsUser(parent) +
-    //           AccountOp::EnsureSymlinkAsUser
-    // EnsureDir's parent is `/Users/dev/` (the tenant home dir
-    // itself), which the substrate skips per the "home always exists"
-    // optimization — so no EnsureDirAsUser fires for `$HOME/src`.
-    // Verifies: AclOp recorded with literal group + path; symlink
-    // op recorded with expanded tenant_path.
+    //   Shares: AccountOp::EnsureSymlinkAsUser ONLY (no AclOp::Grant,
+    //           no EnsureDir for the tenant home itself).
+    // Verifies: the symlink op records the literal expanded
+    // tenant_path; no recursive ACL grant fires (Light scope).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
 
-    let acl_ops = exec.acl_ops();
-    assert_eq!(
-        acl_ops,
-        vec![AclOp::Grant {
-            path: PathBuf::from("/tmp"),
-            group: "dev-tenant-share".into(),
-            mode: AclMode::Rw,
-        }],
-        "expected single Grant op for /tmp at rw; got {acl_ops:?}"
+    assert!(
+        exec.acl_ops().is_empty(),
+        "mode (Light scope) must NOT emit AclOp::Grant; got {:?}",
+        exec.acl_ops()
     );
 
     // No EnsureDir (parent is /Users/dev, the tenant home).
@@ -845,6 +813,176 @@ fn mode_runtime_with_shares_emits_per_share_substrate_ops() {
 }
 
 #[test]
+fn mode_runtime_uses_light_reapply_skipping_recursive_acl_passes() {
+    // Pins Light reapply: acl_ops is empty (no per-share Grant),
+    // account_ops omits EnsureCoworkDir, and PF + AddHost +
+    // per-share EnsureSymlinkAsUser still fire.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+
+    assert!(
+        exec.acl_ops().is_empty(),
+        "mode reapply must NOT emit AclOp::Grant (light reapply); got {:?}",
+        exec.acl_ops()
+    );
+
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "mode reapply must NOT emit EnsureCoworkDir (light reapply); got {cowork_ops:?}"
+    );
+
+    let account_kinds: Vec<&'static str> = exec
+        .account_ops()
+        .iter()
+        .map(|op| match op {
+            AccountOp::AddHostToShareGroup { .. } => "AddHostToShareGroup",
+            AccountOp::EnsureSymlinkAsUser { .. } => "EnsureSymlinkAsUser",
+            AccountOp::EnsureDirAsUser { .. } => "EnsureDirAsUser",
+            other => panic!("unexpected account op in light reapply: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        account_kinds,
+        vec!["AddHostToShareGroup", "EnsureSymlinkAsUser"],
+        "expected AddHost then per-share EnsureSymlink under light reapply"
+    );
+}
+
+#[test]
+fn mode_install_uses_light_reapply_skipping_recursive_acl_passes() {
+    // Install tier widens the PF anchor only; share + cowork ACL
+    // state is tier-independent, so Light still skips them.
+    let toml = profile_with_shares(
+        &["api.example.com"],
+        &["pypi.org"],
+        &[("/tmp", "rw", "$HOME/src")],
+    );
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "install"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+
+    assert!(
+        exec.acl_ops().is_empty(),
+        "mode install reapply must NOT emit AclOp::Grant; got {:?}",
+        exec.acl_ops()
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "mode install reapply must NOT emit EnsureCoworkDir; got {cowork_ops:?}"
+    );
+}
+
+#[test]
+fn mode_silently_succeeds_when_cowork_path_is_symlink_under_light_scope() {
+    // Inverse of `reload_refuses_when_cowork_path_is_a_symlink`:
+    // Light scope omits EnsureCoworkDir AND the
+    // `guard_cowork_dir_kind` pre-flight, so a corrupted cowork
+    // path does NOT abort mode. Negative pin — a regression
+    // re-introducing the kind-check under Light would trip it.
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_path_kind(
+            &cowork_path,
+            PathKind::Symlink(PathBuf::from("/tmp/elsewhere")),
+        );
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(
+        code, 0,
+        "Light scope must not refuse on corrupted cowork path; stderr={stderr:?}"
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "mode must NOT emit EnsureCoworkDir against a symlinked cowork path; got {cowork_ops:?}"
+    );
+}
+
+#[test]
+fn mode_silently_succeeds_when_cowork_path_is_absent_under_light_scope() {
+    // Companion to the symlink case: PathKind::Absent (cowork dir
+    // never existed or was rm'd). Under Full scope, `mkdir -p`
+    // would provision it; under Light, mode does nothing — the
+    // operator discovers absence via `tenant doctor` and runs
+    // `tenant reload`.
+    let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_path_kind(&cowork_path, PathKind::Absent);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(
+        code, 0,
+        "Light scope must not provision absent cowork path; stderr={stderr:?}"
+    );
+    let cowork_ops: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureCoworkDir { .. }))
+        .collect();
+    assert!(
+        cowork_ops.is_empty(),
+        "mode must NOT emit EnsureCoworkDir against an absent cowork path; got {cowork_ops:?}"
+    );
+}
+
+#[test]
+fn mode_runtime_with_shares_verbose_plan_excludes_grant_and_cowork() {
+    // Verbose-plan byte-exact pin against a profile WITH declared
+    // shares. `mode_dry_run_verbose_shows_plan_no_echo` uses the
+    // default profile (no shares) AND dry-run swaps in
+    // DryRunHostMachine, so it cannot exercise the share path at
+    // the summary stage. Simulate a TTY via `run_with_stdin` to
+    // trigger the real-mode pre-confirm summary on a profile with
+    // shares. Asserts no Grant, no EnsureCoworkDir, no recursive
+    // chmod in the plan; the tenant-side symlink op IS present.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-v"],
+        b"y\n",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("Grant"),
+        "mode plan must NOT contain Grant ACL op under Light: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("co-working directory"),
+        "mode plan must NOT mention cowork dir under Light: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("chmod -R +a"),
+        "mode plan must NOT include the recursive chmod under Light: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Install symlink /Users/dev/src \u{2192} /tmp"),
+        "mode plan should still install tenant-side symlink: {stdout:?}"
+    );
+}
+
+#[test]
 fn mode_runtime_with_nested_tenant_path_emits_ensure_dir_for_parent() {
     // tenant_path under a subdirectory of $HOME: `$HOME/.local/share/chezmoi`.
     // Parent `/Users/dev/.local/share` is NOT the home itself, so
@@ -873,8 +1011,9 @@ fn mode_runtime_with_nested_tenant_path_emits_ensure_dir_for_parent() {
 
 #[test]
 fn mode_runtime_preserves_profile_declared_share_order() {
-    // Shares apply in profile-declared order. Verify by recording
-    // the AclOp sequence: zeta first, alpha second.
+    // Shares apply in profile-declared order. Mode is Light scope —
+    // no AclOp::Grant fires — so the declared order pin shifts to
+    // the EnsureSymlinkAsUser sequence: zeta first, alpha second.
     let toml = profile_with_shares(
         &[],
         &[],
@@ -884,18 +1023,18 @@ fn mode_runtime_preserves_profile_declared_share_order() {
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    let host_paths: Vec<PathBuf> = exec
-        .acl_ops()
+    let symlink_targets: Vec<PathBuf> = exec
+        .account_ops()
         .into_iter()
         .filter_map(|op| match op {
-            AclOp::Grant { path, .. } => Some(path),
+            AccountOp::EnsureSymlinkAsUser { target, .. } => Some(target),
             _ => None,
         })
         .collect();
     assert_eq!(
-        host_paths,
+        symlink_targets,
         vec![PathBuf::from("/tmp"), PathBuf::from("/var")],
-        "expected declared order [zeta=/tmp, alpha=/var]"
+        "expected declared share order via symlink ops [zeta=/tmp, alpha=/var]"
     );
 }
 
@@ -970,9 +1109,9 @@ fn mode_refuses_when_tenant_path_is_real_directory() {
 #[test]
 fn mode_runtime_skips_substrate_with_existing_symlink_at_tenant_path() {
     // PathKind::Symlink is the idempotent re-link case: substrate
-    // proceeds (chmod-pre-check is idempotent; ln -sfn replaces an
-    // existing symlink). No refusal — share substrate fires
-    // normally.
+    // proceeds (`ln -sfn` replaces an existing symlink). Mode under
+    // Light scope emits the EnsureSymlinkAsUser op but NOT the
+    // recursive grant. No refusal — symlink op fires normally.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -987,10 +1126,20 @@ fn mode_runtime_skips_substrate_with_existing_symlink_at_tenant_path() {
         code, 0,
         "expected success on existing symlink; stderr={stderr:?}"
     );
+    assert!(
+        exec.acl_ops().is_empty(),
+        "mode (Light scope) emits no Grant; got {:?}",
+        exec.acl_ops()
+    );
+    let symlinks: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureSymlinkAsUser { .. }))
+        .collect();
     assert_eq!(
-        exec.acl_ops().len(),
+        symlinks.len(),
         1,
-        "expected single Grant despite existing symlink (idempotent reapply)"
+        "expected single EnsureSymlinkAsUser despite existing symlink (idempotent re-link); got {symlinks:?}"
     );
 }
 
@@ -998,8 +1147,8 @@ fn mode_runtime_skips_substrate_with_existing_symlink_at_tenant_path() {
 fn mode_install_tier_does_not_change_share_substrate() {
     // Shares are tier-independent: the same host_path/mode/tenant_path
     // applies whether the operator widened the firewall for an install
-    // step or narrowed back. Verify by running `mode dev install` on a
-    // profile with a share — share substrate fires with the same shape.
+    // step or narrowed back. Under Light scope this means BOTH tiers
+    // emit no Grant and one EnsureSymlinkAsUser per declared share.
     let toml = profile_with_shares(
         &["github.com"],
         &["nodejs.org"],
@@ -1009,10 +1158,20 @@ fn mode_install_tier_does_not_change_share_substrate() {
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "install"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+    assert!(
+        exec.acl_ops().is_empty(),
+        "mode install (Light scope) emits no Grant; got {:?}",
+        exec.acl_ops()
+    );
+    let symlinks: Vec<_> = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureSymlinkAsUser { .. }))
+        .collect();
     assert_eq!(
-        exec.acl_ops().len(),
+        symlinks.len(),
         1,
-        "share substrate should fire at install tier same as runtime"
+        "share-side symlink op should fire at install tier same as runtime"
     );
 }
 
@@ -1080,9 +1239,13 @@ fn mode_pre_exec_doctor_aggregates_pf_rule_drift_warning() {
 }
 
 #[test]
-fn mode_pre_exec_doctor_scope_excludes_share_drift() {
-    // Share drift is out of mode's scope. Even with HostNotInShareGroup
-    // injected, mode's audit must not aggregate any warning.
+fn mode_pre_exec_doctor_scope_includes_share_drift() {
+    // Mode's pre-exec doctor scope includes the same per-tenant
+    // drift set as shell + reload (HostNotInShareGroup, AclDrift,
+    // SymlinkDrift, CoworkAclDrift, CoworkDirAbsent) — mode no
+    // longer auto-heals share/cowork state under Light reapply, so
+    // pre-exec surfaces the drift the verb would otherwise skip
+    // past silently.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_host_in_group("operator", "dev-tenant-share", false);
@@ -1094,8 +1257,8 @@ fn mode_pre_exec_doctor_scope_excludes_share_drift() {
     );
     assert_eq!(code, 0);
     assert!(
-        !stdout.contains("\u{26a0} Doctor:"),
-        "HostNotInShareGroup must NOT propagate to mode scope; stdout={stdout:?}"
+        stdout.contains("\u{26a0} Doctor: 1 warning for tenant 'dev'"),
+        "HostNotInShareGroup must propagate to mode scope; stdout={stdout:?}"
     );
 }
 
@@ -1133,5 +1296,63 @@ fn mode_surfaces_user_directory_error_when_eligibility_probe_fails() {
     assert!(
         stderr.starts_with("tenant: failed to check mode eligibility for 'dev': "),
         "expected mode_eligibility_probe_failed frame; stderr={stderr:?}"
+    );
+}
+
+// ================================================================
+// Cowork-dir drift detection in mode's pre-exec doctor
+// ================================================================
+//
+// Mode uses Light reapply (no recursive ACL pass), so cowork-dir
+// ACL drift or absence is the operator's to remediate via
+// `tenant reload`. Pre-exec doctor surfaces the drift as a
+// Warning so the operator can decide.
+
+#[test]
+fn mode_pre_exec_doctor_surfaces_cowork_acl_drift() {
+    let cowork_path = std::path::PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_acl(
+            // Listing has only operator-side ACEs, no
+            // `group:dev-tenant-share` entry.
+            &cowork_path,
+            " 0: user:operator allow list,add_file,search\n",
+        );
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains(
+            "\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
+        ),
+        "cowork ACL drift must surface as a Warning aggregate; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn mode_pre_exec_doctor_surfaces_cowork_dir_absent() {
+    // Cowork dir absent → CoworkDirAbsent aggregates as a Warning;
+    // verb still proceeds (audit is a courtesy).
+    let cowork_path = std::path::PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_path_kind(&cowork_path, PathKind::Absent);
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains(
+            "\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
+        ),
+        "cowork dir absence must surface as a Warning aggregate; stdout={stdout:?}"
     );
 }

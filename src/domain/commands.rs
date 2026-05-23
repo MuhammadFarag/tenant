@@ -234,7 +234,12 @@ pub(crate) fn dispatch(
                     // profile-read / share pre-flight failures surface
                     // pre-prompt — don't ask the operator to confirm
                     // something already doomed.
-                    let plan = match tenants.build_reapply_plan(&name, host, level) {
+                    let plan = match tenants.build_reapply_plan(
+                        &name,
+                        host,
+                        level,
+                        tenants::ReapplyScope::Light,
+                    ) {
                         Ok(p) => p,
                         Err(e) => {
                             surface_mode_error(reporter, &name, &e);
@@ -339,7 +344,12 @@ pub(crate) fn dispatch(
                     tenants::Eligibility::Destroyable => {
                         // Build plan pre-summary so profile-read / share
                         // pre-flight failures surface pre-prompt.
-                        let plan = match tenants.build_reapply_plan(&n, host, ModeLevel::Runtime) {
+                        let plan = match tenants.build_reapply_plan(
+                            &n,
+                            host,
+                            ModeLevel::Runtime,
+                            tenants::ReapplyScope::Full,
+                        ) {
                             Ok(p) => p,
                             Err(e) => {
                                 surface_reload_error(reporter, &n, &e);
@@ -875,6 +885,13 @@ Shares
   children created after the apply; the recursive walk covers
   everything else.
 
+  `tenant mode` and `tenant shell` do NOT walk the recursive ACL
+  pass — they refresh the PF posture, host-group membership, and
+  tenant-side symlinks only. This keeps the everyday entry verbs
+  fast; the recursive walk lives on `tenant reload`. Run reload
+  after adding shares or whenever `tenant doctor` reports ACL
+  drift.
+
   Removing a [[shares]] entry does NOT auto-revoke the ACL or
   symlink — `tenant doctor <name>` surfaces orphans. Manual cleanup
   is the operator's call.
@@ -883,8 +900,12 @@ Co-working directory (auto-provisioned, not configurable)
 
   /Users/Shared/tenants/<name>/
 
-  Provisioned by `tenant create` alongside the profile and re-
-  applied on every `tenant reload` / `tenant mode` / `tenant shell`.
+  Provisioned by `tenant create` alongside the profile and
+  re-applied on `tenant reload`. `tenant mode` and `tenant shell`
+  do NOT touch the cowork dir under their light reapply — if the
+  dir is missing or its inheritable ACL has been stripped, the
+  remediation is `tenant doctor <name>` (to surface) +
+  `tenant reload <name>` (to converge).
   Owned `<host>:<name>-tenant-share`, mode 2770 (setgid + group-rwx
   + zero-other), with an inheritable rw ACL granting the share
   group full access. Host and tenant both have rwx via group

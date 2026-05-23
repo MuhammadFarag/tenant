@@ -116,17 +116,45 @@ impl HostMachine for DryRunHostMachine {
         Ok(PathKind::Absent)
     }
 
-    /// Delegates to the real machine: the cowork-dir probe is a direct
-    /// fs read with no `sudo` shell-out, so it's safe to run under dry-run
-    /// and gives the preview an accurate verdict on whether the destroy
-    /// notice would fire.
+    /// Synthesize `Dir` for cowork-pattern paths so doctor's
+    /// `CoworkDirAbsent` probe under dry-run sees a clean baseline
+    /// (matches the synthetic-clean `read_host_acl` listing). The
+    /// destroy verb's cowork-notice probe is dry-run-gated in the
+    /// Reporter layer, so the synthesis is invisible there. Other
+    /// paths delegate to the real machine (create's home-symlink
+    /// edge cases need accurate kind verdicts).
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
+        if path
+            .strip_prefix(crate::domain::tenants::COWORK_DIR_PARENT)
+            .ok()
+            .and_then(|p| p.to_str())
+            .is_some_and(|s| !s.is_empty() && !s.contains('/'))
+        {
+            return Ok(PathKind::Dir);
+        }
         MacosHostMachine.host_path_kind(path)
     }
 
-    /// Empty listing. Unreachable today (default profile has no
-    /// `[[shares]]`); defensive against a future default share.
-    fn read_host_acl(&self, _path: &std::path::Path) -> Result<String, ProbeError> {
+    /// Synthetic "clean" ACL listing. Dry-run has no view of real
+    /// disk state, so distinguishing intact-vs-drifted isn't
+    /// possible — return a clean listing to suppress spurious
+    /// drift findings (same posture as `host_in_group` → `true`).
+    /// A tenant with real drift won't see the warning under
+    /// `--dry-run`; rerun without it (or `tenant doctor <name>`)
+    /// to probe the real substrate. The cowork-pattern path infers
+    /// the tenant from the last segment; anything else returns a
+    /// generic catch-all.
+    fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
+        if let Some(name) = path
+            .strip_prefix(crate::domain::tenants::COWORK_DIR_PARENT)
+            .ok()
+            .and_then(|p| p.to_str())
+            .filter(|s| !s.is_empty() && !s.contains('/'))
+        {
+            return Ok(format!(
+                " 0: group:{name}-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\n"
+            ));
+        }
         Ok(String::new())
     }
 

@@ -4,6 +4,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::domain::tenants::tenant_share_group_name;
 use crate::domain::{AccessMode, AccessOutcome, GroupName, HostUserName, TenantUserName};
 
 /// Order is load-bearing: `--strict` maps max severity to exit code
@@ -88,6 +89,18 @@ pub enum Finding {
         host_path: PathBuf,
         group: GroupName,
     },
+    /// Cowork dir exists but is missing the share-group ACE.
+    CoworkAclDrift {
+        tenant: TenantUserName,
+        path: PathBuf,
+        group: GroupName,
+    },
+    /// Cowork dir is missing from disk. No `group` field: the
+    /// share group is irrelevant until the dir exists.
+    CoworkDirAbsent {
+        tenant: TenantUserName,
+        path: PathBuf,
+    },
     SymlinkDrift {
         tenant: TenantUserName,
         tenant_path: PathBuf,
@@ -133,6 +146,8 @@ impl Finding {
             Finding::PfDisabled => Severity::Critical,
             Finding::AnchorBodyDrift { .. } => Severity::Warning,
             Finding::AclDrift { .. } => Severity::Warning,
+            Finding::CoworkAclDrift { .. } => Severity::Warning,
+            Finding::CoworkDirAbsent { .. } => Severity::Warning,
             Finding::SymlinkDrift { .. } => Severity::Warning,
             Finding::HostNotInShareGroup { .. } => Severity::Warning,
             Finding::TenantKeychainAbsent { .. } => Severity::Warning,
@@ -350,6 +365,87 @@ Alternative
   because files written by the tenant inside the share (caches, build
   output) are tenant-owned, and POSIX requires owner-or-root to modify
   ACLs."
+                ))
+            }
+            Finding::CoworkAclDrift {
+                tenant,
+                path,
+                group,
+            } => {
+                let path = path.display();
+                Some(format!(
+                    "Why this matters
+  The co-working directory {path} is the host\u{2194}tenant collaboration
+  surface for tenant '{tenant}'. Files created on either side inside
+  this directory inherit the `{group}` group's rw ACE (via
+  `file_inherit,directory_inherit`), which is what keeps the operator
+  and the tenant mutually reachable. The current `ls -lde` listing is
+  missing the group entry on the directory itself \u{2014} new files
+  created inside will NOT inherit the rw bits, and existing files
+  that previously inherited may become inaccessible from the other
+  side. Common causes: a manual `chmod -a` on the cowork-dir root, a
+  Time Machine restore that dropped extended ACLs, or a legacy
+  tenant whose cowork dir was never provisioned with the ACE.
+
+Recommended fix
+  tenant reload {tenant}
+  Re-runs the full reapply (PF + shares + cowork dir), which includes
+  `EnsureCoworkDir`'s `chmod -R +a` pass on {path}. macOS `chmod +a`
+  is natively idempotent; safe to run regardless of the current ACL
+  state. `tenant mode` and `tenant shell` do NOT touch the cowork dir
+  under their light reapply scope \u{2014} reload is the canonical
+  remediation.
+
+Side-effects to know about
+  \u{2022} The PF anchor is re-rendered at runtime tier as a side effect
+    of `tenant reload`. If install-tier widening was active when the
+    operator last ran `tenant mode {tenant} install`, the narrow drops
+    it; rerun `mode install` afterward if still needed.
+  \u{2022} The recursive ACL pass walks every existing child of the
+    cowork dir. On a populated workspace this may take a few seconds.
+
+Alternative
+  sudo chmod -R +a \"group:{group} allow read,write,execute,delete,append,file_inherit,directory_inherit\" {path}
+  Re-applies just the cowork-dir ACL grant. Same bit list
+  `EnsureCoworkDir` uses; `sudo` is required because files inside the
+  cowork dir are tenant-owned, and POSIX requires owner-or-root to
+  modify ACLs."
+                ))
+            }
+            Finding::CoworkDirAbsent { tenant, path } => {
+                let path = path.display();
+                let group = tenant_share_group_name(tenant.as_str());
+                Some(format!(
+                    "Why this matters
+  The co-working directory {path} is the per-tenant
+  collaboration surface (host operator + tenant share writable access
+  via the `{group}` group, mode 2770, inheritable rw ACL).
+  It's missing from disk \u{2014} `rm -rf` from the host side, a
+  Time Machine restore that skipped the path, or a legacy tenant
+  whose cowork dir was never provisioned. The tenant has no shared
+  workspace until it's re-provisioned.
+
+Recommended fix
+  tenant reload {tenant}
+  Re-runs the full reapply (PF + shares + cowork dir), which includes
+  `EnsureCoworkDir`'s four-call sequence: `mkdir -p` + `chown` +
+  `chmod 2770` + `chmod -R +a` for the inheritable rw ACE. All four
+  calls are natively idempotent; safe to re-run.
+
+Side-effects to know about
+  \u{2022} The PF anchor is re-rendered at runtime tier as a side effect
+    of `tenant reload`. If install-tier widening was active when the
+    operator last ran `tenant mode {tenant} install`, the narrow drops
+    it; rerun `mode install` afterward if still needed.
+  \u{2022} The directory is created empty. Any files that previously
+    lived inside (if the dir was rm'd, not just lost its ACE) are
+    NOT recovered \u{2014} restore from backup separately if needed.
+
+Alternative
+  sudo mkdir -p {path} && sudo chown $USER:{group} {path} && sudo chmod 2770 {path} && sudo chmod -R +a \"group:{group} allow read,write,execute,delete,append,file_inherit,directory_inherit\" {path}
+  Re-provisions just the cowork dir manually. Same four substrate
+  calls `EnsureCoworkDir` runs. `sudo` is required for ownership and
+  mode-bit changes outside the operator's home."
                 ))
             }
             Finding::SymlinkDrift {
@@ -627,6 +723,23 @@ impl fmt::Display for Finding {
                  group '{group}' missing on {}; \
                  run `tenant reload {tenant}` to re-apply",
                 host_path.display(),
+            ),
+            Finding::CoworkAclDrift {
+                tenant,
+                path,
+                group,
+            } => write!(
+                f,
+                "warning: tenant '{tenant}' co-working directory ACL drift \u{2014} \
+                 group '{group}' missing on {}; \
+                 run `tenant reload {tenant}` to re-apply",
+                path.display(),
+            ),
+            Finding::CoworkDirAbsent { tenant, path } => write!(
+                f,
+                "warning: tenant '{tenant}' co-working directory missing at {}; \
+                 run `tenant reload {tenant}` to re-create",
+                path.display(),
             ),
             Finding::SymlinkDrift {
                 tenant,
