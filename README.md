@@ -27,10 +27,18 @@ After provisioning, you enter the tenant with `tenant shell <name>` (interactive
 
 Install `tenant`. Three options:
 
+**Homebrew** (coming soon): a tap is not yet available. Once live, the intended primary install path will be:
+
+```sh
+brew tap MuhammadFarag/tenant && brew install tenant
+```
+
+Until then, use one of the options below.
+
 **Pre-built binary** (Apple Silicon macOS only):
 
 ```sh
-RELEASE=v0.1.0-alpha.1   # check the releases page for the latest tag
+RELEASE=v0.1.0-alpha.2   # check the releases page for the latest tag
 curl -L "https://github.com/MuhammadFarag/tenant/releases/download/$RELEASE/tenant-$RELEASE-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv tenant /usr/local/bin/
 ```
@@ -38,7 +46,7 @@ sudo mv tenant /usr/local/bin/
 **Build from source at a tagged release**:
 
 ```sh
-cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.1
+cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.2   # check the releases page for the latest tag
 ```
 
 **Build from a local clone**:

@@ -26,9 +26,7 @@ Verbs:
 - `doctor [<name>]` — read-only audit (paths, sudoers, pf, anchor, shares,
   group membership). `--strict` maps max severity to exit 1 / 2.
 
-Rust port of an earlier Go prototype (`/Users/plugin-dev/src/tenant/`,
-cross-reference only); follows Rust idioms (clap derive, composition-root
-DI, trait-object ports) rather than mirroring the Go shape.
+Follows Rust idioms: clap derive, composition-root DI, trait-object ports.
 
 ## Scope
 
@@ -426,7 +424,7 @@ already made.
   per-verb flags (`--strict`, `--mode`) stay scoped.
 - **Comment density is a symptom, not a goal.** Keep comments where WHY is
   non-obvious; drop when the code says it. Tracked source carries no
-  cycle/Q-lock/SC references. Tests follow suit, except sharpening/negative-pin
+  internal planning-process references. Tests follow suit, except sharpening/negative-pin
   comments survive.
 
 ## Test discipline
