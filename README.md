@@ -25,15 +25,14 @@ After provisioning, you enter the tenant with `tenant shell <name>` (interactive
 
 ## Quick start
 
-Install `tenant`. Three options:
-
-**Homebrew** (coming soon): a tap is not yet available. Once live, the intended primary install path will be:
+Install `tenant`. The recommended path is Homebrew (Apple Silicon only):
 
 ```sh
-brew tap MuhammadFarag/tenant && brew install tenant
+brew tap MuhammadFarag/tenant
+brew install tenant
 ```
 
-Until then, use one of the options below.
+Verify with `tenant --version`. Other options:
 
 **Pre-built binary** (Apple Silicon macOS only):
 
