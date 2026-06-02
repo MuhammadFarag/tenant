@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.1
+# tenant 0.1.0-alpha.2
 
-First tagged release. Alpha quality: the verbs work end-to-end on the
+Second alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,16 +21,43 @@ third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
 
+## New since 0.1.0-alpha.1
+
+- **Login keychain provisioning.** `tenant create` now bootstraps the
+  tenant's `login.keychain-db`, and `tenant shell` retrieves the
+  operator-stashed password and unlocks it before exec — so tools that
+  need a keychain (credential helpers, signing) work inside the tenant,
+  and the unlock survives a host reboot.
+- **Co-working directories.** Each tenant gets a shared directory at
+  `/Users/Shared/tenants/<name>`, owned by the operator with the
+  tenant's share group, setgid + an inheritable ACL — files created
+  there by either side stay collaboratively reachable without a tenant
+  umask change.
+- **Filesystem shares with recursive grants.** `[[shares]]` entries in
+  a tenant's profile grant the share group access to host paths via
+  recursive ACLs plus a tenant-side symlink. `tenant reload` applies
+  them (and heals drift); mode/shell entry reapplies the lighter pieces.
+- **`tenant doctor` works on a fresh terminal.** Doctor's privileged
+  reads now prompt for `sudo` at point of use and complete the audit,
+  instead of aborting with `sudo: a password is required` when no sudo
+  session is cached. The pre-exec audit on mutating verbs is likewise
+  quiet when uncached while still surfacing drift it can see without
+  sudo.
+
 ## What works in this release
 
 - `tenant create <name>` — provision a new tenant (user account,
-  share group, profile scaffold, PF anchor).
-- `tenant destroy <name>` — convergent teardown; safe to re-run.
+  share group, login keychain, co-working dir, profile scaffold, PF
+  anchor).
+- `tenant destroy <name>` — convergent teardown; safe to re-run. Leaves
+  the co-working directory intact.
 - `tenant shell <name>` — enter a tenant interactively, or run a
-  single command (`tenant shell <name> -- ls /tmp`).
+  single command (`tenant shell <name> -- ls /tmp`). Unlocks the
+  tenant keychain and reapplies shares on entry.
 - `tenant mode <name> install|runtime` — switch the PF anchor between
   a widened install tier and the restricted runtime tier.
-- `tenant reload [<name>]` — reapply the profile to host state. Walks
+- `tenant reload [<name>]` — reapply the profile to host state,
+  including filesystem shares and the co-working directory. Walks
   every tenant when called without an argument.
 - `tenant doctor [<name>]` — read-only audit covering paths, sudoers,
   PF state, anchor coherence, share grants, and group membership.
@@ -51,17 +78,27 @@ The Homebrew tap is not yet available. Two options for now:
 
 ```
 # Build from source at this release
-cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.1
+cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.2
 
 # Or download the pre-built ARM binary
-curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.1/tenant-v0.1.0-alpha.1-aarch64-apple-darwin.tar.gz | tar -xz
+curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.2/tenant-v0.1.0-alpha.2-aarch64-apple-darwin.tar.gz | tar -xz
 sudo mv tenant /usr/local/bin/
 ```
 
-Verify with `tenant --version` (expect `tenant 0.1.0-alpha.1`).
+Verify with `tenant --version` (expect `tenant 0.1.0-alpha.2`).
 
 ## Known rough edges
 
-This is the first alpha. Expect sharp edges in error reporting,
-recovery from partial failures, and unusual host configurations the
-author has not encountered.
+Still an alpha. Expect sharp edges in error reporting, recovery from
+partial failures, and unusual host configurations the author has not
+encountered. Specifically:
+
+- Pre-confirm summaries are wordier than they need to be (implementation
+  detail and group-name jargon leak into the standard view), and the
+  `tenant shell -- <cmd>` command form prints the full reapply log
+  around the child rather than running quietly.
+- `tenant doctor` over a pipe (no TTY) still fails rather than
+  prompting — run it from an interactive terminal.
+- `destroy` removes the profile TOML without a backup; `create` will
+  overwrite an existing profile. Keep your own copy of hand-authored
+  profiles for now.
