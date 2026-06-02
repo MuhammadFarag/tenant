@@ -789,6 +789,278 @@ fn reload_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
 }
 
 #[test]
+fn reload_pre_exec_doctor_quiet_skips_sudo_probes_when_sudo_uncached() {
+    // When the operator has no cached sudo timestamp, the pre-exec
+    // audit must skip the GENUINE sudo probes
+    // and emit ZERO failure frames — even when those probes are rigged
+    // to fail. This fixes the fresh-terminal spam (#2/#8/#14) and
+    // removes the #8 double-print structurally (uncached ⇒ zero sudo
+    // probes ⇒ zero frames). The auth-free probes (host_in_group,
+    // cowork, anchor-body) are NOT suppressed by the gate — they run
+    // regardless of cache state; this test keeps the host clean on
+    // those so the only observable effect of `uncached` is the
+    // sudo-probe suppression. The auth-free-findings-still-surface
+    // contract is pinned by
+    // `reload_pre_exec_doctor_auth_free_probes_surface_when_sudo_uncached`.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_sudo_session_cached(false)
+        // Rig every sudo-gated probe to fail: if any were invoked, its
+        // failure frame would surface on stderr. The gate must skip
+        // them all before they fire.
+        .fail_next_pf_status(FirewallError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".into(),
+        })
+        .fail_next_kernel_pf_rules(FirewallError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".into(),
+        });
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "verb proceeds; the pre-pass is a courtesy");
+    assert!(
+        !stderr.contains("failed to read pf state"),
+        "uncached sudo must skip the gated pf probe, not surface its failure; stderr={stderr:?}"
+    );
+    assert!(
+        !stderr.contains("failed to read host config"),
+        "uncached sudo must skip the gated host-config reads silently; stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("\u{26a0} Doctor:"),
+        "clean auth-free state + suppressed sudo probes emits no aggregate; stdout={stdout:?}"
+    );
+    // host_in_group (dseditgroup checkmember) is AUTH-FREE, so the
+    // tightened gate runs it regardless of cache state. The verb's own
+    // execution adds the host via AddHostToShareGroup but never CHECKS
+    // membership, so the pre-pass is the only caller — uncached means
+    // it MUST still have fired (the inverse of the pre-tightening pin).
+    assert!(
+        !exec.host_in_group_invocations().is_empty(),
+        "auth-free host_in_group must run even when uncached; invocations={:?}",
+        exec.host_in_group_invocations()
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_auth_free_probes_surface_when_sudo_uncached() {
+    // The fully auth-free per-tenant probes — host_in_group
+    // (dseditgroup checkmember, no
+    // sudo) and the cowork-dir probe (host_path_kind + read_host_acl,
+    // both host-side, no sudo) — must run REGARDLESS of sudo cache
+    // state. So on an uncached terminal their findings still surface,
+    // while the genuine sudo probes (read_pf_status,
+    // read_kernel_pf_rules) stay suppressed and emit no failure frames.
+    let cowork_path = tenant::domain::tenants::cowork_dir_path("dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_sudo_session_cached(false)
+        // Auth-free drift: host not in share group + cowork dir gone.
+        .with_host_in_group("operator", "dev-tenant-share", false)
+        .with_host_path_kind(&cowork_path, PathKind::Absent)
+        // Rig the sudo-gated probes to fail: if the gate let them run,
+        // their failure frames would surface on stderr.
+        .fail_next_pf_status(FirewallError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".into(),
+        })
+        .fail_next_kernel_pf_rules(FirewallError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".into(),
+        });
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "verb proceeds; the pre-pass is a courtesy");
+    // Auth-free probes ran: host_in_group was invoked despite uncached.
+    assert!(
+        !exec.host_in_group_invocations().is_empty(),
+        "auth-free host_in_group must run when uncached; invocations={:?}",
+        exec.host_in_group_invocations()
+    );
+    // Two auth-free warnings (HostNotInShareGroup + CoworkDirAbsent)
+    // aggregate into the doctor hint — proving they surfaced.
+    assert!(
+        stdout.contains(
+            "\u{26a0} Doctor: 2 warnings for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
+        ),
+        "auth-free findings must aggregate even when uncached; stdout={stdout:?}"
+    );
+    // Sudo-gated probes stay suppressed: no failure frames despite the
+    // rigged failures.
+    assert!(
+        !stderr.contains("failed to read pf state"),
+        "uncached sudo must still skip the gated pf probe; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_runs_sudo_probes_when_sudo_cached() {
+    // Regression guard for the tightened gate: when sudo IS cached
+    // (the default), the gate must NOT suppress the sudo-gated
+    // probes — the pre-pass runs them exactly as it did before the
+    // gate landed. This is the mirror of
+    // `reload_pre_exec_doctor_quiet_skips_sudo_probes_when_sudo_uncached`:
+    // there, host_in_group must NOT fire; here it MUST. A gate that
+    // accidentally skipped in the cached path would zero
+    // host_in_group_invocations and trip this pin.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        // Default sudo_session_cached == true; assert the cached path
+        // explicitly rather than relying on the implicit default.
+        .with_sudo_session_cached(true)
+        // Rig a sudo-gated probe to fail: in the cached path its
+        // failure frame MUST surface (proving the probe ran), the
+        // inverse of the uncached test where it must be silent.
+        .fail_next_pf_status(FirewallError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".into(),
+        });
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "verb proceeds; the pre-pass is a courtesy");
+    assert!(
+        stderr.contains("failed to read pf state"),
+        "cached sudo must run the gated pf probe and surface its failure; stderr={stderr:?}"
+    );
+    // host_in_group (dseditgroup checkmember) is AUTH-FREE, so it fires
+    // under BOTH cache states — this is the PARALLEL of the uncached
+    // test (lines 838-846), not its inverse. The cached path's
+    // distinguishing observable is the sudo-GATED pf probe surfacing its
+    // failure frame (asserted above), which the uncached path
+    // suppresses. host_in_group firing here just confirms the verb's
+    // sole caller (the pre-pass) ran it; the pre-pass is the only
+    // membership-checker since the verb's AddHostToShareGroup never
+    // CHECKS membership.
+    assert!(
+        !exec.host_in_group_invocations().is_empty(),
+        "auth-free host_in_group runs under both cache states; invocations={:?}",
+        exec.host_in_group_invocations()
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_acl_drift_surfaces_but_symlink_drift_gated_when_uncached() {
+    // collect_share_drift is split by auth requirement. The AclDrift
+    // check reads `ls -lde` from the operator process (NO
+    // sudo) and must run regardless of sudo cache state; the
+    // SymlinkDrift check probes `sudo -n -u <tenant>` and must stay
+    // gated. Rig BOTH drifts on a single share, run uncached, and
+    // assert only AclDrift surfaces.
+    //
+    // The reload verb's own plan-build invokes tenant_path_kind once
+    // on the share path (independent of the pre-pass). So on the
+    // uncached path the ONLY tenant_path_kind call is the verb's —
+    // the pre-exec doctor adds none, the mechanism by which
+    // SymlinkDrift stays silent.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "ro", "$HOME/src")]);
+    let tenant_path = PathBuf::from("/Users/dev/src");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_sudo_session_cached(false)
+        // AclDrift (auth-free): the share host_path's ACL listing
+        // carries no `group:dev-tenant-share` ACE.
+        .with_host_acl(
+            &PathBuf::from("/tmp"),
+            " 0: user:operator allow list,add_file,search\n",
+        )
+        // SymlinkDrift (sudo): the tenant-side path is absent, which
+        // WOULD drift — but the gated probe must not run it.
+        .with_tenant_path_kind("dev", &tenant_path, PathKind::Absent);
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "verb proceeds; the pre-pass is a courtesy");
+    // Only the auth-free AclDrift surfaces: one warning, not two.
+    assert!(
+        stdout.contains(
+            "\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
+        ),
+        "uncached: only the auth-free AclDrift aggregates (1 warning), \
+         SymlinkDrift stays gated; stdout={stdout:?}"
+    );
+    // No sudo failure frame; the pre-pass stays quiet on the gated half.
+    assert!(
+        !stderr.contains("failed"),
+        "uncached share-drift split emits no failure frame; stderr={stderr:?}"
+    );
+    // tenant_path_kind on the share path ran exactly once — the verb's
+    // own plan-build — proving the pre-exec doctor's SymlinkDrift
+    // branch did NOT invoke it.
+    let calls: Vec<_> = exec
+        .tenant_path_kind_calls()
+        .into_iter()
+        .filter(|(_, p)| p == &tenant_path)
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "uncached: only the verb's plan-build probes tenant_path_kind; \
+         the pre-exec SymlinkDrift check stays gated; calls={calls:?}"
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_acl_and_symlink_drift_both_surface_when_cached() {
+    // Cached ⇒ no regression. The SymlinkDrift half
+    // of collect_share_drift runs alongside the always-on AclDrift
+    // half, so BOTH findings surface. tenant_path_kind on the share
+    // path fires twice — once for the verb's plan-build, once for the
+    // pre-exec doctor's SymlinkDrift probe.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "ro", "$HOME/src")]);
+    let tenant_path = PathBuf::from("/Users/dev/src");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_sudo_session_cached(true)
+        .with_host_acl(
+            &PathBuf::from("/tmp"),
+            " 0: user:operator allow list,add_file,search\n",
+        )
+        .with_tenant_path_kind("dev", &tenant_path, PathKind::Absent);
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "verb proceeds; the pre-pass is a courtesy");
+    // Both AclDrift + SymlinkDrift aggregate: two warnings.
+    assert!(
+        stdout.contains(
+            "\u{26a0} Doctor: 2 warnings for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
+        ),
+        "cached: both AclDrift and SymlinkDrift aggregate (2 warnings); stdout={stdout:?}"
+    );
+    // tenant_path_kind on the share path fired twice: verb plan-build
+    // + the pre-exec doctor's now-ungated SymlinkDrift probe.
+    let calls: Vec<_> = exec
+        .tenant_path_kind_calls()
+        .into_iter()
+        .filter(|(_, p)| p == &tenant_path)
+        .collect();
+    assert_eq!(
+        calls.len(),
+        2,
+        "cached: verb plan-build + pre-exec SymlinkDrift both probe; calls={calls:?}"
+    );
+}
+
+#[test]
 fn reload_surfaces_user_directory_error_when_eligibility_probe_fails() {
     // Single-tenant reload re-uses `destroy_eligibility`; a dscl failure
     // routes to `reload_eligibility_probe_failed` with reload-named

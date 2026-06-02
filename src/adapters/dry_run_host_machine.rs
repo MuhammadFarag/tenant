@@ -172,6 +172,15 @@ impl HostMachine for DryRunHostMachine {
         Ok(true)
     }
 
+    /// `true` so the dry-run preview runs the full pre-exec audit
+    /// against the synthetic-clean placeholders rather than silently
+    /// skipping every sudo-gated probe. Dry-run never spawns sudo, so
+    /// the cache check is moot — but reporting "cached" keeps the
+    /// preview's doctor surface representative of a real run.
+    fn sudo_session_cached(&self) -> bool {
+        true
+    }
+
     fn describe_keychain(&self, op: &KeychainOp) -> String {
         MacosHostMachine.describe_keychain(op)
     }

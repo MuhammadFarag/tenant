@@ -405,19 +405,37 @@ impl<'a> Tenants<'a> {
             }
         };
 
+        // The pre-pass runs pre-consent (before `Proceed?`), so it must
+        // never force or await a sudo prompt, nor spam probe-failure
+        // frames when the operator simply hasn't authed yet. The gate
+        // is precise: only the GENUINE sudo probes (`read_pf_status`,
+        // `read_env_policy`, `read_kernel_pf_rules`, and the
+        // sudo-bearing half of `collect_share_drift`) are gated on a
+        // cached sudo timestamp. The auth-free probes
+        // (`check_anchor_body_drift` direct fs read,
+        // `collect_cowork_drift` host-side, `host_in_group`
+        // dseditgroup checkmember) run regardless of cache state — they
+        // can't prompt, so suppressing them only cost pre-confirm
+        // coverage. Uncached ⇒ the sudo probes skip quietly; the doctor
+        // verb (post point-of-use auth) is the surface that prompts and
+        // reports those.
+        let sudo_cached = self.machine.sudo_session_cached();
+
         // PfDisabled is host-wide: pf off means no tenant anchor enforces.
-        match self.machine.read_pf_status() {
-            Ok(text) => {
-                if !pf_status_enabled(&text) {
-                    record(Finding::PfDisabled);
+        if sudo_cached {
+            match self.machine.read_pf_status() {
+                Ok(text) => {
+                    if !pf_status_enabled(&text) {
+                        record(Finding::PfDisabled);
+                    }
                 }
+                Err(e) => reporter.doctor_firewall_failed(&e),
             }
-            Err(e) => reporter.doctor_firewall_failed(&e),
         }
 
         // EnvLeak is shell-only: only the shell entry path materializes
         // the operator's ssh-agent socket inside the tenant session.
-        if matches!(scope, DoctorScope::Shell) {
+        if sudo_cached && matches!(scope, DoctorScope::Shell) {
             match self.machine.read_env_policy() {
                 Ok(text) => {
                     if !has_env_delete_for(&text, "SSH_AUTH_SOCK") {
@@ -435,14 +453,19 @@ impl<'a> Tenants<'a> {
                 scope,
                 DoctorScope::Shell | DoctorScope::Mode | DoctorScope::Reload
             ) {
-                match self.machine.read_kernel_pf_rules(tenant) {
-                    Ok(rules) => {
-                        for drift in pf_rule_presence_check(&rules, tenant.as_str()) {
-                            record(drift);
+                // read_kernel_pf_rules is `sudo pfctl -a .. -sr` — gate it.
+                if sudo_cached {
+                    match self.machine.read_kernel_pf_rules(tenant) {
+                        Ok(rules) => {
+                            for drift in pf_rule_presence_check(&rules, tenant.as_str()) {
+                                record(drift);
+                            }
                         }
+                        Err(e) => reporter.doctor_firewall_failed(&e),
                     }
-                    Err(e) => reporter.doctor_firewall_failed(&e),
                 }
+                // check_anchor_body_drift reads the on-disk anchor
+                // directly (no sudo) — run regardless of cache state.
                 match self.check_anchor_body_drift(tenant) {
                     Ok(Some(drift)) => record(drift),
                     Ok(None) => {}
@@ -459,7 +482,16 @@ impl<'a> Tenants<'a> {
                 scope,
                 DoctorScope::Shell | DoctorScope::Mode | DoctorScope::Reload
             ) {
-                self.collect_share_drift(tenant, reporter, &mut record);
+                // collect_share_drift mixes an auth-free AclDrift read
+                // (`ls -lde`) with a sudo SymlinkDrift probe
+                // (`sudo -n -u`). It always runs the AclDrift half and
+                // gates ONLY the SymlinkDrift half on the cached
+                // timestamp — the split is a caller-side decision
+                // (which findings to collect), not a substrate change.
+                self.collect_share_drift(tenant, sudo_cached, reporter, &mut record);
+                // collect_cowork_drift (host_path_kind + read_host_acl)
+                // and host_in_group (dseditgroup checkmember) are fully
+                // auth-free — run them regardless of cache state.
                 self.collect_cowork_drift(tenant, reporter, &mut record);
                 match self
                     .machine
@@ -492,9 +524,16 @@ impl<'a> Tenants<'a> {
     /// Quiet counterpart to `check_share_drift` for the pre-exec
     /// aggregator: same probes, no inline emission. Per-share substrate
     /// failures surface via the doctor frame and the walk continues.
+    ///
+    /// The AclDrift check reads `ls -lde` from the operator process
+    /// (no sudo) and always runs. The SymlinkDrift check probes
+    /// `sudo -n -u <tenant>` and runs only when `sudo_cached` — gating
+    /// it pre-consent keeps the pre-pass from forcing a sudo prompt or
+    /// spamming a failure frame on a fresh terminal.
     fn collect_share_drift<F: FnMut(Finding)>(
         &self,
         name: &TenantUserName,
+        sudo_cached: bool,
         reporter: &mut Reporter,
         record: &mut F,
     ) {
@@ -522,6 +561,13 @@ impl<'a> Tenants<'a> {
                     reporter.doctor_failed(&e);
                     continue;
                 }
+            }
+            // SymlinkDrift probes the tenant-side path via
+            // `sudo -n -u <tenant>` — gated on the cached timestamp so
+            // the pre-pass never forces a prompt. AclDrift above is
+            // auth-free and already ran.
+            if !sudo_cached {
+                continue;
             }
             let tenant_path = expand_tenant_path(name.as_str(), &share.tenant_path);
             match self.machine.tenant_path_kind(name, &tenant_path) {

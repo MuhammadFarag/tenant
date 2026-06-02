@@ -281,8 +281,9 @@ impl HostMachine for MacosHostMachine {
         if !combined.ends_with('\n') {
             combined.push('\n');
         }
-        let listing_output = Command::new("sudo")
-            .args(["-n", "ls", "-1", "/etc/sudoers.d"])
+        let listing_argv = sudoers_dropins_listing_argv();
+        let listing_output = Command::new(&listing_argv[0])
+            .args(&listing_argv[1..])
             .output()
             .map_err(HostFileError::Spawn)?;
         // Non-existent/unreadable /etc/sudoers.d/ → "no drop-ins", not a
@@ -369,8 +370,9 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError> {
-        let output = Command::new("sudo")
-            .args(["-n", "pfctl", "-a", &format!("tenant-{name}"), "-sr"])
+        let argv = kernel_pf_rules_argv(name.as_str());
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
             .output()
             .map_err(FirewallError::Spawn)?;
         if !output.status.success() {
@@ -391,8 +393,9 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_pf_status(&self) -> Result<String, FirewallError> {
-        let output = Command::new("sudo")
-            .args(["-n", "pfctl", "-si"])
+        let argv = pf_status_argv();
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
             .output()
             .map_err(FirewallError::Spawn)?;
         if !output.status.success() {
@@ -720,6 +723,22 @@ impl HostMachine for MacosHostMachine {
         Ok(output.status.success())
     }
 
+    fn sudo_session_cached(&self) -> bool {
+        // `sudo -n -v` validates the cached timestamp without running
+        // a command: exit 0 ⇒ a fresh timestamp exists, non-zero ⇒
+        // none (or expired). The `-n` is load-bearing — this is the
+        // one sudo call that MUST stay non-interactive, since its
+        // whole job is to answer "would the next sudo prompt?" without
+        // itself prompting. A spawn failure reads as "not cached" so
+        // the gate fails closed.
+        let argv = sudo_session_cached_argv();
+        Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
     fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {
         // Existence check via `sudo -n -u <name> /bin/test -e <path>`
         // — NOT `std::fs::metadata` from the operator process. The
@@ -834,9 +853,56 @@ impl HostMachine for MacosHostMachine {
     }
 }
 
+/// Privileged read of a host-config file (`/etc/sudoers` + drop-ins).
+/// Bare sudo — NO `-n`. This is a doctor host-config read; the lead such
+/// probe in the doctor flow prompts-and-caches at point of use so the
+/// subsequent `-n` run-as-tenant probes ride the timestamp.
+pub fn privileged_cat_argv(path: &str) -> Vec<String> {
+    vec!["sudo".into(), "cat".into(), path.into()]
+}
+
+/// `/etc/sudoers.d` listing for `read_env_policy`. Same doctor
+/// host-config-read class as `privileged_cat_argv` — bare sudo, no `-n`.
+pub fn sudoers_dropins_listing_argv() -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "ls".into(),
+        "-1".into(),
+        "/etc/sudoers.d".into(),
+    ]
+}
+
+/// `pfctl -si` for `read_pf_status`. Doctor host-config read — bare
+/// sudo, no `-n`, so the lead privileged probe prompts-and-caches.
+pub fn pf_status_argv() -> Vec<String> {
+    vec!["sudo".into(), "pfctl".into(), "-si".into()]
+}
+
+/// `pfctl -a tenant-<name> -sr` for `read_kernel_pf_rules`. Doctor
+/// host-config read — bare sudo, no `-n`. By the time this runs in the
+/// doctor flow the lead host-config read has already populated the
+/// timestamp, but it stays bare-sudo so ordering can't break it.
+pub fn kernel_pf_rules_argv(name: &str) -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "pfctl".into(),
+        "-a".into(),
+        format!("tenant-{name}"),
+        "-sr".into(),
+    ]
+}
+
+/// `sudo -n -v` cache CHECK. KEEPS `-n` — its whole job is to answer
+/// "would the next sudo prompt?" WITHOUT itself prompting. The one sudo
+/// call that must stay non-interactive after the point-of-use change.
+pub fn sudo_session_cached_argv() -> Vec<String> {
+    vec!["sudo".into(), "-n".into(), "-v".into()]
+}
+
 fn read_privileged_text(path: &str) -> Result<String, HostFileError> {
-    let output = Command::new("sudo")
-        .args(["-n", "cat", path])
+    let argv = privileged_cat_argv(path);
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
         .output()
         .map_err(HostFileError::Spawn)?;
     if !output.status.success() {

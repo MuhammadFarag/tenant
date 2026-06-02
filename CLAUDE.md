@@ -79,7 +79,8 @@ src/domain/       — domain layer. `host_user_directory.rs` defines the
                     `read_kernel_pf_rules`, `read_pam_sudo`,
                     `read_pf_status`, `read_anchor_body`,
                     `read_host_acl`, `tenant_path_kind`,
-                    `host_path_kind`, `host_in_group`) plus the
+                    `host_path_kind`, `host_in_group`,
+                    `sudo_session_cached`) plus the
                     `WritableOp` bridge trait. `ops.rs` carries the
                     `Op` ADT over `AccountOp` / `ProfileOp` / `FirewallOp` /
                     `AclOp` plus the four `impl WritableOp for *Op`
@@ -712,6 +713,31 @@ it from scratch wastes a cycle and risks getting it wrong.
   via `doctor_summary_pending`. Healthy host: nothing. Substrate-
   machinery failures surface as `doctor_*_failed` stderr frames and
   the verb proceeds — audit is a courtesy, never an abort gate.
+
+- **Point-of-use sudo for doctor; precise pre-pass gate.** Doctor's
+  host-config reads (`read_pf_status`, `read_kernel_pf_rules`,
+  `read_env_policy`) shell out with *bare* `sudo` — no `-n` — so the
+  doctor verb's first privileged probe prompts-and-caches at point of
+  use (Touch ID / password per host PAM) and the later run-as-tenant
+  `sudo -n -u` probes ride the timestamp. The cache *check*
+  `sudo_session_cached` (`sudo -n -v`) KEEPS `-n`: it must answer
+  "would the next sudo prompt?" without itself prompting, and a spawn
+  failure reads as not-cached (fail-closed). `pre_exec_doctor_summary`
+  runs pre-consent (before `Proceed?`), so it reads
+  `sudo_session_cached` once and gates ONLY the genuine sudo probes
+  (`read_pf_status`, `read_env_policy`, `read_kernel_pf_rules`, and the
+  `tenant_path_kind` SymlinkDrift half of share drift) — uncached ⇒
+  those skip silently, never forcing a prompt nor spamming (or
+  double-printing) a failure frame. Auth-free per-tenant drift
+  (anchor-body, cowork via `host_path_kind` + `ls -lde`,
+  host-not-in-share-group via `dseditgroup checkmember`, and the
+  `read_host_acl` AclDrift half of share drift) runs regardless of
+  cache state, so a fresh terminal still surfaces the drift it can see
+  without sudo. The split is a CALLER-side decision
+  (`collect_share_drift` takes `sudo_cached: bool`); no interactivity
+  flag leaks into a probe signature — differentiation lives at the
+  caller, not the port. Non-TTY doctor (piped) still fails rather than
+  prompts — out of scope.
 
 ### Operator UX + plan rendering
 

@@ -117,6 +117,12 @@ pub struct StubHostMachine {
 
     tenant_path_kind_failure: RefCell<Option<ProbeError>>,
 
+    /// Records every `(name, path)` looked up via `tenant_path_kind`,
+    /// in call order. Lets tests pin which calls the sudo-bearing
+    /// tenant-side probe touched — load-bearing for the pre-exec
+    /// doctor's "SymlinkDrift check skipped when sudo uncached" pin.
+    tenant_path_kind_calls: RefCell<Vec<(String, PathBuf)>>,
+
     /// Pre-loaded kinds for `host_path_kind`. Unmatched paths default
     /// to `PathKind::Absent` — matches what an untouched host looks
     /// like to the cowork-dir probe.
@@ -145,6 +151,12 @@ pub struct StubHostMachine {
     host_in_group_invocations: RefCell<Vec<(String, String)>>,
 
     host_in_group_failure: RefCell<Option<AccountError>>,
+
+    /// Operator's cached-sudo-timestamp verdict for
+    /// `sudo_session_cached`. Defaults to `true` (set in `new`) so the
+    /// pre-exec doctor pass runs its full probe set in existing tests;
+    /// `with_sudo_session_cached(false)` exercises the quiet-skip gate.
+    sudo_session_cached: Cell<bool>,
 
     keychain_ops: RefCell<Vec<KeychainOp>>,
 
@@ -197,6 +209,7 @@ impl StubHostMachine {
             "Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string();
         *s.pam_sudo_content.borrow_mut() = "auth       sufficient     pam_tid.so\n".to_string();
         *s.pf_status_content.borrow_mut() = "Status: Enabled for 0 days 00:00:00\n".to_string();
+        s.sudo_session_cached.set(true);
         s
     }
 
@@ -437,6 +450,11 @@ impl StubHostMachine {
         self.host_path_kind_calls.borrow().clone()
     }
 
+    /// Snapshot of every `tenant_path_kind` call, in invocation order.
+    pub fn tenant_path_kind_calls(&self) -> Vec<(String, PathBuf)> {
+        self.tenant_path_kind_calls.borrow().clone()
+    }
+
     pub fn with_host_acl(self, path: &std::path::Path, listing: &str) -> Self {
         self.host_acl_state
             .borrow_mut()
@@ -465,6 +483,14 @@ impl StubHostMachine {
 
     pub fn host_in_group_invocations(&self) -> Vec<(String, String)> {
         self.host_in_group_invocations.borrow().clone()
+    }
+
+    /// Override the cached-sudo verdict. `false` exercises the
+    /// pre-exec doctor pass's quiet-skip gate (no sudo probes, no
+    /// failure frames pre-consent).
+    pub fn with_sudo_session_cached(self, cached: bool) -> Self {
+        self.sudo_session_cached.set(cached);
+        self
     }
 
     pub fn keychain_ops(&self) -> Vec<KeychainOp> {
@@ -746,6 +772,9 @@ impl HostMachine for StubHostMachine {
         name: &TenantUserName,
         path: &std::path::Path,
     ) -> Result<PathKind, ProbeError> {
+        self.tenant_path_kind_calls
+            .borrow_mut()
+            .push((name.0.clone(), path.to_path_buf()));
         if let Some(err) = self.tenant_path_kind_failure.borrow_mut().take() {
             return Err(err);
         }
@@ -852,6 +881,10 @@ impl HostMachine for StubHostMachine {
             .get(&key)
             .copied()
             .unwrap_or(true))
+    }
+
+    fn sudo_session_cached(&self) -> bool {
+        self.sudo_session_cached.get()
     }
 
     fn describe_keychain(&self, op: &KeychainOp) -> String {

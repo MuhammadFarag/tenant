@@ -98,6 +98,9 @@ impl HostMachine for NeverHostMachine {
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         panic!("host machine unexpectedly invoked (host_in_group): host={host:?} group={group:?}");
     }
+    fn sudo_session_cached(&self) -> bool {
+        panic!("host machine unexpectedly invoked (sudo_session_cached)");
+    }
     fn describe_keychain(&self, op: &KeychainOp) -> String {
         panic!("host machine unexpectedly invoked (describe_keychain) with op: {op:?}");
     }

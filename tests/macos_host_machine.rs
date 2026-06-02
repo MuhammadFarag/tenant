@@ -548,3 +548,72 @@ fn macos_tenant_keychain_present_returns_false_for_absent_path() {
         "keychain at /Users/root/Library/Keychains/login.keychain-db must not exist"
     );
 }
+
+// Point-of-use sudo for the doctor verb. The three host-config read
+// probes (`read_pf_status`, `read_kernel_pf_rules`, `read_env_policy`)
+// shell out with BARE sudo — NO `-n`. On a fresh terminal the FIRST of
+// these probes prompts (Touch ID / password per host PAM) and populates
+// the operator's sudo timestamp; every subsequent `sudo -n -u <tenant>`
+// run-as-tenant probe then RIDES that cache. Dropping `-n` from these
+// reads is what makes a first-touch `tenant doctor` succeed instead of
+// hard-aborting with "sudo: a password is required". The argv tails are
+// extracted into pure builders so production + test consume the same
+// source and any reintroduction of `-n` fails here exactly once.
+#[test]
+fn macos_pf_status_argv_is_bare_sudo() {
+    use tenant::adapters::macos::host_machine::pf_status_argv;
+    let argv = pf_status_argv();
+    assert_eq!(argv, vec!["sudo", "pfctl", "-si"]);
+    assert!(
+        !argv.iter().any(|a| a == "-n"),
+        "doctor pf-status read must drop -n for point-of-use prompting; argv={argv:?}"
+    );
+}
+
+#[test]
+fn macos_kernel_pf_rules_argv_is_bare_sudo() {
+    use tenant::adapters::macos::host_machine::kernel_pf_rules_argv;
+    let argv = kernel_pf_rules_argv("dev");
+    assert_eq!(argv, vec!["sudo", "pfctl", "-a", "tenant-dev", "-sr"]);
+    assert!(
+        !argv.iter().any(|a| a == "-n"),
+        "doctor kernel-pf-rules read must drop -n for point-of-use prompting; argv={argv:?}"
+    );
+}
+
+#[test]
+fn macos_privileged_cat_argv_is_bare_sudo() {
+    // `read_env_policy` reads `/etc/sudoers` (+ drop-ins) via this
+    // privileged `cat`. As a doctor host-config read it drops `-n` so
+    // the lead probe prompts-and-caches at point of use.
+    use tenant::adapters::macos::host_machine::privileged_cat_argv;
+    let argv = privileged_cat_argv("/etc/sudoers");
+    assert_eq!(argv, vec!["sudo", "cat", "/etc/sudoers"]);
+    assert!(
+        !argv.iter().any(|a| a == "-n"),
+        "doctor sudoers read must drop -n for point-of-use prompting; argv={argv:?}"
+    );
+}
+
+#[test]
+fn macos_sudoers_dropins_listing_argv_is_bare_sudo() {
+    // The drop-in directory listing inside `read_env_policy` is the same
+    // privileged-read class — bare sudo, no `-n`.
+    use tenant::adapters::macos::host_machine::sudoers_dropins_listing_argv;
+    let argv = sudoers_dropins_listing_argv();
+    assert_eq!(argv, vec!["sudo", "ls", "-1", "/etc/sudoers.d"]);
+    assert!(
+        !argv.iter().any(|a| a == "-n"),
+        "doctor sudoers.d listing must drop -n for point-of-use prompting; argv={argv:?}"
+    );
+}
+
+// The non-interactive cache CHECK keeps `-n` — its whole job is to
+// answer "would the next sudo prompt?" WITHOUT itself prompting. This is
+// the one sudo call that MUST stay `-n` after the point-of-use change;
+// pinning it guards against an over-broad "drop -n everywhere" edit.
+#[test]
+fn macos_sudo_session_cached_argv_keeps_dash_n() {
+    use tenant::adapters::macos::host_machine::sudo_session_cached_argv;
+    assert_eq!(sudo_session_cached_argv(), vec!["sudo", "-n", "-v"]);
+}

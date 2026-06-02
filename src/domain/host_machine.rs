@@ -77,6 +77,16 @@ pub trait HostMachine {
     /// An absent group is non-error: returns `Ok(false)`.
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError>;
 
+    /// True iff the operator already holds a valid cached sudo
+    /// timestamp (`sudo -n -v` exits 0). Non-interactive by design:
+    /// this is a CHECK, never a prompt. The pre-exec doctor pass gates
+    /// every sudo-dependent probe behind it so an uncached operator
+    /// sees neither an auth prompt nor a wall of probe-failure frames
+    /// pre-consent. Infallible: any spawn/exec hiccup reads as "not
+    /// cached" (false), so the gate fails closed (skip probes) rather
+    /// than open (spam failures).
+    fn sudo_session_cached(&self) -> bool;
+
     /// True iff `/Users/<tenant>/Library/Keychains/login.keychain-db`
     /// is present on disk. Doctor consults this to surface
     /// `Finding::TenantKeychainAbsent`. Filesystem-existence check from
