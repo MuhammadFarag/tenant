@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.2
+# tenant 0.1.0-alpha.3
 
-Second alpha. Still alpha quality: the verbs work end-to-end on the
+Third alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -14,35 +14,40 @@ packet filter).
 A tenant runs as a real macOS user. It owns a home directory, a
 dedicated share group, and a Packet Filter anchor. The anchor
 restricts outbound network access to an allowlist defined in the
-tenant's profile.
+tenant's profile, and (new in this release) restricts which loopback
+ports the tenant accepts inbound connections on.
 
 The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
 
-## New since 0.1.0-alpha.1
+## New since 0.1.0-alpha.2
 
-- **Login keychain provisioning.** `tenant create` now bootstraps the
-  tenant's `login.keychain-db`, and `tenant shell` retrieves the
-  operator-stashed password and unlocks it before exec — so tools that
-  need a keychain (credential helpers, signing) work inside the tenant,
-  and the unlock survives a host reboot.
-- **Co-working directories.** Each tenant gets a shared directory at
-  `/Users/Shared/tenants/<name>`, owned by the operator with the
-  tenant's share group, setgid + an inheritable ACL — files created
-  there by either side stay collaboratively reachable without a tenant
-  umask change.
-- **Filesystem shares with recursive grants.** `[[shares]]` entries in
-  a tenant's profile grant the share group access to host paths via
-  recursive ACLs plus a tenant-side symlink. `tenant reload` applies
-  them (and heals drift); mode/shell entry reapplies the lighter pieces.
-- **`tenant doctor` works on a fresh terminal.** Doctor's privileged
-  reads now prompt for `sudo` at point of use and complete the audit,
-  instead of aborting with `sudo: a password is required` when no sudo
-  session is cached. The pre-exec audit on mutating verbs is likewise
-  quiet when uncached while still surfacing drift it can see without
-  sudo.
+- **Per-tenant inbound loopback control.** A new `tenant inbound <name>
+  restricted|permissive` verb, an `[inbound] ports` profile section, and
+  a `tenant shell --inbound` flag govern which loopback (`127.0.0.1`)
+  ports a tenant accepts connections on. The default is deny-by-default
+  (locked): a tenant accepts no inbound loopback from anyone. Declare
+  ports in the profile to expose specific TCP services, or flip a tenant
+  to `permissive` temporarily — the motivating case is an OAuth
+  localhost-redirect callback, where a tool inside the tenant needs your
+  browser to reach a short-lived `127.0.0.1:<port>` server. `tenant
+  doctor` flags tenants with exposed ports or left permissive, and
+  `tenant shell` prints the current inbound posture on entry. Existing
+  tenants flip to locked on the next `tenant reload`.
+
+  *Honest scope:* this is surface reduction, not host-versus-peer
+  isolation. On macOS, PF cannot see which user initiated a loopback
+  connection, so a declared or permissive port is reachable by the host
+  operator and by co-located tenants alike — the control narrows *which
+  ports* are exposed, not *who* can reach an exposed one. UDP loopback
+  is not filtered.
+
+- **Homebrew tap.** `tenant` now installs from a tap:
+  `brew tap MuhammadFarag/tenant && brew install tenant` (Apple Silicon).
+  It is the recommended install path; the pre-built tarball and
+  `cargo install` remain available.
 
 ## What works in this release
 
@@ -56,11 +61,14 @@ grant access.
   tenant keychain and reapplies shares on entry.
 - `tenant mode <name> install|runtime` — switch the PF anchor between
   a widened install tier and the restricted runtime tier.
+- `tenant inbound <name> restricted|permissive` — control which loopback
+  ports the tenant accepts inbound connections on (default: none).
 - `tenant reload [<name>]` — reapply the profile to host state,
   including filesystem shares and the co-working directory. Walks
   every tenant when called without an argument.
 - `tenant doctor [<name>]` — read-only audit covering paths, sudoers,
-  PF state, anchor coherence, share grants, and group membership.
+  PF state, anchor coherence, share grants, inbound exposure, and group
+  membership.
 
 ## Requirements
 
@@ -74,18 +82,25 @@ grant access.
 
 ## Installation
 
-The Homebrew tap is not yet available. Two options for now:
+Recommended — Homebrew (Apple Silicon):
+
+```
+brew tap MuhammadFarag/tenant
+brew install tenant
+```
+
+Or build from source / download the pre-built ARM binary:
 
 ```
 # Build from source at this release
-cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.2
+cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.3
 
 # Or download the pre-built ARM binary
-curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.2/tenant-v0.1.0-alpha.2-aarch64-apple-darwin.tar.gz | tar -xz
+curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.3/tenant-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz | tar -xz
 sudo mv tenant /usr/local/bin/
 ```
 
-Verify with `tenant --version` (expect `tenant 0.1.0-alpha.2`).
+Verify with `tenant --version` (expect `tenant 0.1.0-alpha.3`).
 
 ## Known rough edges
 
@@ -93,6 +108,11 @@ Still an alpha. Expect sharp edges in error reporting, recovery from
 partial failures, and unusual host configurations the author has not
 encountered. Specifically:
 
+- Inbound `restricted` mode narrows *which* loopback ports are exposed,
+  not *who* reaches them — co-located tenants can reach a tenant's
+  declared/permissive ports. Run mutually-distrusting workloads in
+  separate tenants only when you don't expose overlapping loopback
+  services.
 - Pre-confirm summaries are wordier than they need to be (implementation
   detail and group-name jargon leak into the standard view), and the
   `tenant shell -- <cmd>` command form prints the full reapply log
