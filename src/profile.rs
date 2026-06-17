@@ -1,6 +1,7 @@
 //! Per-tenant profile config — TOML at `~/.config/tenant/profiles/<name>.toml`.
-//! Carries the PF allowlist (runtime / install tiers) and any
-//! `[[shares]]` filesystem-share declarations.
+//! Carries the PF allowlist (runtime / install tiers), any
+//! `[[shares]]` filesystem-share declarations, and the `[inbound]`
+//! TCP-loopback port list (the `restricted` inbound posture).
 
 use std::fmt;
 use std::io;
@@ -49,8 +50,18 @@ pub fn default_profile_toml() -> String {
      # [[shares]]\n\
      # host_path = \"/Users/<host>/projects/foo\"\n\
      # mode = \"ro\"\n\
-     # tenant_path = \"$HOME/projects/foo\"\n"
-        .to_string()
+     # tenant_path = \"$HOME/projects/foo\"\n\
+     \n\
+     [inbound]\n\
+     # TCP loopback (127.0.0.1) ports the tenant exposes under the default\n\
+     # `restricted` posture. SURFACE-REDUCTION, NOT isolation: a declared port\n\
+     # is reachable by the host AND peer tenants (pf can't see the initiator on\n\
+     # shared loopback). UDP loopback is unfiltered (TCP only). Empty == locked.\n\
+     # Widen temporarily with `tenant inbound <name> permissive`. Uncomment:\n\
+     ports = [\n\
+     #   3000,\n\
+     ]\n"
+    .to_string()
 }
 
 #[derive(Debug)]
@@ -87,6 +98,11 @@ pub struct Profile {
     /// preserving backward-compat with pre-shares profiles.
     #[serde(default)]
     pub shares: Vec<Share>,
+    /// Absent `[inbound]` deserializes to empty ports via
+    /// `#[serde(default)]`, preserving backward-compat with pre-inbound
+    /// profiles. Empty ports is the locked posture.
+    #[serde(default)]
+    pub inbound: Inbound,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -98,6 +114,17 @@ pub struct Allowlist {
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Tier {
     pub hosts: Vec<String>,
+}
+
+/// TCP loopback ports the tenant exposes under the default `restricted`
+/// inbound posture. Bare port list — no proto field (TCP only; UDP
+/// loopback is unfiltered). Empty (or absent section) is the locked
+/// posture: no inbound pass is rendered. An absent `ports` key inside a
+/// present `[inbound]` section also defaults to empty.
+#[derive(Debug, Deserialize, PartialEq, Eq, Default)]
+pub struct Inbound {
+    #[serde(default)]
+    pub ports: Vec<u16>,
 }
 
 /// `host_path` is a literal absolute path; `tenant_path` is a `$HOME`-

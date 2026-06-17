@@ -3,17 +3,19 @@
 //! plus their per-check helpers.
 
 use crate::doctor::{
-    Finding, SymlinkActual, anchor_body_matches, curated_paths, has_env_delete_for,
-    has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
+    Finding, SymlinkActual, anchor_body_matches, classify_inbound_exposure, curated_paths,
+    has_env_delete_for, has_group_acl_entry, has_pam_tid, pf_rule_presence_check,
+    pf_status_enabled,
 };
 use crate::domain::reporter::Reporter;
 use crate::domain::{
     FirewallError, HostFileError, HostUserDirectory, HostUserName, PathKind, ProbeError,
     TenantUserName, UserDirectoryError,
 };
-use crate::firewall::render_anchor;
+use crate::firewall::{anchor_is_permissive, render_anchor};
 use crate::profile::{expand_tenant_path, parse};
 
+use super::reapply::steady_inbound_rules;
 use super::{Tenants, tenant_share_group_name};
 
 /// Per-verb relevance matrix for `pre_exec_doctor_summary`.
@@ -196,6 +198,10 @@ impl<'a> Tenants<'a> {
             reporter.doctor_finding(&drift);
             findings.push(drift);
         }
+        if let Some(exposure) = self.check_inbound_exposure(name)? {
+            reporter.doctor_finding(&exposure);
+            findings.push(exposure);
+        }
         for drift in self.check_share_drift(name, reporter)? {
             findings.push(drift);
         }
@@ -357,6 +363,34 @@ impl<'a> Tenants<'a> {
         Ok(findings)
     }
 
+    /// Classify the tenant's inbound loopback posture into an exposure
+    /// finding: `InboundPermissive` (warning) if the on-disk anchor is
+    /// the widened all-ports form, else `InboundExposure` (info) naming
+    /// the profile's declared ports, else locked = quiet. Composes the
+    /// profile's declared ports (intent) with the observed anchor's
+    /// permissive flag (current posture — there's no state file).
+    /// Unreadable / unparseable profile skips silently, same posture as
+    /// the anchor-body and share-drift checks.
+    fn check_inbound_exposure(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<Option<Finding>, HostFileError> {
+        let profile_content = match self.machine.read_profile(name) {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        let parsed = match parse(&profile_content) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        let permissive = anchor_is_permissive(&self.machine.read_anchor_body(name)?);
+        Ok(classify_inbound_exposure(
+            name,
+            &parsed.inbound.ports,
+            permissive,
+        ))
+    }
+
     /// Compare on-disk anchor body against the runtime-tier render.
     /// An unreadable / unparseable profile skips the check silently.
     /// Runtime-tier only: install-tier widening outside a shell session
@@ -374,7 +408,11 @@ impl<'a> Tenants<'a> {
             Err(_) => return Ok(None),
         };
         let actual = self.machine.read_anchor_body(name)?;
-        let expected = render_anchor(name.as_str(), &parsed.allowlist.runtime.hosts);
+        let expected = render_anchor(
+            name.as_str(),
+            &parsed.allowlist.runtime.hosts,
+            steady_inbound_rules(&parsed),
+        );
         if anchor_body_matches(&actual, &expected) {
             return Ok(None);
         }
@@ -469,6 +507,17 @@ impl<'a> Tenants<'a> {
                 match self.check_anchor_body_drift(tenant) {
                     Ok(Some(drift)) => record(drift),
                     Ok(None) => {}
+                    Err(e) => reporter.doctor_host_file_failed(&e),
+                }
+                // Inbound posture: a calibrated heads-up, NOT a doctor
+                // nag (locked = quiet, restricted-with-ports = a dim
+                // info line, permissive = a loud ⚠). Reads the same
+                // auth-free profile + anchor body — run regardless of
+                // cache state. Emitted directly via the posture line
+                // (not `record`) so it stays out of the warning
+                // aggregate.
+                match self.check_inbound_exposure(tenant) {
+                    Ok(posture) => reporter.doctor_inbound_posture(posture.as_ref()),
                     Err(e) => reporter.doctor_host_file_failed(&e),
                 }
             }

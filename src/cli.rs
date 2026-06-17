@@ -132,6 +132,41 @@ Examples:
         #[arg(value_enum)]
         level: ModeLevel,
     },
+    /// Apply an inbound loopback posture (restricted | permissive) to the tenant.
+    ///
+    /// Re-renders the PF anchor with the requested INBOUND loopback (TCP)
+    /// posture and reloads PF. `restricted` (the default) allows inbound
+    /// loopback only on the ports declared in the profile's `[inbound]`
+    /// section — an empty list locks inbound entirely. `permissive` opens
+    /// all inbound loopback TCP, for the localhost-redirect OAuth window
+    /// (a service that binds a random port the operator can't predeclare).
+    ///
+    /// Permissive widening is intentionally non-persistent at the session
+    /// boundary — `tenant shell <name>` auto-narrows inbound back to
+    /// restricted on entry, so a forgotten `inbound permissive` doesn't
+    /// leak into a future shell session.
+    ///
+    /// HONEST SCOPE: `restricted` is SURFACE-REDUCTION, not host-vs-peer
+    /// isolation. A declared port is reachable by the host AND by peer
+    /// tenants — pf cannot see the initiator on shared loopback
+    /// (127.0.0.1). A tenant also cannot reach its OWN undeclared loopback
+    /// port (declare it to restore intra-tenant use). UDP loopback is
+    /// unfiltered (TCP only). The inbound and egress (`tenant mode`)
+    /// widenings do NOT compose across separate commands: each verb renders
+    /// the axis it does not control at steady state.
+    #[command(after_help = "\
+Examples:
+  tenant inbound alice permissive        open all inbound loopback (OAuth-on-random-port window)
+  tenant inbound alice restricted        narrow back to profile-declared ports")]
+    Inbound {
+        /// Tenant short username.
+        name: TenantUserName,
+        /// `permissive` opens all inbound loopback TCP; `restricted`
+        /// narrows back to the profile's `[inbound]` declared ports
+        /// (empty ⇒ locked).
+        #[arg(value_enum)]
+        level: InboundLevel,
+    },
     /// Enter the tenant. Two forms: interactive shell, or `-- <cmd>`.
     ///
     /// `tenant shell <name>` (interactive): auto-narrows the firewall
@@ -151,23 +186,35 @@ Examples:
     /// stderr naming `tenant mode <name> runtime` for recovery, but
     /// does NOT override the child's exit code.
     ///
-    /// `--mode` is valid only with `-- <cmd>` — widening the
-    /// interactive session would leave the operator at install tier
-    /// silently.
+    /// `--mode` / `--inbound` are valid only with `-- <cmd>` — widening
+    /// the interactive session would leave the operator at install tier
+    /// / permissive inbound silently. The egress (`--mode`) and inbound
+    /// (`--inbound`) widenings are orthogonal: each leaves the axis it
+    /// doesn't name at steady state, and both narrow back on completion.
     #[command(after_help = "\
 Examples:
   tenant shell alice                     enter an interactive login shell
   tenant shell alice -- ls /tmp          run one command at runtime tier
   tenant shell alice --mode install -- pip install foo
-                                         widen for the call, narrow on completion")]
+                                         widen egress for the call, narrow on completion
+  tenant shell alice --inbound permissive -- gh auth login
+                                         widen inbound loopback for the call, narrow on completion")]
     Shell {
         /// Tenant short username.
         name: TenantUserName,
         /// Firewall tier for the command-form reapply. `install` widens
-        /// for the call; runtime narrow always fires on completion.
+        /// egress for the call; runtime narrow always fires on completion.
         /// Requires `-- <cmd>` — rejected on the interactive form.
         #[arg(long, value_enum, requires = "argv")]
         mode: Option<ModeLevel>,
+        /// Inbound loopback posture for the command-form reapply.
+        /// `permissive` opens all inbound loopback TCP for the call; the
+        /// restricted narrow always fires on completion. Requires
+        /// `-- <cmd>` — rejected on the interactive form (which
+        /// auto-narrows inbound to restricted on entry). Orthogonal to
+        /// `--mode`: widening inbound leaves egress at runtime tier.
+        #[arg(long, value_enum, requires = "argv")]
+        inbound: Option<InboundLevel>,
         /// Command to run as the tenant (everything after `--`). Empty
         /// argv selects the interactive login-shell form.
         #[arg(last = true)]
@@ -222,6 +269,25 @@ impl ModeLevel {
         match self {
             ModeLevel::Runtime => "runtime",
             ModeLevel::Install => "install",
+        }
+    }
+}
+
+/// The per-tenant inbound loopback posture. `restricted` (the default)
+/// gates inbound loopback TCP on the profile's declared `[inbound]` ports
+/// (empty ⇒ locked); `permissive` is the temporary all-ports widen.
+/// Parallel to `ModeLevel` on a second, orthogonal axis.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum InboundLevel {
+    Restricted,
+    Permissive,
+}
+
+impl InboundLevel {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            InboundLevel::Restricted => "restricted",
+            InboundLevel::Permissive => "permissive",
         }
     }
 }

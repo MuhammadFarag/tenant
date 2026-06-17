@@ -21,10 +21,11 @@ fn help_profile_exits_zero_and_renders_to_stdout() {
 fn help_profile_body_covers_load_bearing_concepts() {
     // The profile body must call out: the file location, the schema
     // anchor (`schema_version`), the two allowlist tiers, the
-    // [[shares]] block + `$HOME` rule, the `[provision]` non-goal, and
-    // the `tenant reload <name>` apply step. Pin by substring rather
-    // than byte-exact — the body's prose is allowed to shift; the
-    // concepts are not.
+    // [[shares]] block + `$HOME` rule, the `[inbound]` ports section +
+    // its honest-scope caveats, the `[provision]` non-goal, and the
+    // `tenant reload <name>` apply step. Pin by substring rather than
+    // byte-exact — the body's prose is allowed to shift; the concepts
+    // are not.
     let (_code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["help", "profile"]);
     let needles = [
         "~/.config/tenant/profiles/<name>.toml",
@@ -38,6 +39,14 @@ fn help_profile_body_covers_load_bearing_concepts() {
         "$HOME",
         "ro",
         "rw",
+        "[inbound]",
+        "ports",
+        // Honest-scope caveats: surface-reduction (not host-vs-peer),
+        // intra-tenant cost, UDP unfiltered.
+        "surface-reduction",
+        "peer tenants",
+        "OWN undeclared",
+        "UDP",
         "[provision]",
         "git clone",
         "tenant reload",

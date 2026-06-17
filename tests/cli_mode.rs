@@ -228,7 +228,11 @@ fn mode_runtime_real_mode_op_shape() {
         ),
     );
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
-    let expected_body = tenant::firewall::render_anchor("dev", &[]);
+    let expected_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     assert_eq!(
         exec.firewall_ops(),
         vec![
@@ -240,6 +244,38 @@ fn mode_runtime_real_mode_op_shape() {
         ],
         "mode runtime should InstallAnchor (runtime-only body) then Reload"
     );
+}
+
+#[test]
+fn mode_renders_declared_inbound_ports_from_profile() {
+    // Steady-state inbound axis: `mode` does NOT control inbound, so it
+    // renders inbound at the profile's declared ports (restricted with
+    // those ports), NOT a hardcoded locked posture. A tenant whose
+    // profile declares `ports = [3000]` must keep 3000 open after a mode
+    // reapply. Mirrors how `hosts_for_level` resolves egress from the
+    // same parsed profile.
+    let profile = format!(
+        "{}\n[inbound]\nports = [\n  3000,\n]\n",
+        profile_with_hosts(&[], &[])
+    );
+    let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
+    let (code, _stdout, _stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0);
+    let expected_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![3000]),
+    );
+    match &exec.firewall_ops()[0] {
+        FirewallOp::InstallAnchor { body, .. } => {
+            assert_eq!(
+                body, &expected_body,
+                "mode should render the profile's declared inbound ports (steady state), not locked"
+            );
+        }
+        other => panic!("expected InstallAnchor first, got {other:?}"),
+    }
 }
 
 #[test]
@@ -342,6 +378,7 @@ fn mode_install_with_only_runtime_populated() {
             "api.example.com".to_string(),
             "deploy.example.com".to_string(),
         ],
+        tenant::firewall::InboundRules::Restricted(vec![]),
     );
     match &exec.firewall_ops()[0] {
         FirewallOp::InstallAnchor { body, .. } => {
@@ -371,6 +408,7 @@ fn mode_install_with_runtime_and_install_populated() {
             "nodejs.org".to_string(),
             "storage.googleapis.com".to_string(),
         ],
+        tenant::firewall::InboundRules::Restricted(vec![]),
     );
     match &exec.firewall_ops()[0] {
         FirewallOp::InstallAnchor { body, .. } => {
@@ -394,7 +432,11 @@ fn mode_runtime_with_runtime_and_install_populated_excludes_install() {
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 0);
-    let expected_body = tenant::firewall::render_anchor("dev", &["api.example.com".to_string()]);
+    let expected_body = tenant::firewall::render_anchor(
+        "dev",
+        &["api.example.com".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     match &exec.firewall_ops()[0] {
         FirewallOp::InstallAnchor { body, .. } => {
             assert_eq!(body, &expected_body);
@@ -413,8 +455,11 @@ fn mode_install_with_empty_runtime_and_populated_install() {
     let (code, _stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "install"]);
     assert_eq!(code, 0);
-    let expected_body =
-        tenant::firewall::render_anchor("dev", &["pypi.org".to_string(), "npmjs.org".to_string()]);
+    let expected_body = tenant::firewall::render_anchor(
+        "dev",
+        &["pypi.org".to_string(), "npmjs.org".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     match &exec.firewall_ops()[0] {
         FirewallOp::InstallAnchor { body, .. } => {
             assert_eq!(body, &expected_body);
@@ -638,7 +683,11 @@ fn mode_install_anchor_failure_surfaces() {
         .fail_firewall_op(
             FirewallOp::InstallAnchor {
                 name: "dev".into(),
-                body: tenant::firewall::render_anchor("dev", &[]),
+                body: tenant::firewall::render_anchor(
+                    "dev",
+                    &[],
+                    tenant::firewall::InboundRules::Restricted(vec![]),
+                ),
             },
             FirewallError::Fs {
                 path: "/etc/pf.anchors/tenant-dev".into(),

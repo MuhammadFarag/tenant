@@ -392,9 +392,10 @@ fn create_writes_profile_with_correct_toml_shape() {
     // Byte-exact pin on the default profile content. Schema-version
     // floor at 1 (future migrations bump this); two empty allowlist
     // sections (the operator's edit target) plus commented-out example
-    // entries and a commented-out [[shares]] block — guidance scaffold,
-    // not active config. Re-parsing the scaffold must yield an
-    // empty-allowlists, empty-shares profile (covered by
+    // entries, a commented-out [[shares]] block, and an [inbound] block
+    // with a commented-out example port — guidance scaffold, not active
+    // config. Re-parsing the scaffold must yield an empty-allowlists,
+    // empty-shares, empty-inbound-ports profile (covered by
     // `tests/profile_parse.rs`).
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
@@ -431,7 +432,17 @@ fn create_writes_profile_with_correct_toml_shape() {
                 # [[shares]]\n\
                 # host_path = \"/Users/<host>/projects/foo\"\n\
                 # mode = \"ro\"\n\
-                # tenant_path = \"$HOME/projects/foo\"\n";
+                # tenant_path = \"$HOME/projects/foo\"\n\
+                \n\
+                [inbound]\n\
+                # TCP loopback (127.0.0.1) ports the tenant exposes under the default\n\
+                # `restricted` posture. SURFACE-REDUCTION, NOT isolation: a declared port\n\
+                # is reachable by the host AND peer tenants (pf can't see the initiator on\n\
+                # shared loopback). UDP loopback is unfiltered (TCP only). Empty == locked.\n\
+                # Widen temporarily with `tenant inbound <name> permissive`. Uncomment:\n\
+                ports = [\n\
+                #   3000,\n\
+                ]\n";
     assert_eq!(content, want, "profile content mismatch");
 }
 
@@ -970,8 +981,8 @@ fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
         "anchor body must include empty allowlist table; got:\n{body}"
     );
     assert!(
-        body.contains("pass out quick on lo0 user dev"),
-        "anchor body must include loopback pass; got:\n{body}"
+        body.contains("pass out quick on lo0 proto tcp from any to any user dev no state"),
+        "anchor body must include loopback egress pass; got:\n{body}"
     );
 }
 
@@ -1023,12 +1034,47 @@ fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() 
     );
     // Sanity: the rules + scoping are unchanged.
     assert!(
-        body.contains("pass out quick on lo0 user dev"),
-        "anchor body must still include loopback pass; got:\n{body}"
+        body.contains("pass out quick on lo0 proto tcp from any to any user dev no state"),
+        "anchor body must still include loopback egress pass; got:\n{body}"
     );
     assert!(
         body.contains("block out quick proto { tcp udp } from any to any user dev"),
         "anchor body must still include catchall block; got:\n{body}"
+    );
+}
+
+#[test]
+fn create_real_mode_install_anchor_body_includes_declared_inbound_ports() {
+    // Steady-state inbound axis at create: the scaffolded profile's
+    // declared `[inbound] ports` must flow read_profile → parse →
+    // render_anchor into the InstallAnchor body. A tenant whose profile
+    // declares `ports = [3000]` should have 3000's inbound pass rendered,
+    // not a hardcoded locked posture. Mirrors the egress-hosts data flow.
+    let populated = "schema_version = 1\n\
+                     \n\
+                     [allowlist.runtime]\n\
+                     hosts = []\n\
+                     \n\
+                     [allowlist.install]\n\
+                     hosts = []\n\
+                     \n\
+                     [inbound]\n\
+                     ports = [3000]\n";
+    let exec = StubHostMachine::new().with_create_profile_content("dev", populated);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let body = exec
+        .firewall_ops()
+        .into_iter()
+        .find_map(|op| match op {
+            tenant::domain::FirewallOp::InstallAnchor { body, .. } => Some(body),
+            _ => None,
+        })
+        .expect("InstallAnchor op must have been issued");
+    assert!(
+        body.contains("pass in quick on lo0 proto tcp from any to any port 3000 user dev no state"),
+        "anchor body must include the declared inbound port pass (steady state); got:\n{body}"
     );
 }
 
@@ -1075,7 +1121,11 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
     let exec = StubHostMachine::new().fail_firewall_op(
         tenant::domain::FirewallOp::InstallAnchor {
             name: "dev".into(),
-            body: tenant::firewall::render_anchor("dev", &[]),
+            body: tenant::firewall::render_anchor(
+                "dev",
+                &[],
+                tenant::firewall::InboundRules::Restricted(vec![]),
+            ),
         },
         FirewallError::Fs {
             path: "/etc/pf.anchors/tenant-dev".to_string(),

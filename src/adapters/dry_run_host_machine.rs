@@ -95,7 +95,11 @@ impl HostMachine for DryRunHostMachine {
     /// by `read_profile`, so the preview never fires a spurious
     /// `AnchorBodyDrift` finding.
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
-        Ok(crate::firewall::render_anchor(name.as_str(), &[]))
+        Ok(crate::firewall::render_anchor(
+            name.as_str(),
+            &[],
+            crate::firewall::InboundRules::Restricted(vec![]),
+        ))
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {

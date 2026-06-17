@@ -84,6 +84,22 @@ pub enum Finding {
     AnchorBodyDrift {
         tenant: TenantUserName,
     },
+    /// Restricted inbound posture with one or more profile-declared
+    /// loopback ports. Info-tier: the exposure is intended (a tenant-
+    /// local service needs the port), but the operator should know a
+    /// declared port is reachable by the host AND peer tenants — pf
+    /// can't see the initiator across shared 127.0.0.1. `ports` is
+    /// non-empty by construction (empty = locked = no finding).
+    InboundExposure {
+        tenant: TenantUserName,
+        ports: Vec<u16>,
+    },
+    /// Permissive inbound posture: ALL loopback ports open. Warning-tier
+    /// — the temporary widen was left behind outside a live shell
+    /// session, so the surface is wider than the profile declares.
+    InboundPermissive {
+        tenant: TenantUserName,
+    },
     AclDrift {
         tenant: TenantUserName,
         host_path: PathBuf,
@@ -145,6 +161,8 @@ impl Finding {
             Finding::TouchIdMissing => Severity::Info,
             Finding::PfDisabled => Severity::Critical,
             Finding::AnchorBodyDrift { .. } => Severity::Warning,
+            Finding::InboundExposure { .. } => Severity::Info,
+            Finding::InboundPermissive { .. } => Severity::Warning,
             Finding::AclDrift { .. } => Severity::Warning,
             Finding::CoworkAclDrift { .. } => Severity::Warning,
             Finding::CoworkDirAbsent { .. } => Severity::Warning,
@@ -193,6 +211,73 @@ Alternative
   Edits the file directly and reloads pf. Preserves operator edits but
   leaves profile and file out of sync \u{2014} the next `tenant mode` or
   `tenant shell` invocation will re-render and overwrite them."
+            )),
+            Finding::InboundExposure { tenant, ports } => {
+                let port_list = render_port_list(ports);
+                Some(format!(
+                    "Why this matters
+  Tenant '{tenant}'s profile declares inbound loopback ports {port_list}, so
+  the anchor passes loopback TCP to those ports. This is intended
+  surface \u{2014} a tenant-local service (a dev web server, an OAuth
+  redirect target) needs them open. But restricted is SURFACE-REDUCTION,
+  NOT host-vs-peer isolation: a declared port is reachable by the host
+  AND by every peer tenant, because pf cannot see the initiator across
+  the shared 127.0.0.1 loopback. Treat a declared port as open to the
+  whole machine, not just this tenant.
+
+Recommended fix
+  Nothing to fix \u{2014} this is informational. If a port no longer needs to
+  be reachable, remove it from the `[inbound]` ports list in the profile
+  and run `tenant reload {tenant}` to re-render the anchor at the narrowed
+  surface.
+
+Side-effects to know about
+  \u{2022} Removing a declared port narrows the surface but also blocks the
+    tenant from reaching its OWN service on that port \u{2014} a tenant
+    cannot reach an undeclared loopback port. Re-declare it if the
+    tenant-local flow breaks.
+  \u{2022} UDP loopback is unfiltered (TCP only); a UDP service on any port
+    stays reachable regardless of this list.
+
+Alternative
+  tenant inbound {tenant} permissive
+  Temporarily opens ALL loopback ports for an ad-hoc flow (e.g. OAuth on
+  a random port). Narrows back on `tenant inbound {tenant} restricted` or on
+  `tenant shell {tenant}` entry. Prefer declaring the specific port over a
+  blanket widen when the port is known."
+                ))
+            }
+            Finding::InboundPermissive { tenant } => Some(format!(
+                "Why this matters
+  Tenant '{tenant}'s anchor is in the PERMISSIVE inbound posture: every
+  loopback TCP port is open, not just the profile-declared ones.
+  Permissive is meant to be temporary \u{2014} the OAuth-on-a-random-port
+  window \u{2014} and normally narrows back automatically on `tenant shell`
+  entry. Finding it permissive outside a live shell session means a
+  prior widen was left behind: every loopback port the tenant binds is
+  reachable by the host AND by every peer tenant (pf can't see the
+  initiator across shared 127.0.0.1).
+
+Recommended fix
+  tenant inbound {tenant} restricted
+  Re-renders the anchor at the restricted posture (profile-declared
+  ports only, or locked if none) and reloads pf, dropping the
+  all-ports inbound pass.
+
+Side-effects to know about
+  \u{2022} The pfctl reload causes a sub-millisecond packet-filter disruption.
+  \u{2022} Any tenant-local service listening on a non-declared loopback port
+    stops being reachable once narrowed \u{2014} declare the port in the
+    profile's `[inbound]` list if the flow must persist.
+  \u{2022} `tenant shell {tenant}` also auto-narrows inbound on entry, so the next
+    interactive session would have corrected this on its own.
+
+Alternative
+  Re-render via any reapply verb
+  `tenant reload {tenant}`, `tenant mode {tenant} runtime`, or entering
+  `tenant shell {tenant}` all re-render the anchor at steady inbound
+  (restricted), narrowing the same way. Use `tenant inbound` when the
+  ONLY change needed is the inbound narrow."
             )),
             Finding::PfRuleDrift { tenant, .. } => Some(format!(
                 "Why this matters
@@ -713,6 +798,24 @@ impl fmt::Display for Finding {
                  on-disk body differs from profile-derived render; \
                  run `tenant mode {tenant} runtime` to re-render and reload"
             ),
+            Finding::InboundExposure { tenant, ports } => {
+                let (noun, list) = if ports.len() == 1 {
+                    ("port", render_port_list(ports))
+                } else {
+                    ("ports", render_port_list(ports))
+                };
+                write!(
+                    f,
+                    "info: tenant '{tenant}' inbound loopback open on {noun} {list} \u{2014} \
+                     reachable by host + peer tenants"
+                )
+            }
+            Finding::InboundPermissive { tenant } => write!(
+                f,
+                "warning: tenant '{tenant}' inbound loopback is PERMISSIVE \u{2014} \
+                 all ports open to host + peer tenants; \
+                 run `tenant inbound {tenant} restricted` to narrow"
+            ),
             Finding::AclDrift {
                 tenant,
                 host_path,
@@ -844,6 +947,44 @@ pub fn has_env_delete_for(policy: &str, var: &str) -> bool {
         }
     }
     false
+}
+
+/// Render a declared-port list for operator-facing text: comma-space
+/// separated in declared order (`3000, 8080`). Used by both the
+/// `InboundExposure` Display one-liner and its guidance body so the two
+/// stay in sync.
+fn render_port_list(ports: &[u16]) -> String {
+    ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Classify a tenant's inbound loopback posture into an exposure
+/// finding. Composes the profile's declared `ports` with the observed
+/// anchor's `permissive` flag (read from the on-disk body — there's no
+/// state file). Permissive (the temporary widen, left behind) wins over
+/// declared ports because the observed surface is wider than intent;
+/// otherwise non-empty declared ports surface as `InboundExposure`
+/// (Info); locked (restricted + no ports) is quiet (`None`).
+pub fn classify_inbound_exposure(
+    tenant: &TenantUserName,
+    ports: &[u16],
+    permissive: bool,
+) -> Option<Finding> {
+    if permissive {
+        return Some(Finding::InboundPermissive {
+            tenant: tenant.clone(),
+        });
+    }
+    if ports.is_empty() {
+        return None;
+    }
+    Some(Finding::InboundExposure {
+        tenant: tenant.clone(),
+        ports: ports.to_vec(),
+    })
 }
 
 /// Only `Allowed` produces a finding — `Denied` and `Unknown` are

@@ -128,6 +128,13 @@ pub fn mode_breadcrumb(name: &str) -> String {
     )
 }
 
+/// Post-success breadcrumb emitted by `Reporter::inbound_done`.
+pub fn inbound_breadcrumb(name: &str) -> String {
+    format!(
+        "Next: enter the tenant with `tenant shell {name}` \u{2014} inbound loopback auto-narrows back to restricted on entry."
+    )
+}
+
 /// Post-success breadcrumb emitted by `Reporter::reload_done` (single-tenant form).
 pub fn reload_breadcrumb(name: &str) -> String {
     format!("Next: audit with `tenant doctor {name}`.")
@@ -548,6 +555,38 @@ pub fn mode_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -
          \u{2022} reload pf\n  \
          \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
          \u{2022} refresh tenant-side symlinks for declared shares\n{install_tail}\
+         \n\
+         {plan}\
+         Sudo needed for: firewall install.\n\
+         \n\
+         (Real run would prompt: Proceed? [Y/n])\n",
+    )
+}
+
+/// Dry-run summary block for `tenant inbound <name> <level> --dry-run`.
+/// `plan_section` optionally splices the verbose plan block.
+pub fn inbound_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -> String {
+    let plan = plan_section.unwrap_or("");
+    let re_render = if level == "permissive" {
+        "re-render the firewall anchor opening all inbound loopback (TCP) ports"
+    } else {
+        "re-render the firewall anchor restricting inbound loopback to profile-declared ports"
+    };
+    let permissive_tail = if level == "permissive" {
+        format!(
+            "\nThe widened inbound posture persists until 'tenant inbound {name} restricted' (narrow) or 'tenant shell {name}' (auto-narrow on entry).\n",
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "About to apply inbound '{level}' to tenant '{name}'.\n\
+         \n\
+         This will:\n  \
+         \u{2022} {re_render}\n  \
+         \u{2022} reload pf\n  \
+         \u{2022} ensure host '{TEST_HOST}' is a member of '{name}-tenant-share' (idempotent catch-up)\n  \
+         \u{2022} refresh tenant-side symlinks for declared shares\n{permissive_tail}\
          \n\
          {plan}\
          Sudo needed for: firewall install.\n\

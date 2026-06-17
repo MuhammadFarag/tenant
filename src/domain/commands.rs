@@ -1,7 +1,9 @@
 use super::reporter::{ConfirmOutcome, Reporter};
 use super::{AccountOp, FirewallOp, KeychainOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
-use crate::{Cli, HelpTopic, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR};
+use crate::{
+    Cli, HelpTopic, InboundLevel, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR,
+};
 
 const EX_USAGE: u8 = 64;
 const EX_IOERR: u8 = 74;
@@ -116,7 +118,12 @@ pub(crate) fn dispatch(
                 }
             }
         }
-        Verb::Shell { name, mode, argv } => {
+        Verb::Shell {
+            name,
+            mode,
+            inbound,
+            argv,
+        } => {
             if let Err(e) = tenants::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
                 return EX_USAGE;
@@ -145,6 +152,7 @@ pub(crate) fn dispatch(
                 }
                 tenants::Eligibility::Destroyable => {
                     let resolved_mode = mode.unwrap_or(ModeLevel::Runtime);
+                    let resolved_inbound = inbound.unwrap_or(InboundLevel::Restricted);
                     if show_summary {
                         if argv.is_empty() {
                             reporter.shell_summary(&name, host);
@@ -158,7 +166,14 @@ pub(crate) fn dispatch(
                             reporter,
                         );
                     }
-                    match tenants.shell(&name, host, &argv, resolved_mode, reporter) {
+                    match tenants.shell(
+                        &name,
+                        host,
+                        &argv,
+                        resolved_mode,
+                        resolved_inbound,
+                        reporter,
+                    ) {
                         Ok(code) => {
                             // Closing surface is command-form-only; the
                             // interactive form has no terminal context
@@ -238,6 +253,7 @@ pub(crate) fn dispatch(
                         &name,
                         host,
                         level,
+                        None,
                         tenants::ReapplyScope::Light,
                     ) {
                         Ok(p) => p,
@@ -264,6 +280,74 @@ pub(crate) fn dispatch(
                         Ok(()) => 0,
                         Err(e) => {
                             surface_mode_error(reporter, &name, &e);
+                            EX_IOERR
+                        }
+                    }
+                }
+            }
+        }
+        Verb::Inbound { name, level } => {
+            if let Err(e) = tenants::validate_name(&name) {
+                reporter.refuse_invalid_name(&name, &e);
+                return EX_USAGE;
+            }
+            let eligibility = match tenants::destroy_eligibility(directory, &name) {
+                Ok(e) => e,
+                Err(e) => {
+                    reporter.inbound_eligibility_probe_failed(&name, &e);
+                    return EX_IOERR;
+                }
+            };
+            match eligibility {
+                tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
+                    reporter.refuse_inbound_absent(&name);
+                    EX_USAGE
+                }
+                tenants::Eligibility::NotATenant { uid } => {
+                    reporter.refuse_inbound_not_a_tenant(&name, uid, TENANT_UID_FLOOR);
+                    EX_USAGE
+                }
+                tenants::Eligibility::SystemAccount => {
+                    reporter.refuse_inbound_system_account(&name);
+                    EX_USAGE
+                }
+                tenants::Eligibility::Destroyable => {
+                    // Inbound renders the EGRESS axis at runtime tier
+                    // (steady state) and the inbound axis at the requested
+                    // level — the two widenings don't compose across
+                    // separate commands. Build pre-summary so profile-read
+                    // / share pre-flight failures surface pre-prompt.
+                    let plan = match tenants.build_reapply_plan(
+                        &name,
+                        host,
+                        ModeLevel::Runtime,
+                        Some(level),
+                        tenants::ReapplyScope::Light,
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            surface_inbound_error(reporter, &name, &e);
+                            return EX_IOERR;
+                        }
+                    };
+                    let plan_entries = plan.as_plan_entries();
+                    if show_summary {
+                        reporter.inbound_summary(&name, host, level, Some(&plan_entries));
+                        tenants.pre_exec_doctor_summary(
+                            Some(&name),
+                            host,
+                            tenants::DoctorScope::Mode,
+                            reporter,
+                        );
+                    }
+                    if reporter.confirm(true) == ConfirmOutcome::Abort {
+                        reporter.aborted();
+                        return 0;
+                    }
+                    match tenants.inbound(&name, level, &plan, reporter) {
+                        Ok(()) => 0,
+                        Err(e) => {
+                            surface_inbound_error(reporter, &name, &e);
                             EX_IOERR
                         }
                     }
@@ -348,6 +432,7 @@ pub(crate) fn dispatch(
                             &n,
                             host,
                             ModeLevel::Runtime,
+                            None,
                             tenants::ReapplyScope::Full,
                         ) {
                             Ok(p) => p,
@@ -547,6 +632,24 @@ fn surface_shell_mode_error(
         tenants::ModeError::Account(e) => reporter.shell_narrow_account_failed(name, e),
         tenants::ModeError::Probe(e) => reporter.shell_narrow_probe_failed(name, e),
         tenants::ModeError::Share(e) => reporter.refuse_shell_share(name, e),
+    }
+}
+
+/// Parallel to `surface_mode_error` with inbound-specific wording on
+/// Firewall + Share arms; Acl / Account / Probe arms reuse the
+/// mode-named methods whose wording is verb-agnostic.
+fn surface_inbound_error(
+    reporter: &mut Reporter,
+    name: &super::TenantUserName,
+    error: &tenants::ModeError,
+) {
+    match error {
+        tenants::ModeError::Profile(e) => reporter.mode_profile_failed(name, e),
+        tenants::ModeError::Firewall(e) => reporter.inbound_failed(name, e),
+        tenants::ModeError::Acl(e) => reporter.mode_acl_failed(name, e),
+        tenants::ModeError::Account(e) => reporter.mode_account_failed(name, e),
+        tenants::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
+        tenants::ModeError::Share(e) => reporter.refuse_inbound_share(name, e),
     }
 }
 
@@ -895,6 +998,33 @@ Shares
   Removing a [[shares]] entry does NOT auto-revoke the ACL or
   symlink — `tenant doctor <name>` surfaces orphans. Manual cleanup
   is the operator's call.
+
+Inbound loopback ports
+
+  [inbound]
+  ports = [3000, 8080]
+
+  A bare TCP port list gating inbound loopback (127.0.0.1) in the
+  default `restricted` posture. An absent section or empty list
+  (`ports = []`) locks inbound loopback entirely. `tenant inbound
+  <name> permissive` is the temporary all-ports widen (the
+  localhost-redirect OAuth window); `tenant shell <name>` and
+  `tenant reload` narrow inbound back to restricted.
+
+  HONEST SCOPE — read before relying on this:
+
+    This is surface-reduction, NOT host-vs-peer isolation. A
+    declared port is reachable by the host AND by peer tenants
+    alike — pf cannot see the initiator on shared loopback
+    (127.0.0.1), so it is open to everyone on the box, not just the
+    host.
+
+    A tenant cannot reach its OWN undeclared loopback port. The
+    block is indiscriminate: declare a port to restore the tenant's
+    own intra-process loopback use of it.
+
+    TCP only. UDP loopback is unfiltered — the [inbound] list does
+    not constrain it.
 
 Co-working directory (auto-provisioned, not configurable)
 

@@ -746,7 +746,11 @@ impl HostMachine for StubHostMachine {
             },
             None => Vec::new(),
         };
-        Ok(tenant::firewall::render_anchor(name.as_str(), &hosts))
+        Ok(tenant::firewall::render_anchor(
+            name.as_str(),
+            &hosts,
+            tenant::firewall::InboundRules::Restricted(vec![]),
+        ))
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {

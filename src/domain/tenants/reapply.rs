@@ -2,14 +2,14 @@
 //! form's auto-narrow, `reload`, and the create-side post-provision
 //! share pass.
 
-use crate::ModeLevel;
 use crate::domain::reporter::Reporter;
 use crate::domain::{
     AccountError, AccountOp, AclError, FirewallError, FirewallOp, HostUserDirectory, HostUserName,
     Op, ProbeError, TenantUserName, UserDirectoryError,
 };
-use crate::firewall::render_anchor;
+use crate::firewall::{InboundRules, render_anchor};
 use crate::profile::{Profile, ProfileError, parse};
+use crate::{InboundLevel, ModeLevel};
 
 use super::shares::ShareOps;
 use super::{ShareError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
@@ -89,6 +89,37 @@ pub(crate) struct ReloadAllOutcome {
     pub(crate) failed: u32,
 }
 
+/// The inbound posture a verb that does NOT control the inbound axis
+/// renders: steady state at the profile's declared ports. Per the
+/// implicit-current-mode doctrine (no state file), every reapply verb
+/// renders both axes; the axis it doesn't widen goes to steady state.
+/// For inbound that is `Restricted(profile.inbound.ports)` — empty ports
+/// stays the locked posture, declared ports keep their inbound pass.
+/// Mirrors how `hosts_for_level` resolves the egress axis from the same
+/// parsed profile before `render_anchor` sees it.
+///
+/// The temporary `Permissive` widen is the `tenant inbound` verb's job;
+/// it resolves `InboundLevel` against these ports at that call site.
+pub(crate) fn steady_inbound_rules(profile: &Profile) -> InboundRules {
+    InboundRules::Restricted(profile.inbound.ports.clone())
+}
+
+/// Resolve the `tenant inbound` verb's requested `InboundLevel` against
+/// the profile's declared ports into a `firewall::InboundRules`. The
+/// `cli::InboundLevel` → `firewall::InboundRules` resolution lives in the
+/// domain layer so `firewall.rs` stays free of any `cli` dependency —
+/// mirrors how `hosts_for_level` resolves the egress axis before
+/// `render_anchor` sees a `&[String]`.
+///
+/// `Permissive` opens all inbound loopback; `Restricted` keeps the
+/// profile's declared ports (empty ⇒ locked, same as steady state).
+pub(crate) fn inbound_rules_for_level(profile: &Profile, level: InboundLevel) -> InboundRules {
+    match level {
+        InboundLevel::Permissive => InboundRules::Permissive,
+        InboundLevel::Restricted => InboundRules::Restricted(profile.inbound.ports.clone()),
+    }
+}
+
 /// Runtime: runtime hosts only. Install: runtime then install (order
 /// matters for `render_anchor`'s output stability).
 pub(crate) fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<String> {
@@ -118,14 +149,39 @@ impl<'a> Tenants<'a> {
         Ok(())
     }
 
+    /// Apply a pre-built reapply plan carrying the requested inbound
+    /// posture. Sibling of `mode` on the inbound axis: the plan is built
+    /// upstream (egress at runtime tier, inbound at the requested level)
+    /// so profile-read failures surface pre-prompt.
+    pub(crate) fn inbound(
+        &self,
+        name: &TenantUserName,
+        level: InboundLevel,
+        plan: &ReapplyPlan,
+        reporter: &mut Reporter,
+    ) -> Result<(), ModeError> {
+        reporter.inbound_intent(name, level);
+        self.execute_reapply_plan(plan, reporter)?;
+        reporter.inbound_done(name, level);
+        Ok(())
+    }
+
     /// Build the op list for a profile-to-tenant reapply at `level`
     /// under the given `scope`. Pre-flight refusals (host_path
     /// existence, tenant_path occupancy) surface before any op fires.
+    ///
+    /// `inbound_override` controls the INBOUND axis: `None` renders it at
+    /// steady state (profile-declared ports), which is what every verb
+    /// that doesn't control inbound (`mode`/`reload`/create) passes;
+    /// `Some(level)` is the `tenant inbound` verb resolving its requested
+    /// posture. Per the implicit-current-mode doctrine, both axes always
+    /// render — the axis the verb doesn't widen goes to steady state.
     pub(crate) fn build_reapply_plan(
         &self,
         name: &TenantUserName,
         host: &HostUserName,
         level: ModeLevel,
+        inbound_override: Option<InboundLevel>,
         scope: ReapplyScope,
     ) -> Result<ReapplyPlan, ModeError> {
         let profile_content = self
@@ -134,9 +190,13 @@ impl<'a> Tenants<'a> {
             .map_err(ModeError::Profile)?;
         let parsed_profile = parse(&profile_content).map_err(ModeError::Profile)?;
         let hosts = hosts_for_level(&parsed_profile, level);
+        let inbound = match inbound_override {
+            Some(inbound_level) => inbound_rules_for_level(&parsed_profile, inbound_level),
+            None => steady_inbound_rules(&parsed_profile),
+        };
         let install_anchor = FirewallOp::InstallAnchor {
             name: name.into(),
-            body: render_anchor(name.as_str(), &hosts),
+            body: render_anchor(name.as_str(), &hosts, inbound),
         };
         let reload = FirewallOp::Reload;
         let group = tenant_share_group_name(name.as_str());
@@ -221,11 +281,16 @@ impl<'a> Tenants<'a> {
         }
         let mut failed = 0;
         for name in &names {
-            let outcome =
-                match self.build_reapply_plan(name, host, ModeLevel::Runtime, ReapplyScope::Full) {
-                    Ok(plan) => self.reload(name, &plan, reporter),
-                    Err(err) => Err(err),
-                };
+            let outcome = match self.build_reapply_plan(
+                name,
+                host,
+                ModeLevel::Runtime,
+                None,
+                ReapplyScope::Full,
+            ) {
+                Ok(plan) => self.reload(name, &plan, reporter),
+                Err(err) => Err(err),
+            };
             if let Err(err) = outcome {
                 failed += 1;
                 match &err {

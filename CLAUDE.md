@@ -13,12 +13,18 @@ Verbs:
   rules. Leaves the cowork dir intact.
 - `mode <name> install|runtime` — re-render anchor at the tier + reload
   pf (Light reapply).
-- `shell <name> [--mode install|runtime] [-- <cmd>]` — enter the tenant.
-  Empty argv = interactive login; argv after `--` = single-command form.
-  Light reapply (auto-narrow + host membership + tenant-side symlinks, no
-  recursive ACL); install-mode widens for the call and narrows back. Child
-  exit propagates; narrow-on-finally failure → `⚠` stderr warning that
-  doesn't override the child's exit.
+- `inbound <name> restricted|permissive` — re-render anchor's inbound
+  loopback section + reload pf; restricted gates on profile `[inbound]`
+  ports (empty ⇒ locked), permissive opens all loopback TCP; egress renders
+  at runtime steady-state (axes don't compose across commands).
+- `shell <name> [--mode install|runtime] [--inbound restricted|permissive] [-- <cmd>]`
+  — enter the tenant. Empty argv = interactive login; argv after `--` =
+  single-command form. Light reapply (auto-narrow + host membership +
+  tenant-side symlinks, no recursive ACL); install-mode widens for the call
+  and narrows back. Command-form `--inbound permissive` widens inbound for
+  the call then narrows back to restricted; interactive entry auto-narrows
+  inbound to restricted. Child exit propagates; narrow-on-finally failure →
+  `⚠` stderr warning that doesn't override the child's exit.
 - `reload [<name>]` — canonical "apply everything": Full reapply (PF + host
   membership + symlinks + recursive `AclOp::Grant` per share +
   `EnsureCoworkDir`). Mode/shell skip the recursive passes; reload heals
@@ -222,6 +228,22 @@ already made.
 
 ### Reapply (mode / shell / reload)
 
+- **Two anchor axes; every reapply renders both, the uncontrolled one to
+  steady state.** Egress (hosts, `hosts_for_level`) and inbound loopback
+  (`InboundRules`, `inbound_rules_for_level`/`steady_inbound_rules`) resolve
+  independently in `reapply.rs` before `render_anchor`. A verb controls one
+  axis and pins the other to steady: `tenant inbound` → egress at runtime
+  tier; `tenant mode` → inbound at restricted(profile ports);
+  `reload`/`create`/shell-interactive → both steady. The two widenings do NOT
+  compose across separate commands (no state file — implicit-current-mode
+  doctrine); `restricted` is surface-reduction, not host-vs-peer isolation (a
+  declared port is reachable by host AND peer tenants; a tenant can't reach its
+  own undeclared port; UDP is unfiltered — TCP only). lo0 empirical record
+  (`.features/loopback-cross-tenant-isolation.md`): pf tags do NOT survive the
+  lo0 out→in hop and host-egress state does NOT bridge it, so initiator
+  identity is unrecoverable — only permissive (all-ports stateless) and
+  restricted-by-port (`pass in port … no state` + `block drop in flags S/SA`)
+  are physically realizable.
 - **`ReapplyScope::{Light, Full}` splits reapply by cost.** Light (mode +
   shell) omits the recursive ACL passes (`AclOp::Grant` per share +
   `EnsureCoworkDir`); PF anchor + Reload + `AddHostToShareGroup` + per-share
@@ -366,6 +388,22 @@ already made.
   (deterministic renderer ⇒ any diff is real). Runtime tier only — install-tier
   widening outside a shell session IS drift. Profile read/parse failure skips
   silently.
+- **Inbound-exposure finding composes intent + observed posture.**
+  `check_inbound_exposure` reads the profile's declared `[inbound]` ports
+  (intent) and the on-disk anchor's permissive flag (`anchor_is_permissive`,
+  the current posture — there's no state file), then
+  `classify_inbound_exposure` resolves: permissive (the widen left behind)
+  wins → `InboundPermissive` (Warning); else non-empty ports →
+  `InboundExposure` (Info, names the ports); else locked → quiet. Honest scope
+  baked into the text: restricted is surface-reduction, NOT host-vs-peer
+  isolation — a declared port is reachable by the host AND peer tenants (pf
+  can't see the initiator on shared 127.0.0.1); a tenant can't reach its own
+  undeclared port; UDP loopback is unfiltered (TCP only). The shell-entry
+  posture line (`doctor_inbound_posture`) is CALIBRATED and distinct from the
+  `⚠ Doctor: N warning(s)` aggregate: locked = quiet, restricted-with-ports =
+  a dim `inbound: restricted — :N open …` line, permissive = a loud
+  `⚠ inbound: PERMISSIVE …` warning. Emitted directly (not via the pre-exec
+  `record` closure) so Info exposure never inflates the warning count.
 - **Findings carry a 4-section guidance block (Why / Fix / Side-effects /
   Alternative).** Sentence-case headers, imperative fix, literal tenant name
   in per-tenant variants; variants without a distinct command omit

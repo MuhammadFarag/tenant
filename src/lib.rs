@@ -8,7 +8,7 @@ pub mod firewall;
 pub mod profile;
 pub mod terminal;
 
-pub use cli::{Cli, HelpTopic, ModeLevel, Verb};
+pub use cli::{Cli, HelpTopic, InboundLevel, ModeLevel, Verb};
 pub use terminal::Terminal;
 
 use domain::reporter::Reporter;

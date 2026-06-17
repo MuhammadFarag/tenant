@@ -8,6 +8,7 @@ use crate::domain::{
 use crate::firewall::{ensure_anchor_ref, render_anchor};
 use crate::profile::{ProfileError, display_path_for, parse};
 
+use super::reapply::steady_inbound_rules;
 use super::{ModeError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
 
 /// Failure surface for create. `UserWithRollback` is the
@@ -162,7 +163,11 @@ impl<'a> Tenants<'a> {
                 let pf_conf_current = self.machine.read_pf_conf().map_err(CreateError::Firewall)?;
                 let install_anchor = FirewallOp::InstallAnchor {
                     name: name.into(),
-                    body: render_anchor(name.as_str(), &parsed_profile.allowlist.runtime.hosts),
+                    body: render_anchor(
+                        name.as_str(),
+                        &parsed_profile.allowlist.runtime.hosts,
+                        steady_inbound_rules(&parsed_profile),
+                    ),
                 };
                 let update_conf = FirewallOp::UpdateConfig {
                     content: ensure_anchor_ref(&pf_conf_current, name.as_str()),

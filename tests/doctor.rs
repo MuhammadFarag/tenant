@@ -9,7 +9,8 @@
 use std::path::PathBuf;
 
 use tenant::doctor::{
-    Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify, curated_paths,
+    Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify,
+    classify_inbound_exposure, curated_paths,
 };
 use tenant::domain::{AccessMode, AccessOutcome, HostUserName, TenantUserName};
 
@@ -318,6 +319,120 @@ fn finding_anchor_body_drift_severity_is_warning() {
 }
 
 // ============================================================
+// Finding::InboundExposure / InboundPermissive — Display + severity
+// ============================================================
+//
+// The inbound loopback axis (cycle 24). `InboundExposure` is the
+// steady restricted-with-ports posture (Info: the declared ports are
+// open by intent, but reachable by host AND peer tenants — pf can't see
+// the initiator on shared 127.0.0.1). `InboundPermissive` is the
+// temporary all-ports widen (Warning: every loopback port is open).
+
+#[test]
+fn finding_display_inbound_exposure_single_port() {
+    let f = Finding::InboundExposure {
+        tenant: TenantUserName::from("dev"),
+        ports: vec![3000],
+    };
+    assert_eq!(
+        format!("{f}"),
+        "info: tenant 'dev' inbound loopback open on port 3000 \u{2014} \
+         reachable by host + peer tenants"
+    );
+}
+
+#[test]
+fn finding_display_inbound_exposure_multi_port() {
+    let f = Finding::InboundExposure {
+        tenant: TenantUserName::from("dev"),
+        ports: vec![3000, 8080],
+    };
+    assert_eq!(
+        format!("{f}"),
+        "info: tenant 'dev' inbound loopback open on ports 3000, 8080 \u{2014} \
+         reachable by host + peer tenants"
+    );
+}
+
+#[test]
+fn finding_inbound_exposure_severity_is_info() {
+    let f = Finding::InboundExposure {
+        tenant: TenantUserName::from("dev"),
+        ports: vec![3000],
+    };
+    assert_eq!(f.severity(), Severity::Info);
+}
+
+#[test]
+fn finding_display_inbound_permissive() {
+    let f = Finding::InboundPermissive {
+        tenant: TenantUserName::from("dev"),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' inbound loopback is PERMISSIVE \u{2014} \
+         all ports open to host + peer tenants; \
+         run `tenant inbound dev restricted` to narrow"
+    );
+}
+
+#[test]
+fn finding_inbound_permissive_severity_is_warning() {
+    let f = Finding::InboundPermissive {
+        tenant: TenantUserName::from("dev"),
+    };
+    assert_eq!(f.severity(), Severity::Warning);
+}
+
+// ── classify_inbound_exposure — posture → finding ─────────────────────
+//
+// Detection composes the profile's declared ports with the observed
+// anchor's permissive flag. Permissive (widened) wins regardless of
+// declared ports; else declared ports → Info; else locked → None.
+
+#[test]
+fn classify_inbound_permissive_wins_over_declared_ports() {
+    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[3000], true);
+    assert_eq!(
+        f,
+        Some(Finding::InboundPermissive {
+            tenant: TenantUserName::from("dev"),
+        })
+    );
+}
+
+#[test]
+fn classify_inbound_permissive_with_no_declared_ports() {
+    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[], true);
+    assert_eq!(
+        f,
+        Some(Finding::InboundPermissive {
+            tenant: TenantUserName::from("dev"),
+        })
+    );
+}
+
+#[test]
+fn classify_inbound_restricted_with_ports_is_info() {
+    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[3000, 8080], false);
+    assert_eq!(
+        f,
+        Some(Finding::InboundExposure {
+            tenant: TenantUserName::from("dev"),
+            ports: vec![3000, 8080],
+        })
+    );
+}
+
+#[test]
+fn classify_inbound_locked_is_no_finding() {
+    // Restricted + empty ports = locked = quiet. Nothing reachable, so
+    // nothing to surface.
+    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[], false);
+    assert_eq!(f, None);
+}
+
+// ============================================================
 // Finding::guidance — per-variant multi-section text
 // ============================================================
 //
@@ -375,6 +490,83 @@ Alternative
   Edits the file directly and reloads pf. Preserves operator edits but
   leaves profile and file out of sync \u{2014} the next `tenant mode` or
   `tenant shell` invocation will re-render and overwrite them.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+#[test]
+fn guidance_inbound_exposure_byte_form() {
+    let f = Finding::InboundExposure {
+        tenant: TenantUserName::from("dev"),
+        ports: vec![3000, 8080],
+    };
+    let expected = "Why this matters
+  Tenant 'dev's profile declares inbound loopback ports 3000, 8080, so
+  the anchor passes loopback TCP to those ports. This is intended
+  surface \u{2014} a tenant-local service (a dev web server, an OAuth
+  redirect target) needs them open. But restricted is SURFACE-REDUCTION,
+  NOT host-vs-peer isolation: a declared port is reachable by the host
+  AND by every peer tenant, because pf cannot see the initiator across
+  the shared 127.0.0.1 loopback. Treat a declared port as open to the
+  whole machine, not just this tenant.
+
+Recommended fix
+  Nothing to fix \u{2014} this is informational. If a port no longer needs to
+  be reachable, remove it from the `[inbound]` ports list in the profile
+  and run `tenant reload dev` to re-render the anchor at the narrowed
+  surface.
+
+Side-effects to know about
+  \u{2022} Removing a declared port narrows the surface but also blocks the
+    tenant from reaching its OWN service on that port \u{2014} a tenant
+    cannot reach an undeclared loopback port. Re-declare it if the
+    tenant-local flow breaks.
+  \u{2022} UDP loopback is unfiltered (TCP only); a UDP service on any port
+    stays reachable regardless of this list.
+
+Alternative
+  tenant inbound dev permissive
+  Temporarily opens ALL loopback ports for an ad-hoc flow (e.g. OAuth on
+  a random port). Narrows back on `tenant inbound dev restricted` or on
+  `tenant shell dev` entry. Prefer declaring the specific port over a
+  blanket widen when the port is known.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+#[test]
+fn guidance_inbound_permissive_byte_form() {
+    let f = Finding::InboundPermissive {
+        tenant: TenantUserName::from("dev"),
+    };
+    let expected = "Why this matters
+  Tenant 'dev's anchor is in the PERMISSIVE inbound posture: every
+  loopback TCP port is open, not just the profile-declared ones.
+  Permissive is meant to be temporary \u{2014} the OAuth-on-a-random-port
+  window \u{2014} and normally narrows back automatically on `tenant shell`
+  entry. Finding it permissive outside a live shell session means a
+  prior widen was left behind: every loopback port the tenant binds is
+  reachable by the host AND by every peer tenant (pf can't see the
+  initiator across shared 127.0.0.1).
+
+Recommended fix
+  tenant inbound dev restricted
+  Re-renders the anchor at the restricted posture (profile-declared
+  ports only, or locked if none) and reloads pf, dropping the
+  all-ports inbound pass.
+
+Side-effects to know about
+  \u{2022} The pfctl reload causes a sub-millisecond packet-filter disruption.
+  \u{2022} Any tenant-local service listening on a non-declared loopback port
+    stops being reachable once narrowed \u{2014} declare the port in the
+    profile's `[inbound]` list if the flow must persist.
+  \u{2022} `tenant shell dev` also auto-narrows inbound on entry, so the next
+    interactive session would have corrected this on its own.
+
+Alternative
+  Re-render via any reapply verb
+  `tenant reload dev`, `tenant mode dev runtime`, or entering
+  `tenant shell dev` all re-render the anchor at steady inbound
+  (restricted), narrowing the same way. Use `tenant inbound` when the
+  ONLY change needed is the inbound narrow.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 

@@ -493,7 +493,11 @@ fn shell_narrows_to_runtime_before_login() {
         .with_default_stash("dev");
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    let expected_body = tenant::firewall::render_anchor("dev", &[]);
+    let expected_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     assert_eq!(
         exec.firewall_ops(),
         vec![
@@ -645,7 +649,11 @@ fn shell_aborts_when_install_anchor_fails() {
         .fail_firewall_op(
             FirewallOp::InstallAnchor {
                 name: "dev".into(),
-                body: tenant::firewall::render_anchor("dev", &[]),
+                body: tenant::firewall::render_anchor(
+                    "dev",
+                    &[],
+                    tenant::firewall::InboundRules::Restricted(vec![]),
+                ),
             },
             FirewallError::Fs {
                 path: "/etc/pf.anchors/tenant-dev".into(),
@@ -749,7 +757,11 @@ fn shell_install_anchor_body_excludes_install_hosts() {
         .with_default_stash("dev");
     let (code, _stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0);
-    let expected_body = tenant::firewall::render_anchor("dev", &["api.example.com".to_string()]);
+    let expected_body = tenant::firewall::render_anchor(
+        "dev",
+        &["api.example.com".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     match &exec.firewall_ops()[0] {
         FirewallOp::InstallAnchor { body, .. } => {
             assert_eq!(
@@ -1154,6 +1166,72 @@ fn shell_pre_exec_doctor_exit_code_unaffected_by_findings() {
 }
 
 #[test]
+fn shell_pre_exec_inbound_posture_quiet_when_locked() {
+    // Locked (default profile, empty [inbound]) emits NO inbound posture
+    // line on shell entry — a locked tenant accepts no loopback inbound,
+    // so there's nothing to calibrate. Negative pin against a posture
+    // line that nags on the secure-by-default migration state.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("inbound:"),
+        "locked tenant must emit no inbound posture line; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_inbound_posture_restricted_with_ports_shows_calibrated_line() {
+    // restricted + declared ports → a calibrated posture line naming the
+    // ports and the host + peer-tenant reachability caveat. Info-flavored
+    // (not a ⚠ warning aggregate) — the exposure is intended.
+    let profile = format!(
+        "{}\n[inbound]\nports = [\n  3000,\n]\n",
+        profile_with_hosts(&[], &[])
+    );
+    let synced_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![3000]),
+    );
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_anchor_body("dev", &synced_body)
+        .with_default_stash("dev");
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("inbound: restricted — :3000 open to host + peer tenants"),
+        "restricted-with-ports entry must show calibrated posture line; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_pre_exec_inbound_posture_permissive_warns_with_narrow_hint() {
+    // A permissive anchor on entry (a prior widen left behind) → a loud
+    // posture warning naming the all-ports exposure + a narrow hint.
+    // Shell auto-narrows inbound on entry anyway, so this is a heads-up,
+    // not a blocker. The interactive-entry reapply re-renders restricted.
+    let permissive_body =
+        tenant::firewall::render_anchor("dev", &[], tenant::firewall::InboundRules::Permissive);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &permissive_body)
+        .with_default_stash("dev");
+    let (code, stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("inbound: PERMISSIVE — all ports open to host + peer tenants"),
+        "permissive entry must show the loud posture warning; stdout={stdout:?}"
+    );
+}
+
+#[test]
 fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
     // read_pf_status fails → frame the failure on stderr, continue
     // with the verb. The shell verb still proceeds to shell_intent +
@@ -1212,7 +1290,11 @@ fn shell_command_form_default_runtime_invokes_exec_as_tenant() {
         &["shell", "dev", "--", "ls", "/tmp"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    let expected_body = tenant::firewall::render_anchor("dev", &[]);
+    let expected_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     assert_eq!(
         exec.firewall_ops(),
         vec![
@@ -1262,8 +1344,13 @@ fn shell_command_form_install_mode_widens_then_narrows() {
     let install_body = tenant::firewall::render_anchor(
         "dev",
         &["runtime.example".to_string(), "install.example".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
     );
-    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let runtime_body = tenant::firewall::render_anchor(
+        "dev",
+        &["runtime.example".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     assert_eq!(
         exec.firewall_ops(),
         vec![
@@ -1350,7 +1437,11 @@ fn shell_interactive_form_unchanged_when_argv_empty() {
         code, 5,
         "child shell exit code propagates: stderr={stderr:?}"
     );
-    let expected_body = tenant::firewall::render_anchor("dev", &[]);
+    let expected_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     assert_eq!(
         exec.firewall_ops(),
         vec![
@@ -1389,7 +1480,11 @@ fn shell_command_form_install_mode_narrow_on_finally_runs_when_child_fails() {
         &["shell", "dev", "--mode", "install", "--", "false"],
     );
     assert_eq!(code, 42, "child exit code; stderr={stderr:?}");
-    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let runtime_body = tenant::firewall::render_anchor(
+        "dev",
+        &["runtime.example".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     let ops = exec.firewall_ops();
     assert_eq!(
         ops.iter()
@@ -1452,7 +1547,11 @@ fn shell_command_form_narrow_failure_surfaces_warning_and_child_exit_wins() {
     // distinct `body` fields, so `fail_firewall_op` matching on the
     // runtime-body op tags ONLY the finally narrow.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
-    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let runtime_body = tenant::firewall::render_anchor(
+        "dev",
+        &["runtime.example".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_default_stash("dev")
@@ -1535,7 +1634,11 @@ fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
     // builds + executes a runtime-tier reapply. fail_next_firewall is
     // one-shot, so the narrow's ops should land cleanly. Pin: a
     // runtime-body InstallAnchor appears after the failed Reload.
-    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let runtime_body = tenant::firewall::render_anchor(
+        "dev",
+        &["runtime.example".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     let ops = exec.firewall_ops();
     assert!(
         ops.iter().any(|op| matches!(
@@ -1740,7 +1843,11 @@ fn shell_command_narrow_failure_warning_uses_warning_glyph() {
     // verified at the Reporter level. The warning line names the
     // tenant, the failure summary, and the recovery command.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
-    let runtime_body = tenant::firewall::render_anchor("dev", &["runtime.example".to_string()]);
+    let runtime_body = tenant::firewall::render_anchor(
+        "dev",
+        &["runtime.example".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
         .with_default_stash("dev")
@@ -2319,5 +2426,252 @@ fn shell_pre_exec_doctor_surfaces_cowork_dir_absent() {
             "\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
         ),
         "cowork dir absence must surface as a Warning aggregate on shell entry; stdout={stdout:?}"
+    );
+}
+
+// ================================================================
+// Command form `--inbound` flag (sibling of `--mode`)
+//
+// `--inbound permissive` widens the INBOUND loopback axis for the
+// command's duration and narrows back to restricted on completion —
+// mirroring `--mode install`'s egress widen + narrow-on-finally. The
+// two axes are orthogonal: `--inbound permissive` leaves egress at its
+// default runtime tier, and `--mode install` leaves inbound at steady
+// restricted. Interactive entry auto-narrows inbound to restricted
+// (the `requires = "argv"` rail rejects `--inbound` without `--`).
+// ================================================================
+
+#[test]
+fn shell_command_inbound_permissive_renders_permissive_entry_then_narrows() {
+    // `tenant shell dev --inbound permissive -- ls`. Entry reapply
+    // widens inbound to permissive (egress stays runtime tier); child
+    // runs; finally narrows inbound back to restricted. The profile
+    // declares a port so the restricted-narrow body is distinct from a
+    // locked one — the narrow installs the profile-port restricted body.
+    let profile = format!(
+        "{}\n[inbound]\nports = [\n  3000,\n]\n",
+        profile_with_hosts(&["api.example.com"], &["pypi.org"])
+    );
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "permissive", "--", "ls"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    // Egress = runtime tier throughout (inbound widen doesn't touch the
+    // egress axis). Entry inbound = permissive; finally inbound =
+    // restricted with the profile's declared port.
+    let permissive_body = tenant::firewall::render_anchor(
+        "dev",
+        &["api.example.com".to_string()],
+        tenant::firewall::InboundRules::Permissive,
+    );
+    let restricted_body = tenant::firewall::render_anchor(
+        "dev",
+        &["api.example.com".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![3000]),
+    );
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: permissive_body,
+            },
+            FirewallOp::Reload,
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: restricted_body,
+            },
+            FirewallOp::Reload,
+        ],
+        "entry widens inbound to permissive; finally narrows inbound to restricted"
+    );
+    assert_eq!(
+        exec.exec_calls(),
+        vec![("dev".to_string(), vec!["ls".to_string()])],
+    );
+}
+
+#[test]
+fn shell_command_inbound_permissive_narrow_on_finally_runs_when_child_fails() {
+    // Narrow-on-finally is mandatory regardless of child outcome — same
+    // posture as `--mode install` (`shell_command_form_install_mode_narrow_on_finally_runs_when_child_fails`).
+    // Otherwise the on-disk anchor stays permissive after a non-zero
+    // exit (silent persistent widening). Verb returns the child's exit.
+    let profile = format!(
+        "{}\n[inbound]\nports = [\n  3000,\n]\n",
+        profile_with_hosts(&["api.example.com"], &[])
+    );
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_default_stash("dev")
+        .exec_exit_code(42);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "permissive", "--", "false"],
+    );
+    assert_eq!(code, 42, "child exit code; stderr={stderr:?}");
+    let restricted_body = tenant::firewall::render_anchor(
+        "dev",
+        &["api.example.com".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![3000]),
+    );
+    let ops = exec.firewall_ops();
+    assert_eq!(
+        ops.iter()
+            .filter(|o| matches!(o, FirewallOp::Reload))
+            .count(),
+        2,
+        "narrow-on-finally fires even when child failed: {ops:?}"
+    );
+    let last_install = ops
+        .iter()
+        .rfind(|op| matches!(op, FirewallOp::InstallAnchor { .. }))
+        .unwrap();
+    if let FirewallOp::InstallAnchor { body, .. } = last_install {
+        assert_eq!(
+            body, &restricted_body,
+            "finally narrow installs the restricted-inbound body, not permissive"
+        );
+    }
+}
+
+#[test]
+fn shell_command_default_inbound_stays_restricted_no_extra_narrow() {
+    // F2 negative pin (inbound axis): no `--inbound` flag → entry
+    // renders inbound at steady restricted; the runtime-mode command
+    // form fires exactly ONE Reload (no redundant post-child narrow).
+    // Mirrors `shell_command_form_runtime_mode_no_post_child_narrow`.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, _stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "true"],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        exec.firewall_ops()
+            .iter()
+            .filter(|o| matches!(o, FirewallOp::Reload))
+            .count(),
+        1,
+        "default-inbound (restricted) command form fires ONE Reload (entry only): {:?}",
+        exec.firewall_ops()
+    );
+}
+
+#[test]
+fn shell_command_inbound_restricted_explicit_no_extra_narrow() {
+    // `--inbound restricted` is the default posture made explicit —
+    // it widens nothing, so no narrow-on-finally fires. Exactly ONE
+    // Reload. Pins that the narrow gate keys on the WIDENED level
+    // (Permissive), not merely on the flag's presence.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, _stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "restricted", "--", "true"],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        exec.firewall_ops()
+            .iter()
+            .filter(|o| matches!(o, FirewallOp::Reload))
+            .count(),
+        1,
+        "explicit --inbound restricted widens nothing → ONE Reload: {:?}",
+        exec.firewall_ops()
+    );
+}
+
+#[test]
+fn shell_clap_rejects_inbound_without_argv() {
+    // `--inbound` requires argv (parallel to `--mode`). `tenant shell
+    // dev --inbound permissive` (no `--` separator, no command) → clap
+    // parse error (exit 2); no substrate fires. Interactive entry
+    // auto-narrows inbound to restricted, so widening it for an
+    // interactive session is rejected at parse — the operator would
+    // otherwise be left at permissive silently.
+    let exec = StubHostMachine::new();
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "permissive"],
+    );
+    assert_ne!(code, 0, "clap rejects parse: stderr={stderr:?}");
+    assert!(
+        exec.firewall_ops().is_empty()
+            && exec.account_ops().is_empty()
+            && exec.exec_calls().is_empty()
+            && exec.logins().is_empty(),
+        "no substrate fires on clap parse rejection"
+    );
+}
+
+#[test]
+fn shell_command_inbound_and_mode_compose_within_one_call() {
+    // The two axes are orthogonal WITHIN a single command: `--mode
+    // install --inbound permissive` widens BOTH on entry and narrows
+    // BOTH on finally (egress→runtime, inbound→restricted). The doctrine
+    // forbids composition ACROSS separate commands, not within one.
+    let profile = format!(
+        "{}\n[inbound]\nports = [\n  3000,\n]\n",
+        profile_with_hosts(&["runtime.example"], &["install.example"])
+    );
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &[
+            "shell",
+            "dev",
+            "--mode",
+            "install",
+            "--inbound",
+            "permissive",
+            "--",
+            "ls",
+        ],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    // Entry: egress install tier (both hosts) + inbound permissive.
+    let entry_body = tenant::firewall::render_anchor(
+        "dev",
+        &["runtime.example".to_string(), "install.example".to_string()],
+        tenant::firewall::InboundRules::Permissive,
+    );
+    // Finally: egress runtime tier (runtime host only) + inbound
+    // restricted (profile port).
+    let narrow_body = tenant::firewall::render_anchor(
+        "dev",
+        &["runtime.example".to_string()],
+        tenant::firewall::InboundRules::Restricted(vec![3000]),
+    );
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: entry_body,
+            },
+            FirewallOp::Reload,
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: narrow_body,
+            },
+            FirewallOp::Reload,
+        ],
+        "both axes widen on entry, both narrow on finally"
     );
 }

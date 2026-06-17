@@ -2,9 +2,9 @@
 //! Wraps `ModeError` for the auto-narrow path and adds `NarrowFailed`
 //! for the command form's post-child reapply.
 
-use crate::ModeLevel;
 use crate::domain::reporter::Reporter;
 use crate::domain::{AccountError, AccountOp, HostUserName, KeychainError, Op, TenantUserName};
+use crate::{InboundLevel, ModeLevel};
 
 use super::reapply::{ReapplyPlan, ReapplyScope};
 use super::{ModeError, Tenants};
@@ -34,22 +34,27 @@ pub(crate) enum ShellError {
 
 impl<'a> Tenants<'a> {
     /// Shell-verb entry: empty argv → interactive; non-empty → command.
+    /// `inbound` controls the command form's inbound-loopback axis;
+    /// the interactive form ignores it (it always auto-narrows inbound
+    /// to restricted, and `--inbound` is parse-rejected without argv).
     pub(crate) fn shell(
         &self,
         name: &TenantUserName,
         host: &HostUserName,
         argv: &[String],
         mode: ModeLevel,
+        inbound: InboundLevel,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
         if argv.is_empty() {
             return self.shell_interactive(name, host, reporter);
         }
-        self.shell_command(name, host, argv, mode, reporter)
+        self.shell_command(name, host, argv, mode, inbound, reporter)
     }
 
     /// Light reapply (PF + host membership + tenant-side symlinks),
-    /// then unlock the keychain and log in.
+    /// then unlock the keychain and log in. Inbound auto-narrows to
+    /// restricted (steady-state `None` ⇒ profile-declared ports).
     fn shell_interactive(
         &self,
         name: &TenantUserName,
@@ -60,7 +65,7 @@ impl<'a> Tenants<'a> {
         // the verb context even if the pre-flight profile read fails.
         reporter.shell_intent(name);
         let reapply_plan = self
-            .build_reapply_plan(name, host, ModeLevel::Runtime, ReapplyScope::Light)
+            .build_reapply_plan(name, host, ModeLevel::Runtime, None, ReapplyScope::Light)
             .map_err(ShellError::Mode)?;
         let login = AccountOp::LoginAsUser { name: name.into() };
         let mut plan_entries = reapply_plan.as_plan_entries();
@@ -74,15 +79,17 @@ impl<'a> Tenants<'a> {
     }
 
     /// Command-form shell. Build + execute the entry reapply at the
-    /// requested tier, run the child, then reapply at runtime on
-    /// completion (skipped when the entry tier was already Runtime,
-    /// since a second reapply would write the same bytes for zero
-    /// on-disk delta). Failure composition:
+    /// requested egress tier + inbound posture, run the child, then
+    /// reapply at the steady posture (egress runtime + inbound
+    /// restricted) on completion. The narrow is skipped only when
+    /// NEITHER axis was widened (`mode == Runtime && inbound ==
+    /// Restricted`), since a second reapply would write the same bytes
+    /// for zero on-disk delta. Failure composition:
     ///
     /// - widen-build-failure → `Mode`, no narrow (nothing to undo).
     /// - widen-execute-failure → best-effort narrow inline, then `Mode`.
     /// - child-spawn-failure → `Account`, no narrow (entry reapply
-    ///   already reflects the requested tier).
+    ///   already reflects the requested posture).
     /// - child-ran + narrow-failed → `NarrowFailed` carrying both the
     ///   child exit and the narrow error; child exit propagates.
     fn shell_command(
@@ -91,19 +98,27 @@ impl<'a> Tenants<'a> {
         host: &HostUserName,
         argv: &[String],
         mode: ModeLevel,
+        inbound: InboundLevel,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
         reporter.shell_command_intent(name, mode);
 
         let entry_plan: ReapplyPlan = self
-            .build_reapply_plan(name, host, mode, ReapplyScope::Light)
+            .build_reapply_plan(name, host, mode, Some(inbound), ReapplyScope::Light)
             .map_err(ShellError::Mode)?;
 
         if let Err(entry_err) = self.execute_reapply_plan(&entry_plan, reporter) {
-            // Best-effort narrow; drop any secondary failure on the floor —
-            // the operator's primary signal is the entry failure.
+            // Best-effort narrow (both axes); drop any secondary failure
+            // on the floor — the operator's primary signal is the entry
+            // failure.
             let _ = self
-                .build_reapply_plan(name, host, ModeLevel::Runtime, ReapplyScope::Light)
+                .build_reapply_plan(
+                    name,
+                    host,
+                    ModeLevel::Runtime,
+                    Some(InboundLevel::Restricted),
+                    ReapplyScope::Light,
+                )
                 .and_then(|p| self.execute_reapply_plan(&p, reporter));
             return Err(ShellError::Mode(entry_err));
         }
@@ -112,11 +127,21 @@ impl<'a> Tenants<'a> {
 
         let child_result = self.machine.exec_as_tenant(name, argv);
 
-        let narrow_result = if mode == ModeLevel::Runtime {
+        // Narrow when EITHER axis widened. Runtime egress + restricted
+        // inbound is the steady posture; a no-widen call skips the
+        // redundant second reapply.
+        let widened = mode == ModeLevel::Install || inbound == InboundLevel::Permissive;
+        let narrow_result = if !widened {
             Ok(())
         } else {
-            self.build_reapply_plan(name, host, ModeLevel::Runtime, ReapplyScope::Light)
-                .and_then(|p| self.execute_reapply_plan(&p, reporter))
+            self.build_reapply_plan(
+                name,
+                host,
+                ModeLevel::Runtime,
+                Some(InboundLevel::Restricted),
+                ReapplyScope::Light,
+            )
+            .and_then(|p| self.execute_reapply_plan(&p, reporter))
         };
 
         match (child_result, narrow_result) {

@@ -9,11 +9,11 @@ use super::{
     AccessMode, AccountError, AclError, FirewallError, GroupId, HostMachine, HostUserName,
     KeychainError, Op, ProbeError, TenantUserName, UserDirectoryError, UserId,
 };
-use crate::ModeLevel;
 use crate::ansi::{self};
 use crate::doctor::{Category, Finding, Severity};
 use crate::profile::{ProfileError, display_path_for};
 use crate::terminal::Terminal;
+use crate::{InboundLevel, ModeLevel};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ConfirmOutcome {
@@ -342,6 +342,54 @@ impl<'t, 'm> Reporter<'t, 'm> {
             let _ = writeln!(
                 self.terminal.stdout,
                 "The widened allowlist persists until 'tenant mode {name} runtime' (narrow) or 'tenant shell {name}' (auto-narrow on entry)."
+            );
+        }
+        let _ = writeln!(self.terminal.stdout);
+        self.emit_plan_section(plan);
+        let _ = writeln!(self.terminal.stdout, "Sudo needed for: firewall install.");
+        let _ = writeln!(self.terminal.stdout);
+    }
+
+    pub fn inbound_summary(
+        &mut self,
+        name: &TenantUserName,
+        host: &HostUserName,
+        level: InboundLevel,
+        plan: Option<&[(Op<'_>, Option<&'static str>)]>,
+    ) {
+        let level_str = level.as_str();
+        let group = tenant_share_group_name(name.as_str());
+        let _ = writeln!(
+            self.terminal.stdout,
+            "About to apply inbound '{level_str}' to tenant '{name}'."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
+        if matches!(level, InboundLevel::Permissive) {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "  \u{2022} re-render the firewall anchor opening all inbound loopback (TCP) ports"
+            );
+        } else {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "  \u{2022} re-render the firewall anchor restricting inbound loopback to profile-declared ports"
+            );
+        }
+        let _ = writeln!(self.terminal.stdout, "  \u{2022} reload pf");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
+        );
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} refresh tenant-side symlinks for declared shares"
+        );
+        if matches!(level, InboundLevel::Permissive) {
+            let _ = writeln!(self.terminal.stdout);
+            let _ = writeln!(
+                self.terminal.stdout,
+                "The widened inbound posture persists until 'tenant inbound {name} restricted' (narrow) or 'tenant shell {name}' (auto-narrow on entry)."
             );
         }
         let _ = writeln!(self.terminal.stdout);
@@ -685,6 +733,30 @@ impl<'t, 'm> Reporter<'t, 'm> {
         ));
     }
 
+    pub fn inbound_intent(&mut self, name: &TenantUserName, level: InboundLevel) {
+        if !self.dry_run {
+            let level_str = level.as_str();
+            self.section(&format!(
+                "Applying inbound '{level_str}' to tenant '{name}'"
+            ));
+        }
+    }
+
+    pub fn inbound_done(&mut self, name: &TenantUserName, level: InboundLevel) {
+        if self.dry_run {
+            return;
+        }
+        let level_str = level.as_str();
+        self.section("Done");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Tenant '{name}' inbound loopback is {level_str}."
+        );
+        self.next_step(&format!(
+            "Next: enter the tenant with `tenant shell {name}` \u{2014} inbound loopback auto-narrows back to restricted on entry."
+        ));
+    }
+
     /// Convergent-noop. Tense-neutral; emits in both real and dry-run.
     pub fn destroy_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
@@ -805,6 +877,27 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(
             self.terminal.stderr,
             "tenant: refusing to apply mode to '{name}': system account (no tenant-range UID)"
+        );
+    }
+
+    pub fn refuse_inbound_absent(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: cannot apply inbound posture to '{name}': does not exist"
+        );
+    }
+
+    pub fn refuse_inbound_not_a_tenant(&mut self, name: &TenantUserName, uid: UserId, floor: u32) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to apply inbound posture to '{name}': UID {uid} is below tenant floor {floor}"
+        );
+    }
+
+    pub fn refuse_inbound_system_account(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to apply inbound posture to '{name}': system account (no tenant-range UID)"
         );
     }
 
@@ -1053,6 +1146,17 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    pub fn inbound_eligibility_probe_failed(
+        &mut self,
+        name: &TenantUserName,
+        err: &UserDirectoryError,
+    ) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check inbound eligibility for '{name}': {err}"
+        );
+    }
+
     pub fn doctor_eligibility_probe_failed(
         &mut self,
         name: &TenantUserName,
@@ -1108,6 +1212,40 @@ impl<'t, 'm> Reporter<'t, 'm> {
             format!("\u{26a0} Doctor: {count} {noun}{scope} \u{2014} run `{command}` for details");
         let painted = self.paint_stdout(&line, ansi::yellow);
         let _ = writeln!(self.terminal.stdout, "{painted}");
+    }
+
+    /// Calibrated shell-entry inbound posture line (cycle 24). Locked
+    /// (no declared ports, anchor not permissive) is quiet — `posture`
+    /// is `None`, nothing emits. `InboundExposure` (restricted with
+    /// ports) gets a dim info-flavored line naming the ports; the loud
+    /// `InboundPermissive` gets a yellow ⚠ warning plus a narrow hint.
+    /// Distinct from `doctor_summary_pending`'s warning aggregate: the
+    /// posture line is a calibrated heads-up, not a "run doctor" nag.
+    pub fn doctor_inbound_posture(&mut self, posture: Option<&Finding>) {
+        let Some(finding) = posture else {
+            return;
+        };
+        match finding {
+            Finding::InboundExposure { ports, .. } => {
+                let ports_spec = ports
+                    .iter()
+                    .map(|p| format!(":{p}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let line = format!(
+                    "inbound: restricted \u{2014} {ports_spec} open to host + peer tenants"
+                );
+                let painted = self.paint_stdout(&line, ansi::dim);
+                let _ = writeln!(self.terminal.stdout, "{painted}");
+            }
+            Finding::InboundPermissive { .. } => {
+                let line = "\u{26a0} inbound: PERMISSIVE \u{2014} all ports open to host + peer tenants; \
+                            narrows back to restricted on entry";
+                let painted = self.paint_stdout(line, ansi::yellow);
+                let _ = writeln!(self.terminal.stdout, "{painted}");
+            }
+            _ => {}
+        }
     }
 
     // Failures (stderr, EX_IOERR)
@@ -1309,6 +1447,13 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    pub fn inbound_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to apply inbound posture for '{name}': {err}"
+        );
+    }
+
     // Share-reapply failure framing — per-verb context phrases so the
     // operator's recovery guidance reads in the verb they invoked.
 
@@ -1339,6 +1484,13 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(
             self.terminal.stderr,
             "tenant: cannot apply mode for '{name}': {err}"
+        );
+    }
+
+    pub fn refuse_inbound_share(&mut self, name: &TenantUserName, err: &ShareError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: cannot apply inbound posture for '{name}': {err}"
         );
     }
 

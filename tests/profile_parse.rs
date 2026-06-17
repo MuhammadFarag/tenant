@@ -9,7 +9,8 @@
 use std::path::PathBuf;
 
 use tenant::profile::{
-    Allowlist, Profile, Share, ShareMode, Tier, default_profile_toml, expand_tenant_path, parse,
+    Allowlist, Inbound, Profile, Share, ShareMode, Tier, default_profile_toml, expand_tenant_path,
+    parse,
 };
 
 #[test]
@@ -24,6 +25,7 @@ fn parse_default_toml_yields_schema_1_with_empty_allowlists() {
                 install: Tier { hosts: vec![] },
             },
             shares: vec![],
+            inbound: Inbound { ports: vec![] },
         }
     );
 }
@@ -419,5 +421,109 @@ fn missing_tenant_path_rejected() {
         err.message.contains("tenant_path"),
         "expected message to mention tenant_path, got: {}",
         err.message
+    );
+}
+
+// --- [inbound] section -------------------------------------------------
+//
+// The profile grows an optional `[inbound]` table declaring the TCP
+// loopback ports the tenant exposes under the default `restricted`
+// posture: `ports = [<u16> ...]`. No proto field (TCP only — UDP
+// loopback is unfiltered). Absent section / empty list both mean
+// "locked" (no inbound pass emitted). Same backward-compat posture as
+// `[[shares]]`: missing section deserializes to an empty Vec.
+
+fn toml_with_inbound_section(inbound_body: &str) -> String {
+    format!(
+        "schema_version = 1\n\
+         \n\
+         [allowlist.runtime]\n\
+         hosts = []\n\
+         \n\
+         [allowlist.install]\n\
+         hosts = []\n\
+         \n\
+         {inbound_body}"
+    )
+}
+
+#[test]
+fn parses_inbound_ports_to_u16_in_declared_order() {
+    let toml = toml_with_inbound_section("[inbound]\nports = [3000, 8080, 443]\n");
+    let profile = parse(&toml).expect("must parse");
+    assert_eq!(profile.inbound.ports, vec![3000u16, 8080, 443]);
+}
+
+#[test]
+fn parses_single_inbound_port() {
+    let toml = toml_with_inbound_section("[inbound]\nports = [5173]\n");
+    let profile = parse(&toml).expect("must parse");
+    assert_eq!(profile.inbound.ports, vec![5173u16]);
+}
+
+#[test]
+fn absent_inbound_section_yields_empty_ports() {
+    // Backward-compat: profiles written before the inbound axis shipped
+    // have no `[inbound]` section. Parse must succeed and yield an empty
+    // Vec — the locked posture.
+    let toml = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = []\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    let profile = parse(toml).expect("must parse without inbound section");
+    assert!(
+        profile.inbound.ports.is_empty(),
+        "expected empty inbound ports, got: {:?}",
+        profile.inbound.ports
+    );
+}
+
+#[test]
+fn empty_inbound_ports_list_yields_empty_ports() {
+    let toml = toml_with_inbound_section("[inbound]\nports = []\n");
+    let profile = parse(&toml).expect("must parse");
+    assert!(
+        profile.inbound.ports.is_empty(),
+        "expected empty inbound ports, got: {:?}",
+        profile.inbound.ports
+    );
+}
+
+#[test]
+fn inbound_port_above_u16_max_rejected() {
+    // 70000 > 65535; serde u16 deserialize rejects it. Catches operator
+    // typos that would otherwise render an out-of-range pf port.
+    let toml = toml_with_inbound_section("[inbound]\nports = [70000]\n");
+    let err = parse(&toml).expect_err("out-of-u16 port must be refused");
+    assert!(
+        err.message.contains("ports") || err.message.contains("70000"),
+        "expected message to mention ports or the bad value, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn inbound_non_integer_port_rejected() {
+    let toml = toml_with_inbound_section("[inbound]\nports = [\"3000\"]\n");
+    let err = parse(&toml).expect_err("non-integer port must be refused");
+    assert!(
+        err.message.contains("ports") || err.message.contains("integer"),
+        "expected message to mention ports or integer, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn default_profile_toml_parses_with_empty_inbound_ports() {
+    // The scaffolded `[inbound]` block is fully commented (example port
+    // commented out) so it parses to the locked posture.
+    let profile = parse(&default_profile_toml()).expect("default toml must parse");
+    assert!(
+        profile.inbound.ports.is_empty(),
+        "expected default profile to have empty inbound ports, got: {:?}",
+        profile.inbound.ports
     );
 }

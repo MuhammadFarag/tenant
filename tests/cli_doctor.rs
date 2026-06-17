@@ -913,7 +913,11 @@ fn doctor_anchor_body_hand_edit_emits_warning() {
     let stub_reader = make_tenant_stub_reader("dev");
     let edited_body = format!(
         "{}# stray operator edit\n",
-        tenant::firewall::render_anchor("dev", &[])
+        tenant::firewall::render_anchor(
+            "dev",
+            &[],
+            tenant::firewall::InboundRules::Restricted(vec![])
+        )
     );
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -940,6 +944,145 @@ fn doctor_anchor_body_hand_edit_emits_warning() {
 }
 
 #[test]
+fn doctor_anchor_body_in_sync_with_declared_inbound_ports_no_finding() {
+    // Steady-state inbound axis in doctor's drift check: a profile that
+    // declares `ports = [3000]` with an on-disk anchor that reflects
+    // port 3000 is in sync — NO AnchorBodyDrift. Doctor must render the
+    // expected body from the profile's declared ports (Restricted with
+    // those ports), not a hardcoded locked posture; otherwise it
+    // false-positives on every tenant that declares an inbound port.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = format!(
+        "{}\n[inbound]\nports = [\n  3000,\n]\n",
+        profile_with_hosts(&[], &[])
+    );
+    let synced_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![3000]),
+    );
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_anchor_body("dev", &synced_body);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("anchor file drift"),
+        "no anchor-body drift expected when on-disk body matches declared ports; stdout={stdout:?}"
+    );
+    // The declared port surfaces as an Info inbound-exposure finding (a
+    // separate axis); the negative pin here is specifically that no
+    // ANCHOR-BODY drift fires. The exposure finding is the only
+    // per-tenant line, so the summary counts one.
+    assert!(
+        stdout.contains(
+            "info: tenant 'dev' inbound loopback open on port 3000 — reachable by host + peer tenants"
+        ),
+        "declared port should surface as an inbound-exposure info finding; stdout={stdout:?}"
+    );
+}
+
+// ── inbound-exposure finding (cycle 24) ──────────────────────────────
+
+#[test]
+fn doctor_inbound_declared_ports_emits_info_finding() {
+    // A tenant with `[inbound] ports = [3000]` and an in-sync anchor:
+    // no drift, but doctor surfaces the declared port as an Info finding
+    // naming the port (open, reachable by host + peer tenants). Info-tier
+    // so it doesn't trip `--strict` exit-1 on its own.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = format!(
+        "{}\n[inbound]\nports = [\n  3000,\n]\n",
+        profile_with_hosts(&[], &[])
+    );
+    let synced_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![3000]),
+    );
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_anchor_body("dev", &synced_body);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "info: tenant 'dev' inbound loopback open on port 3000 — reachable by host + peer tenants"
+        ),
+        "expected inbound-exposure info finding; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_inbound_locked_no_finding() {
+    // Restricted + empty ports = locked = quiet: no inbound finding.
+    // (default profile has an empty `[inbound]`.) Negative pin against a
+    // finding that false-positives on the migration default.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let synced_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &synced_body);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("inbound loopback"),
+        "locked inbound must emit no finding; stdout={stdout:?}"
+    );
+    assert_eq!(stdout, "doctor: tenant 'dev' — no per-tenant findings.\n");
+}
+
+#[test]
+fn doctor_inbound_permissive_anchor_emits_warning() {
+    // The on-disk anchor is in the permissive posture (a prior widen left
+    // behind, outside a live shell). Doctor reads the anchor, detects the
+    // permissive line, and emits a Warning. The profile here declares
+    // port 3000, but permissive wins (the observed posture is wider than
+    // declared). Anchor matches the permissive render so AnchorBodyDrift
+    // does NOT also fire (doctor renders steady = restricted, but we
+    // assert only the inbound warning is present).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = format!(
+        "{}\n[inbound]\nports = [\n  3000,\n]\n",
+        profile_with_hosts(&[], &[])
+    );
+    let permissive_body =
+        tenant::firewall::render_anchor("dev", &[], tenant::firewall::InboundRules::Permissive);
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_anchor_body("dev", &permissive_body);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "warning: tenant 'dev' inbound loopback is PERMISSIVE — all ports open to host + peer tenants"
+        ),
+        "expected inbound-permissive warning finding; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_inbound_permissive_with_strict_exits_1() {
+    // InboundPermissive is Warning-tier; --strict + warning → exit 1.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let permissive_body =
+        tenant::firewall::render_anchor("dev", &[], tenant::firewall::InboundRules::Permissive);
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_anchor_body("dev", &permissive_body);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--strict"]);
+    assert_eq!(
+        code, 1,
+        "expected exit 1 on warning+strict; stderr={stderr:?}"
+    );
+}
+
+#[test]
 fn doctor_anchor_body_profile_drift_emits_warning() {
     // Operator updated the profile (added a runtime host) but
     // didn't re-render. Anchor body == empty-allowlist render;
@@ -947,7 +1090,11 @@ fn doctor_anchor_body_profile_drift_emits_warning() {
     // the new host → diverges from on-disk body → one drift line.
     let stub_reader = make_tenant_stub_reader("dev");
     let new_profile = profile_with_hosts(&["example.com"], &[]);
-    let stale_body = tenant::firewall::render_anchor("dev", &[]);
+    let stale_body = tenant::firewall::render_anchor(
+        "dev",
+        &[],
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &new_profile)
         .with_anchor_body("dev", &stale_body);
@@ -963,7 +1110,14 @@ fn doctor_anchor_body_profile_drift_emits_warning() {
 fn doctor_anchor_body_drift_with_strict_exits_1() {
     // AnchorBodyDrift is Warning-tier; --strict + warning-only → exit 1.
     let stub_reader = make_tenant_stub_reader("dev");
-    let edited_body = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let edited_body = format!(
+        "{}# stray\n",
+        tenant::firewall::render_anchor(
+            "dev",
+            &[],
+            tenant::firewall::InboundRules::Restricted(vec![])
+        )
+    );
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited_body);
@@ -1028,7 +1182,14 @@ fn doctor_anchor_body_drift_all_tenants_scoped_per_tenant() {
     // finding and nothing scoped to staging.
     let stub_reader = make_two_tenant_stub_reader();
     let default = tenant::profile::default_profile_toml();
-    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let edited = format!(
+        "{}# stray\n",
+        tenant::firewall::render_anchor(
+            "dev",
+            &[],
+            tenant::firewall::InboundRules::Restricted(vec![])
+        )
+    );
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &default)
         .with_existing_profile("staging", &default)
@@ -1051,7 +1212,14 @@ fn doctor_anchor_body_drift_suppresses_no_findings_summary() {
     // "no per-tenant findings" summary line. Pins that the new
     // variant is counted as PER-TENANT (not host-wide).
     let stub_reader = make_tenant_stub_reader("dev");
-    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let edited = format!(
+        "{}# stray\n",
+        tenant::firewall::render_anchor(
+            "dev",
+            &[],
+            tenant::firewall::InboundRules::Restricted(vec![])
+        )
+    );
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited);
@@ -1079,6 +1247,7 @@ fn doctor_anchor_body_install_tier_match_still_drifts() {
             "runtime.example.com".to_string(),
             "install.example.com".to_string(),
         ],
+        tenant::firewall::InboundRules::Restricted(vec![]),
     );
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
@@ -1109,7 +1278,14 @@ fn doctor_standard_mode_omits_guidance_block() {
     // string of the guidance block) must not appear without -v.
     // Guards skim-the-output usage from sudden multi-screen output.
     let stub_reader = make_tenant_stub_reader("dev");
-    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let edited = format!(
+        "{}# stray\n",
+        tenant::firewall::render_anchor(
+            "dev",
+            &[],
+            tenant::firewall::InboundRules::Restricted(vec![])
+        )
+    );
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited);
@@ -1133,7 +1309,14 @@ fn doctor_verbose_emits_indented_guidance_below_finding() {
     // AnchorBodyDrift here verifies the full pipeline (variant
     // → guidance() → Reporter prefix → stdout).
     let stub_reader = make_tenant_stub_reader("dev");
-    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let edited = format!(
+        "{}# stray\n",
+        tenant::firewall::render_anchor(
+            "dev",
+            &[],
+            tenant::firewall::InboundRules::Restricted(vec![])
+        )
+    );
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_anchor_body("dev", &edited);
@@ -1191,7 +1374,14 @@ fn doctor_verbose_filesystem_exposure_omits_guidance_block() {
     let target = std::path::PathBuf::from(format!("/Users/{TEST_HOST}/.ssh/id_rsa"));
     let stub_exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
-        .with_anchor_body("dev", &tenant::firewall::render_anchor("dev", &[]))
+        .with_anchor_body(
+            "dev",
+            &tenant::firewall::render_anchor(
+                "dev",
+                &[],
+                tenant::firewall::InboundRules::Restricted(vec![]),
+            ),
+        )
         .with_probe_outcome(
             "dev",
             &target,
@@ -1221,7 +1411,14 @@ fn doctor_verbose_multiple_findings_each_paired_with_own_guidance() {
     // (AnchorBodyDrift). Verify by relative position of section
     // markers unique to each guidance body.
     let stub_reader = make_tenant_stub_reader("dev");
-    let edited = format!("{}# stray\n", tenant::firewall::render_anchor("dev", &[]));
+    let edited = format!(
+        "{}# stray\n",
+        tenant::firewall::render_anchor(
+            "dev",
+            &[],
+            tenant::firewall::InboundRules::Restricted(vec![])
+        )
+    );
     let stub_exec = StubHostMachine::new()
         .with_pf_status_content("Status: Disabled\n")
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
