@@ -102,10 +102,13 @@ tenant shell dev --mode install -- bash -c 'curl https://example.com/install.sh 
 | `destroy <name>` | Symmetric teardown. Convergent — re-running on an absent tenant is a no-op. |
 | `shell <name>` | Enter the tenant. Optional `--mode install\|runtime` and `-- <cmd>` for the single-command form. |
 | `mode <name> install\|runtime` | Re-render the PF anchor at the requested tier and reload. |
+| `inbound <name> restricted\|permissive` | Set the tenant's loopback inbound posture. `restricted` (the default) allows inbound only on profile-declared ports; `permissive` temporarily opens all ports — the localhost-redirect OAuth window. |
 | `reload [<name>]` | Reapply the profile to host state. No argument walks every tenant. |
 | `doctor [<name>]` | Read-only audit. Surfaces filesystem exposure, share drift, firewall state, and sudoers posture. `--strict` exits non-zero on findings. |
 
 All verbs accept `--verbose` for plan and step-level detail, and `--dry-run` for a no-substrate preview. Mutating verbs prompt for confirmation by default; `--yes` skips the prompt.
+
+A note on `inbound`: `restricted` is surface-reduction, not host-vs-peer isolation. On a shared loopback (`127.0.0.1`) PF cannot see who opened the connection, so a declared or `permissive` port is reachable by the host and any co-located tenant alike, and only TCP is filtered (UDP loopback is unfiltered). A locked tenant — `restricted` with no declared ports, the default — is unreachable on loopback by anyone.
 
 ## Profile
 
