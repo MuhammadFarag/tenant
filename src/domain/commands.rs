@@ -502,6 +502,19 @@ pub(crate) fn dispatch(
                 }
             }
         },
+        Verb::Setup => {
+            // Host-wide: no name, no eligibility, no pre-exec doctor pass
+            // (setup prepares the host; its own offer is the surface).
+            // The Reporter owns the offer/decline/dry-run branching, so
+            // dispatch just routes the outcome.
+            match tenants.setup(reporter) {
+                Ok(()) => 0,
+                Err(e) => {
+                    surface_setup_error(reporter, &e);
+                    EX_IOERR
+                }
+            }
+        }
         Verb::Help { topic } => {
             let body = match topic {
                 Some(HelpTopic::Profile) => help_body_profile(),
@@ -590,6 +603,12 @@ fn surface_destroy_error(
         tenants::DestroyError::Account(e) => reporter.destroy_failed(name, e),
         tenants::DestroyError::Profile(e) => reporter.destroy_profile_failed(name, e),
         tenants::DestroyError::Firewall(e) => reporter.destroy_firewall_failed(name, e),
+    }
+}
+
+fn surface_setup_error(reporter: &mut Reporter, error: &tenants::SetupError) {
+    match error {
+        tenants::SetupError::Pam(e) => reporter.setup_pam_failed(e),
     }
 }
 

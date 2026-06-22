@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use super::tenants::{ConflictError, NameError, ShareError, tenant_share_group_name};
 use super::{
-    AccessMode, AccountError, AclError, FirewallError, GroupId, HostMachine, HostUserName,
-    KeychainError, Op, ProbeError, TenantUserName, UserDirectoryError, UserId,
+    AccessMode, AccountError, AclError, FirewallError, GroupId, HostFileError, HostMachine,
+    HostUserName, KeychainError, Op, ProbeError, TenantUserName, UserDirectoryError, UserId,
 };
 use crate::ansi::{self};
 use crate::doctor::{Category, Finding, Severity};
@@ -755,6 +755,137 @@ impl<'t, 'm> Reporter<'t, 'm> {
         self.next_step(&format!(
             "Next: enter the tenant with `tenant shell {name}` \u{2014} inbound loopback auto-narrows back to restricted on entry."
         ));
+    }
+
+    // ---- setup verb (host-wide, opt-in host prep) ----
+
+    /// Opening line/section for `tenant setup`. Real → section divider;
+    /// dry-run → a "would" line (the section dividers are dry-run-gated
+    /// across every verb).
+    pub fn setup_intent(&mut self) {
+        if self.dry_run {
+            let _ = writeln!(self.terminal.stdout, "Would set up this host.");
+        } else {
+            self.section("Setting up host");
+        }
+    }
+
+    /// Present the Touch-ID-for-sudo item and return the operator's
+    /// decision. The description always prints (operator context for the
+    /// offer); `-v` additionally echoes the substrate mechanism. The
+    /// decision itself is delegated to `setup_offer` — default-NO,
+    /// non-TTY-declines (an auth-stack change must not auto-apply from a
+    /// pipe), `--yes`-accepts, dry-run-previews.
+    pub fn setup_touch_id_offer(&mut self) -> ConfirmOutcome {
+        let _ = writeln!(self.terminal.stdout, "Touch ID for sudo");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  Let sudo accept your fingerprint \u{2014} faster, and adds a hardware"
+        );
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  auth factor. Additive: your password still works. Appends"
+        );
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  `auth sufficient pam_tid.so` to /etc/pam.d/sudo_local."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        // The substrate mechanism echoes under `-v` via `Tenants::run`'s
+        // `step` (`$ …`) at execution time, same as every other verb — no
+        // separate plan echo here (it would double the lines).
+        self.setup_offer("Enable Touch ID for sudo?")
+    }
+
+    /// Per-item opt-in decision. Defaults to NO and DECLINES on a non-TTY
+    /// without `--yes` — the deliberate divergence from `confirm` (which
+    /// proceeds on non-TTY): `setup`'s items are security-sensitive
+    /// opt-ins, not converge-to-declared-state operations.
+    fn setup_offer(&mut self, question: &str) -> ConfirmOutcome {
+        if self.dry_run {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "(Real run would prompt: {question} [y/N])"
+            );
+            return ConfirmOutcome::Proceed;
+        }
+        if self.yes_flag {
+            return ConfirmOutcome::Proceed;
+        }
+        if !self.terminal.stdin_is_tty {
+            return ConfirmOutcome::Abort;
+        }
+        // Chicken-and-egg heads-up: enabling Touch ID needs sudo, which
+        // isn't fingerprint-gated yet, so this one prompts for a typed
+        // password. Printed only here, where an actual prompt fires.
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  You'll be asked for your password once to apply this."
+        );
+        loop {
+            let _ = write!(self.terminal.stdout, "{question} [y/N] ");
+            let _ = self.terminal.stdout.flush();
+            let mut line = String::new();
+            match self.terminal.stdin.read_line(&mut line) {
+                Ok(0) => return ConfirmOutcome::Abort, // EOF
+                Ok(_) => {}
+                Err(_) => return ConfirmOutcome::Abort,
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return ConfirmOutcome::Abort; // default NO
+            }
+            match trimmed.to_ascii_lowercase().as_str() {
+                "y" | "yes" => return ConfirmOutcome::Proceed,
+                "n" | "no" => return ConfirmOutcome::Abort,
+                _ => {
+                    let _ = writeln!(self.terminal.stdout, "Please answer y or n.");
+                }
+            }
+        }
+    }
+
+    /// Post-success note after Touch ID is enabled. Dim breadcrumb;
+    /// real-mode only (the `✓` line comes from the op's progress).
+    pub fn setup_touch_id_done(&mut self) {
+        if self.dry_run {
+            return;
+        }
+        self.next_step(
+            "Touch ID takes effect on your next sudo \u{2014} run `sudo -k` or open a new terminal.",
+        );
+    }
+
+    /// Operator declined the Touch-ID item. Real-mode only (dry-run
+    /// always previews a Proceed, so this never fires under dry-run).
+    pub fn setup_touch_id_skipped(&mut self) {
+        if self.dry_run {
+            return;
+        }
+        let _ = writeln!(self.terminal.stdout, "Skipped Touch ID for sudo.");
+    }
+
+    /// Closing section for `tenant setup`. Real-mode only.
+    pub fn setup_done(&mut self) {
+        if self.dry_run {
+            return;
+        }
+        self.section("Done");
+        let _ = writeln!(self.terminal.stdout, "Host setup complete.");
+    }
+
+    /// Stderr frame for a `SetupError::Pam` substrate failure. Names the
+    /// backup so the operator can recover by hand if the append left
+    /// `/etc/pam.d/sudo_local` in a bad state (the change is append-only
+    /// and newline-guarded, so this is belt-and-suspenders on the auth
+    /// stack — there's no auto-restore for a PAM file).
+    pub fn setup_pam_failed(&mut self, err: &HostFileError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to enable Touch ID for sudo: {err} \
+             \u{2014} if /etc/pam.d/sudo_local looks wrong, restore it from \
+             /etc/pam.d/sudo_local.tenant-backup (written before the change, if one existed)"
+        );
     }
 
     /// Convergent-noop. Tense-neutral; emits in both real and dry-run.

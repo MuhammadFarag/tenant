@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::domain::{GroupId, GroupName, HostUserName, KeychainPassword, TenantUserName, UserId};
 
-use super::errors::{AccountError, AclError, FirewallError, KeychainError};
+use super::errors::{AccountError, AclError, FirewallError, HostFileError, KeychainError};
 use super::host_machine::{HostMachine, WritableOp};
 use crate::profile::ProfileError;
 
@@ -280,6 +280,22 @@ pub enum KeychainOp {
     DeleteStashedPassword { name: TenantUserName },
 }
 
+/// Host-config sub-domain: opt-in host-prep mutations driven by the
+/// `tenant setup` verb. Sibling-by-substrate to the parked sudoers
+/// brief — named for the substrate it touches (`/etc/pam.d`), not the
+/// verb. Reuses `HostFileError` (the shared host-config substrate
+/// error). Today one variant; sudoers / pf-prereqs are future siblings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PamOp {
+    /// Ensure `auth sufficient pam_tid.so` is present in
+    /// `/etc/pam.d/sudo_local` (the OS-update-safe customization file).
+    /// The adapter backs up sudo_local before mutating and is globally
+    /// idempotent — it no-ops if Touch ID is already enabled in either
+    /// `/etc/pam.d/sudo` or `/etc/pam.d/sudo_local`, so a duplicate
+    /// directive never accumulates.
+    EnableTouchIdForSudo,
+}
+
 /// Display-only wrapper used for uniform describe-dispatch. Execution
 /// stays on the bare per-domain ADTs (via `WritableOp`) so per-domain
 /// error types are preserved end-to-end.
@@ -289,6 +305,7 @@ pub enum Op<'a> {
     Firewall(&'a FirewallOp),
     Acl(&'a AclOp),
     Keychain(&'a KeychainOp),
+    Pam(&'a PamOp),
 }
 
 impl<'a> Op<'a> {
@@ -300,6 +317,7 @@ impl<'a> Op<'a> {
             Op::Firewall(op) => machine.describe_firewall(op),
             Op::Acl(op) => machine.describe_acl(op),
             Op::Keychain(op) => machine.describe_keychain(op),
+            Op::Pam(op) => machine.describe_pam(op),
         }
     }
 
@@ -313,6 +331,7 @@ impl<'a> Op<'a> {
             Op::Firewall(op) => firewall_business_label(op),
             Op::Acl(op) => acl_business_label(op),
             Op::Keychain(op) => keychain_business_label(op),
+            Op::Pam(op) => pam_business_label(op),
         }
     }
 
@@ -328,6 +347,7 @@ impl<'a> Op<'a> {
             Op::Firewall(op) => firewall_intent_label(op),
             Op::Acl(op) => acl_intent_label(op),
             Op::Keychain(op) => keychain_intent_label(op),
+            Op::Pam(op) => pam_intent_label(op),
         }
     }
 }
@@ -589,6 +609,22 @@ fn keychain_intent_label(op: &KeychainOp) -> String {
     }
 }
 
+fn pam_business_label(op: &PamOp) -> String {
+    match op {
+        PamOp::EnableTouchIdForSudo => {
+            "Touch ID for sudo enabled in /etc/pam.d/sudo_local".to_string()
+        }
+    }
+}
+
+fn pam_intent_label(op: &PamOp) -> String {
+    match op {
+        PamOp::EnableTouchIdForSudo => {
+            "Enable Touch ID for sudo in /etc/pam.d/sudo_local".to_string()
+        }
+    }
+}
+
 impl WritableOp for AccountOp {
     type Error = AccountError;
     fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), AccountError> {
@@ -636,5 +672,15 @@ impl WritableOp for KeychainOp {
     }
     fn op_ref(&self) -> Op<'_> {
         Op::Keychain(self)
+    }
+}
+
+impl WritableOp for PamOp {
+    type Error = HostFileError;
+    fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), HostFileError> {
+        machine.execute_pam(self)
+    }
+    fn op_ref(&self) -> Op<'_> {
+        Op::Pam(self)
     }
 }

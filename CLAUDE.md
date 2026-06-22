@@ -31,6 +31,11 @@ Verbs:
   their drift. No-arg walks every tenant; exits 0 / 74.
 - `doctor [<name>]` — read-only audit (paths, sudoers, pf, anchor, shares,
   group membership). `--strict` maps max severity to exit 1 / 2.
+- `setup` — host-wide, opt-in host preparation (no tenant arg). A menu of
+  opt-in items; today one: enable Touch ID for sudo (`PamOp`). Per-item
+  prompt defaults to NO; non-TTY without `--yes` declines (auth-stack
+  change must not auto-apply from a pipe); `--yes` accepts; `--dry-run`
+  previews. No eligibility checks, no pre-exec doctor pass.
 
 Follows Rust idioms: clap derive, composition-root DI, trait-object ports.
 
@@ -57,7 +62,8 @@ src/domain/       — domain layer. host_user_directory.rs: HostUserDirectory tr
                     inventory queries). host_machine.rs: HostMachine trait — the single host-
                     substrate port (describe_*/execute_* op pairs + non-unit carve-outs for
                     login/exec/reads/probes) + the WritableOp bridge. ops.rs: the Op ADT
-                    (AccountOp/ProfileOp/FirewallOp/AclOp) + their WritableOp impls. errors.rs:
+                    (AccountOp/ProfileOp/FirewallOp/AclOp/KeychainOp/PamOp) + their WritableOp
+                    impls. errors.rs:
                     per-domain error types. ids.rs: domain newtypes (UserId/GroupId/
                     TenantUserName/HostUserName/GroupName).
 src/domain/tenants.rs / tenants/
@@ -65,7 +71,8 @@ src/domain/tenants.rs / tenants/
                     dispatcher + tenant_share_group_name + cowork_dir_path + guard_cowork_dir_kind.
                     Per-verb submodules own their full code (error type + impl Tenants block +
                     helpers): validation.rs, create.rs, destroy.rs, reapply.rs (mode/reload/
-                    ReapplyScope/build_+execute_reapply_plan), shares.rs, shell.rs, doctor.rs.
+                    ReapplyScope/build_+execute_reapply_plan), shares.rs, shell.rs, doctor.rs,
+                    setup.rs (host-wide opt-in host prep; SetupError).
 src/domain/commands.rs
                   — verb dispatch (no I/O). Per-arm surface_*_error helpers route domain
                     errors to Reporter; builds ReapplyPlan upfront for prompt-bearing verbs so
@@ -109,9 +116,18 @@ already made.
 ### ADT + trait shape
 
 - **Intent / mechanism split.** Domain ops (`AccountOp`/`ProfileOp`/
-  `FirewallOp`/`AclOp`) express *what*; `MacosHostMachine` owns argv —
-  Tenants never builds argv. Tests assert op identity; literal shell shape
-  is pinned in `tests/macos_host_machine.rs`, one test per variant.
+  `FirewallOp`/`AclOp`/`KeychainOp`/`PamOp`) express *what*;
+  `MacosHostMachine` owns argv — Tenants never builds argv. Tests assert op
+  identity; literal shell shape is pinned in `tests/macos_host_machine.rs`,
+  one test per variant.
+- **`PamOp` is the host-config sub-domain for `tenant setup`** — named by
+  substrate (`/etc/pam.d`), sibling-by-shape to the parked `SudoersOp`
+  brief, not by the verb. One variant today (`EnableTouchIdForSudo`),
+  reusing `HostFileError`. A planned mutation that fits `Result<(), E>` ⇒
+  ADT variant (not a carve-out). `execute_pam` is self-idempotent: it
+  no-ops when `pam_tid` is already present in EITHER `/etc/pam.d/sudo` or
+  `/etc/pam.d/sudo_local`, so the verb can offer unconditionally (no
+  pre-probe) without ever appending a duplicate directive.
 - **One `HostMachine` trait; sub-domains as method-pairs.** A new sub-domain
   extends `HostMachine` with a `describe_*`/`execute_*` pair + a leaf
   `Op<'_>` variant — no new trait. The single `HostMachine` is the one test
@@ -360,8 +376,46 @@ already made.
   `Absent` → no notice; otherwise notice; probe error → `⚠` stderr warning and
   destroy continues.
 
+### Host setup (`tenant setup`)
+
+- **`setup` is host-wide, not per-tenant.** No name argument, no
+  eligibility/name checks, no pre-exec doctor pass. It prepares the HOST to
+  run tenants — a menu of opt-in items (today one: Touch ID for sudo). Lives
+  in `tenants/setup.rs` (`SetupError` + `Tenants::setup`); dispatch routes
+  the outcome with no plan-build or confirm orchestration.
+- **Touch ID is an OFFER, not a fix.** It has no ground truth in any
+  profile — it's an optional host capability (`Finding::TouchIdMissing` is
+  Info, never trips `--strict`). So `doctor` does NOT carry a `--fix`; it
+  points at `setup`, which *offers* and lets the operator decline. Declining
+  is first-class and stateless — no suppression file (implicit-current-mode
+  doctrine); a declined item just keeps surfacing the dim Info line.
+- **Per-item confirm diverges from `confirm`.** `setup`'s offer defaults to
+  NO (`[y/N]`) and a non-TTY without `--yes` DECLINES — the opposite of
+  create/destroy (which proceed on non-TTY). An auth-stack change must never
+  auto-apply from a pipe. `--yes` accepts; `--dry-run` previews (the offer
+  returns Proceed with a `(Real run would prompt: …)` line). Logic lives in
+  `Reporter::setup_offer`, not in `Tenants` (no `cli.dry_run` in command
+  logic).
+- **No pre-probe for "already enabled".** The item is always offered;
+  `execute_pam` is self-idempotent (no-ops if `pam_tid` is in either pam
+  file). This keeps `--dry-run` honest — the preview never depends on
+  probing placeholder host state — and mirrors every other verb's
+  static-plan + idempotent-execute shape. Re-running `setup` re-offers; a
+  yes on an already-configured host is a substrate no-op.
+- **Touch ID targets `/etc/pam.d/sudo_local`, not `/etc/pam.d/sudo`.** The
+  sudo file is clobbered by macOS updates and `include`s `sudo_local` as its
+  first auth directive, so the append survives updates and lands first in the
+  stack. `execute_pam` backs up `sudo_local` (`.tenant-backup`) before an
+  append-only stdin-fed `sudo tee -a` (no shell pipe).
+
 ### Doctor
 
+- **Touch-ID detection reads BOTH pam files.** `check_touch_id_for_sudo`
+  short-circuits: a `pam_tid` directive in `/etc/pam.d/sudo` returns clean
+  without touching `sudo_local`, else `read_pam_sudo_local` (ENOENT ⇒
+  `Ok("")`, the common case) is consulted. Reading only `/etc/pam.d/sudo`
+  false-positived `TouchIdMissing` on a host set up the sanctioned way. The
+  finding's copy is an offer pointing at `tenant setup`, not a `sed` command.
 - **Probe-as-tenant subsumes ACL semantics at the kernel level.**
   Filesystem-exposure detection runs `sudo -n -u <tenant> /bin/test -<r|x>
   <path>` and treats the exit code as ground truth (0 Allowed / 1 Denied /

@@ -3,7 +3,7 @@
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
     GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    KeychainPassword, PathKind, ProbeError, ProfileOp, TenantUserName,
+    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 
 /// Default host machine for tests that should not reach the exec stage —
@@ -61,6 +61,9 @@ impl HostMachine for NeverHostMachine {
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {
         panic!("host machine unexpectedly invoked (read_pam_sudo)");
     }
+    fn read_pam_sudo_local(&self) -> Result<String, HostFileError> {
+        panic!("host machine unexpectedly invoked (read_pam_sudo_local)");
+    }
     fn read_pf_status(&self) -> Result<String, FirewallError> {
         panic!("host machine unexpectedly invoked (read_pf_status)");
     }
@@ -106,6 +109,12 @@ impl HostMachine for NeverHostMachine {
     }
     fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError> {
         panic!("host machine unexpectedly invoked (execute_keychain) with op: {op:?}");
+    }
+    fn describe_pam(&self, op: &PamOp) -> String {
+        panic!("host machine unexpectedly invoked (describe_pam) with op: {op:?}");
+    }
+    fn execute_pam(&self, op: &PamOp) -> Result<(), HostFileError> {
+        panic!("host machine unexpectedly invoked (execute_pam) with op: {op:?}");
     }
     fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {
         panic!("host machine unexpectedly invoked (tenant_keychain_present): name={name:?}");

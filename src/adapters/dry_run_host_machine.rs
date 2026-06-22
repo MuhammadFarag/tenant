@@ -2,7 +2,7 @@ use crate::adapters::macos::MacosHostMachine;
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
     GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    KeychainPassword, PathKind, ProbeError, ProfileOp, TenantUserName,
+    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::profile::{ProfileError, default_profile_toml};
 
@@ -82,6 +82,13 @@ impl HostMachine for DryRunHostMachine {
     /// "Touch-ID-present" placeholder so the preview doesn't fire a
     /// spurious `TouchIdMissing` finding.
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {
+        Ok("auth       sufficient     pam_tid.so\n".to_string())
+    }
+
+    /// "Touch-ID-present" placeholder, mirroring `read_pam_sudo`, so this
+    /// method ALONE keeps the `--dry-run` preview free of a spurious
+    /// `TouchIdMissing` finding — independent of the sibling read's value.
+    fn read_pam_sudo_local(&self) -> Result<String, HostFileError> {
         Ok("auth       sufficient     pam_tid.so\n".to_string())
     }
 
@@ -190,6 +197,14 @@ impl HostMachine for DryRunHostMachine {
     }
 
     fn execute_keychain(&self, _op: &KeychainOp) -> Result<(), KeychainError> {
+        Ok(())
+    }
+
+    fn describe_pam(&self, op: &PamOp) -> String {
+        MacosHostMachine.describe_pam(op)
+    }
+
+    fn execute_pam(&self, _op: &PamOp) -> Result<(), HostFileError> {
         Ok(())
     }
 

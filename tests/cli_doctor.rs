@@ -692,9 +692,11 @@ fn doctor_pam_tid_present_no_finding() {
 
 #[test]
 fn doctor_pam_tid_absent_emits_info_finding() {
-    // Empty pam.d/sudo content → no pam_tid → one TouchIdMissing
-    // (info-tier). Operator-visible finding line names the exact
-    // edit needed to enable it.
+    // pam_tid absent from BOTH /etc/pam.d/sudo and /etc/pam.d/sudo_local
+    // → no pam_tid → one TouchIdMissing (info-tier). The reframed
+    // one-liner points the operator at `tenant setup` (the opt-in
+    // host-prep verb), not a raw `sed` command — Touch ID is an
+    // offer to accept, not a defect to "fix".
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubHostMachine::new().with_pam_sudo_content("");
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
@@ -704,12 +706,104 @@ fn doctor_pam_tid_absent_emits_info_finding() {
         "expected Touch-ID info finding; stdout={stdout:?}"
     );
     assert!(
-        stdout.contains("auth sufficient pam_tid.so"),
-        "finding should name the directive shape; stdout={stdout:?}"
+        stdout.contains("tenant setup"),
+        "finding should point at `tenant setup`; stdout={stdout:?}"
     );
     // Exactly one Touch-ID line (not duplicated).
     let count = stdout.matches("Touch ID for sudo not detected").count();
     assert_eq!(count, 1, "expected one Touch-ID line; stdout={stdout:?}");
+}
+
+#[test]
+fn doctor_pam_tid_in_sudo_local_only_no_finding() {
+    // Touch ID configured the OS-update-safe way — `pam_tid` in
+    // /etc/pam.d/sudo_local, NOT in /etc/pam.d/sudo. Doctor's
+    // detection consults BOTH files, so this is a healthy host: no
+    // TouchIdMissing finding. (Before dual-file detection this was a
+    // false positive — doctor only read /etc/pam.d/sudo.)
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new()
+        .with_pam_sudo_content("# sudo: auth account password session\n")
+        .with_pam_sudo_local_content("auth       sufficient     pam_tid.so\n");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("Touch ID for sudo not detected"),
+        "pam_tid in sudo_local must satisfy the check; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_pam_tid_in_neither_file_emits_finding() {
+    // Both files present but neither carries the directive → finding.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new()
+        .with_pam_sudo_content("# sudo: auth account password session\n")
+        .with_pam_sudo_local_content("# auth sufficient pam_smartcard.so\n");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("info: Touch ID for sudo not detected"),
+        "expected Touch-ID info finding; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_empty_sudo_local_is_not_an_error() {
+    // The adapter maps a missing /etc/pam.d/sudo_local to `Ok("")` (the
+    // common case — no local customizations). At the domain seam an
+    // empty body must parse as "no directive", NOT abort the audit: sudo
+    // has no pam_tid + sudo_local empty → the finding fires and doctor
+    // exits 0, proving the empty body flowed through has_pam_tid rather
+    // than surfacing as a host-config-read failure (which would be 74).
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new()
+        .with_pam_sudo_content("")
+        .with_pam_sudo_local_content("");
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(
+        code, 0,
+        "empty sudo_local must not abort; stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("info: Touch ID for sudo not detected"),
+        "expected Touch-ID info finding; stdout={stdout:?}"
+    );
+    assert!(
+        !stderr.contains("failed to read host config"),
+        "empty body is not a read failure; stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_pam_sudo_local_substrate_failure_routes_to_host_file_failed_frame() {
+    // A NON-ENOENT failure on read_pam_sudo_local (e.g. EACCES) is a
+    // genuine substrate failure — it propagates as `HostFileError::Fs`
+    // and routes to `doctor_host_file_failed` (EX_IOERR), naming the
+    // sudo_local path. sudo content carries no pam_tid so the check
+    // falls through to the (failing) sudo_local read rather than
+    // short-circuiting on sudo. Sibling of the read_pam_sudo failure pin.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let stub_exec = StubHostMachine::new()
+        .with_pam_sudo_content("")
+        .fail_next_pam_sudo_local(tenant::domain::HostFileError::Fs {
+            path: "/etc/pam.d/sudo_local".to_string(),
+            message: "permission denied".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
+    assert!(
+        stdout.is_empty(),
+        "substrate failure aborts before findings; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("failed to read host config"),
+        "stderr should frame as host-config-read failure; got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("/etc/pam.d/sudo_local"),
+        "stderr should name the failed path; got: {stderr:?}"
+    );
 }
 
 #[test]

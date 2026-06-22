@@ -20,8 +20,73 @@ use std::path::PathBuf;
 
 use tenant::adapters::macos::MacosHostMachine;
 use tenant::domain::{
-    AccountOp, AclMode, AclOp, FirewallOp, GroupId, HostMachine, ProfileOp, UserId,
+    AccountOp, AclMode, AclOp, FirewallOp, GroupId, HostMachine, PamOp, ProfileOp, UserId,
 };
+
+// `pam_tid_append_payload` is the pure idempotency + newline-glue
+// decision behind `execute_pam`. Unit-pinned here because the real
+// `execute_pam` / `append_privileged` substrate path (sudo tee -a) is
+// not reachable from the stub-driven E2E tests — this is the only
+// coverage of the "no duplicate" and "don't glue onto an unterminated
+// last line" guarantees.
+use tenant::adapters::macos::host_machine::pam_tid_append_payload;
+
+#[test]
+fn pam_payload_none_when_already_in_sudo() {
+    assert_eq!(
+        pam_tid_append_payload("auth sufficient pam_tid.so\n", ""),
+        None
+    );
+}
+
+#[test]
+fn pam_payload_none_when_already_in_sudo_local() {
+    assert_eq!(
+        pam_tid_append_payload("# sudo stack\n", "auth sufficient pam_tid.so\n"),
+        None
+    );
+}
+
+#[test]
+fn pam_payload_for_empty_sudo_local() {
+    assert_eq!(
+        pam_tid_append_payload("# sudo stack\n", "").as_deref(),
+        Some("auth sufficient pam_tid.so\n")
+    );
+}
+
+#[test]
+fn pam_payload_prepends_newline_when_unterminated() {
+    // sudo_local's last line lacks a trailing '\n' — the directive must
+    // NOT glue onto it (that would malform PAM + defeat the dup guard).
+    assert_eq!(
+        pam_tid_append_payload("", "# a hand-written comment").as_deref(),
+        Some("\nauth sufficient pam_tid.so\n")
+    );
+}
+
+#[test]
+fn pam_payload_no_extra_newline_when_terminated() {
+    assert_eq!(
+        pam_tid_append_payload("", "# a hand-written comment\n").as_deref(),
+        Some("auth sufficient pam_tid.so\n")
+    );
+}
+
+#[test]
+fn macos_describes_enable_touch_id_for_sudo() {
+    // Two-line "pretend-shell" mechanism: back up sudo_local, then
+    // append the canonical directive. The real `execute_pam` uses a
+    // stdin-fed `sudo tee -a` (no shell pipe) + an idempotency guard,
+    // but the describe renders the operator-legible shape — same
+    // honest-abstraction posture as `InstallAnchor`'s `tee < anchor.body`.
+    let s = MacosHostMachine;
+    assert_eq!(
+        s.describe_pam(&PamOp::EnableTouchIdForSudo),
+        "sudo cp /etc/pam.d/sudo_local /etc/pam.d/sudo_local.tenant-backup\n\
+         echo 'auth sufficient pam_tid.so' | sudo tee -a /etc/pam.d/sudo_local"
+    );
+}
 
 #[test]
 fn macos_describes_create_share_group() {

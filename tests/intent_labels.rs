@@ -14,7 +14,18 @@
 
 use std::path::PathBuf;
 
-use tenant::domain::{AccountOp, AclMode, AclOp, FirewallOp, GroupId, Op, ProfileOp, UserId};
+use tenant::domain::{
+    AccountOp, AclMode, AclOp, FirewallOp, GroupId, Op, PamOp, ProfileOp, UserId,
+};
+
+#[test]
+fn intent_enable_touch_id_for_sudo() {
+    let op = PamOp::EnableTouchIdForSudo;
+    assert_eq!(
+        Op::Pam(&op).intent_label(),
+        "Enable Touch ID for sudo in /etc/pam.d/sudo_local"
+    );
+}
 
 // ============================================================
 // Account-domain variants

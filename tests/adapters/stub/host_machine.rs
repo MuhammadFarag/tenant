@@ -11,7 +11,7 @@ use tenant::adapters::macos::MacosHostMachine;
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
     GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    KeychainPassword, PathKind, ProbeError, ProfileOp, TenantUserName,
+    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use tenant::profile::{ProfileError, default_profile_toml};
 
@@ -88,6 +88,13 @@ pub struct StubHostMachine {
 
     pam_sudo_failure: RefCell<Option<HostFileError>>,
 
+    /// Defaults to empty (no local customizations) so doctor's
+    /// `sudo OR sudo_local` check relies on `pam_sudo_content` alone
+    /// unless a test exercises the sudo_local path explicitly.
+    pam_sudo_local_content: RefCell<String>,
+
+    pam_sudo_local_failure: RefCell<Option<HostFileError>>,
+
     /// Defaults to "Status: Enabled" so tests that don't care about
     /// pf-enabled don't see spurious `PfDisabled` findings.
     pf_status_content: RefCell<String>,
@@ -157,6 +164,13 @@ pub struct StubHostMachine {
     /// pre-exec doctor pass runs its full probe set in existing tests;
     /// `with_sudo_session_cached(false)` exercises the quiet-skip gate.
     sudo_session_cached: Cell<bool>,
+
+    /// Records every `PamOp` passed to `execute_pam`, in call order.
+    /// Setup tests assert the Touch-ID op fired (or didn't) via `pam_ops()`.
+    pam_ops: RefCell<Vec<PamOp>>,
+
+    /// One-shot failure injection for `execute_pam`.
+    pam_failure: RefCell<Option<HostFileError>>,
 
     keychain_ops: RefCell<Vec<KeychainOp>>,
 
@@ -363,6 +377,16 @@ impl StubHostMachine {
         self
     }
 
+    pub fn with_pam_sudo_local_content(self, content: &str) -> Self {
+        *self.pam_sudo_local_content.borrow_mut() = content.to_string();
+        self
+    }
+
+    pub fn fail_next_pam_sudo_local(self, err: HostFileError) -> Self {
+        *self.pam_sudo_local_failure.borrow_mut() = Some(err);
+        self
+    }
+
     pub fn with_pf_status_content(self, content: &str) -> Self {
         *self.pf_status_content.borrow_mut() = content.to_string();
         self
@@ -495,6 +519,15 @@ impl StubHostMachine {
 
     pub fn keychain_ops(&self) -> Vec<KeychainOp> {
         self.keychain_ops.borrow().clone()
+    }
+
+    pub fn pam_ops(&self) -> Vec<PamOp> {
+        self.pam_ops.borrow().clone()
+    }
+
+    pub fn fail_next_pam(self, err: HostFileError) -> Self {
+        *self.pam_failure.borrow_mut() = Some(err);
+        self
     }
 
     pub fn fail_next_keychain_create(self, err: KeychainError) -> Self {
@@ -725,6 +758,13 @@ impl HostMachine for StubHostMachine {
         Ok(self.pam_sudo_content.borrow().clone())
     }
 
+    fn read_pam_sudo_local(&self) -> Result<String, HostFileError> {
+        if let Some(err) = self.pam_sudo_local_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self.pam_sudo_local_content.borrow().clone())
+    }
+
     fn read_pf_status(&self) -> Result<String, FirewallError> {
         if let Some(err) = self.pf_status_failure.borrow_mut().take() {
             return Err(err);
@@ -893,6 +933,18 @@ impl HostMachine for StubHostMachine {
 
     fn describe_keychain(&self, op: &KeychainOp) -> String {
         MacosHostMachine.describe_keychain(op)
+    }
+
+    fn describe_pam(&self, op: &PamOp) -> String {
+        MacosHostMachine.describe_pam(op)
+    }
+
+    fn execute_pam(&self, op: &PamOp) -> Result<(), HostFileError> {
+        self.pam_ops.borrow_mut().push(op.clone());
+        if let Some(err) = self.pam_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {

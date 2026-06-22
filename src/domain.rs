@@ -15,7 +15,7 @@ pub use host_machine::{HostMachine, WritableOp};
 pub use host_user_directory::HostUserDirectory;
 pub use ids::{GroupId, GroupName, HostUserName, KeychainPassword, TenantUserName, UserId};
 pub use ops::{
-    AccessMode, AccessOutcome, AccountOp, AclMode, AclOp, FirewallOp, KeychainOp, Op, PathKind,
-    ProfileOp,
+    AccessMode, AccessOutcome, AccountOp, AclMode, AclOp, FirewallOp, KeychainOp, Op, PamOp,
+    PathKind, ProfileOp,
 };
 pub(crate) use tenants::Tenants;

@@ -144,8 +144,17 @@ impl<'a> Tenants<'a> {
         &self,
         reporter: &mut Reporter,
     ) -> Result<Option<Finding>, HostFileError> {
-        let pam_config = self.machine.read_pam_sudo()?;
-        if has_pam_tid(&pam_config) {
+        // Detection consults BOTH /etc/pam.d/sudo and the OS-update-safe
+        // /etc/pam.d/sudo_local. Touch ID configured the sanctioned way
+        // lands in sudo_local; reading only sudo would false-positive
+        // `TouchIdMissing` on a correctly-set-up modern host. Reads are
+        // short-circuited: a directive in sudo proves the check without
+        // touching sudo_local, so a (non-ENOENT) sudo_local read failure
+        // can't abort an already-satisfied audit.
+        if has_pam_tid(&self.machine.read_pam_sudo()?) {
+            return Ok(None);
+        }
+        if has_pam_tid(&self.machine.read_pam_sudo_local()?) {
             return Ok(None);
         }
         let finding = Finding::TouchIdMissing;

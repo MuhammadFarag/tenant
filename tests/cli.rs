@@ -101,6 +101,7 @@ fn each_verb_help_includes_long_body() {
         ("mode", "non-persistent"),
         ("shell", "login shell"),
         ("doctor", "ground truth"),
+        ("setup", "no pre-exec doctor pass"),
     ];
     for (verb, needle) in cases {
         let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &[verb, "--help"]);
@@ -110,6 +111,18 @@ fn each_verb_help_includes_long_body() {
             "{verb} --help missing {needle:?}: {stdout}"
         );
     }
+}
+
+#[test]
+fn setup_takes_no_positional_argument() {
+    // `setup` is host-wide — unlike create/destroy/mode/etc. it accepts
+    // NO tenant name. A stray positional must be a clap parse error
+    // (exit 2), not silently ignored.
+    let (code, _stdout, stderr) = run_with(StubUserDirectory::default(), &["setup", "foo"]);
+    assert_eq!(
+        code, 2,
+        "stray positional should be a parse error; stderr={stderr:?}"
+    );
 }
 
 #[test]

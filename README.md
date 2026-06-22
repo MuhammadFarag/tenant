@@ -105,6 +105,7 @@ tenant shell dev --mode install -- bash -c 'curl https://example.com/install.sh 
 | `inbound <name> restricted\|permissive` | Set the tenant's loopback inbound posture. `restricted` (the default) allows inbound only on profile-declared ports; `permissive` temporarily opens all ports — the localhost-redirect OAuth window. |
 | `reload [<name>]` | Reapply the profile to host state. No argument walks every tenant. |
 | `doctor [<name>]` | Read-only audit. Surfaces filesystem exposure, share drift, firewall state, and sudoers posture. `--strict` exits non-zero on findings. |
+| `setup` | Prepare this host to run tenants (opt-in, host-wide; no tenant argument). Today offers to enable Touch ID for sudo. The per-item prompt defaults to no; `--yes` accepts non-interactively, `--dry-run` previews. |
 
 All verbs accept `--verbose` for plan and step-level detail, and `--dry-run` for a no-substrate preview. Mutating verbs prompt for confirmation by default; `--yes` skips the prompt.
 
@@ -136,7 +137,7 @@ tenant_path = "$HOME/projects/myrepo"
 - **macOS**, currently tested on Darwin 25.x. Tooling assumes `dseditgroup`, `sysadminctl`, `dscl`, `pfctl`, and the absolute paths `/bin/test`, `/bin/mkdir`, `/bin/ln`, `/usr/bin/readlink` are present at their canonical locations.
 - **Operator account in the `admin` group**, so `sudo` can prompt and `sudo -u <tenant>` is permitted.
 - **PF enabled** (`sudo pfctl -e`). `tenant create` enables it on first run.
-- **Touch ID for sudo** is recommended. Add `auth sufficient pam_tid.so` to `/etc/pam.d/sudo`. `tenant doctor` reports if it is missing.
+- **Touch ID for sudo** is recommended (faster prompts + a hardware auth factor). Run `tenant setup` to enable it — it appends `auth sufficient pam_tid.so` to `/etc/pam.d/sudo_local`, the OS-update-safe customization file (`/etc/pam.d/sudo` includes it, and direct edits there are clobbered by macOS updates). `tenant doctor` reports if it is missing; declining is a valid choice.
 
 ## Building from source
 

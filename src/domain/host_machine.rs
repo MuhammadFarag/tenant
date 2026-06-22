@@ -1,6 +1,6 @@
 use super::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostUserName, KeychainError, KeychainOp, KeychainPassword, Op,
+    GroupName, HostFileError, HostUserName, KeychainError, KeychainOp, KeychainPassword, Op, PamOp,
     PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::profile::ProfileError;
@@ -50,6 +50,9 @@ pub trait HostMachine {
     fn describe_keychain(&self, op: &KeychainOp) -> String;
     fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError>;
 
+    fn describe_pam(&self, op: &PamOp) -> String;
+    fn execute_pam(&self, op: &PamOp) -> Result<(), HostFileError>;
+
     fn probe_access_as_tenant(
         &self,
         name: &TenantUserName,
@@ -62,6 +65,14 @@ pub trait HostMachine {
     fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError>;
 
     fn read_pam_sudo(&self) -> Result<String, HostFileError>;
+
+    /// Reads `/etc/pam.d/sudo_local` — the OS-update-safe customization
+    /// file that `/etc/pam.d/sudo` includes at the top of its stack on
+    /// modern macOS. Touch ID configured the sanctioned way lands here,
+    /// so doctor's detection must consult it alongside `read_pam_sudo`.
+    /// An absent file is non-error: returns `Ok(String::new())` (the
+    /// file is optional; absence just means "no local customizations").
+    fn read_pam_sudo_local(&self) -> Result<String, HostFileError>;
 
     fn read_pf_status(&self) -> Result<String, FirewallError>;
 

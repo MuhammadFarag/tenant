@@ -6,16 +6,38 @@ use std::fs;
 use std::io;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError,
     FirewallOp, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    KeychainPassword, PathKind, ProbeError, ProfileOp, TenantUserName,
+    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
+
+/// `/etc/pam.d/sudo` — the system PAM stack for sudo. On modern macOS it
+/// `include`s `sudo_local` as the first directive of its auth stack;
+/// tenant never edits this file (OS updates overwrite it), only reads it
+/// for detection.
+const PAM_SUDO: &str = "/etc/pam.d/sudo";
+
+/// `/etc/pam.d/sudo_local` — the OS-update-safe customization file
+/// `/etc/pam.d/sudo` includes. The Touch-ID directive lands here.
+const PAM_SUDO_LOCAL: &str = "/etc/pam.d/sudo_local";
+
+/// Fixed backup path written before `setup` mutates `sudo_local`.
+/// Parallels `PF_CONF_BACKUP` — deterministic, overwritten each apply.
+const PAM_SUDO_LOCAL_BACKUP: &str = "/etc/pam.d/sudo_local.tenant-backup";
+
+/// The canonical Touch-ID-for-sudo directive. `sufficient` short-circuits
+/// the auth stack on a Touch ID hit and falls through to password on a
+/// miss. Single source so `describe_pam`'s echo and `execute_pam`'s
+/// appended bytes can't drift; `doctor::has_pam_tid` is whitespace-
+/// tolerant so the single-space form is detected identically to the
+/// tab-aligned form an operator might hand-write.
+const PAM_TID_DIRECTIVE: &str = "auth sufficient pam_tid.so";
 
 pub struct MacosHostMachine;
 
@@ -386,10 +408,24 @@ impl HostMachine for MacosHostMachine {
 
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {
         // /etc/pam.d/sudo is mode 0644 — direct fs read, no sudo.
-        fs::read_to_string("/etc/pam.d/sudo").map_err(|e| HostFileError::Fs {
-            path: "/etc/pam.d/sudo".to_string(),
+        fs::read_to_string(PAM_SUDO).map_err(|e| HostFileError::Fs {
+            path: PAM_SUDO.to_string(),
             message: e.to_string(),
         })
+    }
+
+    fn read_pam_sudo_local(&self) -> Result<String, HostFileError> {
+        // /etc/pam.d/sudo_local is mode 0644 — direct fs read, no sudo.
+        // Absent is the common case (no local customizations applied) and
+        // is NOT an error: an empty body parses as "no pam_tid directive".
+        match fs::read_to_string(PAM_SUDO_LOCAL) {
+            Ok(body) => Ok(body),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(HostFileError::Fs {
+                path: PAM_SUDO_LOCAL.to_string(),
+                message: e.to_string(),
+            }),
+        }
     }
 
     fn read_pf_status(&self) -> Result<String, FirewallError> {
@@ -712,6 +748,54 @@ impl HostMachine for MacosHostMachine {
         }
     }
 
+    fn describe_pam(&self, op: &PamOp) -> String {
+        // "Pretend-shell" mechanism (same posture as `InstallAnchor`'s
+        // `tee < anchor.body`): the real `execute_pam` backs up via
+        // `sudo cp`, guards idempotency, and appends via a stdin-fed
+        // `sudo tee -a` (no shell pipe). The echo shows the legible
+        // two-step shape an operator could run by hand.
+        match op {
+            PamOp::EnableTouchIdForSudo => format!(
+                "sudo cp {PAM_SUDO_LOCAL} {PAM_SUDO_LOCAL_BACKUP}\n\
+                 echo '{PAM_TID_DIRECTIVE}' | sudo tee -a {PAM_SUDO_LOCAL}"
+            ),
+        }
+    }
+
+    fn execute_pam(&self, op: &PamOp) -> Result<(), HostFileError> {
+        match op {
+            PamOp::EnableTouchIdForSudo => {
+                // A failed `sudo` read defaults to empty so detection still
+                // falls through to sudo_local; the sudo_local read failure
+                // (non-ENOENT) propagates. Both feed the pure
+                // `pam_tid_append_payload` decision (idempotency +
+                // newline-glue guard).
+                let sudo = self.read_pam_sudo().unwrap_or_default();
+                let sudo_local = self.read_pam_sudo_local()?;
+                let Some(payload) = pam_tid_append_payload(&sudo, &sudo_local) else {
+                    // Already enabled in either file — no-op so a duplicate
+                    // directive never accumulates (the verb offers
+                    // unconditionally; this is the substrate-side guard).
+                    return Ok(());
+                };
+                // Back up sudo_local before mutating, if it exists (fresh
+                // hosts have no sudo_local — nothing to back up; `tee -a`
+                // below creates it).
+                if Path::new(PAM_SUDO_LOCAL).exists() {
+                    spawn_host_file(&[
+                        "sudo".into(),
+                        "cp".into(),
+                        PAM_SUDO_LOCAL.into(),
+                        PAM_SUDO_LOCAL_BACKUP.into(),
+                    ])?;
+                }
+                // Append-only via stdin-fed `sudo tee -a` (no shell pipe);
+                // creates sudo_local if absent, appends if present.
+                append_privileged(PAM_SUDO_LOCAL, &payload)
+            }
+        }
+    }
+
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         // Exit 0 ⇒ member; any non-zero (host absent, group absent) ⇒
         // false — dseditgroup conflates these and the idempotence
@@ -965,6 +1049,79 @@ fn spawn_firewall(argv: &[String]) -> Result<(), FirewallError> {
         return Err(FirewallError::NonZero {
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Spawn a privileged host-config command, mapping failure to
+/// `HostFileError` (the shared host-config substrate error). Sibling of
+/// `spawn_firewall`/`spawn_capturing` for the `PamOp` substrate.
+fn spawn_host_file(argv: &[String]) -> Result<(), HostFileError> {
+    let (program, rest) = argv
+        .split_first()
+        .ok_or_else(|| HostFileError::Spawn(io::Error::other("argv is empty")))?;
+    let output = Command::new(program)
+        .args(rest)
+        .output()
+        .map_err(HostFileError::Spawn)?;
+    if !output.status.success() {
+        return Err(HostFileError::NonZero {
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Decide what to append to `/etc/pam.d/sudo_local` to enable Touch ID.
+/// `None` ⇒ `pam_tid` is already present in `sudo` OR `sudo_local`, so
+/// enabling is a no-op (idempotent — never appends a duplicate). `Some`
+/// payload ⇒ the exact bytes to append, with a leading-newline guard so a
+/// final line lacking a trailing `\n` isn't glued onto the directive
+/// (which would both malform the PAM stack and defeat the duplicate guard
+/// on a later re-run). Pure so the idempotency + newline logic is unit-
+/// testable without the substrate; `pub` for the pin in
+/// `tests/macos_host_machine.rs`.
+pub fn pam_tid_append_payload(sudo: &str, sudo_local: &str) -> Option<String> {
+    if crate::doctor::has_pam_tid(sudo) || crate::doctor::has_pam_tid(sudo_local) {
+        return None;
+    }
+    let lead = if !sudo_local.is_empty() && !sudo_local.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    Some(format!("{lead}{PAM_TID_DIRECTIVE}\n"))
+}
+
+/// Append `payload` (verbatim — the caller owns any leading/trailing
+/// newlines, see `pam_tid_append_payload`) to a root-owned file via
+/// `sudo tee -a`, feeding the bytes through the child's stdin so no shell
+/// pipe is needed. Creates the file if absent.
+fn append_privileged(path: &str, payload: &str) -> Result<(), HostFileError> {
+    let mut child = Command::new("sudo")
+        .args(["tee", "-a", path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(HostFileError::Spawn)?;
+    // Take + drop the stdin handle so `tee` sees EOF before we wait.
+    // (`Child::wait` also closes stdin, but taking it here makes the
+    // EOF-before-wait intent explicit and robust against future refactors.)
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| HostFileError::Spawn(io::Error::other("failed to open tee stdin")))?;
+    stdin
+        .write_all(payload.as_bytes())
+        .map_err(HostFileError::Spawn)?;
+    drop(stdin);
+    let status = child.wait().map_err(HostFileError::Spawn)?;
+    if !status.success() {
+        return Err(HostFileError::NonZero {
+            code: status.code().unwrap_or(-1),
+            stderr: String::new(),
         });
     }
     Ok(())

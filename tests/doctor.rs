@@ -695,37 +695,43 @@ Alternative
 
 #[test]
 fn guidance_touch_id_missing_byte_form() {
-    // Info-toned "why" (recommendation, not correctness drift); no
-    // Alternative (no meaningful different command exists in this
-    // project's threat model — either you want Touch ID or you don't).
+    // Info-toned "why" framed as an OFFER (opt-in host prep), not a
+    // defect-fix: Recommended fix points at the `tenant setup` verb,
+    // and a distinct Alternative legitimizes declining. Dual-file copy
+    // names both /etc/pam.d/sudo and /etc/pam.d/sudo_local.
     let f = Finding::TouchIdMissing;
     let expected = "Why this matters
-  /etc/pam.d/sudo doesn't enable Touch ID for sudo authentication.
-  This isn't a correctness drift \u{2014} sudo still works via password \u{2014}
-  but it's a recommendation aligned with the project's locked
+  Neither /etc/pam.d/sudo nor /etc/pam.d/sudo_local enables Touch ID for
+  sudo. This isn't a correctness drift \u{2014} sudo still works via password
+  \u{2014} it's an optional recommendation aligned with the project's locked
   no-NOPASSWD-sudoers stance. Touch ID makes sudo prompts faster (a
   fingerprint beats typing a password) AND adds a second auth factor
   (fingerprint plus sudoers membership) instead of just one (sudoers
-  membership). Info-tier because absence doesn't compromise isolation;
-  it's an ergonomics + defense-in-depth gap.
+  membership). Info-tier because absence doesn't compromise isolation,
+  and declining is a valid choice \u{2014} this is an offer, not a defect.
 
 Recommended fix
-  sudo sed -i.bak '/^auth.*pam_opendirectory/i auth       sufficient     pam_tid.so' /etc/pam.d/sudo
-  Inserts an `auth sufficient pam_tid.so` line before the existing
-  pam_opendirectory module. `sufficient` is the control type the
-  threat model expects \u{2014} a Touch ID hit short-circuits the rest of
-  the auth stack; a Touch ID miss falls through to password.
+  tenant setup
+  Offers to append `auth sufficient pam_tid.so` to /etc/pam.d/sudo_local
+  \u{2014} the OS-update-safe customization file that /etc/pam.d/sudo
+  includes (editing /etc/pam.d/sudo directly is clobbered by macOS
+  updates). `sufficient` short-circuits the auth stack on a Touch ID
+  hit and falls through to password on a miss. You'll be asked for your
+  password once to apply it (Touch ID isn't on yet).
 
 Side-effects to know about
   \u{2022} Next sudo invocation pops a Touch ID prompt instead of (or
-    before) the password prompt. Touch your sensor on the Touch Bar
-    or Magic Keyboard within ~10 seconds.
+    before) the password prompt. Touch your sensor within ~10 seconds.
   \u{2022} If Touch ID hardware isn't available or isn't registered (System
     Settings \u{2192} Touch ID & Password), pam_tid.so falls through to the
     next module \u{2014} sudo still works, just without the short-circuit.
-  \u{2022} The /etc/pam.d/sudo.bak backup file is created by sed -i.bak;
-    remove it (`sudo rm /etc/pam.d/sudo.bak`) once the new behavior is
-    verified.";
+  \u{2022} Inside tmux or screen, the Touch ID prompt won't appear without
+    the third-party pam_reattach module.
+
+Alternative
+  Ignore this finding if you prefer typing your password. It stays an
+  info-tier note, never trips `--strict`, and `tenant setup` will offer
+  again whenever you change your mind.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
