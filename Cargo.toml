@@ -7,6 +7,8 @@ description = "A macOS CLI for provisioning isolated user accounts with per-tena
 repository = "https://github.com/MuhammadFarag/tenant"
 readme = "README.md"
 license = "Apache-2.0"
+keywords = ["macos", "cli", "sandbox", "tenant", "pf"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
