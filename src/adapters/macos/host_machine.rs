@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError,
-    FirewallOp, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
+    FirewallOp, GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError,
+    KeychainOp, KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
@@ -96,6 +96,9 @@ impl HostMachine for MacosHostMachine {
                      sudo chmod {mode:04o} {path}\n\
                      sudo chmod -R +a \"{entry}\" {path}"
                 )
+            }
+            AccountOp::EnsurePrimaryGroup { name, gid } => {
+                format!("sudo dscl . -create /Users/{name} PrimaryGroupID {gid}")
             }
         }
     }
@@ -216,6 +219,40 @@ impl HostMachine for MacosHostMachine {
         fs::read_to_string(&path).map_err(|e| ProfileError {
             message: e.to_string(),
         })
+    }
+
+    fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
+        // `dscl . -read /Groups/<group> PrimaryGroupID` prints
+        // `PrimaryGroupID: <n>`; the trailing whitespace-delimited token
+        // is the gid. No `sudo` — group records are world-readable on
+        // macOS, mirroring `MacosUserDirectory::has_group`/`uid_for`. An
+        // unparseable record (group absent / OD breakage) is a hard error,
+        // not a fabricated gid, so a missing share group can't silently
+        // re-point the tenant's primary group at a wrong/default value.
+        let path = format!("/Groups/{}", group.as_str());
+        let output = Command::new("dscl")
+            .args([".", "-read", &path, "PrimaryGroupID"])
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        if !output.status.success() {
+            return Err(ProbeError::NonZero {
+                code: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .split_whitespace()
+            .next_back()
+            .and_then(|tok| tok.parse::<u32>().ok())
+            .map(GroupId)
+            .ok_or_else(|| ProbeError::NonZero {
+                code: -1,
+                stderr: format!(
+                    "unparseable PrimaryGroupID for group '{}': {stdout:?}",
+                    group.as_str()
+                ),
+            })
     }
 
     fn describe_firewall(&self, op: &FirewallOp) -> String {
@@ -1261,6 +1298,15 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
                  execute via execute_ensure_cowork_dir, not account_argv"
             )
         }
+        AccountOp::EnsurePrimaryGroup { name, gid } => vec![
+            "sudo".into(),
+            "dscl".into(),
+            ".".into(),
+            "-create".into(),
+            format!("/Users/{name}"),
+            "PrimaryGroupID".into(),
+            gid.to_string(),
+        ],
     }
 }
 

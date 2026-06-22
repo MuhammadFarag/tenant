@@ -1,7 +1,7 @@
 use super::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostUserName, KeychainError, KeychainOp, KeychainPassword, Op, PamOp,
-    PathKind, ProbeError, ProfileOp, TenantUserName,
+    GroupId, GroupName, HostFileError, HostUserName, KeychainError, KeychainOp, KeychainPassword,
+    Op, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::profile::ProfileError;
 
@@ -25,6 +25,17 @@ pub trait HostMachine {
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), ProfileError>;
 
     fn read_profile(&self, name: &TenantUserName) -> Result<String, ProfileError>;
+
+    /// Reads the primary gid of the named share group via `dscl . -read
+    /// /Groups/<group> PrimaryGroupID`. Full reapply calls this to
+    /// resolve the gid for `AccountOp::EnsurePrimaryGroup` before
+    /// constructing the op: the tenant's primary group must match the
+    /// LIVE share-group record, whose gid was allocated at create and is
+    /// not derivable from the name (UID/GID may diverge). Unprivileged
+    /// read (group records are world-readable on macOS), so it is safe to
+    /// run pre-prompt during plan-build without tripping the uncached-sudo
+    /// path. An absent group or unparseable record surfaces as `ProbeError`.
+    fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError>;
 
     fn read_pf_conf(&self) -> Result<String, FirewallError>;
 

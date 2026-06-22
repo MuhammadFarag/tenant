@@ -1602,10 +1602,16 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    // Covers both reapply probes that surface as `ModeError::Probe`: the
+    // share-symlink `tenant_path_kind` filesystem probe (mode/inbound/
+    // reload) and reload's `read_share_group_gid` directory read. Phrased
+    // as "host state" rather than "filesystem" so it's honest for the
+    // directory-services read too; the `ProbeError` detail names the
+    // specific failing command.
     pub fn mode_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
         let _ = writeln!(
             self.terminal.stderr,
-            "tenant: failed to probe tenant filesystem state for '{name}': {err}"
+            "tenant: failed to probe host state for '{name}': {err}"
         );
     }
 

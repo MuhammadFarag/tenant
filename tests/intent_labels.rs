@@ -68,6 +68,30 @@ fn intent_create_tenant_user() {
 }
 
 #[test]
+fn intent_ensure_primary_group() {
+    let op = AccountOp::EnsurePrimaryGroup {
+        name: "dev".into(),
+        gid: GroupId(600),
+    };
+    assert_eq!(
+        Op::Account(&op).intent_label(),
+        "Set tenant 'dev' primary group to GID 600"
+    );
+}
+
+#[test]
+fn business_ensure_primary_group() {
+    let op = AccountOp::EnsurePrimaryGroup {
+        name: "dev".into(),
+        gid: GroupId(600),
+    };
+    assert_eq!(
+        Op::Account(&op).business_label(),
+        "Tenant 'dev' primary group set to GID 600"
+    );
+}
+
+#[test]
 fn intent_delete_tenant_user() {
     let op = AccountOp::DeleteTenantUser { name: "dev".into() };
     assert_eq!(

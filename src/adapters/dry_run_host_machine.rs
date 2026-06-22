@@ -1,7 +1,7 @@
 use crate::adapters::macos::MacosHostMachine;
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
+    GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
     KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::profile::{ProfileError, default_profile_toml};
@@ -40,6 +40,12 @@ impl HostMachine for DryRunHostMachine {
     /// matches the operator's mental model of "the file would now exist".
     fn read_profile(&self, _name: &TenantUserName) -> Result<String, ProfileError> {
         Ok(default_profile_toml())
+    }
+    /// Canonical tenant-floor gid placeholder so the `--dry-run` reload
+    /// preview renders a representative `EnsurePrimaryGroup` line without
+    /// reading real dscl state.
+    fn read_share_group_gid(&self, _group: &GroupName) -> Result<GroupId, ProbeError> {
+        Ok(GroupId(crate::allocation::TENANT_UID_FLOOR))
     }
     /// Empty pf.conf so the plan focuses on what tenant adds, not what's
     /// already there.

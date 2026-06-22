@@ -126,6 +126,18 @@ fn macos_describes_create_tenant_user() {
 }
 
 #[test]
+fn macos_describes_ensure_primary_group() {
+    let s = MacosHostMachine;
+    assert_eq!(
+        s.describe_account(&AccountOp::EnsurePrimaryGroup {
+            name: "dev".into(),
+            gid: GroupId(600)
+        }),
+        "sudo dscl . -create /Users/dev PrimaryGroupID 600",
+    );
+}
+
+#[test]
 fn macos_describes_delete_tenant_user() {
     let s = MacosHostMachine;
     assert_eq!(

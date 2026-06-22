@@ -313,6 +313,31 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
 }
 
 #[test]
+fn mode_light_does_not_reassert_primary_group() {
+    // Primary-group reassertion (OS-update resilience, finding #26) is a
+    // Full/reload-only convergence op, NOT part of Light reapply: it sits
+    // with the cowork/recursive-grant passes Light skips, and convergence
+    // is reload's "apply everything" role. mode neither reads the gid nor
+    // emits the op. The exact-account_ops pin above already enforces this;
+    // this names the intent explicitly — preload a gid so the point is
+    // "even with a gid available, Light neither reads nor reasserts it".
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_share_group_gid("dev-tenant-share", 742);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !exec
+            .account_ops()
+            .iter()
+            .any(|op| matches!(op, AccountOp::EnsurePrimaryGroup { .. })),
+        "mode (Light) must NOT reassert primary group: {:?}",
+        exec.account_ops()
+    );
+}
+
+#[test]
 fn mode_does_not_emit_restore_config_op() {
     // Negative pin: no auto-recovery on Reload failure. The
     // create-side restore-on-reload-failure sequence

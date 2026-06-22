@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tenant::adapters::macos::MacosHostMachine;
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
+    GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
     KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use tenant::profile::{ProfileError, default_profile_toml};
@@ -57,6 +57,18 @@ pub struct StubHostMachine {
     /// side effects on a real-host fs; tests assert via `firewall_ops()`
     /// rather than re-reading conf state.
     pf_conf_state: RefCell<String>,
+
+    /// Preloaded share-group gids for `read_share_group_gid`, populated by
+    /// the `with_share_group_gid` builder (added in Cycle 3, when the
+    /// resolved-gid test first needs a non-default value). Unmatched groups
+    /// fall back to the canonical tenant-floor `GroupId(600)` so Full-
+    /// reapply tests that don't assert the gid value stay stable.
+    share_group_gids: RefCell<HashMap<String, GroupId>>,
+
+    /// One-shot failure injection for `read_share_group_gid`, populated by
+    /// the `fail_next_share_group_gid` builder (added in Cycle 3 for the
+    /// gid-read-failure path).
+    share_group_gid_failure: RefCell<Option<ProbeError>>,
 
     /// Override for what `ProfileOp::Create` writes. Production always
     /// writes `default_profile_toml()`; this lets create-flow tests
@@ -296,6 +308,25 @@ impl StubHostMachine {
         self.profile_state
             .borrow_mut()
             .insert(name.to_string(), content.to_string());
+        self
+    }
+
+    /// Preload the gid `read_share_group_gid` returns for `group` (the
+    /// `<name>-tenant-share` group). Lets a reload test assert that the
+    /// resolved gid — not a hardcoded constant — flows into
+    /// `EnsurePrimaryGroup`, and that multi-tenant reload uses each
+    /// tenant's own gid.
+    pub fn with_share_group_gid(self, group: &str, gid: u32) -> Self {
+        self.share_group_gids
+            .borrow_mut()
+            .insert(group.to_string(), GroupId(gid));
+        self
+    }
+
+    /// One-shot failure for the next `read_share_group_gid` call —
+    /// exercises the Full-reapply gid-read failure path.
+    pub fn fail_next_share_group_gid(self, err: ProbeError) -> Self {
+        *self.share_group_gid_failure.borrow_mut() = Some(err);
         self
     }
 
@@ -687,6 +718,22 @@ impl HostMachine for StubHostMachine {
                 message: format!("profile '{name}' not found"),
             }),
         }
+    }
+
+    fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
+        // One-shot failure injection first (Cycle 3 failure-path test),
+        // then a preloaded gid (`with_share_group_gid`), else the canonical
+        // tenant-floor default so existing Full-reapply tests that don't
+        // care about the gid value see a stable `EnsurePrimaryGroup`.
+        if let Some(err) = self.share_group_gid_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self
+            .share_group_gids
+            .borrow()
+            .get(group.as_str())
+            .copied()
+            .unwrap_or(GroupId(600)))
     }
 
     fn read_pf_conf(&self) -> Result<String, FirewallError> {

@@ -475,7 +475,11 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
     // user's home directory chowns to `dev-tenant-share` (sysadminctl
     // chowns the home dir to the group named by `-GID` at creation
     // time); this test pins both the order and the operand values via
-    // the ✓ stream + `account_ops()` assertions below.
+    // the ✓ stream + `account_ops()` assertions below. Create sets the
+    // primary group ONCE here (CreateTenantUser `-GID`); it must NOT also
+    // emit a separate `EnsurePrimaryGroup` — that is reload's Full-reapply
+    // convergence op (finding #26). The exact `account_ops()` list below
+    // (which has no EnsurePrimaryGroup) enforces the no-double-set.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);

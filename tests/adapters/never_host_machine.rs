@@ -2,7 +2,7 @@
 
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
-    GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
+    GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
     KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 
@@ -32,6 +32,9 @@ impl HostMachine for NeverHostMachine {
     }
     fn read_profile(&self, name: &TenantUserName) -> Result<String, tenant::profile::ProfileError> {
         panic!("host machine unexpectedly invoked (read_profile) with name: {name:?}");
+    }
+    fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
+        panic!("host machine unexpectedly invoked (read_share_group_gid) with group: {group:?}");
     }
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
         panic!("host machine unexpectedly invoked (read_pf_conf)");

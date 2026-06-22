@@ -134,6 +134,21 @@ pub enum AccountOp {
         group: GroupName,
         mode: u32,
     },
+
+    /// Re-assert the tenant user's primary group to its share group.
+    /// An OS update can "normalize" a non-standard local account's
+    /// `PrimaryGroupID` back to macOS's default `staff` (20) — which both
+    /// breaks the tenant's access to its own shares + cowork dir AND
+    /// grants it `staff`'s reach into the host home. `gid` is resolved
+    /// from the live share-group record at plan-build time
+    /// (`HostMachine::read_share_group_gid`); the substrate `dscl
+    /// . -create` overwrites idempotently regardless of the current
+    /// value. Set once at create via `CreateTenantUser`, so this is the
+    /// convergence (Full reapply) op, not a first-apply one.
+    EnsurePrimaryGroup {
+        name: TenantUserName,
+        gid: GroupId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,6 +416,9 @@ fn account_business_label(op: &AccountOp) -> String {
         AccountOp::EnsureCoworkDir { path, .. } => {
             format!("Co-working directory ensured at {}", path.display())
         }
+        AccountOp::EnsurePrimaryGroup { name, gid } => {
+            format!("Tenant '{name}' primary group set to GID {gid}")
+        }
     }
 }
 
@@ -530,6 +548,9 @@ fn account_intent_label(op: &AccountOp) -> String {
         }
         AccountOp::EnsureCoworkDir { path, .. } => {
             format!("Ensure co-working directory at {}", path.display())
+        }
+        AccountOp::EnsurePrimaryGroup { name, gid } => {
+            format!("Set tenant '{name}' primary group to GID {gid}")
         }
     }
 }

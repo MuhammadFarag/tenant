@@ -15,7 +15,8 @@
 use std::path::PathBuf;
 
 use tenant::domain::{
-    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, PathKind, UserId,
+    AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, GroupId, PathKind,
+    ProbeError, UserId,
 };
 
 mod adapters;
@@ -146,6 +147,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
                 "Firewall anchor installed at /etc/pf.anchors/tenant-dev",
                 "Firewall ruleset reloaded",
                 "Host 'operator' added to share group 'dev-tenant-share'",
+                "Tenant 'dev' primary group set to GID 600",
                 "Co-working directory ensured at /Users/Shared/tenants/dev",
                 "ACL granted to group 'dev-tenant-share' on /tmp",
                 "Symlink /Users/dev/src → /tmp installed",
@@ -251,6 +253,14 @@ fn reload_verbose_plan_block_includes_share_ops() {
     assert!(
         stdout.contains("      sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
         "plan must list InstallAnchor shell line: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Set tenant 'dev' primary group to GID 600"),
+        "plan must list EnsurePrimaryGroup intent: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("      sudo dscl . -create /Users/dev PrimaryGroupID 600\n"),
+        "plan must list EnsurePrimaryGroup shell line: {stdout:?}"
     );
     assert!(
         stdout.contains("Grant 'dev-tenant-share' ACL access to /tmp"),
@@ -604,6 +614,35 @@ fn reload_no_arg_continues_on_per_tenant_failure() {
 }
 
 #[test]
+fn reload_all_continues_when_one_tenants_share_group_gid_read_fails() {
+    // The gid-read failure channel (finding #26) must also be
+    // continue-on-failure in the multi-tenant walk, not abort it. Both
+    // tenants have profiles; the one-shot `fail_next_share_group_gid`
+    // trips the FIRST tenant processed (alphabetical: 'dev'), so 'dev'
+    // fails its plan-build and 'staging' continues and succeeds.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_existing_profile("staging", &tenant::profile::default_profile_toml())
+        .fail_next_share_group_gid(ProbeError::NonZero {
+            code: 1,
+            stderr: "eDSRecordNotFound".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
+    assert_eq!(
+        code, 74,
+        "EX_IOERR expected when a per-tenant gid read fails"
+    );
+    assert!(
+        stderr.contains("failed to probe host state for 'dev'"),
+        "expected dev's gid-read failure frame: {stderr:?}"
+    );
+    assert!(
+        stdout.contains("Reloaded 1 of 2 tenant(s); 1 failed.\n"),
+        "walk continues past the gid-read failure: {stdout:?}"
+    );
+}
+
+#[test]
 fn reload_no_arg_emits_no_op_summary_when_no_tenants() {
     let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["reload"]);
     assert_eq!(code, 0);
@@ -635,6 +674,13 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
                 group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
+            // Tenant-side membership catch-up sits beside the host-side
+            // one: re-assert the tenant's primary group (OS-update
+            // resilience, finding #26) before the filesystem fixups.
+            AccountOp::EnsurePrimaryGroup {
+                name: "dev".into(),
+                gid: GroupId(600),
+            },
             AccountOp::EnsureCoworkDir {
                 path: PathBuf::from("/Users/Shared/tenants/dev"),
                 owner: "operator".into(),
@@ -642,7 +688,7 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
                 mode: 0o2770,
             },
         ],
-        "reload fires AddHost + cowork-dir catch-up unconditionally (substrate is idempotent, not Tenants-side conditional)"
+        "reload fires AddHost + primary-group reassert + cowork-dir catch-up unconditionally (substrate is idempotent, not Tenants-side conditional)"
     );
 }
 
@@ -666,6 +712,10 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
                 group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
+            AccountOp::EnsurePrimaryGroup {
+                name: "dev".into(),
+                gid: GroupId(600),
+            },
             AccountOp::EnsureCoworkDir {
                 path: PathBuf::from("/Users/Shared/tenants/dev"),
                 owner: "operator".into(),
@@ -678,7 +728,7 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
                 target: PathBuf::from("/tmp"),
             },
         ],
-        "AddHost + cowork-dir recorded before the share-substrate ops"
+        "AddHost + primary-group reassert + cowork-dir recorded before the share-substrate ops"
     );
 }
 
@@ -1168,5 +1218,97 @@ fn reload_all_uses_full_reapply_scope_per_tenant_emitting_grant_and_cowork() {
     assert_eq!(
         cowork_count, 2,
         "reload-all (Full scope) must emit one EnsureCoworkDir per tenant (2 total here)"
+    );
+}
+
+// ================================================================
+// Primary-group reassertion (OS-update resilience, finding #26)
+// ================================================================
+
+#[test]
+fn reload_ensure_primary_group_carries_resolved_share_group_gid_not_a_constant() {
+    // The gid in EnsurePrimaryGroup is READ from the live share-group
+    // record (HostMachine::read_share_group_gid), not hardcoded — the gid
+    // was allocated at create and isn't derivable from the name. Preload a
+    // non-600 gid and assert it flows through, so a regression that pins
+    // 600 / the floor is caught.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_share_group_gid("dev-tenant-share", 742);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        exec.account_ops().contains(&AccountOp::EnsurePrimaryGroup {
+            name: "dev".into(),
+            gid: GroupId(742),
+        }),
+        "EnsurePrimaryGroup must carry the resolved share-group gid (742), not a constant: {:?}",
+        exec.account_ops()
+    );
+}
+
+#[test]
+fn reload_all_reasserts_each_tenants_own_primary_group_gid() {
+    // Per-tenant gid resolution lives in reload_all's own build callsite.
+    // dev's share group is gid 600, staging's is 601; each tenant's
+    // EnsurePrimaryGroup must carry ITS OWN gid, proving the read is
+    // per-tenant, not a shared constant.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_existing_profile("staging", &tenant::profile::default_profile_toml())
+        // dev's 600 equals the stub default (illustrative); staging's 601
+        // is load-bearing — it differs from the default, so the staging
+        // assertion only holds if the read is genuinely per-tenant.
+        .with_share_group_gid("dev-tenant-share", 600)
+        .with_share_group_gid("staging-tenant-share", 601);
+    let (code, _stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
+    assert_eq!(code, 0, "reload-all happy path; stderr={stderr:?}");
+    let ops = exec.account_ops();
+    assert!(
+        ops.contains(&AccountOp::EnsurePrimaryGroup {
+            name: "dev".into(),
+            gid: GroupId(600),
+        }),
+        "dev reasserts its own gid 600: {ops:?}"
+    );
+    assert!(
+        ops.contains(&AccountOp::EnsurePrimaryGroup {
+            name: "staging".into(),
+            gid: GroupId(601),
+        }),
+        "staging reasserts its own gid 601: {ops:?}"
+    );
+}
+
+#[test]
+fn reload_aborts_with_io_error_when_share_group_gid_read_fails() {
+    // The gid read happens in build_reapply_plan (pre-prompt, pre-exec).
+    // A failure → ModeError::Probe → EX_IOERR, surfaced as a host-state
+    // probe frame, with NO mutation ops fired (the plan never finished
+    // building, so execute_reapply_plan never runs).
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .fail_next_share_group_gid(ProbeError::NonZero {
+            code: 1,
+            stderr: "eDSRecordNotFound".to_string(),
+        });
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(
+        code, 74,
+        "gid-read failure maps to EX_IOERR; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("failed to probe host state for 'dev'"),
+        "surfaces the host-state probe frame (not a filesystem-worded one): {stderr:?}"
+    );
+    assert!(
+        exec.account_ops().is_empty(),
+        "plan-build failure fires no mutation ops: {:?}",
+        exec.account_ops()
+    );
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "plan-build failure fires no firewall ops: {:?}",
+        exec.firewall_ops()
     );
 }

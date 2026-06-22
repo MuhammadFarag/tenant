@@ -57,6 +57,18 @@ pub(crate) struct ReapplyPlan {
     pub(crate) install_anchor: FirewallOp,
     pub(crate) reload: FirewallOp,
     pub(crate) add_host: AccountOp,
+    /// Tenant-side membership catch-up: re-assert the tenant user's
+    /// primary group to the share group (OS-update resilience, #26).
+    /// `Some` under Full, `None` under Light — same split as
+    /// `ensure_cowork_dir`: re-asserting the primary group is a host-state
+    /// CONVERGENCE repair, and convergence is reload's "apply everything"
+    /// role. mode/shell stay Light to keep the quick paths minimal (one
+    /// fewer dscl read per entry) with `tenant reload` as the documented
+    /// drift remedy. (Note: shell's `sudo -iu` login runs AFTER the
+    /// reapply, so reasserting here WOULD reach the about-to-start session
+    /// — that self-heal-on-entry is the separate shell-entry-safety
+    /// concern, finding #29, not this op's scope.)
+    pub(crate) ensure_primary_group: Option<AccountOp>,
     pub(crate) ensure_cowork_dir: Option<AccountOp>,
     pub(crate) share_ops: Vec<ShareOps>,
 }
@@ -64,10 +76,13 @@ pub(crate) struct ReapplyPlan {
 impl ReapplyPlan {
     pub(crate) fn as_plan_entries(&self) -> Vec<(Op<'_>, Option<&'static str>)> {
         let mut entries: Vec<(Op<'_>, Option<&'static str>)> =
-            Vec::with_capacity(4 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
+            Vec::with_capacity(5 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
         entries.push((Op::Firewall(&self.install_anchor), None));
         entries.push((Op::Firewall(&self.reload), None));
         entries.push((Op::Account(&self.add_host), None));
+        if let Some(ensure_primary_group) = &self.ensure_primary_group {
+            entries.push((Op::Account(ensure_primary_group), None));
+        }
         if let Some(cowork) = &self.ensure_cowork_dir {
             entries.push((Op::Account(cowork), None));
         }
@@ -204,6 +219,26 @@ impl<'a> Tenants<'a> {
             group: group.clone(),
             host: host.into(),
         };
+        // Tenant-side membership catch-up (Full only): re-assert the
+        // tenant user's primary group to its share group. Resolve the gid
+        // from the LIVE share-group record (`read_share_group_gid`, an
+        // unprivileged dscl read) rather than trusting a derived value —
+        // the gid was allocated at create and isn't recoverable from the
+        // name. Borrow `&group` here so it stays available for the cowork
+        // op below to move. Light scope skips both the read and the op.
+        let ensure_primary_group = match scope {
+            ReapplyScope::Full => {
+                let gid = self
+                    .machine
+                    .read_share_group_gid(&group)
+                    .map_err(ModeError::Probe)?;
+                Some(AccountOp::EnsurePrimaryGroup {
+                    name: name.into(),
+                    gid,
+                })
+            }
+            ReapplyScope::Light => None,
+        };
         // Kind-check fires only when EnsureCoworkDir will: `mkdir -p`
         // silently follows a symlink, and the subsequent chown /
         // chmod / chmod -R would then mutate the link target.
@@ -225,6 +260,7 @@ impl<'a> Tenants<'a> {
             install_anchor,
             reload,
             add_host,
+            ensure_primary_group,
             ensure_cowork_dir,
             share_ops,
         })
@@ -245,6 +281,10 @@ impl<'a> Tenants<'a> {
             .map_err(ModeError::Firewall)?;
         self.run(&plan.add_host, reporter)
             .map_err(ModeError::Account)?;
+        if let Some(ensure_primary_group) = &plan.ensure_primary_group {
+            self.run(ensure_primary_group, reporter)
+                .map_err(ModeError::Account)?;
+        }
         if let Some(cowork) = &plan.ensure_cowork_dir {
             self.run(cowork, reporter).map_err(ModeError::Account)?;
         }
