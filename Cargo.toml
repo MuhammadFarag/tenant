@@ -1,6 +1,6 @@
 [package]
 name = "tenant"
-version = "0.1.0-dev"
+version = "0.1.0-alpha.4"
 edition = "2024"
 authors = ["Muhammad Farag <m@far.ag>"]
 description = "A macOS CLI for provisioning isolated user accounts with per-tenant firewall rules and explicit file shares."
