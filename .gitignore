@@ -3,3 +3,9 @@
 
 # Cargo build artifacts
 /target
+
+# macOS
+.DS_Store
+
+# Out-of-tree herdr plugin work
+/herdr-plugin/
