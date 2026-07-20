@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.4
+# tenant 0.1.0-alpha.5
 
-Fourth alpha. Still alpha quality: the verbs work end-to-end on the
+Fifth alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,6 +21,28 @@ The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
+
+## New since 0.1.0-alpha.4
+
+- **`tenant reload` repairs a tenant's primary group.** A macOS system
+  update can reset a tenant account's primary group back to the default
+  `staff` (20). That single flipped attribute breaks the sandbox in both
+  directions: the tenant loses access to its own shares and co-working
+  directory (symlinks resolve, every read and write is denied), and it
+  gains `staff` membership — which is enough to enter the host operator's
+  home directory and enumerate `~/.ssh`, `~/.aws`, and `~/.config/gh`.
+
+  Until now the primary group was set once, at `create`, and no verb ever
+  re-asserted it — so the documented drift remedy (`tenant doctor` →
+  `tenant reload`) could not repair it, and the manual fix was a hand-run
+  `dscl` command. `tenant reload` now re-asserts it against the live
+  share-group record on every run. It is idempotent and a no-op on a
+  healthy host. `mode` and `shell` do the lighter reapply and are
+  unchanged.
+
+  If you ran a system update since alpha.4, run `tenant reload` and then
+  re-enter the tenant — a session already running under the wrong group
+  picks up the correction on its next login.
 
 ## New since 0.1.0-alpha.3
 
@@ -93,14 +115,14 @@ Or build from source / download the pre-built ARM binary:
 
 ```
 # Build from source at this release
-cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.4
+cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.5
 
 # Or download the pre-built ARM binary
-curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.4/tenant-v0.1.0-alpha.4-aarch64-apple-darwin.tar.gz | tar -xz
+curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.5/tenant-v0.1.0-alpha.5-aarch64-apple-darwin.tar.gz | tar -xz
 sudo mv tenant /usr/local/bin/
 ```
 
-Verify with `tenant --version` (expect `tenant 0.1.0-alpha.4`).
+Verify with `tenant --version` (expect `tenant 0.1.0-alpha.5`).
 
 ## Known rough edges
 
