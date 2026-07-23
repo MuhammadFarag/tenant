@@ -1201,6 +1201,38 @@ fn doctor_anchor_body_profile_drift_emits_warning() {
 }
 
 #[test]
+fn doctor_flags_drift_when_profile_declares_extra_ports_not_in_anchor() {
+    // End-to-end wiring for per-host egress ports on the doctor side:
+    // operator added a port (22) to a host in the profile but didn't
+    // re-render. On-disk anchor still has the host as a bare 443 entry
+    // (default `<allowed>` group); doctor renders the profile with the
+    // host in its own `<allowed_443_22>` group → byte-diverges → drift.
+    // No new Finding variant — AnchorBodyDrift covers it for free.
+    let stub_reader = make_tenant_stub_reader("dev");
+    let profile = "schema_version = 1\n\
+                   \n\
+                   [allowlist.runtime]\n\
+                   hosts = [{ host = \"github.com\", ports = [443, 22] }]\n\
+                   \n\
+                   [allowlist.install]\n\
+                   hosts = []\n";
+    let stale_body = tenant::firewall::render_anchor(
+        "dev",
+        &common::egress(&["github.com"]),
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", profile)
+        .with_anchor_body("dev", &stale_body);
+    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("tenant 'dev' anchor file drift"),
+        "extra-port profile edit without reload must surface AnchorBodyDrift; stdout={stdout:?}"
+    );
+}
+
+#[test]
 fn doctor_anchor_body_drift_with_strict_exits_1() {
     // AnchorBodyDrift is Warning-tier; --strict + warning-only → exit 1.
     let stub_reader = make_tenant_stub_reader("dev");
@@ -1337,10 +1369,7 @@ fn doctor_anchor_body_install_tier_match_still_drifts() {
     // Anchor body matches install-tier render (BOTH hosts present).
     let install_tier_body = tenant::firewall::render_anchor(
         "dev",
-        &[
-            "runtime.example.com".to_string(),
-            "install.example.com".to_string(),
-        ],
+        &common::egress(&["runtime.example.com", "install.example.com"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     let stub_exec = StubHostMachine::new()

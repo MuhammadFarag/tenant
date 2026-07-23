@@ -198,6 +198,50 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
 }
 
 #[test]
+fn reload_renders_per_host_egress_ports_into_anchor_body() {
+    // End-to-end wiring for per-host egress ports: a mixed runtime
+    // allowlist (a bare 443 host + a `[443, 22]` host) must reach the
+    // recorded InstallAnchor body as a distinct `<allowed_443_22>` table +
+    // its own pass rule, while the bare host stays in the default
+    // `<allowed>` group. Read → parse → hosts_for_level → render_anchor.
+    let toml = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = [\n\
+                  \"api.anthropic.com\",\n\
+                  { host = \"github.com\", ports = [443, 22] },\n\
+                ]\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    let exec = StubHostMachine::new().with_existing_profile("dev", toml);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
+
+    let fw_ops = exec.firewall_ops();
+    let body = match &fw_ops[0] {
+        FirewallOp::InstallAnchor { body, .. } => body,
+        other => panic!("expected InstallAnchor first, got {other:?}"),
+    };
+    // Bare host stays in the default group.
+    assert!(
+        body.contains("table <allowed> persist { \\\n  api.anthropic.com \\\n}\n"),
+        "bare host must render in the default <allowed> table, got body:\n{body}"
+    );
+    // The `[443, 22]` host gets its own group table + rule.
+    assert!(
+        body.contains("table <allowed_443_22> persist { \\\n  github.com \\\n}\n"),
+        "expected an <allowed_443_22> table for the ports-declaring host, got body:\n{body}"
+    );
+    assert!(
+        body.contains(
+            "pass out quick proto tcp from any to <allowed_443_22> port { 443, 22 } user dev\n"
+        ),
+        "expected the <allowed_443_22> pass rule, got body:\n{body}"
+    );
+}
+
+#[test]
 fn reload_profile_read_failure_surfaces_before_prompt() {
     // Behavior pin: dispatch builds the reapply plan BEFORE the
     // confirm prompt, so a missing profile surfaces pre-prompt with

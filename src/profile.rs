@@ -27,10 +27,12 @@ pub fn default_profile_toml() -> String {
      schema_version = 1\n\
      \n\
      [allowlist.runtime]\n\
-     # Hosts the tenant can reach during normal use. Uncomment to enable:\n\
+     # Hosts the tenant can reach during normal use. A bare host opens TCP\n\
+     # 443 only; an inline table declares that host's TCP ports (e.g. 22 for\n\
+     # git-over-ssh). Uncomment to enable:\n\
      hosts = [\n\
-     #   \"github.com\",\n\
      #   \"api.anthropic.com\",\n\
+     #   { host = \"github.com\", ports = [443, 22] },\n\
      ]\n\
      \n\
      [allowlist.install]\n\
@@ -113,7 +115,42 @@ pub struct Allowlist {
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Tier {
-    pub hosts: Vec<String>,
+    pub hosts: Vec<HostEntry>,
+}
+
+/// A single allowlist host with the TCP ports it may be reached on.
+/// Serde-normalized via `RawHostEntry` so downstream (the renderer's
+/// `EgressHost` resolution) never sees the untagged enum: a bare string
+/// entry fills `ports = [443]` (backward-compat — every pre-ports profile
+/// is bare-only), an inline table declares its own ports. TCP only (no
+/// proto field), matching `[inbound]` and the egress catchall.
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
+#[serde(from = "RawHostEntry")]
+pub struct HostEntry {
+    pub host: String,
+    pub ports: Vec<u16>,
+}
+
+/// Wire form of a `hosts` array element: a bare `"host"` string or an
+/// inline `{ host = …, ports = [...] }` table. Normalized into `HostEntry`
+/// by the `From` impl so the bare-vs-table distinction stops at parse.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawHostEntry {
+    Bare(String),
+    WithPorts { host: String, ports: Vec<u16> },
+}
+
+impl From<RawHostEntry> for HostEntry {
+    fn from(raw: RawHostEntry) -> Self {
+        match raw {
+            RawHostEntry::Bare(host) => HostEntry {
+                host,
+                ports: vec![443],
+            },
+            RawHostEntry::WithPorts { host, ports } => HostEntry { host, ports },
+        }
+    }
 }
 
 /// TCP loopback ports the tenant exposes under the default `restricted`
@@ -186,10 +223,36 @@ pub fn parse(content: &str) -> Result<Profile, ProfileError> {
     let profile: Profile = toml::from_str(content).map_err(|e| ProfileError {
         message: e.to_string(),
     })?;
+    for entry in profile
+        .allowlist
+        .runtime
+        .hosts
+        .iter()
+        .chain(&profile.allowlist.install.hosts)
+    {
+        validate_host_entry_ports(entry)?;
+    }
     for share in &profile.shares {
         validate_tenant_path_template(&share.tenant_path)?;
     }
     Ok(profile)
+}
+
+/// An allowlist entry with `ports = []` is a contradiction — a host with
+/// no ports is unreachable, so listing it is a likely authoring mistake.
+/// Refused at parse (a bare string entry can't reach this: it normalizes
+/// to `[443]`).
+fn validate_host_entry_ports(entry: &HostEntry) -> Result<(), ProfileError> {
+    if entry.ports.is_empty() {
+        return Err(ProfileError {
+            message: format!(
+                "allowlist host {:?} declares ports = []; a host with no ports is \
+                 unreachable \u{2014} remove the entry or declare its ports",
+                entry.host
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Prefix-only `$HOME`: position 0 followed by `/`, or the whole path.

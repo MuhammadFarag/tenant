@@ -1,5 +1,6 @@
 //! Create-verb error type and the `Tenants::create` orchestrator.
 
+use crate::ModeLevel;
 use crate::domain::reporter::Reporter;
 use crate::domain::{
     AccountError, AccountOp, FirewallError, FirewallOp, GroupId, HostUserName, KeychainError,
@@ -8,7 +9,7 @@ use crate::domain::{
 use crate::firewall::{ensure_anchor_ref, render_anchor};
 use crate::profile::{ProfileError, display_path_for, parse};
 
-use super::reapply::steady_inbound_rules;
+use super::reapply::{hosts_for_level, steady_inbound_rules};
 use super::{ModeError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
 
 /// Failure surface for create. `UserWithRollback` is the
@@ -165,7 +166,7 @@ impl<'a> Tenants<'a> {
                     name: name.into(),
                     body: render_anchor(
                         name.as_str(),
-                        &parsed_profile.allowlist.runtime.hosts,
+                        &hosts_for_level(&parsed_profile, ModeLevel::Runtime),
                         steady_inbound_rules(&parsed_profile),
                     ),
                 };

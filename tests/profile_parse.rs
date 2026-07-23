@@ -9,9 +9,17 @@
 use std::path::PathBuf;
 
 use tenant::profile::{
-    Allowlist, Inbound, Profile, Share, ShareMode, Tier, default_profile_toml, expand_tenant_path,
-    parse,
+    Allowlist, HostEntry, Inbound, Profile, Share, ShareMode, Tier, default_profile_toml,
+    expand_tenant_path, parse,
 };
+
+// A bare profile host resolves to TCP 443 — the pre-ports meaning.
+fn bare(host: &str) -> HostEntry {
+    HostEntry {
+        host: host.to_string(),
+        ports: vec![443],
+    }
+}
 
 #[test]
 fn parse_default_toml_yields_schema_1_with_empty_allowlists() {
@@ -48,9 +56,9 @@ fn parse_populated_runtime_hosts_preserves_input_order() {
     assert_eq!(
         profile.allowlist.runtime.hosts,
         vec![
-            "api.anthropic.com".to_string(),
-            "github.com".to_string(),
-            "crates.io".to_string(),
+            bare("api.anthropic.com"),
+            bare("github.com"),
+            bare("crates.io"),
         ]
     );
 }
@@ -67,7 +75,7 @@ fn parse_populated_install_hosts_preserves_input_order() {
     let profile = parse(toml).expect("must parse");
     assert_eq!(
         profile.allowlist.install.hosts,
-        vec!["registry.npmjs.org".to_string(), "pypi.org".to_string()]
+        vec![bare("registry.npmjs.org"), bare("pypi.org")]
     );
 }
 
@@ -125,6 +133,112 @@ fn parse_refuses_invalid_toml_syntax() {
         "expected 'invalid TOML' prefix, got: {}",
         err.message
     );
+}
+
+// --- per-host egress ports ---------------------------------------------
+//
+// A `hosts` array element is either a bare string (TCP 443 only —
+// backward-compat) or an inline `{ host = …, ports = [...] }` table
+// declaring that host's TCP ports. Normalized to `HostEntry { host, ports }`
+// at parse; `ports = []` is refused (a host with no ports is unreachable).
+
+#[test]
+fn bare_host_string_resolves_to_port_443() {
+    // Backward-compat: a bare string keeps today's meaning (443 only).
+    let toml = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = [\"github.com\"]\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    let profile = parse(toml).expect("must parse");
+    assert_eq!(
+        profile.allowlist.runtime.hosts,
+        vec![HostEntry {
+            host: "github.com".to_string(),
+            ports: vec![443],
+        }]
+    );
+}
+
+#[test]
+fn inline_table_host_round_trips_host_and_ports_in_order() {
+    let toml = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = [{ host = \"github.com\", ports = [443, 22] }]\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    let profile = parse(toml).expect("must parse");
+    assert_eq!(
+        profile.allowlist.runtime.hosts,
+        vec![HostEntry {
+            host: "github.com".to_string(),
+            ports: vec![443, 22],
+        }]
+    );
+}
+
+#[test]
+fn mixed_bare_and_table_array_parses() {
+    // The git-over-ssh case (brief example B): a bare host next to an
+    // inline-table host in the same array.
+    let toml = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = [\n\
+                  \"api.anthropic.com\",\n\
+                  { host = \"github.com\", ports = [443, 22] },\n\
+                ]\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    let profile = parse(toml).expect("must parse");
+    assert_eq!(
+        profile.allowlist.runtime.hosts,
+        vec![
+            bare("api.anthropic.com"),
+            HostEntry {
+                host: "github.com".to_string(),
+                ports: vec![443, 22],
+            },
+        ]
+    );
+}
+
+#[test]
+fn empty_ports_entry_refused_with_byte_exact_message() {
+    // Decision 3: a host with no ports is unreachable — refuse at parse,
+    // naming the host. Byte-exact message pin.
+    let toml = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = [{ host = \"github.com\", ports = [] }]\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    let err = parse(toml).expect_err("empty-ports entry must be refused");
+    assert_eq!(
+        err.message,
+        "allowlist host \"github.com\" declares ports = []; a host with no ports is \
+         unreachable \u{2014} remove the entry or declare its ports"
+    );
+}
+
+#[test]
+fn malformed_host_entry_table_missing_host_errors() {
+    // A table entry missing `host` is a parse error. serde's untagged
+    // enum gives a blunt message — pin only that it errors, not the text.
+    let toml = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = [{ ports = [443] }]\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    parse(toml).expect_err("table entry missing host must be refused");
 }
 
 // --- [[shares]] table-array --------------------------------------------

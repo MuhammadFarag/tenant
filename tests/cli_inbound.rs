@@ -179,7 +179,7 @@ fn inbound_restricted_op_shape_renders_profile_ports() {
     // restricted with the profile's declared port.
     let expected_body = tenant::firewall::render_anchor(
         "dev",
-        &["api.example.com".to_string()],
+        &common::egress(&["api.example.com"]),
         tenant::firewall::InboundRules::Restricted(vec![3000]),
     );
     assert_eq!(
@@ -284,7 +284,7 @@ fn inbound_permissive_op_shape_renders_permissive_section() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     let expected_body = tenant::firewall::render_anchor(
         "dev",
-        &["api.example.com".to_string()],
+        &common::egress(&["api.example.com"]),
         tenant::firewall::InboundRules::Permissive,
     );
     match &exec.firewall_ops()[0] {

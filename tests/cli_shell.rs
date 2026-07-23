@@ -759,7 +759,7 @@ fn shell_install_anchor_body_excludes_install_hosts() {
     assert_eq!(code, 0);
     let expected_body = tenant::firewall::render_anchor(
         "dev",
-        &["api.example.com".to_string()],
+        &common::egress(&["api.example.com"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     match &exec.firewall_ops()[0] {
@@ -1343,12 +1343,12 @@ fn shell_command_form_install_mode_widens_then_narrows() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     let install_body = tenant::firewall::render_anchor(
         "dev",
-        &["runtime.example".to_string(), "install.example".to_string()],
+        &common::egress(&["runtime.example", "install.example"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     let runtime_body = tenant::firewall::render_anchor(
         "dev",
-        &["runtime.example".to_string()],
+        &common::egress(&["runtime.example"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     assert_eq!(
@@ -1482,7 +1482,7 @@ fn shell_command_form_install_mode_narrow_on_finally_runs_when_child_fails() {
     assert_eq!(code, 42, "child exit code; stderr={stderr:?}");
     let runtime_body = tenant::firewall::render_anchor(
         "dev",
-        &["runtime.example".to_string()],
+        &common::egress(&["runtime.example"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     let ops = exec.firewall_ops();
@@ -1549,7 +1549,7 @@ fn shell_command_form_narrow_failure_surfaces_warning_and_child_exit_wins() {
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let runtime_body = tenant::firewall::render_anchor(
         "dev",
-        &["runtime.example".to_string()],
+        &common::egress(&["runtime.example"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     let exec = StubHostMachine::new()
@@ -1636,7 +1636,7 @@ fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
     // runtime-body InstallAnchor appears after the failed Reload.
     let runtime_body = tenant::firewall::render_anchor(
         "dev",
-        &["runtime.example".to_string()],
+        &common::egress(&["runtime.example"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     let ops = exec.firewall_ops();
@@ -1845,7 +1845,7 @@ fn shell_command_narrow_failure_warning_uses_warning_glyph() {
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let runtime_body = tenant::firewall::render_anchor(
         "dev",
-        &["runtime.example".to_string()],
+        &common::egress(&["runtime.example"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     let exec = StubHostMachine::new()
@@ -2466,12 +2466,12 @@ fn shell_command_inbound_permissive_renders_permissive_entry_then_narrows() {
     // restricted with the profile's declared port.
     let permissive_body = tenant::firewall::render_anchor(
         "dev",
-        &["api.example.com".to_string()],
+        &common::egress(&["api.example.com"]),
         tenant::firewall::InboundRules::Permissive,
     );
     let restricted_body = tenant::firewall::render_anchor(
         "dev",
-        &["api.example.com".to_string()],
+        &common::egress(&["api.example.com"]),
         tenant::firewall::InboundRules::Restricted(vec![3000]),
     );
     assert_eq!(
@@ -2518,7 +2518,7 @@ fn shell_command_inbound_permissive_narrow_on_finally_runs_when_child_fails() {
     assert_eq!(code, 42, "child exit code; stderr={stderr:?}");
     let restricted_body = tenant::firewall::render_anchor(
         "dev",
-        &["api.example.com".to_string()],
+        &common::egress(&["api.example.com"]),
         tenant::firewall::InboundRules::Restricted(vec![3000]),
     );
     let ops = exec.firewall_ops();
@@ -2648,14 +2648,14 @@ fn shell_command_inbound_and_mode_compose_within_one_call() {
     // Entry: egress install tier (both hosts) + inbound permissive.
     let entry_body = tenant::firewall::render_anchor(
         "dev",
-        &["runtime.example".to_string(), "install.example".to_string()],
+        &common::egress(&["runtime.example", "install.example"]),
         tenant::firewall::InboundRules::Permissive,
     );
     // Finally: egress runtime tier (runtime host only) + inbound
     // restricted (profile port).
     let narrow_body = tenant::firewall::render_anchor(
         "dev",
-        &["runtime.example".to_string()],
+        &common::egress(&["runtime.example"]),
         tenant::firewall::InboundRules::Restricted(vec![3000]),
     );
     assert_eq!(

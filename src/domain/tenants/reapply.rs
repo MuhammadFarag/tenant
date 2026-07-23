@@ -7,7 +7,7 @@ use crate::domain::{
     AccountError, AccountOp, AclError, FirewallError, FirewallOp, HostUserDirectory, HostUserName,
     Op, ProbeError, TenantUserName, UserDirectoryError,
 };
-use crate::firewall::{InboundRules, render_anchor};
+use crate::firewall::{EgressHost, InboundRules, render_anchor};
 use crate::profile::{Profile, ProfileError, parse};
 use crate::{InboundLevel, ModeLevel};
 
@@ -124,7 +124,7 @@ pub(crate) fn steady_inbound_rules(profile: &Profile) -> InboundRules {
 /// `cli::InboundLevel` → `firewall::InboundRules` resolution lives in the
 /// domain layer so `firewall.rs` stays free of any `cli` dependency —
 /// mirrors how `hosts_for_level` resolves the egress axis before
-/// `render_anchor` sees a `&[String]`.
+/// `render_anchor` sees a `&[EgressHost]`.
 ///
 /// `Permissive` opens all inbound loopback; `Restricted` keeps the
 /// profile's declared ports (empty ⇒ locked, same as steady state).
@@ -136,13 +136,27 @@ pub(crate) fn inbound_rules_for_level(profile: &Profile, level: InboundLevel) ->
 }
 
 /// Runtime: runtime hosts only. Install: runtime then install (order
-/// matters for `render_anchor`'s output stability).
-pub(crate) fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<String> {
+/// matters for `render_anchor`'s output stability). Each profile
+/// `HostEntry` resolves into the renderer's `EgressHost` here — the single
+/// domain-side `HostEntry → EgressHost` map, mirroring where the
+/// `InboundLevel → InboundRules` resolution lives. Both create and doctor
+/// reach the runtime-tier egress by calling this with `ModeLevel::Runtime`,
+/// so the map has exactly one home.
+pub(crate) fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<EgressHost> {
+    let to_egress = |entries: &[crate::profile::HostEntry]| -> Vec<EgressHost> {
+        entries
+            .iter()
+            .map(|e| EgressHost {
+                host: e.host.clone(),
+                ports: e.ports.clone(),
+            })
+            .collect()
+    };
     match level {
-        ModeLevel::Runtime => profile.allowlist.runtime.hosts.clone(),
+        ModeLevel::Runtime => to_egress(&profile.allowlist.runtime.hosts),
         ModeLevel::Install => {
-            let mut hosts = profile.allowlist.runtime.hosts.clone();
-            hosts.extend(profile.allowlist.install.hosts.iter().cloned());
+            let mut hosts = to_egress(&profile.allowlist.runtime.hosts);
+            hosts.extend(to_egress(&profile.allowlist.install.hosts));
             hosts
         }
     }

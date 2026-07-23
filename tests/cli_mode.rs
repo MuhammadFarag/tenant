@@ -399,10 +399,7 @@ fn mode_install_with_only_runtime_populated() {
     assert_eq!(code, 0);
     let expected_body = tenant::firewall::render_anchor(
         "dev",
-        &[
-            "api.example.com".to_string(),
-            "deploy.example.com".to_string(),
-        ],
+        &common::egress(&["api.example.com", "deploy.example.com"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     match &exec.firewall_ops()[0] {
@@ -428,11 +425,7 @@ fn mode_install_with_runtime_and_install_populated() {
     assert_eq!(code, 0);
     let expected_body = tenant::firewall::render_anchor(
         "dev",
-        &[
-            "api.example.com".to_string(),
-            "nodejs.org".to_string(),
-            "storage.googleapis.com".to_string(),
-        ],
+        &common::egress(&["api.example.com", "nodejs.org", "storage.googleapis.com"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     match &exec.firewall_ops()[0] {
@@ -459,7 +452,7 @@ fn mode_runtime_with_runtime_and_install_populated_excludes_install() {
     assert_eq!(code, 0);
     let expected_body = tenant::firewall::render_anchor(
         "dev",
-        &["api.example.com".to_string()],
+        &common::egress(&["api.example.com"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     match &exec.firewall_ops()[0] {
@@ -482,7 +475,7 @@ fn mode_install_with_empty_runtime_and_populated_install() {
     assert_eq!(code, 0);
     let expected_body = tenant::firewall::render_anchor(
         "dev",
-        &["pypi.org".to_string(), "npmjs.org".to_string()],
+        &common::egress(&["pypi.org", "npmjs.org"]),
         tenant::firewall::InboundRules::Restricted(vec![]),
     );
     match &exec.firewall_ops()[0] {

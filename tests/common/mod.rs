@@ -819,6 +819,20 @@ pub fn profile_with_shares(
     format!("{base}{share_blocks}")
 }
 
+/// Build `EgressHost`s from bare host names, each defaulting to TCP 443 —
+/// the pre-ports meaning a bare profile entry resolves to. Lets a
+/// `render_anchor` expectation mirror a bare-only profile without spelling
+/// out `EgressHost { host, ports: vec![443] }` at every call site.
+pub fn egress(hosts: &[&str]) -> Vec<tenant::firewall::EgressHost> {
+    hosts
+        .iter()
+        .map(|h| tenant::firewall::EgressHost {
+            host: h.to_string(),
+            ports: vec![443],
+        })
+        .collect()
+}
+
 /// Helper: profile TOML with the given runtime + install host lists.
 /// Tests use this to populate `with_existing_profile` content so the
 /// writer's read_profile + parse + render path exercises non-empty

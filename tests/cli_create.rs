@@ -409,10 +409,12 @@ fn create_writes_profile_with_correct_toml_shape() {
                 schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
-                # Hosts the tenant can reach during normal use. Uncomment to enable:\n\
+                # Hosts the tenant can reach during normal use. A bare host opens TCP\n\
+                # 443 only; an inline table declares that host's TCP ports (e.g. 22 for\n\
+                # git-over-ssh). Uncomment to enable:\n\
                 hosts = [\n\
-                #   \"github.com\",\n\
                 #   \"api.anthropic.com\",\n\
+                #   { host = \"github.com\", ports = [443, 22] },\n\
                 ]\n\
                 \n\
                 [allowlist.install]\n\

@@ -2,6 +2,7 @@
 //! and the `Tenants::doctor` / `Tenants::doctor_all` orchestrators
 //! plus their per-check helpers.
 
+use crate::ModeLevel;
 use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, classify_inbound_exposure, curated_paths,
     has_env_delete_for, has_group_acl_entry, has_pam_tid, pf_rule_presence_check,
@@ -15,7 +16,7 @@ use crate::domain::{
 use crate::firewall::{anchor_is_permissive, render_anchor};
 use crate::profile::{expand_tenant_path, parse};
 
-use super::reapply::steady_inbound_rules;
+use super::reapply::{hosts_for_level, steady_inbound_rules};
 use super::{Tenants, tenant_share_group_name};
 
 /// Per-verb relevance matrix for `pre_exec_doctor_summary`.
@@ -419,7 +420,7 @@ impl<'a> Tenants<'a> {
         let actual = self.machine.read_anchor_body(name)?;
         let expected = render_anchor(
             name.as_str(),
-            &parsed.allowlist.runtime.hosts,
+            &hosts_for_level(&parsed, ModeLevel::Runtime),
             steady_inbound_rules(&parsed),
         );
         if anchor_body_matches(&actual, &expected) {

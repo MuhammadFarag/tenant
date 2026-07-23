@@ -826,13 +826,23 @@ impl HostMachine for StubHostMachine {
         if let Some(content) = self.anchor_body_state.borrow().get(name.as_str()) {
             return Ok(content.clone());
         }
-        let hosts: Vec<String> = match self.profile_state.borrow().get(name.as_str()) {
-            Some(toml) => match tenant::profile::parse(toml) {
-                Ok(profile) => profile.allowlist.runtime.hosts.clone(),
-                Err(_) => Vec::new(),
-            },
-            None => Vec::new(),
-        };
+        let hosts: Vec<tenant::firewall::EgressHost> =
+            match self.profile_state.borrow().get(name.as_str()) {
+                Some(toml) => match tenant::profile::parse(toml) {
+                    Ok(profile) => profile
+                        .allowlist
+                        .runtime
+                        .hosts
+                        .iter()
+                        .map(|e| tenant::firewall::EgressHost {
+                            host: e.host.clone(),
+                            ports: e.ports.clone(),
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                },
+                None => Vec::new(),
+            };
         Ok(tenant::firewall::render_anchor(
             name.as_str(),
             &hosts,

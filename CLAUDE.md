@@ -86,9 +86,11 @@ src/adapters/     — driven adapters. macos/user_directory.rs (MacosUserDirecto
                     production substrate; owns all argv + privileged writes). dry_run_host_machine.rs
                     (DryRunHostMachine — no-op execute; describe delegates; reads return placeholders).
 src/allocation.rs — UidAllocator + GidAllocator, independent, both from TENANT_UID_FLOOR = 600.
-src/profile.rs    — TOML serde + parse (schema-version + $HOME prefix-only); expand_tenant_path;
-                    default_profile_toml.
-src/firewall.rs   — pure: render_anchor, anchor-ref helpers, tenant_anchor_name/_path.
+src/profile.rs    — TOML serde + parse (schema-version + $HOME prefix-only + empty-ports refusal);
+                    HostEntry (bare host ⇒ 443, inline table ⇒ per-host ports);
+                    expand_tenant_path; default_profile_toml.
+src/firewall.rs   — pure: render_anchor (EgressHost port-group tables), anchor-ref helpers,
+                    tenant_anchor_name/_path.
 src/doctor.rs     — pure grep-and-classify: Finding/Severity/Category/SymlinkActual + parse/classify
                     fns. All I/O lives in Tenants::doctor_*.
 src/main.rs       — composition root: prod impls + tenant::run; reads $USER, probes TTY + colors.
@@ -260,6 +262,24 @@ already made.
   identity is unrecoverable — only permissive (all-ports stateless) and
   restricted-by-port (`pass in port … no state` + `block drop in flags S/SA`)
   are physically realizable.
+- **Egress ports are per-host; the renderer groups by verbatim port list.**
+  A `hosts` array entry is a bare string (⇒ TCP 443 only — every pre-ports
+  profile renders byte-identical) or an inline `{ host, ports }` table;
+  serde normalizes both to `HostEntry` (`#[serde(from = "RawHostEntry")]`),
+  and `ports = []` is refused at parse (an unreachable host is a
+  contradiction). `hosts_for_level` is the single `HostEntry → EgressHost`
+  home (create + doctor call it with `Runtime`); `firewall.rs` owns
+  `EgressHost` and imports neither `profile` nor `cli` (mirrors
+  `InboundRules`). `render_anchor` groups entries by ports list VERBATIM
+  (`[443, 22]` ≠ `[22, 443]` — deterministic, documented, harmless); the
+  `[443]` default group ALWAYS renders first as the `<allowed>` table +
+  `port 443` rule (the byte-identity gate for `anchor_body_matches` — no
+  pre-ports profile drifts on upgrade), other groups append
+  `<allowed_443_22>`-style tables + one pass rule each, first-occurrence
+  order, before the catchall. TCP only (no proto field, matching
+  `[inbound]`); a host listed in two groups renders in both (unvalidated,
+  harmless — `quick` pass either way). Ports are NOT a tier/verb axis: an
+  entry's ports render identically at every tier, so no new verb/Op exists.
 - **`ReapplyScope::{Light, Full}` splits reapply by cost.** Light (mode +
   shell) omits the recursive ACL passes (`AclOp::Grant` per share +
   `EnsureCoworkDir`); PF anchor + Reload + `AddHostToShareGroup` + per-share

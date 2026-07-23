@@ -110,7 +110,7 @@ impl HostMachine for DryRunHostMachine {
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
         Ok(crate::firewall::render_anchor(
             name.as_str(),
-            &[],
+            &[] as &[crate::firewall::EgressHost],
             crate::firewall::InboundRules::Restricted(vec![]),
         ))
     }
