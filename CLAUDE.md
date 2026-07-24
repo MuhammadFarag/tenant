@@ -29,6 +29,13 @@ Verbs:
   membership + symlinks + recursive `AclOp::Grant` per share +
   `EnsureCoworkDir`). Mode/shell skip the recursive passes; reload heals
   their drift. No-arg walks every tenant; exits 0 / 74.
+- `bootstrap [<name>]` — run the merged profile's `[bootstrap]` commands AS
+  the tenant (`/bin/sh -c <entry>` via `exec_as_tenant`), in order, stopping
+  on the first non-zero exit. Wrapped in an install-tier egress widen +
+  narrow-on-finally (reuses shell command-form's composition; inbound axis
+  `None`). Keychain unlocked first (mirrors shell's pre-spawn step). No
+  commands ⇒ quiet success. No-arg walks every tenant (fleet converge);
+  exits 0 / 74.
 - `doctor [<name>]` — read-only audit (paths, sudoers, pf, anchor, shares,
   group membership). `--strict` maps max severity to exit 1 / 2.
 - `setup` — host-wide, opt-in host preparation (no tenant arg). A menu of
@@ -72,8 +79,11 @@ src/domain/tenants.rs / tenants/
                     tenant_share_group_name + cowork_dir_path + guard_cowork_dir_kind.
                     Per-verb submodules own their full code (error type + impl Tenants block +
                     helpers): validation.rs, create.rs, destroy.rs, reapply.rs (mode/reload/
-                    ReapplyScope/build_+execute_reapply_plan), shares.rs, shell.rs, doctor.rs,
-                    setup.rs (host-wide opt-in host prep; SetupError).
+                    ReapplyScope/build_+execute_reapply_plan/build_reapply_plan_from_profile),
+                    shares.rs, shell.rs, doctor.rs, setup.rs (host-wide opt-in host prep;
+                    SetupError), bootstrap.rs (BootstrapError/BootstrapPlan/bootstrap/
+                    bootstrap_all/surface_bootstrap_error; reuses the reapply widen/narrow
+                    bracket + shell's keychain pre-spawn step).
 src/domain/commands.rs
                   — verb dispatch (no I/O). Per-arm surface_*_error helpers route domain
                     errors to Reporter; builds ReapplyPlan upfront for prompt-bearing verbs so
@@ -315,6 +325,65 @@ already made.
 - **Auto-narrow protects only the `tenant shell` entry path.** `sudo -iu
   tenant` bypasses the binary and inherits the current posture;
   `tenant shell` is the canonical entry.
+
+### Bootstrap (`tenant bootstrap`)
+
+- **Bootstrap is a VERB, not a reload pass and not a create step.** Reload
+  reapplies *descriptions of state* (re-application is inherently safe);
+  `[bootstrap]` commands are *actions*, and re-running actions must be
+  operator-chosen — so execution is the explicit `tenant bootstrap` verb.
+  Create-end merged profiles never declare commands (fresh scaffold), so
+  coupling to create would be dead code. Reload/mode/shell/create behavior
+  is untouched by Half 2.
+- **A `[bootstrap]` command is a shell string run `/bin/sh -c <entry>`** via
+  the existing `exec_as_tenant` carve-out (the `sudo -iu <name>` login
+  context). Absolute `/bin/sh` per the Darwin absolute-paths doctrine. The
+  guard idiom the design leans on (`command -v x || install x`, `test -d …
+  ||`) *requires* a shell — an argv-array form buys nothing. Empty/
+  whitespace-only entries refuse at parse (`validate_bootstrap_command`,
+  same posture as `ports = []`); duplicates are NOT refused (concat-no-
+  dedupe — idempotence makes the second run a no-op).
+- **Stop on the first failing command; exit `EX_IOERR` (74).** Bootstrap is
+  NOT shell — no child-exit propagation (a command exiting 3 ⇒ verb exits
+  74, not 3). Recovery is fix → re-run; the idempotent prefix no-ops.
+  A substrate failure (widen/narrow reapply, exec spawn) is also 74;
+  `StashAbsent` (legacy tenant, no operator-side keychain stash) is the one
+  `EX_USAGE` arm (mirrors shell, names destroy/recreate).
+- **Every command renders verbatim in the pre-confirm summary,
+  unconditionally — the honesty backstop.** The commands are the entire
+  point of the confirm, so they show even without `-v` (rendered via the
+  `AccountOp::ExecAsUser` plan/echo shape); the widen/narrow *infra* plan
+  stays verbose-gated per the plan-rendering doctrine. A no-commands tenant
+  is a quiet success (one line, no confirm, exit 0 — convergent-noop, mirrors
+  destroy-absent).
+- **Pre-exec doctor summary, like every mutating verb.** The single-tenant
+  form runs `pre_exec_doctor_summary(Some(name), .., DoctorScope::Reload, ..)`
+  between the summary and the confirm — bootstrap Light-reapplies the same
+  per-tenant surfaces reload audits, so it reuses `Reload`'s subset (no
+  `Bootstrap` scope). Courtesy, never an abort gate; the no-arg walk stays
+  doctor-free (consistent with `reload_all`).
+- **Widen/narrow bracket reuses the reapply machinery.** Build the
+  install-tier widen plan (`build_reapply_plan_from_profile`, Light scope,
+  inbound `None` — bootstrap controls only egress) once from the same parse
+  that yields the commands; execute it, unlock the keychain, run the
+  commands, then narrow-on-finally at runtime (rebuilt fresh, like
+  `shell_command`). The widen is UNCONDITIONAL, so — unlike shell — the
+  keychain unlock is post-widen "work": an unlock failure narrows the widen
+  back rather than stranding install tier. Failure matrix mirrors
+  `shell_command`'s (widen-build-fail: no narrow; widen-exec-fail: best-
+  effort inline narrow; work-ran + narrow-failed: `⚠` naming
+  `tenant mode <name> runtime`, still exit 74). No new `Op` variant, no new
+  `HostMachine` method — Half 2 adds zero substrate.
+- **No-arg walk mirrors `reload_all`.** Per-tenant failures recorded, walk
+  continues, any failure ⇒ exit 74; a no-commands tenant is a quiet skip
+  (not a failure); a legacy tenant missing its stash refuses that ONE tenant
+  and the walk moves on. No doctor finding, no state file, no run-once.
+- **`tenant help profile`'s non-goal narrowed with the feature.** The old
+  "no `git clone`, no `[provision]` section" copy became a `[bootstrap]`
+  section (schema + guard idiom + the `/bin/sh -c` contract) whose non-goal
+  is now "tenant does not manage or template file CONTENTS; it runs your
+  declared idempotent commands." The `[provision]`/`git clone` needles in
+  `tests/cli_help.rs` moved to `[bootstrap]`/`tenant bootstrap` needles.
 
 ### Shares
 

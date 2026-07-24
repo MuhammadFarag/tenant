@@ -7,6 +7,7 @@ use crate::profile::{
     Profile, ProfileError, ProfileRole, display_fragment_path_for, merge, parse_partial,
 };
 
+pub mod bootstrap;
 pub mod create;
 pub mod destroy;
 pub mod doctor;
@@ -16,6 +17,7 @@ pub mod shares;
 pub mod shell;
 pub mod validation;
 
+pub(crate) use bootstrap::{BootstrapError, surface_bootstrap_error};
 pub(crate) use create::CreateError;
 pub(crate) use destroy::{DestroyError, Eligibility, destroy_eligibility};
 pub(crate) use doctor::{DoctorError, DoctorScope};

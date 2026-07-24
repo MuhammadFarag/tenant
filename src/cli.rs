@@ -124,6 +124,32 @@ pub enum Verb {
         /// on the host in sequence.
         name: Option<TenantUserName>,
     },
+    /// Run the tenant's declared `[bootstrap]` commands. Bare form walks every tenant.
+    ///
+    /// Runs each `commands` entry from the merged profile (fragments +
+    /// profile) AS the tenant, via `/bin/sh -c <entry>`, in declared
+    /// order, stopping on the first command that exits non-zero. The
+    /// commands run inside an install-tier egress widen for the duration
+    /// (so a bootstrap command may reach install-only hosts like package
+    /// registries), and egress narrows back to runtime on completion —
+    /// even if a command fails.
+    ///
+    /// There is no flag and no state: the operator promises the commands
+    /// are idempotent (the design leans on guard idioms like
+    /// `command -v x || install x`), so `tenant bootstrap <name>` is safe
+    /// to re-run anytime — the idempotent prefix no-ops. A tenant whose
+    /// merged profile declares no commands is a quiet success.
+    ///
+    /// Bare `tenant bootstrap` enumerates every tenant and bootstraps each
+    /// in turn (the fleet-converge story: edit a shared fragment, run
+    /// `tenant bootstrap`); per-tenant failures don't abort the walk — the
+    /// final summary names any failed tenants. Failures exit `EX_IOERR`
+    /// (74).
+    Bootstrap {
+        /// Optional tenant short username. Omit to bootstrap every tenant
+        /// on the host in sequence.
+        name: Option<TenantUserName>,
+    },
     /// Apply a firewall widening level (install | runtime) to the tenant.
     ///
     /// Re-renders the PF anchor at the requested tier and reloads PF.

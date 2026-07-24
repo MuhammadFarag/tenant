@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use tenant::profile::{
-    Allowlist, HostEntry, Inbound, PartialProfile, Profile, ProfileRole, Share, ShareMode, Tier,
-    default_profile_toml, expand_tenant_path, merge, parse, parse_partial,
+    Allowlist, Bootstrap, HostEntry, Inbound, PartialProfile, Profile, ProfileRole, Share,
+    ShareMode, Tier, default_profile_toml, expand_tenant_path, merge, parse, parse_partial,
 };
 
 // A bare profile host resolves to TCP 443 — the pre-ports meaning.
@@ -34,6 +34,7 @@ fn parse_default_toml_yields_schema_1_with_empty_allowlists() {
             },
             shares: vec![],
             inbound: Inbound { ports: vec![] },
+            bootstrap: Bootstrap { commands: vec![] },
         }
     );
 }
@@ -815,6 +816,9 @@ fn parse_partial_runs_per_file_ports_and_home_validators() {
                     mode = \"rw\"\n\
                     tenant_path = \"/etc/$HOME/x\"\n";
     parse_partial(bad_home, ProfileRole::Fragment).expect_err("mid-string $HOME must refuse");
+    let bad_bootstrap = "[bootstrap]\ncommands = [\"\"]\n";
+    parse_partial(bad_bootstrap, ProfileRole::Fragment)
+        .expect_err("empty bootstrap command must refuse in a fragment");
 }
 
 #[test]
@@ -1094,4 +1098,173 @@ fn parse_equals_single_part_merge_for_include_free_profiles() {
     let via_parse = parse(toml).unwrap();
     let via_merge = merge(vec![parse_partial(toml, ProfileRole::Tenant).unwrap()]).unwrap();
     assert_eq!(via_parse, via_merge);
+}
+
+// --- [bootstrap] section -----------------------------------------------
+//
+// The profile grows an optional `[bootstrap]` table declaring shell
+// commands the `tenant bootstrap` verb runs as the tenant:
+// `commands = ["<shell string>", ...]`. Same backward-compat posture as
+// `[inbound]`: absent section / empty list deserialize to an empty Vec
+// (nothing to run). Merge concatenates fragments-first (one more list
+// beside ports); an empty/whitespace-only entry is an authoring mistake
+// refused per-file at parse (mirrors `ports = []`); duplicates are NOT
+// refused (concat-no-dedupe — idempotence makes run two a no-op).
+
+fn toml_with_bootstrap_section(bootstrap_body: &str) -> String {
+    format!(
+        "schema_version = 1\n\
+         \n\
+         [allowlist.runtime]\n\
+         hosts = []\n\
+         \n\
+         [allowlist.install]\n\
+         hosts = []\n\
+         \n\
+         {bootstrap_body}"
+    )
+}
+
+#[test]
+fn parses_bootstrap_commands_in_declared_order() {
+    let toml = toml_with_bootstrap_section(
+        "[bootstrap]\ncommands = [\"command -v rg || brew install ripgrep\", \"echo done\"]\n",
+    );
+    let profile = parse(&toml).expect("must parse");
+    assert_eq!(
+        profile.bootstrap.commands,
+        vec![
+            "command -v rg || brew install ripgrep".to_string(),
+            "echo done".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn absent_bootstrap_section_yields_empty_commands() {
+    // Backward-compat: profiles written before the bootstrap axis shipped
+    // have no `[bootstrap]` section. Parse must succeed and yield an empty
+    // Vec — nothing to run.
+    let toml = "schema_version = 1\n\
+                \n\
+                [allowlist.runtime]\n\
+                hosts = []\n\
+                \n\
+                [allowlist.install]\n\
+                hosts = []\n";
+    let profile = parse(toml).expect("must parse without bootstrap section");
+    assert!(
+        profile.bootstrap.commands.is_empty(),
+        "expected empty bootstrap commands, got: {:?}",
+        profile.bootstrap.commands
+    );
+}
+
+#[test]
+fn empty_bootstrap_commands_list_yields_empty_commands() {
+    let toml = toml_with_bootstrap_section("[bootstrap]\ncommands = []\n");
+    let profile = parse(&toml).expect("must parse");
+    assert!(
+        profile.bootstrap.commands.is_empty(),
+        "expected empty bootstrap commands, got: {:?}",
+        profile.bootstrap.commands
+    );
+}
+
+#[test]
+fn default_profile_toml_parses_with_empty_bootstrap_commands() {
+    // The scaffold carries no `[bootstrap]` section, so it parses to an
+    // empty command list — a `tenant bootstrap` against a fresh tenant is
+    // a quiet no-op. Value-identity of the parsed default is pinned by
+    // the default_profile_toml tests above.
+    let profile = parse(&default_profile_toml()).expect("default toml must parse");
+    assert!(
+        profile.bootstrap.commands.is_empty(),
+        "expected default profile to have empty bootstrap commands, got: {:?}",
+        profile.bootstrap.commands
+    );
+}
+
+#[test]
+fn parse_refuses_empty_bootstrap_command() {
+    // Same posture as `ports = []`: a no-op command in the list is an
+    // authoring mistake. Refused at parse (per-file, in parse_partial);
+    // the load path names which file, so the message stays generic.
+    let toml = toml_with_bootstrap_section("[bootstrap]\ncommands = [\"echo ok\", \"\"]\n");
+    let err = parse(&toml).expect_err("empty command string must refuse");
+    assert!(
+        err.message.contains("bootstrap") && err.message.contains("empty"),
+        "message must name the bootstrap empty-command mistake: {}",
+        err.message
+    );
+}
+
+#[test]
+fn parse_refuses_whitespace_only_bootstrap_command() {
+    let toml = toml_with_bootstrap_section("[bootstrap]\ncommands = [\"   \\t \"]\n");
+    let err = parse(&toml).expect_err("whitespace-only command string must refuse");
+    assert!(
+        err.message.contains("bootstrap") && err.message.contains("empty"),
+        "message must name the bootstrap empty-command mistake: {}",
+        err.message
+    );
+}
+
+#[test]
+fn parse_partial_bootstrap_legal_in_fragment() {
+    // A fragment may carry `[bootstrap]` — fleet-shared bootstrap via
+    // includes. The per-file empty-command refusal still applies.
+    let frag = "[bootstrap]\ncommands = [\"echo frag\"]\n[allowlist.runtime]\nhosts = []\n";
+    let p = parse_partial(frag, ProfileRole::Fragment).expect("bootstrap in fragment must parse");
+    assert_eq!(p.bootstrap.commands, vec!["echo frag".to_string()]);
+}
+
+#[test]
+fn merge_unions_bootstrap_commands_fragments_first() {
+    let frag = parse_partial(
+        "[bootstrap]\ncommands = [\"frag-cmd\"]\n[allowlist.runtime]\nhosts = []\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n\
+         [allowlist.runtime]\n\
+         hosts = []\n\
+         [allowlist.install]\n\
+         hosts = []\n\
+         [bootstrap]\n\
+         commands = [\"prof-cmd\"]\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![frag, prof]).expect("must merge");
+    assert_eq!(
+        merged.bootstrap.commands,
+        vec!["frag-cmd".to_string(), "prof-cmd".to_string()]
+    );
+}
+
+#[test]
+fn merge_does_not_dedupe_repeated_bootstrap_command() {
+    // Concat-no-dedupe doctrine: a command in both a fragment and the
+    // profile renders twice. Idempotence makes the second run a no-op.
+    let frag = parse_partial(
+        "[bootstrap]\ncommands = [\"echo same\"]\n[allowlist.runtime]\nhosts = []\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n\
+         [allowlist.install]\n\
+         hosts = []\n\
+         [bootstrap]\n\
+         commands = [\"echo same\"]\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![frag, prof]).expect("must merge");
+    assert_eq!(
+        merged.bootstrap.commands,
+        vec!["echo same".to_string(), "echo same".to_string()]
+    );
 }

@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use tenant::adapters::macos::MacosHostMachine;
@@ -31,6 +32,12 @@ pub struct StubHostMachine {
     exec_calls: RefCell<Vec<(String, Vec<String>)>>,
 
     exec_exit_code: Cell<i32>,
+
+    /// Per-call exit-code queue for `exec_as_tenant`. When non-empty each
+    /// call pops the next code (falling back to `exec_exit_code` once
+    /// drained), so a test can script "command 1 exits 0, command 2 exits
+    /// 3" to pin bootstrap's stop-on-first-failure ordering.
+    exec_exit_codes: RefCell<VecDeque<i32>>,
 
     exec_failure: RefCell<Option<AccountError>>,
 
@@ -287,6 +294,14 @@ impl StubHostMachine {
 
     pub fn exec_exit_code(self, code: i32) -> Self {
         self.exec_exit_code.set(code);
+        self
+    }
+
+    /// Script per-call exit codes for `exec_as_tenant` (drains in order,
+    /// then falls back to `exec_exit_code`). Lets a bootstrap test pin
+    /// "first command succeeds, second fails, third never runs".
+    pub fn with_exec_exit_codes(self, codes: &[i32]) -> Self {
+        *self.exec_exit_codes.borrow_mut() = codes.iter().copied().collect();
         self
     }
 
@@ -705,6 +720,9 @@ impl HostMachine for StubHostMachine {
             .push((name.to_string(), argv.to_vec()));
         if let Some(err) = self.exec_failure.borrow_mut().take() {
             return Err(err);
+        }
+        if let Some(code) = self.exec_exit_codes.borrow_mut().pop_front() {
+            return Ok(code);
         }
         Ok(self.exec_exit_code.get())
     }

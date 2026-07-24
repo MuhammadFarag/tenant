@@ -120,6 +120,11 @@ pub struct Profile {
     /// profiles. Empty ports is the locked posture.
     #[serde(default)]
     pub inbound: Inbound,
+    /// Absent `[bootstrap]` deserializes to empty commands via
+    /// `#[serde(default)]`, preserving backward-compat with pre-bootstrap
+    /// profiles. Empty commands ⇒ `tenant bootstrap` is a quiet no-op.
+    #[serde(default)]
+    pub bootstrap: Bootstrap,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -179,6 +184,18 @@ pub struct Inbound {
     pub ports: Vec<u16>,
 }
 
+/// Shell commands the `tenant bootstrap` verb runs AS the tenant, each
+/// via `/bin/sh -c <command>`. The operator promises they're idempotent
+/// (the design leans on guard idioms like `command -v x || install x`),
+/// so the verb is re-runnable anytime. Absent (or empty) ⇒ nothing to
+/// run. Bare command list — no proto/tier field; commands are not a
+/// tier axis (they run once, when the operator invokes the verb).
+#[derive(Debug, Deserialize, PartialEq, Eq, Default)]
+pub struct Bootstrap {
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
 /// Wire shape for BOTH tenant profiles and `include` fragments: every
 /// section optional/defaulted. `Profile` (unchanged) is the merged,
 /// validated result; downstream consumers never see a `PartialProfile`.
@@ -200,6 +217,8 @@ pub struct PartialProfile {
     pub shares: Vec<Share>,
     #[serde(default)]
     pub inbound: Inbound,
+    #[serde(default)]
+    pub bootstrap: Bootstrap,
 }
 
 /// Independently-optional allowlist tiers. A fragment may declare one, the
@@ -322,6 +341,9 @@ pub fn parse_partial(content: &str, role: ProfileRole) -> Result<PartialProfile,
     for share in &partial.shares {
         validate_tenant_path_template(&share.tenant_path)?;
     }
+    for command in &partial.bootstrap.commands {
+        validate_bootstrap_command(command)?;
+    }
     Ok(partial)
 }
 
@@ -377,6 +399,13 @@ pub fn merge(parts: Vec<PartialProfile>) -> Result<Profile, ProfileError> {
         .iter()
         .flat_map(|p| p.inbound.ports.iter().copied())
         .collect();
+    // Concatenate fragments-first, no dedupe (same posture as ports /
+    // hosts / shares). Empty/whitespace entries are already refused
+    // per-file by `parse_partial`, so the merged list has none.
+    let commands: Vec<String> = parts
+        .iter()
+        .flat_map(|p| p.bootstrap.commands.iter().cloned())
+        .collect();
     // Verbatim tenant_path collision, only across a genuine union (more
     // than one part). A single include-free profile with two shares at the
     // same tenant_path parsed before this feature (last-symlink-wins
@@ -402,6 +431,7 @@ pub fn merge(parts: Vec<PartialProfile>) -> Result<Profile, ProfileError> {
         allowlist: Allowlist { runtime, install },
         shares,
         inbound: Inbound { ports },
+        bootstrap: Bootstrap { commands },
     })
 }
 
@@ -467,6 +497,20 @@ fn validate_host_entry_ports(entry: &HostEntry) -> Result<(), ProfileError> {
                  unreachable \u{2014} remove the entry or declare its ports",
                 entry.host
             ),
+        });
+    }
+    Ok(())
+}
+
+/// An empty or whitespace-only `[bootstrap]` command is a no-op in the
+/// list — an authoring mistake, same posture as `ports = []`. Refused at
+/// parse (per-file, so the refusal names the file that authored it).
+fn validate_bootstrap_command(command: &str) -> Result<(), ProfileError> {
+    if command.trim().is_empty() {
+        return Err(ProfileError {
+            message: "bootstrap declares an empty (or whitespace-only) command; \
+                      a no-op command is an authoring mistake \u{2014} remove it"
+                .to_string(),
         });
     }
     Ok(())

@@ -214,10 +214,33 @@ impl<'a> Tenants<'a> {
         scope: ReapplyScope,
     ) -> Result<ReapplyPlan, ModeError> {
         let parsed_profile = self.load_profile(name).map_err(ModeError::Profile)?;
-        let hosts = hosts_for_level(&parsed_profile, level);
+        self.build_reapply_plan_from_profile(
+            name,
+            host,
+            level,
+            inbound_override,
+            scope,
+            &parsed_profile,
+        )
+    }
+
+    /// The plan-construction body, given an already-loaded profile. Split
+    /// out so `bootstrap` can read the profile ONCE (it needs the
+    /// `[bootstrap]` commands from the same parse) and still build the
+    /// widen reapply plan without a second `load_profile`.
+    pub(crate) fn build_reapply_plan_from_profile(
+        &self,
+        name: &TenantUserName,
+        host: &HostUserName,
+        level: ModeLevel,
+        inbound_override: Option<InboundLevel>,
+        scope: ReapplyScope,
+        parsed_profile: &Profile,
+    ) -> Result<ReapplyPlan, ModeError> {
+        let hosts = hosts_for_level(parsed_profile, level);
         let inbound = match inbound_override {
-            Some(inbound_level) => inbound_rules_for_level(&parsed_profile, inbound_level),
-            None => steady_inbound_rules(&parsed_profile),
+            Some(inbound_level) => inbound_rules_for_level(parsed_profile, inbound_level),
+            None => steady_inbound_rules(parsed_profile),
         };
         let install_anchor = FirewallOp::InstallAnchor {
             name: name.into(),
@@ -265,7 +288,7 @@ impl<'a> Tenants<'a> {
             }
             ReapplyScope::Light => None,
         };
-        let share_ops = self.build_share_ops(name, &parsed_profile, scope)?;
+        let share_ops = self.build_share_ops(name, parsed_profile, scope)?;
         Ok(ReapplyPlan {
             install_anchor,
             reload,

@@ -502,6 +502,131 @@ pub(crate) fn dispatch(
                 }
             }
         },
+        Verb::Bootstrap { name } => match name {
+            Some(n) => {
+                if let Err(e) = tenants::validate_name(&n) {
+                    reporter.refuse_invalid_name(&n, &e);
+                    return EX_USAGE;
+                }
+                let eligibility = match tenants::destroy_eligibility(directory, &n) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        reporter.bootstrap_eligibility_probe_failed(&n, &e);
+                        return EX_IOERR;
+                    }
+                };
+                match eligibility {
+                    tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
+                        reporter.refuse_bootstrap_absent(&n);
+                        EX_USAGE
+                    }
+                    tenants::Eligibility::NotATenant { uid } => {
+                        reporter.refuse_bootstrap_not_a_tenant(&n, uid, TENANT_UID_FLOOR);
+                        EX_USAGE
+                    }
+                    tenants::Eligibility::SystemAccount => {
+                        reporter.refuse_bootstrap_system_account(&n);
+                        EX_USAGE
+                    }
+                    tenants::Eligibility::Destroyable => {
+                        // Build the plan pre-summary so profile-read /
+                        // include / share pre-flight failures surface
+                        // pre-prompt (same posture as reload).
+                        let plan = match tenants.build_bootstrap_plan(&n, host) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tenants::surface_bootstrap_error(
+                                    reporter,
+                                    &n,
+                                    &tenants::BootstrapError::Mode(e),
+                                );
+                                return EX_IOERR;
+                            }
+                        };
+                        // A tenant declaring no commands is a quiet,
+                        // convergent success — no summary, no confirm.
+                        if plan.commands.is_empty() {
+                            reporter.bootstrap_nothing_declared(&n);
+                            return 0;
+                        }
+                        let command_ops = build_bootstrap_command_ops(&n, &plan.commands);
+                        let command_entries = bootstrap_command_entries(&command_ops);
+                        let infra_entries = plan.widen.as_plan_entries();
+                        if show_summary {
+                            reporter.bootstrap_summary(&n, &command_entries, &infra_entries);
+                            // Bootstrap is a mutating verb (PF widen/narrow +
+                            // commands), so it runs the per-tenant drift audit
+                            // between summary and confirm like every other
+                            // mutating verb. Reuse DoctorScope::Reload:
+                            // bootstrap Light-reapplies the same per-tenant
+                            // surfaces reload audits. Courtesy only — never an
+                            // abort gate. Single-tenant only; the no-arg walk
+                            // stays doctor-free, consistent with reload_all.
+                            tenants.pre_exec_doctor_summary(
+                                Some(&n),
+                                host,
+                                tenants::DoctorScope::Reload,
+                                reporter,
+                            );
+                        }
+                        if reporter.confirm(true) == ConfirmOutcome::Abort {
+                            reporter.aborted();
+                            return 0;
+                        }
+                        match tenants.bootstrap(&n, host, &plan, reporter) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                tenants::surface_bootstrap_error(reporter, &n, &e);
+                                // StashAbsent is operator-action-required
+                                // (EX_USAGE, mirrors shell); every other
+                                // arm — command failure, spawn failure,
+                                // narrow-after-success — is a substrate
+                                // failure at EX_IOERR (bootstrap is not
+                                // shell; no child-exit propagation).
+                                match e {
+                                    tenants::BootstrapError::StashAbsent { .. } => EX_USAGE,
+                                    _ => EX_IOERR,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                let names = match directory.tenant_names() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        reporter.bootstrap_all_enumeration_failed(&e);
+                        return EX_IOERR;
+                    }
+                };
+                if names.is_empty() {
+                    return match tenants.bootstrap_all(directory, host, reporter) {
+                        Ok(outcome) if outcome.failed == 0 => 0,
+                        Ok(_) => EX_IOERR,
+                        Err(e) => {
+                            reporter.bootstrap_all_enumeration_failed(&e);
+                            EX_IOERR
+                        }
+                    };
+                }
+                if show_summary {
+                    reporter.bootstrap_all_summary(host, &names);
+                }
+                if reporter.confirm(true) == ConfirmOutcome::Abort {
+                    reporter.aborted();
+                    return 0;
+                }
+                match tenants.bootstrap_all(directory, host, reporter) {
+                    Ok(outcome) if outcome.failed == 0 => 0,
+                    Ok(_) => EX_IOERR,
+                    Err(e) => {
+                        reporter.bootstrap_all_enumeration_failed(&e);
+                        EX_IOERR
+                    }
+                }
+            }
+        },
         Verb::Setup => {
             // Host-wide: no name, no eligibility, no pre-exec doctor pass
             // (setup prepares the host; its own offer is the surface).
@@ -688,6 +813,29 @@ fn surface_reload_error(
         tenants::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
         tenants::ModeError::Share(e) => reporter.refuse_reload_share(name, e),
     }
+}
+
+/// One display-only `ExecAsUser` op per bootstrap command, for the
+/// always-shown pre-confirm command list (the honesty backstop). Plan/echo
+/// render ONLY — `execute_account` panics on `ExecAsUser`; the real run
+/// goes through `machine.exec_as_tenant` inside `Tenants::bootstrap`,
+/// exactly like shell. Owns the ops so `bootstrap_command_entries` can
+/// borrow them into the slice the Reporter expects.
+fn build_bootstrap_command_ops(
+    name: &super::TenantUserName,
+    commands: &[String],
+) -> Vec<AccountOp> {
+    commands
+        .iter()
+        .map(|command| AccountOp::ExecAsUser {
+            name: name.into(),
+            argv: vec!["/bin/sh".to_string(), "-c".to_string(), command.clone()],
+        })
+        .collect()
+}
+
+fn bootstrap_command_entries(ops: &[AccountOp]) -> Vec<(Op<'_>, Option<&'static str>)> {
+    ops.iter().map(|op| (Op::Account(op), None)).collect()
 }
 
 // Plan-slice construction for prompt-having verbs. `*_plan_ops` owns
@@ -1082,14 +1230,31 @@ Co-working directory (auto-provisioned, not configurable)
   may hold operator-authored work, and destroy emits a notice
   line naming the path so the operator can clean up manually.
 
-Non-goal: filesystem contents
+Bootstrap commands
 
-  tenant deliberately does not provision the tenant's filesystem
-  contents (no `git clone`, no `mkdir`, no template files). There
-  is no [provision] section. Bootstrap inside the tenant after
-  creation:
+  [bootstrap]
+  commands = [
+    "command -v rg || brew install ripgrep",
+    "test -d ~/dotfiles || git clone https://github.com/you/dotfiles ~/dotfiles",
+  ]
 
-    tenant shell <name> -- git clone https://github.com/you/repo
+  `tenant bootstrap <name>` runs each command AS the tenant, via
+  /bin/sh -c, in declared order, stopping on the first that exits
+  non-zero. The commands run inside a temporary install-tier egress
+  widen (so a command may reach install-only hosts like package
+  registries), and egress narrows back on completion.
+
+  You promise the commands are idempotent — the design leans on guard
+  idioms (`command -v x || install x`, `test -d ... ||`) — so the verb
+  is safe to re-run anytime; the already-satisfied prefix no-ops. There
+  is no state file and no run-once tracking. Commands may be declared in
+  include fragments too, so bare `tenant bootstrap` converges a whole
+  fleet (edit a shared fragment, run it).
+
+  Non-goal: tenant does not manage or template the tenant's filesystem
+  CONTENTS (it writes no dotfiles and renders no templates itself). What
+  it runs are the idempotent commands YOU declare in [bootstrap] — the
+  contents they produce are yours to own.
 
 Applying changes
 

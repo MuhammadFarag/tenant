@@ -819,6 +819,23 @@ pub fn profile_with_shares(
     format!("{base}{share_blocks}")
 }
 
+/// Helper: profile TOML with the given runtime + install host lists AND a
+/// `[bootstrap]` block. Each command is a verbatim shell string. Empty
+/// `commands` produces no `[bootstrap]` block (backward-compat). Used by
+/// the bootstrap E2E suite to drive the read_profile + merge + verb path.
+pub fn profile_with_bootstrap(runtime: &[&str], install: &[&str], commands: &[&str]) -> String {
+    let base = profile_with_hosts(runtime, install);
+    if commands.is_empty() {
+        return base;
+    }
+    let lines = commands
+        .iter()
+        .map(|c| format!("  \"{c}\","))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{base}\n[bootstrap]\ncommands = [\n{lines}\n]\n")
+}
+
 /// Build `EgressHost`s from bare host names, each defaulting to TCP 443 —
 /// the pre-ports meaning a bare profile entry resolves to. Lets a
 /// `render_anchor` expectation mirror a bare-only profile without spelling

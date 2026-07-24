@@ -22,7 +22,8 @@ fn help_profile_body_covers_load_bearing_concepts() {
     // The profile body must call out: the file location, the schema
     // anchor (`schema_version`), the two allowlist tiers, the
     // [[shares]] block + `$HOME` rule, the `[inbound]` ports section +
-    // its honest-scope caveats, the `[provision]` non-goal, and the
+    // its honest-scope caveats, the `[bootstrap]` commands section +
+    // its narrowed non-goal (no templating of file CONTENTS), and the
     // `tenant reload <name>` apply step. Pin by substring rather than
     // byte-exact — the body's prose is allowed to shift; the concepts
     // are not.
@@ -47,8 +48,13 @@ fn help_profile_body_covers_load_bearing_concepts() {
         "peer tenants",
         "OWN undeclared",
         "UDP",
-        "[provision]",
-        "git clone",
+        // Bootstrap section (Half 2): the schema anchor, the verb, the
+        // shell contract, and the narrowed non-goal (contents, not the
+        // old `[provision]` copy).
+        "[bootstrap]",
+        "tenant bootstrap",
+        "/bin/sh -c",
+        "does not manage or template",
         "tenant reload",
     ];
     for needle in needles {

@@ -1788,6 +1788,280 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    // --- bootstrap verb ------------------------------------------------
+
+    pub fn bootstrap_intent(&mut self, name: &TenantUserName) {
+        if !self.dry_run {
+            self.section(&format!("Bootstrapping tenant '{name}'"));
+        }
+    }
+
+    pub fn bootstrap_done(&mut self, name: &TenantUserName) {
+        if self.dry_run {
+            return;
+        }
+        self.section("Done");
+        let _ = writeln!(self.terminal.stdout, "Tenant '{name}' bootstrapped.");
+        self.next_step(&format!("Next: audit with `tenant doctor {name}`."));
+    }
+
+    /// Pre-confirm summary. The command list ALWAYS renders (the honesty
+    /// backstop — every command visible before the operator says yes),
+    /// via the `AccountOp::ExecAsUser` plan/echo shape in `command_entries`.
+    /// The widen infra plan (`infra_entries`) stays verbose-gated per the
+    /// plan-rendering doctrine.
+    pub fn bootstrap_summary(
+        &mut self,
+        name: &TenantUserName,
+        command_entries: &[(Op<'_>, Option<&'static str>)],
+        infra_entries: &[(Op<'_>, Option<&'static str>)],
+    ) {
+        let count = command_entries.len();
+        let _ = writeln!(
+            self.terminal.stdout,
+            "About to run {count} bootstrap command(s) as tenant '{name}'."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} widen egress to the install-tier allowlist for the duration"
+        );
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} run each command below as '{name}', stopping on the first failure"
+        );
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} narrow egress back to runtime tier on completion (even if a command fails)"
+        );
+        let _ = writeln!(self.terminal.stdout);
+        // Verbose-only firewall infra plan (the widen reapply ops).
+        if self.verbose && !infra_entries.is_empty() {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "Firewall reapply (widen to install tier):"
+            );
+            let _ = writeln!(self.terminal.stdout);
+            self.render_plan_block(infra_entries);
+            let _ = writeln!(self.terminal.stdout);
+        }
+        // Always-shown command list — the honesty backstop.
+        let _ = writeln!(self.terminal.stdout, "Commands to run:");
+        let _ = writeln!(self.terminal.stdout);
+        self.render_plan_block(command_entries);
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Sudo needed for: firewall install, exec, firewall narrow."
+        );
+        let _ = writeln!(self.terminal.stdout);
+    }
+
+    /// Single-tenant quiet no-op: a tenant declaring no commands is a
+    /// convergent success (mirrors destroy-absent). One stdout line, no
+    /// section framing, no confirm — exit 0.
+    pub fn bootstrap_nothing_declared(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Tenant '{name}' declares no bootstrap commands \u{2014} nothing to run."
+        );
+    }
+
+    /// `✓` per successfully-run command, naming the command verbatim
+    /// (the `ExecAsUser` business label would only say 'sh'). Silent in
+    /// dry-run, mirroring `progress`.
+    pub fn bootstrap_command_ran(&mut self, name: &TenantUserName, command: &str) {
+        if self.dry_run {
+            return;
+        }
+        self.ok(&format!("Ran as '{name}': {command}"));
+    }
+
+    pub fn bootstrap_command_failed(&mut self, name: &TenantUserName, command: &str, code: i32) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: bootstrap command failed for '{name}' (exit {code}): {command}"
+        );
+    }
+
+    pub fn bootstrap_exec_failed(&mut self, name: &TenantUserName, err: &AccountError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to run bootstrap command as '{name}': {err}"
+        );
+    }
+
+    /// Yellow `⚠` stderr one-liner for narrow-on-finally failure after the
+    /// commands ran. Does NOT mask the commands' outcome (they succeeded);
+    /// names the recovery verb. Parallel to `shell_narrow_failed`.
+    pub fn bootstrap_narrow_failed(
+        &mut self,
+        name: &TenantUserName,
+        _err: &super::tenants::ModeError,
+    ) {
+        let prefix = if self.terminal.colors.stderr {
+            "\x1b[33m\u{26a0}\x1b[0m"
+        } else {
+            "\u{26a0}"
+        };
+        let _ = writeln!(
+            self.terminal.stderr,
+            "{prefix} tenant '{name}': bootstrap commands ran, but the firewall was not narrowed \u{2014} install-tier widening still in effect; run `tenant mode {name} runtime` to recover"
+        );
+    }
+
+    /// Firewall-widen/narrow reapply failure with bootstrap phrasing
+    /// (distinct from `mode_failed`'s tier-swap wording).
+    pub fn bootstrap_firewall_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to apply firewall for bootstrap of '{name}': {err}"
+        );
+    }
+
+    pub fn refuse_bootstrap_share(&mut self, name: &TenantUserName, err: &ShareError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: cannot bootstrap '{name}': {err}"
+        );
+    }
+
+    /// Same refusal shape as shell's (`EX_USAGE`, names destroy/recreate),
+    /// with bootstrap wording — a legacy tenant missing its operator-side
+    /// keychain stash can't have its keychain unlocked.
+    pub fn bootstrap_refuse_stash_absent(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to bootstrap '{name}': stashed password absent \
+             \u{2014} run `tenant destroy {name} && tenant create {name}` to re-bootstrap"
+        );
+    }
+
+    pub fn refuse_bootstrap_absent(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: cannot bootstrap '{name}': does not exist"
+        );
+    }
+
+    pub fn refuse_bootstrap_not_a_tenant(
+        &mut self,
+        name: &TenantUserName,
+        uid: UserId,
+        floor: u32,
+    ) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to bootstrap '{name}': UID {uid} is below tenant floor {floor}"
+        );
+    }
+
+    pub fn refuse_bootstrap_system_account(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to bootstrap '{name}': system account (no tenant-range UID)"
+        );
+    }
+
+    pub fn bootstrap_eligibility_probe_failed(
+        &mut self,
+        name: &TenantUserName,
+        err: &UserDirectoryError,
+    ) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check bootstrap eligibility for '{name}': {err}"
+        );
+    }
+
+    /// Pre-confirm summary for the fleet walk (mirrors `reload_all_summary`).
+    pub fn bootstrap_all_summary(&mut self, host: &HostUserName, names: &[TenantUserName]) {
+        let count = names.len();
+        let list = names
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "About to bootstrap {count} tenant(s): {list}."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "For each tenant this will:");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} widen egress to install tier, run its declared [bootstrap] commands as the tenant, then narrow back"
+        );
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} skip tenants that declare no commands"
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Per-tenant failures continue the walk; a final summary names the counts. \
+             The invoking host is '{host}'."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Sudo needed for: firewall install, exec, firewall narrow (per tenant)."
+        );
+        let _ = writeln!(self.terminal.stdout);
+    }
+
+    /// Silent when `count == 0`; `bootstrap_all_done_summary` handles that.
+    pub fn bootstrap_all_starting(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        if !self.dry_run {
+            self.section(&format!("Bootstrapping {count} tenant(s)"));
+        }
+    }
+
+    pub fn bootstrap_all_done_summary(&mut self, succeeded: usize, failed: usize, skipped: usize) {
+        if self.dry_run {
+            return;
+        }
+        if succeeded == 0 && failed == 0 && skipped == 0 {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "No tenants on this host to bootstrap."
+            );
+            return;
+        }
+        self.section("Done");
+        let mut line = format!("Bootstrapped {succeeded} tenant(s)");
+        if skipped > 0 {
+            line.push_str(&format!("; {skipped} skipped (no commands)"));
+        }
+        if failed > 0 {
+            line.push_str(&format!("; {failed} failed"));
+        }
+        line.push('.');
+        let _ = writeln!(self.terminal.stdout, "{line}");
+    }
+
+    /// Dim per-tenant skip note during the walk (a tenant with no
+    /// commands). Real-mode only.
+    pub fn bootstrap_walk_nothing_declared(&mut self, name: &TenantUserName) {
+        if self.dry_run {
+            return;
+        }
+        self.next_step(&format!(
+            "{name}: no bootstrap commands declared — skipped."
+        ));
+    }
+
+    pub fn bootstrap_all_enumeration_failed(&mut self, err: &UserDirectoryError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to enumerate tenants for bootstrap: {err}"
+        );
+    }
+
     fn emit_plan_section(&mut self, plan: Option<&[(Op<'_>, Option<&'static str>)]>) {
         if !self.verbose {
             return;
