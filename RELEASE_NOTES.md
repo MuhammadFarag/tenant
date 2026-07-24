@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.6
+# tenant 0.1.0-alpha.7
 
-Sixth alpha. Still alpha quality: the verbs work end-to-end on the
+Seventh alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -22,73 +22,70 @@ third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
 
-## New since 0.1.0-alpha.5
+## New since 0.1.0-alpha.6
 
-- **Per-host egress ports in the allowlist.** An allowlist `hosts`
-  entry can now declare which TCP ports it opens: a bare string keeps
-  the old meaning (TCP 443 only), an inline table declares its own
-  ports —
+- **`tenant bootstrap` — profile-declared setup commands.** A profile
+  (or an include fragment — that's the point) may declare:
 
   ```toml
-  [allowlist.runtime]
-  hosts = [
-    "api.anthropic.com",                        # TCP 443 only
-    { host = "github.com", ports = [443, 22] }, # + git-over-ssh
+  [bootstrap]
+  commands = [
+    "command -v rg || brew install ripgrep",
+    "test -d ~/dotfiles || git clone https://github.com/you/dotfiles ~/dotfiles",
   ]
   ```
 
-  The motivating case is git-over-ssh to a forge without opening
-  port 22 to every allowlisted host. Existing profiles are untouched:
-  bare-string profiles render a byte-identical PF anchor, so upgrading
-  does not surface anchor drift in `tenant doctor`. An entry with
-  `ports = []` is refused at parse (an unreachable host is a
-  contradiction). TCP only, matching `[inbound]`.
+  `tenant bootstrap <name>` runs each command as the tenant, in merged
+  order (fragments first), stopping on the first that exits non-zero.
+  The run happens inside a temporary install-tier egress widen (so
+  commands can reach package registries), and egress always narrows
+  back to runtime on completion — even when a command fails. Every
+  command is shown verbatim before the confirmation prompt.
 
-- **Profile `include` fragments — share config across a fleet.** A
-  profile may declare an ordered list of fragments to merge:
+  Combined with include fragments this is fleet management: declare
+  the setup once in `includes/base.toml`, and bare `tenant bootstrap`
+  walks every tenant and converges each — per-tenant failures don't
+  stop the walk. You promise the commands are idempotent (use guard
+  idioms like the examples above); the verb is then safe to re-run
+  anytime. There is no state file and no run-once tracking, and
+  `tenant reload` never runs commands — reapplying infrastructure and
+  re-running actions stay separate operations.
 
-  ```toml
-  include = ["base"]
+- **`tenant shell -d/--directory` — start in a tenant-side
+  directory.** The enter–cd–run workflow is now one line:
+
+  ```
+  tenant shell agent -d projects/foo -- claude
+  tenant shell agent -d projects/foo            # interactive, starts there
   ```
 
-  Fragments live in `~/.config/tenant/profiles/includes/<name>.toml`
-  and are partial profiles: any subset of sections (allowlist tiers,
-  `[inbound]` ports, `[[shares]]`) is legal, and the merged result must
-  form a complete profile. Merging concatenates lists in order —
-  fragments first, the tenant's own entries last; nothing overrides.
-  Nested includes are refused (depth one), and two shares mapping to
-  the same `tenant_path` across the merge are refused at load.
+  Paths resolve on the TENANT's filesystem: a relative path lands
+  under the tenant's home (prefer this form), an absolute path is
+  literal, and a quoted `'$HOME/…'` expands to the tenant's home.
+  Unquoted `$HOME` is expanded by *your* shell to *your* home before
+  the binary sees it — hence the relative form. A missing or
+  non-directory path refuses before anything is applied (when a sudo
+  session is active to probe with), and a `$` anywhere but the
+  leading `$HOME` refuses rather than being silently expanded by the
+  tenant's login shell.
 
-  This is how a fleet of tenants shares the same agent-API endpoints
-  or common shares without hand-duplicating them into every profile:
-  edit the fragment once, run `tenant reload` (no argument walks every
-  tenant) to converge the fleet. Editing a fragment without reloading
+## New since 0.1.0-alpha.5
+
+- **Per-host egress ports in the allowlist.** An allowlist `hosts`
+  entry can declare which TCP ports it opens: a bare string keeps the
+  old meaning (TCP 443 only), an inline table declares its own ports
+  (`{ host = "github.com", ports = [443, 22] }` for git-over-ssh).
+  Existing profiles render byte-identical anchors — upgrading does not
+  surface anchor drift.
+
+- **Profile `include` fragments — share config across a fleet.** A
+  profile may declare `include = ["base"]`; fragments live in
+  `~/.config/tenant/profiles/includes/<name>.toml` and are partial
+  profiles merged in order (fragments first, the profile's own entries
+  last; nothing overrides). Edit the fragment once, `tenant reload` to
+  converge every includer; editing a fragment without reloading
   surfaces as anchor drift in `tenant doctor` on every tenant that
-  includes it. The `create` scaffold carries a commented
-  `# include = ["base"]` hint, and `tenant help profile` documents the
-  schema.
-
-## New since 0.1.0-alpha.4
-
-- **`tenant reload` repairs a tenant's primary group.** A macOS system
-  update can reset a tenant account's primary group back to the default
-  `staff` (20). That single flipped attribute breaks the sandbox in both
-  directions: the tenant loses access to its own shares and co-working
-  directory (symlinks resolve, every read and write is denied), and it
-  gains `staff` membership — which is enough to enter the host operator's
-  home directory and enumerate `~/.ssh`, `~/.aws`, and `~/.config/gh`.
-
-  Until now the primary group was set once, at `create`, and no verb ever
-  re-asserted it — so the documented drift remedy (`tenant doctor` →
-  `tenant reload`) could not repair it, and the manual fix was a hand-run
-  `dscl` command. `tenant reload` now re-asserts it against the live
-  share-group record on every run. It is idempotent and a no-op on a
-  healthy host. `mode` and `shell` do the lighter reapply and are
-  unchanged.
-
-  If you ran a system update since alpha.4, run `tenant reload` and then
-  re-enter the tenant — a session already running under the wrong group
-  picks up the correction on its next login.
+  includes it. Nested includes are refused (depth one).
 
 ## What works in this release
 
@@ -99,8 +96,11 @@ grant access.
 - `tenant destroy <name>` — convergent teardown; safe to re-run. Leaves
   the co-working directory intact.
 - `tenant shell <name>` — enter a tenant interactively, or run a
-  single command (`tenant shell <name> -- ls /tmp`). Unlocks the
-  tenant keychain and reapplies shares on entry.
+  single command (`tenant shell <name> -- ls /tmp`); `-d <dir>` starts
+  either form in a tenant-side directory. Unlocks the tenant keychain
+  and reapplies shares on entry.
+- `tenant bootstrap [<name>]` — run the profile's declared idempotent
+  setup commands as the tenant; bare form walks every tenant.
 - `tenant mode <name> install|runtime` — switch the PF anchor between
   a widened install tier and the restricted runtime tier.
 - `tenant inbound <name> restricted|permissive` — control which loopback
@@ -136,14 +136,14 @@ Or build from source / download the pre-built ARM binary:
 
 ```
 # Build from source at this release
-cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.6
+cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.7
 
 # Or download the pre-built ARM binary
-curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.6/tenant-v0.1.0-alpha.6-aarch64-apple-darwin.tar.gz | tar -xz
+curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.7/tenant-v0.1.0-alpha.7-aarch64-apple-darwin.tar.gz | tar -xz
 sudo mv tenant /usr/local/bin/
 ```
 
-Verify with `tenant --version` (expect `tenant 0.1.0-alpha.6`).
+Verify with `tenant --version` (expect `tenant 0.1.0-alpha.7`).
 
 ## Known rough edges
 
@@ -151,10 +151,14 @@ Still an alpha. Expect sharp edges in error reporting, recovery from
 partial failures, and unusual host configurations the author has not
 encountered. Specifically:
 
+- `tenant bootstrap` trusts your idempotence promise — an unguarded
+  `git clone` in the list fails its second run and stops the verb.
+  The pre-confirm command list is the honesty backstop; there is no
+  sandbox-level validation of what a command does.
 - With include fragments there is no "effective profile" view yet —
-  the per-tenant file alone no longer tells the whole story. The merged
-  result is what `tenant reload` applies and `tenant doctor` audits;
-  read the fragment files alongside the profile for now.
+  the per-tenant file alone no longer tells the whole story. The
+  merged result is what `tenant reload` applies and `tenant doctor`
+  audits; read the fragment files alongside the profile for now.
 - Inbound `restricted` mode narrows *which* loopback ports are exposed,
   not *who* reaches them — co-located tenants can reach a tenant's
   declared/permissive ports. Run mutually-distrusting workloads in
@@ -164,10 +168,6 @@ encountered. Specifically:
   "already enabled, nothing to do" on a configured host (accepting is a
   harmless no-op). The interactive prompt also can't be driven over a
   pipe — use `--yes` for scripted enable.
-- Pre-confirm summaries are wordier than they need to be (implementation
-  detail and group-name jargon leak into the standard view), and the
-  `tenant shell -- <cmd>` command form prints the full reapply log
-  around the child rather than running quietly.
 - `tenant doctor` over a pipe (no TTY) still fails rather than
   prompting — run it from an interactive terminal.
 - `destroy` removes the profile TOML without a backup; `create` will
