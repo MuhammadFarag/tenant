@@ -41,6 +41,13 @@ impl HostMachine for DryRunHostMachine {
     fn read_profile(&self, _name: &TenantUserName) -> Result<String, ProfileError> {
         Ok(default_profile_toml())
     }
+    /// An empty fragment is a legal partial, so this keeps the preview
+    /// honest without fabricating content. Normally unreachable: the
+    /// scaffold's `include` hint is commented, so the `read_profile`
+    /// placeholder above resolves no includes.
+    fn read_profile_fragment(&self, _fragment: &str) -> Result<String, ProfileError> {
+        Ok(String::new())
+    }
     /// Canonical tenant-floor gid placeholder so the `--dry-run` reload
     /// preview renders a representative `EnsurePrimaryGroup` line without
     /// reading real dscl state.

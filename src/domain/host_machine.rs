@@ -26,6 +26,16 @@ pub trait HostMachine {
 
     fn read_profile(&self, name: &TenantUserName) -> Result<String, ProfileError>;
 
+    /// Reads an `include` fragment's TOML from
+    /// `~/.config/tenant/profiles/includes/<fragment>.toml`. A content read,
+    /// so it carves out beside `read_profile` rather than becoming an `Op`
+    /// variant — ops are planned mutations; this is how the load path
+    /// *learns*. Takes `&str`: fragment names are not tenant names, and the
+    /// lexical rail already ran at parse (`validate_fragment_name`), so the
+    /// name reaching here is safe. No fragment-writing op exists — Half 1
+    /// never authors fragments.
+    fn read_profile_fragment(&self, fragment: &str) -> Result<String, ProfileError>;
+
     /// Reads the primary gid of the named share group via `dscl . -read
     /// /Groups/<group> PrimaryGroupID`. Full reapply calls this to
     /// resolve the gid for `AccountOp::EnsurePrimaryGroup` before

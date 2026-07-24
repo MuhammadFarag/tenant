@@ -7,7 +7,7 @@ use crate::domain::{
     KeychainOp, KeychainPassword, ProfileOp, TenantUserName, UserId,
 };
 use crate::firewall::{ensure_anchor_ref, render_anchor};
-use crate::profile::{ProfileError, display_path_for, parse};
+use crate::profile::{ProfileError, display_path_for};
 
 use super::reapply::{hosts_for_level, steady_inbound_rules};
 use super::{ModeError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
@@ -149,16 +149,10 @@ impl<'a> Tenants<'a> {
                     .map_err(CreateError::KeychainStash)?;
                 self.run(&create_profile, reporter)
                     .map_err(CreateError::Profile)?;
-                let profile_content = self.machine.read_profile(name).map_err(|e| {
+                let parsed_profile = self.load_profile(name).map_err(|e| {
                     CreateError::Firewall(FirewallError::Fs {
                         path: display_path_for(name.as_str()),
-                        message: format!("read failed: {e}"),
-                    })
-                })?;
-                let parsed_profile = parse(&profile_content).map_err(|e| {
-                    CreateError::Firewall(FirewallError::Fs {
-                        path: display_path_for(name.as_str()),
-                        message: format!("parse failed: {e}"),
+                        message: format!("load failed: {e}"),
                     })
                 })?;
                 let pf_conf_current = self.machine.read_pf_conf().map_err(CreateError::Firewall)?;

@@ -33,6 +33,14 @@ impl HostMachine for NeverHostMachine {
     fn read_profile(&self, name: &TenantUserName) -> Result<String, tenant::profile::ProfileError> {
         panic!("host machine unexpectedly invoked (read_profile) with name: {name:?}");
     }
+    fn read_profile_fragment(
+        &self,
+        fragment: &str,
+    ) -> Result<String, tenant::profile::ProfileError> {
+        panic!(
+            "host machine unexpectedly invoked (read_profile_fragment) with fragment: {fragment:?}"
+        );
+    }
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
         panic!("host machine unexpectedly invoked (read_share_group_gid) with group: {group:?}");
     }

@@ -3,6 +3,7 @@
 //! `[[shares]]` filesystem-share declarations, and the `[inbound]`
 //! TCP-loopback port list (the `restricted` inbound posture).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
@@ -15,6 +16,14 @@ pub fn display_path_for(name: &str) -> String {
     format!("~/.config/tenant/profiles/{name}.toml")
 }
 
+/// Display path for an `include` fragment, literal `~` form. Fragments
+/// live under the `includes/` subdirectory so the tenant/fragment
+/// distinction is physical (a tenant legally named `base` writes
+/// `profiles/base.toml`, which can't collide with `includes/`).
+pub fn display_fragment_path_for(fragment: &str) -> String {
+    format!("~/.config/tenant/profiles/includes/{fragment}.toml")
+}
+
 /// Default profile content scaffolded at create-time. Empty hosts arrays
 /// mean "no egress allowlisted yet"; the operator edits before use.
 /// Commented `# ...` examples scaffold the common shape (allowlist
@@ -25,6 +34,12 @@ pub fn default_profile_toml() -> String {
      # Apply edits with `tenant reload <name>`.\n\
      \n\
      schema_version = 1\n\
+     \n\
+     # Optional: share common allowlist / inbound / shares across a fleet by\n\
+     # including ordered fragments from\n\
+     # ~/.config/tenant/profiles/includes/<name>.toml — each is merged before\n\
+     # this file (this file wins last). Uncomment to enable:\n\
+     # include = [\"base\"]\n\
      \n\
      [allowlist.runtime]\n\
      # Hosts the tenant can reach during normal use. A bare host opens TCP\n\
@@ -164,6 +179,48 @@ pub struct Inbound {
     pub ports: Vec<u16>,
 }
 
+/// Wire shape for BOTH tenant profiles and `include` fragments: every
+/// section optional/defaulted. `Profile` (unchanged) is the merged,
+/// validated result; downstream consumers never see a `PartialProfile`.
+/// The completeness checks (schema_version present, both tiers declared)
+/// live in `merge`, not here — a fragment carrying only
+/// `[allowlist.runtime]` is a legal partial.
+#[derive(Debug, Deserialize, PartialEq, Eq, Default)]
+pub struct PartialProfile {
+    #[serde(default)]
+    pub schema_version: Option<u32>,
+    /// Ordered fragment names resolved from `profiles/includes/<name>.toml`,
+    /// merged left-to-right before the tenant profile. Refused in a fragment
+    /// (depth one). Serde-default so include-free profiles round-trip.
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub allowlist: PartialAllowlist,
+    #[serde(default)]
+    pub shares: Vec<Share>,
+    #[serde(default)]
+    pub inbound: Inbound,
+}
+
+/// Independently-optional allowlist tiers. A fragment may declare one, the
+/// other, both, or neither; `merge` requires each present somewhere.
+#[derive(Debug, Deserialize, PartialEq, Eq, Default)]
+pub struct PartialAllowlist {
+    #[serde(default)]
+    pub runtime: Option<Tier>,
+    #[serde(default)]
+    pub install: Option<Tier>,
+}
+
+/// Distinguishes the two roles a `PartialProfile` plays at parse. A
+/// `Fragment` declaring `include` is refused (depth one); a `Tenant`
+/// profile's `include` list drives the load path's fragment resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileRole {
+    Tenant,
+    Fragment,
+}
+
 /// `host_path` is a literal absolute path; `tenant_path` is a `$HOME`-
 /// templated string that the parser does NOT resolve — the type
 /// distinction signals "not yet resolved" at the layer boundary.
@@ -207,9 +264,24 @@ pub fn expand_tenant_path(name: &str, template: &str) -> PathBuf {
 /// `/etc/$HOME/foo`) is a likely authoring mistake and refused rather
 /// than passed through as a surprising literal.
 pub fn parse(content: &str) -> Result<Profile, ProfileError> {
+    // The no-fragments composition: a directly-parsed profile is a single
+    // part. `load_profile` (the include-resolving path) is what reads and
+    // prepends fragments; `parse` does not resolve `include` (it has no
+    // fragment reader), so a profile relying on a fragment for a section
+    // surfaces the same completeness refusal it would if the fragment were
+    // empty. Value-identical to today for include-free profiles.
+    merge(vec![parse_partial(content, ProfileRole::Tenant)?])
+}
+
+/// Parse one file (tenant profile or fragment) into a `PartialProfile`.
+/// Runs the per-file validations (schema pre-check, `ports = []` refusal,
+/// `$HOME` prefix-only, include lexical rail) so a refusal names the
+/// mistake in the file that authored it — the load path adds which file.
+/// A `Fragment` declaring the `include` key at all is refused (depth one).
+pub fn parse_partial(content: &str, role: ProfileRole) -> Result<PartialProfile, ProfileError> {
     // Pre-check before typed deserialize so the refusal phrasing doesn't
-    // depend on serde's error formatting. Falls through silently if the
-    // field is absent / wrong type; the typed deserialize catches both.
+    // depend on serde's error formatting. Optional in a partial: absent
+    // schema_version falls through (completeness is a merge concern).
     let raw: toml::Value = toml::from_str(content).map_err(|e: toml::de::Error| ProfileError {
         message: format!("invalid TOML: {e}"),
     })?;
@@ -220,22 +292,167 @@ pub fn parse(content: &str) -> Result<Profile, ProfileError> {
             message: format!("schema_version {schema} not understood (this tenant supports 1)"),
         });
     }
-    let profile: Profile = toml::from_str(content).map_err(|e| ProfileError {
+    let partial: PartialProfile = toml::from_str(content).map_err(|e| ProfileError {
         message: e.to_string(),
     })?;
-    for entry in profile
+    // Depth one: refuse the `include` KEY's presence in a fragment — even
+    // `include = []`, which "declares include" per the doctrine yet resolves
+    // nothing. Failing on presence (not just a non-empty list) fails earlier
+    // and truer: an operator who writes `include = []` in a fragment and
+    // later fills it in shouldn't be surprised the refusal appears only then.
+    // `raw` is already parsed above; `partial.include` can't distinguish an
+    // absent key from `[]`.
+    if role == ProfileRole::Fragment && raw.get("include").is_some() {
+        return Err(ProfileError {
+            message: "a fragment may not declare `include`; nesting is not supported \
+                      (depth one)"
+                .to_string(),
+        });
+    }
+    validate_includes(&partial.include)?;
+    for entry in partial
         .allowlist
         .runtime
-        .hosts
         .iter()
-        .chain(&profile.allowlist.install.hosts)
+        .chain(&partial.allowlist.install)
+        .flat_map(|tier| &tier.hosts)
     {
         validate_host_entry_ports(entry)?;
     }
-    for share in &profile.shares {
+    for share in &partial.shares {
         validate_tenant_path_template(&share.tenant_path)?;
     }
-    Ok(profile)
+    Ok(partial)
+}
+
+/// Fold ordered parts (fragments first, tenant profile last) into the
+/// merged, validated `Profile`. Per-tier host lists, inbound ports, and
+/// shares union by concatenation in order (no dedupe — a value appearing
+/// twice renders twice, which the renderer/pf already tolerate). Then the
+/// merged result is checked for completeness (schema_version present, both
+/// allowlist tiers declared somewhere) and the shares `tenant_path`
+/// verbatim-collision refusal.
+pub fn merge(parts: Vec<PartialProfile>) -> Result<Profile, ProfileError> {
+    // schema_version: present somewhere. Every present value is already
+    // validated == 1 by `parse_partial`, so the first found is canonical.
+    let schema_version = parts
+        .iter()
+        .find_map(|p| p.schema_version)
+        .ok_or(ProfileError {
+            message: "no schema_version declared in the profile or any included fragment \
+                  (expected schema_version = 1)"
+                .to_string(),
+        })?;
+    if !parts.iter().any(|p| p.allowlist.runtime.is_some()) {
+        return Err(ProfileError {
+            message: "no [allowlist.runtime] declared in the profile or any included fragment"
+                .to_string(),
+        });
+    }
+    if !parts.iter().any(|p| p.allowlist.install.is_some()) {
+        return Err(ProfileError {
+            message: "no [allowlist.install] declared in the profile or any included fragment"
+                .to_string(),
+        });
+    }
+    let runtime = Tier {
+        hosts: parts
+            .iter()
+            .filter_map(|p| p.allowlist.runtime.as_ref())
+            .flat_map(|tier| tier.hosts.iter().cloned())
+            .collect(),
+    };
+    let install = Tier {
+        hosts: parts
+            .iter()
+            .filter_map(|p| p.allowlist.install.as_ref())
+            .flat_map(|tier| tier.hosts.iter().cloned())
+            .collect(),
+    };
+    let shares: Vec<Share> = parts
+        .iter()
+        .flat_map(|p| p.shares.iter().cloned())
+        .collect();
+    let ports: Vec<u16> = parts
+        .iter()
+        .flat_map(|p| p.inbound.ports.iter().copied())
+        .collect();
+    // Verbatim tenant_path collision, only across a genuine union (more
+    // than one part). A single include-free profile with two shares at the
+    // same tenant_path parsed before this feature (last-symlink-wins
+    // downstream), so value-identity forbids a new refusal for it — the
+    // collision is a union concern, and the escape hatch ("drop the
+    // include") only makes sense when an include is in play.
+    if parts.len() > 1 {
+        let mut seen_paths: HashSet<&str> = HashSet::new();
+        for share in &shares {
+            if !seen_paths.insert(share.tenant_path.as_str()) {
+                return Err(ProfileError {
+                    message: format!(
+                        "two shares map to the same tenant_path {:?}; drop the include or \
+                         inline the share you want",
+                        share.tenant_path
+                    ),
+                });
+            }
+        }
+    }
+    Ok(Profile {
+        schema_version,
+        allowlist: Allowlist { runtime, install },
+        shares,
+        inbound: Inbound { ports },
+    })
+}
+
+/// Lexical rail on `include` entries — the same charset as tenant names
+/// (`[a-z][a-z0-9_-]{0,30}`) plus a duplicate-entry refusal. The charset
+/// forecloses path traversal (`../`, `/`, leading dots) without a second
+/// vocabulary. Refuses at parse, naming the bad entry.
+fn validate_includes(includes: &[String]) -> Result<(), ProfileError> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for name in includes {
+        validate_fragment_name(name)?;
+        if !seen.insert(name.as_str()) {
+            return Err(ProfileError {
+                message: format!("include lists {name:?} more than once; remove the duplicate"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `[a-z][a-z0-9_-]{0,30}` — mirrors `validate_name`'s tenant-name charset
+/// (kept here to stay a pure-string check with no upward dependency on the
+/// domain layer). The leading-lowercase rule excludes `.`/`/`/`-` starts,
+/// so `../etc`, `/abs`, and `.hidden` all refuse.
+fn validate_fragment_name(name: &str) -> Result<(), ProfileError> {
+    let refuse = |detail: &str| {
+        Err(ProfileError {
+            message: format!("include name {name:?} {detail}"),
+        })
+    };
+    if name.is_empty() {
+        return refuse("is empty");
+    }
+    if name.len() > 31 {
+        return refuse("is too long (max 31 characters)");
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !first.is_ascii_lowercase() {
+        return refuse("must start with a lowercase letter [a-z]");
+    }
+    for c in chars {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+            return Err(ProfileError {
+                message: format!(
+                    "include name {name:?} has an invalid character {c:?}; allowed: [a-z0-9_-]"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// An allowlist entry with `ports = []` is a contradiction — a host with

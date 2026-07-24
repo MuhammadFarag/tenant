@@ -408,6 +408,12 @@ fn create_writes_profile_with_correct_toml_shape() {
                 \n\
                 schema_version = 1\n\
                 \n\
+                # Optional: share common allowlist / inbound / shares across a fleet by\n\
+                # including ordered fragments from\n\
+                # ~/.config/tenant/profiles/includes/<name>.toml — each is merged before\n\
+                # this file (this file wins last). Uncomment to enable:\n\
+                # include = [\"base\"]\n\
+                \n\
                 [allowlist.runtime]\n\
                 # Hosts the tenant can reach during normal use. A bare host opens TCP\n\
                 # 443 only; an inline table declares that host's TCP ports (e.g. 22 for\n\
@@ -2208,5 +2214,44 @@ fn create_emits_cowork_dir_during_provisioning() {
     assert_eq!(
         cowork_count, 1,
         "create must emit exactly one EnsureCoworkDir during provisioning"
+    );
+}
+
+#[test]
+fn create_merges_included_fragment_hosts_into_anchor_body() {
+    // Create-side end-to-end for includes: the scaffolded profile declares
+    // `include = ["base"]`; the merged runtime host set (fragment first)
+    // must reach the InstallAnchor body. Same read_profile → load →
+    // render_anchor flow as reload, via create's post-provision firewall step.
+    let profile = "schema_version = 1\n\
+                   include = [\"base\"]\n\
+                   [allowlist.runtime]\n\
+                   hosts = [\"prof.example\"]\n\
+                   [allowlist.install]\n\
+                   hosts = []\n";
+    let fragment = "[allowlist.runtime]\nhosts = [\"frag.example\"]\n";
+    let exec = StubHostMachine::new()
+        .with_create_profile_content("dev", profile)
+        .with_profile_fragment("base", fragment);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let body = exec
+        .firewall_ops()
+        .into_iter()
+        .find_map(|op| match op {
+            tenant::domain::FirewallOp::InstallAnchor { body, .. } => Some(body),
+            _ => None,
+        })
+        .expect("InstallAnchor op must have been issued");
+    let frag_pos = body
+        .find("frag.example")
+        .unwrap_or_else(|| panic!("fragment host must render into anchor:\n{body}"));
+    let prof_pos = body
+        .find("prof.example")
+        .unwrap_or_else(|| panic!("profile host must render into anchor:\n{body}"));
+    assert!(
+        frag_pos < prof_pos,
+        "fragment host must render before profile host (fragments first):\n{body}"
     );
 }

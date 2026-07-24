@@ -68,7 +68,8 @@ src/domain/       — domain layer. host_user_directory.rs: HostUserDirectory tr
                     TenantUserName/HostUserName/GroupName).
 src/domain/tenants.rs / tenants/
                   — facade: Tenants + the generic run<O: WritableOp> narrate-execute-narrate
-                    dispatcher + tenant_share_group_name + cowork_dir_path + guard_cowork_dir_kind.
+                    dispatcher + load_profile (the one include-resolving profile-load path) +
+                    tenant_share_group_name + cowork_dir_path + guard_cowork_dir_kind.
                     Per-verb submodules own their full code (error type + impl Tenants block +
                     helpers): validation.rs, create.rs, destroy.rs, reapply.rs (mode/reload/
                     ReapplyScope/build_+execute_reapply_plan), shares.rs, shell.rs, doctor.rs,
@@ -87,8 +88,12 @@ src/adapters/     — driven adapters. macos/user_directory.rs (MacosUserDirecto
                     (DryRunHostMachine — no-op execute; describe delegates; reads return placeholders).
 src/allocation.rs — UidAllocator + GidAllocator, independent, both from TENANT_UID_FLOOR = 600.
 src/profile.rs    — TOML serde + parse (schema-version + $HOME prefix-only + empty-ports refusal);
+                    PartialProfile wire shape + parse_partial(role) + merge (union-in-order +
+                    completeness + verbatim tenant_path collision) + include fragment rail
+                    (validate_fragment_name); parse is the no-fragments merge composition.
                     HostEntry (bare host ⇒ 443, inline table ⇒ per-host ports);
-                    expand_tenant_path; default_profile_toml.
+                    expand_tenant_path; default_profile_toml; display_path_for /
+                    display_fragment_path_for.
 src/firewall.rs   — pure: render_anchor (EgressHost port-group tables), anchor-ref helpers,
                     tenant_anchor_name/_path.
 src/doctor.rs     — pure grep-and-classify: Finding/Severity/Category/SymlinkActual + parse/classify
@@ -395,6 +400,59 @@ already made.
   (host-side, no sudo — works even when the tenant user is gone). Convergent:
   `Absent` → no notice; otherwise notice; probe error → `⚠` stderr warning and
   destroy continues.
+
+### Profile includes
+
+- **`include = ["base"]` is a list from day one** (string→list later would be
+  a schema break). Fragments resolve ONLY from
+  `~/.config/tenant/profiles/includes/<name>.toml`; the `includes/`
+  subdirectory makes the tenant/fragment split physical — a tenant legally
+  named `base` writes `profiles/base.toml`, which can't collide with the dir.
+- **`PartialProfile` is the wire shape for BOTH tenant profiles AND
+  fragments** (every section optional); `Profile` (unchanged) is the merged,
+  validated result — downstream (renderer/reapply/doctor) never sees a
+  partial. `parse_partial(content, role)` runs the per-file validations
+  (schema pre-check, `ports = []`, `$HOME` prefix-only) so a refusal names the
+  file; `merge(parts)` concatenates per-tier hosts / inbound ports / shares in
+  order (fragments first, profile last) then validates completeness
+  (`schema_version` present + BOTH allowlist tiers declared somewhere — do not
+  default tiers to empty, that silently relaxes the schema for include-free
+  profiles) + the shares `tenant_path` collision. `parse` is the no-fragments
+  composition `merge(vec![parse_partial(_, Tenant)?])` — value-identical for
+  include-free profiles (Profile equality ⇒ anchor byte-identity downstream).
+- **Depth one.** A fragment declaring `include` is refused at parse (parsed
+  with `ProfileRole::Fragment`) — no nesting ⇒ no cycle detection.
+- **Merge = concatenation, no dedupe** (a host/port in both a fragment and the
+  profile renders twice; the renderer + pf tables already tolerate it). The
+  `tenant_path` collision compare is **verbatim** (`$HOME/foo` ≠
+  `/Users/x/foo` — same class as the renderer's verbatim port-list grouping),
+  and fires only across a genuine union (`parts.len() > 1`), so a single
+  include-free profile keeps its pre-feature last-symlink-wins behavior (the
+  value-identity gate). Duplicate `include` entries refuse at parse.
+- **Fragment-name rail.** `include` entries pass the same charset as tenant
+  names (`[a-z][a-z0-9_-]{0,30}`), MIRRORED in `profile.rs`
+  (`validate_fragment_name`, not `validate_name`) to stay a pure-string check
+  with no upward dependency on the domain layer — forecloses `../`, `/`, and
+  leading dots without a second vocabulary. Refusal is at parse; the adapter
+  never re-validates.
+- **One load path.** `Tenants::load_profile` (cross-verb, on the facade) is
+  read_profile → `parse_partial` → per include (`read_profile_fragment` +
+  `parse_partial(Fragment)`) → `merge`; all six former read+parse sites route
+  through it. Fragment read/parse errors wrap with `display_fragment_path_for`
+  ("which file broke" is the whole error-UX); the tenant-profile error flows
+  unwrapped so each site's posture is unchanged (create surfaces / reapply
+  pre-prompt `ModeError::Profile` / doctor skip-silently). `read_profile_fragment`
+  is a `HostMachine` carve-out (content read, not an `Op`; dry-run returns
+  `Ok("")` — an empty fragment is a legal partial); no fragment-writing op
+  exists (Half 1 never authors fragments). Editing a fragment without
+  reloading surfaces as `AnchorBodyDrift` on every includer via the
+  merged-profile render — no fragment-specific Finding.
+- **Scaffold hint stays commented.** `default_profile_toml` carries a
+  commented `# include = ["base"]`; active would fail every real
+  `tenant create` — the post-provision `load_profile` would resolve
+  `read_profile_fragment("base")` against a not-yet-created
+  `includes/base.toml` and hard-fail (`EX_IOERR`). (Dry-run is unaffected —
+  its fragment read returns `Ok("")`.) The default-parse value is pinned.
 
 ### Host setup (`tenant setup`)
 

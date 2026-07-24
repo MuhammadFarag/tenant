@@ -8,7 +8,7 @@ use crate::domain::{
     Op, ProbeError, TenantUserName, UserDirectoryError,
 };
 use crate::firewall::{EgressHost, InboundRules, render_anchor};
-use crate::profile::{Profile, ProfileError, parse};
+use crate::profile::{Profile, ProfileError};
 use crate::{InboundLevel, ModeLevel};
 
 use super::shares::ShareOps;
@@ -213,11 +213,7 @@ impl<'a> Tenants<'a> {
         inbound_override: Option<InboundLevel>,
         scope: ReapplyScope,
     ) -> Result<ReapplyPlan, ModeError> {
-        let profile_content = self
-            .machine
-            .read_profile(name)
-            .map_err(ModeError::Profile)?;
-        let parsed_profile = parse(&profile_content).map_err(ModeError::Profile)?;
+        let parsed_profile = self.load_profile(name).map_err(ModeError::Profile)?;
         let hosts = hosts_for_level(&parsed_profile, level);
         let inbound = match inbound_override {
             Some(inbound_level) => inbound_rules_for_level(&parsed_profile, inbound_level),

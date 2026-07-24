@@ -221,6 +221,13 @@ impl HostMachine for MacosHostMachine {
         })
     }
 
+    fn read_profile_fragment(&self, fragment: &str) -> Result<String, ProfileError> {
+        let path = profile_fragment_path(fragment)?;
+        fs::read_to_string(&path).map_err(|e| ProfileError {
+            message: e.to_string(),
+        })
+    }
+
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
         // `dscl . -read /Groups/<group> PrimaryGroupID` prints
         // `PrimaryGroupID: <n>`; the trailing whitespace-delimited token
@@ -1179,6 +1186,20 @@ fn profile_path(name: &TenantUserName) -> Result<PathBuf, ProfileError> {
     Ok(PathBuf::from(home)
         .join(".config/tenant/profiles")
         .join(format!("{name}.toml")))
+}
+
+/// `$HOME/.config/tenant/profiles/includes/<fragment>.toml`. The single
+/// spelling of the fragment path (centralized-name-builder doctrine, same
+/// reason `profile_path` exists). Display form with literal `~` lives in
+/// `profile::display_fragment_path_for`. Takes `&str`: the lexical rail
+/// already ran at parse, so `fragment` is safe by the time it reaches here.
+fn profile_fragment_path(fragment: &str) -> Result<PathBuf, ProfileError> {
+    let home = env::var("HOME").map_err(|_| ProfileError {
+        message: "HOME environment variable is not set".to_string(),
+    })?;
+    Ok(PathBuf::from(home)
+        .join(".config/tenant/profiles/includes")
+        .join(format!("{fragment}.toml")))
 }
 
 /// Describe-side renders its own strings (byte-exact verbose output); this

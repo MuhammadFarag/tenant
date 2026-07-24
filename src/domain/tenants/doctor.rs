@@ -14,7 +14,7 @@ use crate::domain::{
     TenantUserName, UserDirectoryError,
 };
 use crate::firewall::{anchor_is_permissive, render_anchor};
-use crate::profile::{expand_tenant_path, parse};
+use crate::profile::expand_tenant_path;
 
 use super::reapply::{hosts_for_level, steady_inbound_rules};
 use super::{Tenants, tenant_share_group_name};
@@ -289,11 +289,7 @@ impl<'a> Tenants<'a> {
         name: &TenantUserName,
         reporter: &mut Reporter,
     ) -> Result<Vec<Finding>, DoctorError> {
-        let profile_content = match self.machine.read_profile(name) {
-            Ok(c) => c,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let parsed = match parse(&profile_content) {
+        let parsed = match self.load_profile(name) {
             Ok(p) => p,
             Err(_) => return Ok(Vec::new()),
         };
@@ -385,11 +381,7 @@ impl<'a> Tenants<'a> {
         &self,
         name: &TenantUserName,
     ) -> Result<Option<Finding>, HostFileError> {
-        let profile_content = match self.machine.read_profile(name) {
-            Ok(c) => c,
-            Err(_) => return Ok(None),
-        };
-        let parsed = match parse(&profile_content) {
+        let parsed = match self.load_profile(name) {
             Ok(p) => p,
             Err(_) => return Ok(None),
         };
@@ -409,11 +401,7 @@ impl<'a> Tenants<'a> {
         &self,
         name: &TenantUserName,
     ) -> Result<Option<Finding>, HostFileError> {
-        let profile_content = match self.machine.read_profile(name) {
-            Ok(c) => c,
-            Err(_) => return Ok(None),
-        };
-        let parsed = match parse(&profile_content) {
+        let parsed = match self.load_profile(name) {
             Ok(p) => p,
             Err(_) => return Ok(None),
         };
@@ -596,11 +584,7 @@ impl<'a> Tenants<'a> {
         reporter: &mut Reporter,
         record: &mut F,
     ) {
-        let profile_content = match self.machine.read_profile(name) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let parsed = match parse(&profile_content) {
+        let parsed = match self.load_profile(name) {
             Ok(p) => p,
             Err(_) => return,
         };

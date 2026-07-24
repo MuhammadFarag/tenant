@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use tenant::profile::{
-    Allowlist, HostEntry, Inbound, Profile, Share, ShareMode, Tier, default_profile_toml,
-    expand_tenant_path, parse,
+    Allowlist, HostEntry, Inbound, PartialProfile, Profile, ProfileRole, Share, ShareMode, Tier,
+    default_profile_toml, expand_tenant_path, merge, parse, parse_partial,
 };
 
 // A bare profile host resolves to TCP 443 — the pre-ports meaning.
@@ -103,9 +103,10 @@ fn parse_refuses_missing_schema_version() {
                 [allowlist.install]\n\
                 hosts = []\n";
     let err = parse(toml).expect_err("missing schema_version must be refused");
-    // serde's "missing field" frame; the dispatcher's Reporter call
-    // wraps this in the path-naming frame so the operator gets full
-    // context end-to-end.
+    // Refused by merge's completeness check: schema_version is optional in
+    // a PartialProfile but must be present in the merged result. The
+    // dispatcher's Reporter call wraps this in the path-naming frame so the
+    // operator gets full context end-to-end.
     assert!(
         err.message.contains("schema_version"),
         "expected message to mention schema_version, got: {}",
@@ -640,4 +641,457 @@ fn default_profile_toml_parses_with_empty_inbound_ports() {
         "expected default profile to have empty inbound ports, got: {:?}",
         profile.inbound.ports
     );
+}
+
+#[test]
+fn default_profile_toml_carries_commented_include_hint() {
+    // Scaffold gains a COMMENTED `# include = ["base"]` hint naming the
+    // includes/ subdirectory. Commented, not active: an active include
+    // would fail every real `tenant create` — the post-provision
+    // load_profile would resolve read_profile_fragment("base") against a
+    // not-yet-created includes/base.toml and hard-fail (EX_IOERR).
+    // Value-identity of the parsed default is pinned by the two
+    // default_profile_toml tests above.
+    let toml = default_profile_toml();
+    assert!(
+        toml.contains("# include = [\"base\"]"),
+        "scaffold must carry the commented include hint; got:\n{toml}"
+    );
+    assert!(
+        toml.contains("includes/"),
+        "hint must name the includes/ subdirectory; got:\n{toml}"
+    );
+    // Commented ⇒ the parsed default declares no includes.
+    let partial = parse_partial(&toml, ProfileRole::Tenant).expect("default must parse");
+    assert!(
+        partial.include.is_empty(),
+        "the include hint must stay commented (no active include); got {:?}",
+        partial.include
+    );
+}
+
+// --- include fragments: PartialProfile / parse_partial / merge ---------
+//
+// Half 1 of "Common configuration": a profile may declare
+// `include = ["base"]` — an ordered list of fragment names resolved from
+// `profiles/includes/<name>.toml`. `PartialProfile` is the wire shape for
+// BOTH tenant profiles and fragments (every section optional). `merge`
+// folds parts fragments-first + profile-last into the validated `Profile`
+// everyone downstream already consumes. `parse` becomes the no-fragments
+// composition of the two (value-identical for include-free profiles).
+
+#[test]
+fn parse_partial_tenant_profile_populates_declared_sections() {
+    let p =
+        parse_partial(&default_profile_toml(), ProfileRole::Tenant).expect("default must parse");
+    assert_eq!(p.schema_version, Some(1));
+    assert!(p.include.is_empty());
+    assert!(p.allowlist.runtime.is_some());
+    assert!(p.allowlist.install.is_some());
+}
+
+#[test]
+fn parse_partial_fragment_may_omit_schema_and_tiers() {
+    // A fragment is a partial profile: every section optional. One tier,
+    // no schema_version, is legal here — completeness is a merge concern.
+    let frag = "[allowlist.runtime]\nhosts = [\"api.anthropic.com\"]\n";
+    let p = parse_partial(frag, ProfileRole::Fragment).expect("partial fragment must parse");
+    assert_eq!(p.schema_version, None);
+    assert!(p.allowlist.runtime.is_some());
+    assert!(p.allowlist.install.is_none());
+}
+
+#[test]
+fn parse_partial_empty_fragment_is_legal() {
+    // An empty fragment is the identity element of the merge.
+    let p = parse_partial("", ProfileRole::Fragment).expect("empty fragment must parse");
+    assert_eq!(p, PartialProfile::default());
+}
+
+#[test]
+fn parse_partial_fragment_declaring_include_is_refused() {
+    // Depth one: `include` inside a fragment is refused at parse. No
+    // nesting ⇒ no cycle detection.
+    let frag = "include = [\"other\"]\n\
+                [allowlist.runtime]\n\
+                hosts = []\n";
+    let err = parse_partial(frag, ProfileRole::Fragment).expect_err("nested include must refuse");
+    assert!(
+        err.message.contains("fragment") && err.message.contains("include"),
+        "message must name fragment+include: {}",
+        err.message
+    );
+}
+
+#[test]
+fn parse_partial_fragment_declaring_empty_include_is_refused() {
+    // Depth one refuses the presence of the `include` KEY, not just a
+    // non-empty list: `include = []` in a fragment still declares include
+    // and is a likely authoring mistake (refuse now, not only when the
+    // operator later fills it in).
+    let frag = "include = []\n\
+                [allowlist.runtime]\n\
+                hosts = []\n";
+    let err = parse_partial(frag, ProfileRole::Fragment)
+        .expect_err("empty include in a fragment must refuse");
+    assert!(
+        err.message.contains("fragment") && err.message.contains("include"),
+        "message must name fragment+include: {}",
+        err.message
+    );
+}
+
+#[test]
+fn parse_partial_duplicate_include_refused() {
+    // Decision 4: a repeated include entry is certainly an authoring
+    // mistake — refuse at parse, naming the entry.
+    let toml = "schema_version = 1\ninclude = [\"base\", \"base\"]\n";
+    let err = parse_partial(toml, ProfileRole::Tenant).expect_err("duplicate include must refuse");
+    assert!(
+        err.message.contains("base")
+            && (err.message.contains("more than once") || err.message.contains("duplicate")),
+        "message must name the duplicate: {}",
+        err.message
+    );
+}
+
+#[test]
+fn parse_partial_bad_fragment_name_refused() {
+    // Decision 1: include entries pass the same lexical rail as tenant
+    // names (`[a-z][a-z0-9_-]{0,30}`), foreclosing path traversal without
+    // a second charset.
+    for bad in ["../etc", "Base", ".hidden", "a/b", "with space", ""] {
+        let toml = format!("include = [\"{bad}\"]\n");
+        let err = parse_partial(&toml, ProfileRole::Tenant)
+            .expect_err(&format!("bad name {bad:?} must be refused"));
+        assert!(
+            err.message.contains("include name"),
+            "bad={bad:?} must be refused naming the entry: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn parse_partial_fragment_name_length_boundary() {
+    // The length rail mirrors validate_name's MAX_NAME_LEN = 31 (total
+    // chars): 31 accepted, 32 refused. Pins the off-by-one the plan flagged.
+    let ok = "a".repeat(31);
+    parse_partial(&format!("include = [\"{ok}\"]\n"), ProfileRole::Tenant)
+        .expect("31-char include name must be accepted");
+    let too_long = "a".repeat(32);
+    let err = parse_partial(
+        &format!("include = [\"{too_long}\"]\n"),
+        ProfileRole::Tenant,
+    )
+    .expect_err("32-char include name must be refused");
+    assert!(
+        err.message.contains("too long"),
+        "message must flag length: {}",
+        err.message
+    );
+}
+
+#[test]
+fn parse_partial_schema_version_pre_check_runs_per_file() {
+    // schema_version is optional in a fragment, but validated against the
+    // supported set when present — same pre-check as tenant profiles.
+    let frag = "schema_version = 2\n";
+    let err = parse_partial(frag, ProfileRole::Fragment).expect_err("schema 2 must refuse");
+    assert_eq!(
+        err.message,
+        "schema_version 2 not understood (this tenant supports 1)"
+    );
+}
+
+#[test]
+fn parse_partial_runs_per_file_ports_and_home_validators() {
+    // The existing per-entry validations run per file so a fragment's own
+    // mistakes refuse here (the load path names which file).
+    let bad_ports = "[allowlist.runtime]\nhosts = [{ host = \"x\", ports = [] }]\n";
+    parse_partial(bad_ports, ProfileRole::Fragment).expect_err("ports = [] must refuse");
+    let bad_home = "[[shares]]\n\
+                    host_path = \"/t\"\n\
+                    mode = \"rw\"\n\
+                    tenant_path = \"/etc/$HOME/x\"\n";
+    parse_partial(bad_home, ProfileRole::Fragment).expect_err("mid-string $HOME must refuse");
+}
+
+#[test]
+fn merge_unions_runtime_hosts_fragments_first() {
+    // Per-tier host lists union in order: fragments first, profile last.
+    let frag = parse_partial(
+        "[allowlist.runtime]\nhosts = [\"frag.example\"]\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n\
+         [allowlist.runtime]\n\
+         hosts = [\"prof.example\"]\n\
+         [allowlist.install]\n\
+         hosts = []\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![frag, prof]).expect("must merge");
+    assert_eq!(
+        merged.allowlist.runtime.hosts,
+        vec![bare("frag.example"), bare("prof.example")]
+    );
+}
+
+#[test]
+fn merge_does_not_dedupe_repeated_host() {
+    // Decision 3: union = concatenation, no dedupe. A host in both a
+    // fragment and the profile renders TWICE (the renderer + pf tables
+    // tolerate duplicates); a silent dedup would be invisible to the
+    // distinct-host union tests, so pin the duplicate explicitly.
+    let frag = parse_partial(
+        "[allowlist.runtime]\nhosts = [\"dup.example\"]\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n\
+         [allowlist.runtime]\n\
+         hosts = [\"dup.example\"]\n\
+         [allowlist.install]\n\
+         hosts = []\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![frag, prof]).expect("must merge");
+    assert_eq!(
+        merged.allowlist.runtime.hosts,
+        vec![bare("dup.example"), bare("dup.example")]
+    );
+}
+
+#[test]
+fn merge_unions_install_hosts_fragments_first() {
+    // The install tier is a Tier construction distinct from runtime — pin
+    // it independently so a copy-paste bug (e.g. reading `runtime` for
+    // both tiers) can't hide behind the runtime-union test above.
+    let frag = parse_partial(
+        "[allowlist.install]\nhosts = [\"frag.pkg\"]\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n\
+         [allowlist.runtime]\n\
+         hosts = []\n\
+         [allowlist.install]\n\
+         hosts = [\"prof.pkg\"]\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![frag, prof]).expect("must merge");
+    assert_eq!(
+        merged.allowlist.install.hosts,
+        vec![bare("frag.pkg"), bare("prof.pkg")]
+    );
+    // Cross-check the tiers didn't bleed: install content stayed out of runtime.
+    assert!(merged.allowlist.runtime.hosts.is_empty());
+}
+
+#[test]
+fn merge_unions_inbound_ports_fragments_first() {
+    let frag = parse_partial(
+        "[inbound]\nports = [3000]\n[allowlist.runtime]\nhosts = []\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n\
+         [allowlist.runtime]\n\
+         hosts = []\n\
+         [allowlist.install]\n\
+         hosts = []\n\
+         [inbound]\n\
+         ports = [8080]\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![frag, prof]).expect("must merge");
+    assert_eq!(merged.inbound.ports, vec![3000u16, 8080]);
+}
+
+#[test]
+fn merge_unions_shares_fragments_first() {
+    let frag = parse_partial(
+        "[allowlist.runtime]\nhosts = []\n\
+         [[shares]]\n\
+         host_path = \"/frag\"\n\
+         mode = \"ro\"\n\
+         tenant_path = \"$HOME/frag\"\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n\
+         [allowlist.install]\n\
+         hosts = []\n\
+         [[shares]]\n\
+         host_path = \"/prof\"\n\
+         mode = \"rw\"\n\
+         tenant_path = \"$HOME/prof\"\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![frag, prof]).expect("must merge");
+    let host_paths: Vec<&PathBuf> = merged.shares.iter().map(|s| &s.host_path).collect();
+    assert_eq!(
+        host_paths,
+        vec![&PathBuf::from("/frag"), &PathBuf::from("/prof")]
+    );
+}
+
+#[test]
+fn merge_refuses_when_a_tier_is_never_declared() {
+    // Merged completeness: both allowlist tiers must be declared somewhere.
+    let frag = parse_partial(
+        "[allowlist.runtime]\nhosts = [\"x\"]\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n[allowlist.runtime]\nhosts = []\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let err = merge(vec![frag, prof]).expect_err("missing install tier must refuse");
+    assert!(
+        err.message.contains("allowlist") && err.message.contains("install"),
+        "message must name the missing tier: {}",
+        err.message
+    );
+}
+
+#[test]
+fn merge_refuses_when_no_schema_version_anywhere() {
+    let frag = parse_partial("[allowlist.runtime]\nhosts = []\n", ProfileRole::Fragment).unwrap();
+    let prof = parse_partial("[allowlist.install]\nhosts = []\n", ProfileRole::Tenant).unwrap();
+    let err = merge(vec![frag, prof]).expect_err("missing schema_version must refuse");
+    assert!(
+        err.message.contains("schema_version"),
+        "message must name schema_version: {}",
+        err.message
+    );
+}
+
+#[test]
+fn merge_refuses_verbatim_tenant_path_collision() {
+    // Decision 2: the collision compare is verbatim (template strings,
+    // byte-for-byte), NOT expanded paths.
+    let frag = parse_partial(
+        "[allowlist.runtime]\nhosts = []\n\
+         [[shares]]\n\
+         host_path = \"/a\"\n\
+         mode = \"ro\"\n\
+         tenant_path = \"$HOME/src\"\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n[allowlist.install]\nhosts = []\n\
+         [[shares]]\n\
+         host_path = \"/b\"\n\
+         mode = \"rw\"\n\
+         tenant_path = \"$HOME/src\"\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let err = merge(vec![frag, prof]).expect_err("tenant_path collision must refuse");
+    // Byte-exact pin — decision 2's canonical refusal.
+    assert_eq!(
+        err.message,
+        "two shares map to the same tenant_path \"$HOME/src\"; drop the include or \
+         inline the share you want"
+    );
+}
+
+#[test]
+fn parse_single_file_duplicate_tenant_path_stays_value_identical() {
+    // Value-identity gate (DoD #3): an include-free profile with two shares
+    // at the same tenant_path parsed before this feature (no collision
+    // check; last-symlink-wins downstream). The collision refusal is a
+    // union concern (parts > 1), so `parse` of a single file must NOT
+    // acquire a new refusal.
+    let toml = "schema_version = 1\n\
+                [allowlist.runtime]\n\
+                hosts = []\n\
+                [allowlist.install]\n\
+                hosts = []\n\
+                [[shares]]\n\
+                host_path = \"/a\"\n\
+                mode = \"ro\"\n\
+                tenant_path = \"$HOME/src\"\n\
+                [[shares]]\n\
+                host_path = \"/b\"\n\
+                mode = \"rw\"\n\
+                tenant_path = \"$HOME/src\"\n";
+    let profile = parse(toml).expect("single-file duplicate tenant_path must still parse");
+    assert_eq!(profile.shares.len(), 2);
+}
+
+#[test]
+fn merge_verbatim_collision_ignores_different_spelling() {
+    // `$HOME/foo` vs an explicit `/Users/dev/foo` spelling slips through —
+    // deterministic, documented, harmless (same class as a host listed twice).
+    let frag = parse_partial(
+        "[allowlist.runtime]\nhosts = []\n\
+         [[shares]]\n\
+         host_path = \"/a\"\n\
+         mode = \"ro\"\n\
+         tenant_path = \"$HOME/foo\"\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial(
+        "schema_version = 1\n[allowlist.install]\nhosts = []\n\
+         [[shares]]\n\
+         host_path = \"/b\"\n\
+         mode = \"rw\"\n\
+         tenant_path = \"/Users/dev/foo\"\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![frag, prof]).expect("different spellings must not collide");
+    assert_eq!(merged.shares.len(), 2);
+}
+
+#[test]
+fn merge_include_only_profile_is_legal_when_fragment_complete() {
+    // A tenant profile whose only content is `include = ["base"]` is legal
+    // if the base is complete.
+    let frag = parse_partial(
+        "schema_version = 1\n\
+         [allowlist.runtime]\n\
+         hosts = [\"a\"]\n\
+         [allowlist.install]\n\
+         hosts = []\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let prof = parse_partial("include = [\"base\"]\n", ProfileRole::Tenant).unwrap();
+    let merged = merge(vec![frag, prof]).expect("include-only profile must merge");
+    assert_eq!(merged.schema_version, 1);
+    assert_eq!(merged.allowlist.runtime.hosts, vec![bare("a")]);
+}
+
+#[test]
+fn parse_equals_single_part_merge_for_include_free_profiles() {
+    // Backward-compat gate: for an include-free profile, `parse` is
+    // value-identical to `merge(vec![parse_partial(..)])` — the no-fragments
+    // composition. `Profile` equality ⇒ anchor byte-identity downstream.
+    let toml = "schema_version = 1\n\
+                [allowlist.runtime]\n\
+                hosts = [\"a\"]\n\
+                [allowlist.install]\n\
+                hosts = [\"b\"]\n";
+    let via_parse = parse(toml).unwrap();
+    let via_merge = merge(vec![parse_partial(toml, ProfileRole::Tenant).unwrap()]).unwrap();
+    assert_eq!(via_parse, via_merge);
 }

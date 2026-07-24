@@ -75,6 +75,17 @@ pub struct StubHostMachine {
     /// exercise the non-empty-allowlist path without rewriting the default.
     create_profile_overrides: RefCell<HashMap<String, String>>,
 
+    /// Preloaded `include` fragment content, keyed by fragment name;
+    /// backs `read_profile_fragment`. Populated by `with_profile_fragment`
+    /// (mirror of `with_existing_profile`). An unpreloaded fragment reads
+    /// as `ProfileError` (mirror of a missing profile), exercising the
+    /// missing-include failure path.
+    profile_fragments: RefCell<HashMap<String, String>>,
+
+    /// Records every `read_profile_fragment` call in order, so a test can
+    /// assert which fragments the load path resolved.
+    fragment_reads: RefCell<Vec<String>>,
+
     probes: RefCell<Vec<(String, PathBuf, AccessMode)>>,
 
     /// Unmatched probes default to `AccessOutcome::Denied`.
@@ -344,6 +355,21 @@ impl StubHostMachine {
             .borrow_mut()
             .insert(name.to_string(), content.to_string());
         self
+    }
+
+    /// Preload an `include` fragment's content, keyed by fragment name.
+    /// Mirror of `with_existing_profile` for the `includes/` subdirectory;
+    /// an unpreloaded fragment reads as a `ProfileError`.
+    pub fn with_profile_fragment(self, fragment: &str, content: &str) -> Self {
+        self.profile_fragments
+            .borrow_mut()
+            .insert(fragment.to_string(), content.to_string());
+        self
+    }
+
+    /// Fragment names read via `read_profile_fragment`, in call order.
+    pub fn fragment_reads(&self) -> Vec<String> {
+        self.fragment_reads.borrow().clone()
     }
 
     pub fn profile_state(&self) -> HashMap<String, String> {
@@ -716,6 +742,16 @@ impl HostMachine for StubHostMachine {
             Some(content) => Ok(content.clone()),
             None => Err(ProfileError {
                 message: format!("profile '{name}' not found"),
+            }),
+        }
+    }
+
+    fn read_profile_fragment(&self, fragment: &str) -> Result<String, ProfileError> {
+        self.fragment_reads.borrow_mut().push(fragment.to_string());
+        match self.profile_fragments.borrow().get(fragment) {
+            Some(content) => Ok(content.clone()),
+            None => Err(ProfileError {
+                message: format!("fragment '{fragment}' not found"),
             }),
         }
     }

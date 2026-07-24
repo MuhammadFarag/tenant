@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use super::host_machine::WritableOp;
 use super::reporter::Reporter;
-use super::{AccountError, GroupName, HostMachine, PathKind, ProbeError};
+use super::{AccountError, GroupName, HostMachine, PathKind, ProbeError, TenantUserName};
+use crate::profile::{
+    Profile, ProfileError, ProfileRole, display_fragment_path_for, merge, parse_partial,
+};
 
 pub mod create;
 pub mod destroy;
@@ -64,6 +67,18 @@ pub(super) fn guard_cowork_dir_kind(
     }
 }
 
+/// Wrap a fragment read/parse failure with the fragment's display path so
+/// the operator sees WHICH include broke — "which file broke" is the whole
+/// error-UX of this feature.
+fn wrap_fragment_error(fragment: &str, err: ProfileError) -> ProfileError {
+    ProfileError {
+        message: format!(
+            "include \"{fragment}\" ({path}): {err}",
+            path = display_fragment_path_for(fragment)
+        ),
+    }
+}
+
 fn probe_to_account_err(err: ProbeError) -> AccountError {
     match err {
         ProbeError::Spawn(e) => AccountError::Spawn(e),
@@ -81,6 +96,34 @@ pub(crate) struct Tenants<'a> {
 impl<'a> Tenants<'a> {
     pub(crate) fn new(machine: &'a dyn HostMachine) -> Self {
         Self { machine }
+    }
+
+    /// The one profile-load path. Reads the tenant profile, resolves its
+    /// ordered `include` fragments (depth one) from `includes/`, and merges
+    /// them (fragments first, tenant profile last) into a validated
+    /// `Profile`. All six former read+parse call sites route through here so
+    /// downstream stays include-agnostic and doctor's anchor-body drift
+    /// renders from the merged profile for free (editing a fragment without
+    /// reloading surfaces as `AnchorBodyDrift` on every includer). Fragment
+    /// read/parse errors are wrapped with the fragment's display path so the
+    /// operator knows which file broke; the tenant-profile read/parse error
+    /// flows through unwrapped, preserving each call site's posture.
+    pub(super) fn load_profile(&self, name: &TenantUserName) -> Result<Profile, ProfileError> {
+        let content = self.machine.read_profile(name)?;
+        let base = parse_partial(&content, ProfileRole::Tenant)?;
+        let includes = base.include.clone();
+        let mut parts = Vec::with_capacity(includes.len() + 1);
+        for fragment in &includes {
+            let frag_content = self
+                .machine
+                .read_profile_fragment(fragment)
+                .map_err(|e| wrap_fragment_error(fragment, e))?;
+            let part = parse_partial(&frag_content, ProfileRole::Fragment)
+                .map_err(|e| wrap_fragment_error(fragment, e))?;
+            parts.push(part);
+        }
+        parts.push(base);
+        merge(parts)
     }
 
     /// Narrate, execute, narrate. Coupling the three steps means a

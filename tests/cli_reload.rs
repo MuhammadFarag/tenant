@@ -1356,3 +1356,75 @@ fn reload_aborts_with_io_error_when_share_group_gid_read_fails() {
         exec.firewall_ops()
     );
 }
+
+#[test]
+fn reload_merges_included_fragment_hosts_into_anchor_body() {
+    // Half 1 end-to-end: a profile declaring `include = ["base"]` merges
+    // the fragment's runtime hosts (fragments first) ahead of its own into
+    // the rendered InstallAnchor body. Load path: read_profile →
+    // parse_partial → read_profile_fragment → parse_partial(Fragment) →
+    // merge → hosts_for_level → render_anchor.
+    let profile = "schema_version = 1\n\
+                   include = [\"base\"]\n\
+                   [allowlist.runtime]\n\
+                   hosts = [\"prof.example\"]\n\
+                   [allowlist.install]\n\
+                   hosts = []\n";
+    let fragment = "[allowlist.runtime]\n\
+                    hosts = [\"frag.example\"]\n";
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", profile)
+        .with_profile_fragment("base", fragment);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0, "exit={code}; stderr={stderr:?}");
+
+    let fw_ops = exec.firewall_ops();
+    let body = match &fw_ops[0] {
+        FirewallOp::InstallAnchor { body, .. } => body,
+        other => panic!("expected InstallAnchor first, got {other:?}"),
+    };
+    let frag_pos = body
+        .find("frag.example")
+        .unwrap_or_else(|| panic!("fragment host must render into anchor:\n{body}"));
+    let prof_pos = body
+        .find("prof.example")
+        .unwrap_or_else(|| panic!("profile host must render into anchor:\n{body}"));
+    assert!(
+        frag_pos < prof_pos,
+        "fragment host must render before profile host (fragments first):\n{body}"
+    );
+}
+
+#[test]
+fn reload_missing_fragment_fails_before_prompt() {
+    // A declared include with no fragment on disk surfaces through the
+    // existing pre-prompt profile-read failure path: EX_IOERR, no stdout,
+    // and the error names the missing fragment file.
+    let profile = "schema_version = 1\n\
+                   include = [\"base\"]\n\
+                   [allowlist.runtime]\n\
+                   hosts = []\n\
+                   [allowlist.install]\n\
+                   hosts = []\n";
+    let exec = StubHostMachine::new().with_existing_profile("dev", profile); // no fragment preloaded
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "--verbose"],
+    );
+    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
+    assert_eq!(stdout, "", "no stdout pre-prompt; got {stdout:?}");
+    assert!(
+        stderr.contains("includes/base.toml"),
+        "stderr must name the missing fragment file; got {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("Proceed?"),
+        "no confirm prompt should be emitted; got {stdout:?}"
+    );
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "missing-fragment failure fires no firewall ops: {:?}",
+        exec.firewall_ops()
+    );
+}
