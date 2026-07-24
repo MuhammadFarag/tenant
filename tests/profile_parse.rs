@@ -1173,15 +1173,32 @@ fn empty_bootstrap_commands_list_yields_empty_commands() {
 
 #[test]
 fn default_profile_toml_parses_with_empty_bootstrap_commands() {
-    // The scaffold carries no `[bootstrap]` section, so it parses to an
-    // empty command list — a `tenant bootstrap` against a fresh tenant is
-    // a quiet no-op. Value-identity of the parsed default is pinned by
-    // the default_profile_toml tests above.
+    // The scaffold's `[bootstrap]` example entries are commented, so it
+    // parses to an empty command list — a `tenant bootstrap` against a
+    // fresh tenant is a quiet no-op. Value-identity of the parsed default
+    // is pinned by the default_profile_toml tests above.
     let profile = parse(&default_profile_toml()).expect("default toml must parse");
     assert!(
         profile.bootstrap.commands.is_empty(),
         "expected default profile to have empty bootstrap commands, got: {:?}",
         profile.bootstrap.commands
+    );
+}
+
+#[test]
+fn default_profile_toml_carries_commented_bootstrap_hint() {
+    // Scaffold carries a `[bootstrap]` section with commented example
+    // entries — discoverable when editing, but a fresh tenant's
+    // `tenant bootstrap` stays a quiet no-op (empty commands, pinned
+    // above).
+    let toml = default_profile_toml();
+    assert!(
+        toml.contains("[bootstrap]"),
+        "scaffold must carry the [bootstrap] section; got:\n{toml}"
+    );
+    assert!(
+        toml.contains("tenant bootstrap"),
+        "hint must name the verb that runs the commands; got:\n{toml}"
     );
 }
 

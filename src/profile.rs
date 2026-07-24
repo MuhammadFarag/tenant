@@ -77,6 +77,15 @@ pub fn default_profile_toml() -> String {
      # Widen temporarily with `tenant inbound <name> permissive`. Uncomment:\n\
      ports = [\n\
      #   3000,\n\
+     ]\n\
+     \n\
+     [bootstrap]\n\
+     # Idempotent shell commands `tenant bootstrap <name>` runs AS the tenant\n\
+     # (each via `/bin/sh -c`, in order, stopping on the first failure), under\n\
+     # a temporary install-tier egress widen. Guard so re-runs no-op\n\
+     # (e.g. `command -v x || install x`). Uncomment and edit:\n\
+     commands = [\n\
+     #   \"test -d ~/projects/foo || git clone https://github.com/you/foo ~/projects/foo\",\n\
      ]\n"
     .to_string()
 }
