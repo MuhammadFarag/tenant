@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.5
+# tenant 0.1.0-alpha.6
 
-Fifth alpha. Still alpha quality: the verbs work end-to-end on the
+Sixth alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,6 +21,52 @@ The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
+
+## New since 0.1.0-alpha.5
+
+- **Per-host egress ports in the allowlist.** An allowlist `hosts`
+  entry can now declare which TCP ports it opens: a bare string keeps
+  the old meaning (TCP 443 only), an inline table declares its own
+  ports —
+
+  ```toml
+  [allowlist.runtime]
+  hosts = [
+    "api.anthropic.com",                        # TCP 443 only
+    { host = "github.com", ports = [443, 22] }, # + git-over-ssh
+  ]
+  ```
+
+  The motivating case is git-over-ssh to a forge without opening
+  port 22 to every allowlisted host. Existing profiles are untouched:
+  bare-string profiles render a byte-identical PF anchor, so upgrading
+  does not surface anchor drift in `tenant doctor`. An entry with
+  `ports = []` is refused at parse (an unreachable host is a
+  contradiction). TCP only, matching `[inbound]`.
+
+- **Profile `include` fragments — share config across a fleet.** A
+  profile may declare an ordered list of fragments to merge:
+
+  ```toml
+  include = ["base"]
+  ```
+
+  Fragments live in `~/.config/tenant/profiles/includes/<name>.toml`
+  and are partial profiles: any subset of sections (allowlist tiers,
+  `[inbound]` ports, `[[shares]]`) is legal, and the merged result must
+  form a complete profile. Merging concatenates lists in order —
+  fragments first, the tenant's own entries last; nothing overrides.
+  Nested includes are refused (depth one), and two shares mapping to
+  the same `tenant_path` across the merge are refused at load.
+
+  This is how a fleet of tenants shares the same agent-API endpoints
+  or common shares without hand-duplicating them into every profile:
+  edit the fragment once, run `tenant reload` (no argument walks every
+  tenant) to converge the fleet. Editing a fragment without reloading
+  surfaces as anchor drift in `tenant doctor` on every tenant that
+  includes it. The `create` scaffold carries a commented
+  `# include = ["base"]` hint, and `tenant help profile` documents the
+  schema.
 
 ## New since 0.1.0-alpha.4
 
@@ -44,32 +90,6 @@ grant access.
   re-enter the tenant — a session already running under the wrong group
   picks up the correction on its next login.
 
-## New since 0.1.0-alpha.3
-
-- **`tenant setup` — opt-in host preparation.** A new host-wide verb
-  (no tenant argument) that prepares the Mac to run tenants. Today it
-  offers one item: enabling Touch ID for sudo. On accept it appends
-  `auth sufficient pam_tid.so` to `/etc/pam.d/sudo_local` — the
-  OS-update-safe customization file macOS's `/etc/pam.d/sudo` includes
-  (editing `/etc/pam.d/sudo` directly is clobbered by system updates).
-  The change is append-only, backed up first, and idempotent: re-running
-  never duplicates the directive, and it no-ops if Touch ID is already
-  enabled in either pam file.
-
-  Touch ID is offered, not forced. The prompt defaults to no, and a
-  non-interactive invocation (piped/scripted) declines unless you pass
-  `--yes` — an auth-stack change never auto-applies from a pipe.
-  `--dry-run` previews. Declining is a valid choice; `tenant doctor`
-  keeps a quiet informational note and `tenant setup` will offer again
-  whenever you change your mind. You'll be asked for your password once
-  to apply it (Touch ID isn't on yet at that point).
-
-- **`tenant doctor` Touch-ID detection now checks both pam files.**
-  Doctor reads `/etc/pam.d/sudo` *and* `/etc/pam.d/sudo_local`, so a
-  host configured the sanctioned way no longer trips a false
-  "Touch ID not detected" finding. The finding, when it does fire,
-  points at `tenant setup` rather than a hand-edited `sed` command.
-
 ## What works in this release
 
 - `tenant setup` — opt-in host preparation (enable Touch ID for sudo).
@@ -85,9 +105,10 @@ grant access.
   a widened install tier and the restricted runtime tier.
 - `tenant inbound <name> restricted|permissive` — control which loopback
   ports the tenant accepts inbound connections on (default: none).
-- `tenant reload [<name>]` — reapply the profile to host state,
-  including filesystem shares and the co-working directory. Walks
-  every tenant when called without an argument.
+- `tenant reload [<name>]` — reapply the profile (with its include
+  fragments) to host state, including filesystem shares and the
+  co-working directory. Walks every tenant when called without an
+  argument.
 - `tenant doctor [<name>]` — read-only audit covering paths, sudoers,
   PF state, anchor coherence, share grants, inbound exposure, Touch-ID
   posture, and group membership.
@@ -115,14 +136,14 @@ Or build from source / download the pre-built ARM binary:
 
 ```
 # Build from source at this release
-cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.5
+cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.6
 
 # Or download the pre-built ARM binary
-curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.5/tenant-v0.1.0-alpha.5-aarch64-apple-darwin.tar.gz | tar -xz
+curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.6/tenant-v0.1.0-alpha.6-aarch64-apple-darwin.tar.gz | tar -xz
 sudo mv tenant /usr/local/bin/
 ```
 
-Verify with `tenant --version` (expect `tenant 0.1.0-alpha.5`).
+Verify with `tenant --version` (expect `tenant 0.1.0-alpha.6`).
 
 ## Known rough edges
 
@@ -130,6 +151,10 @@ Still an alpha. Expect sharp edges in error reporting, recovery from
 partial failures, and unusual host configurations the author has not
 encountered. Specifically:
 
+- With include fragments there is no "effective profile" view yet —
+  the per-tenant file alone no longer tells the whole story. The merged
+  result is what `tenant reload` applies and `tenant doctor` audits;
+  read the fragment files alongside the profile for now.
 - Inbound `restricted` mode narrows *which* loopback ports are exposed,
   not *who* reaches them — co-located tenants can reach a tenant's
   declared/permissive ports. Run mutually-distrusting workloads in
