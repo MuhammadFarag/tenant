@@ -11,7 +11,8 @@ use crate::domain::TenantUserName;
     long_about = "Provision macOS user accounts, primary groups (named \
                   `<name>-tenant-share`) in a project-reserved UID/GID range \
                   (>= 600), a per-tenant profile (TOML at \
-                  `~/.config/tenant/profiles/<name>.toml`), a per-tenant \
+                  `~/.config/tenant/profiles/<name>.toml`, with optional \
+                  fragments in `includes/`), a per-tenant \
                   PF anchor (`/etc/pf.anchors/tenant-<name>`, referenced from \
                   `/etc/pf.conf`), and a per-tenant co-working directory at \
                   `/Users/Shared/tenants/<name>/` co-owned by host and tenant \
@@ -62,7 +63,7 @@ pub enum Verb {
     /// tenant-reserved UID/GID range (>= 600), writes a scaffolded
     /// profile to `~/.config/tenant/profiles/<name>.toml`, installs a
     /// per-tenant PF anchor (egress blocked by default; allowlist hosts
-    /// declared in the profile), and enables PF host-wide if not
+    /// and ports declared in the profile), and enables PF host-wide if not
     /// already enabled. The invoking host is added to the tenant's
     /// share group so RW shares the tenant creates stay host-writable.
     ///
@@ -127,7 +128,7 @@ pub enum Verb {
     ///
     /// Re-renders the PF anchor at the requested tier and reloads PF.
     /// `runtime` is the baseline; `install` widens to include the
-    /// install-tier allowlist hosts (e.g. package registries, CDN
+    /// install-tier allowlist hosts and ports (e.g. package registries, CDN
     /// mirrors needed for one-shot dependency installs).
     ///
     /// Install widening is intentionally non-persistent at the
@@ -144,7 +145,7 @@ Examples:
         /// Tenant short username.
         name: TenantUserName,
         /// `install` widens egress to include install-tier allowlist
-        /// hosts; `runtime` narrows back to the baseline allowlist.
+        /// hosts and ports; `runtime` narrows back to the baseline allowlist.
         #[arg(value_enum)]
         level: ModeLevel,
     },

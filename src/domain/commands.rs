@@ -954,6 +954,7 @@ fn help_body_profile() -> &'static str {
 Location
 
   ~/.config/tenant/profiles/<name>.toml
+  (Fragments resolve from ~/.config/tenant/profiles/includes/<name>.toml)
 
   Read on every `tenant create` (scaffolded), `tenant mode`,
   `tenant reload`, and `tenant shell`. Edits take effect on the
@@ -962,17 +963,30 @@ Location
 Schema
 
   schema_version = 1
+  include = ["base"] # Optional ordered list of fragments to merge first
 
   [allowlist.runtime]
-  hosts = ["github.com", "api.anthropic.com"]
+  hosts = [
+    "api.anthropic.com", # Bare strings default to TCP 443
+    { host = "github.com", ports = [443, 22] } # Inline table declares TCP ports (22 = git-over-ssh)
+  ]
 
   [allowlist.install]
   hosts = ["registry.npmjs.org", "pypi.org"]
+
+  Fragments (the `include` array) are resolved from the `includes/`
+  subdirectory. Fragments are partial profiles — any subset of
+  sections, but no nested `include`. Merging concatenates lists in
+  order (fragments first, the profile's own entries last); the
+  merged result must form a complete profile.
 
   Two allowlist tiers gate PF egress. Runtime is the baseline;
   install is the widened set used under `tenant mode <name> install`
   (persistent) or `tenant shell <name> --mode install -- <cmd>`
   (auto-narrows back to runtime on completion).
+
+  Egress hosts can be bare strings (TCP 443 only) or inline tables
+  with a `ports` array to allow specific TCP ports.
 
 Shares
 
