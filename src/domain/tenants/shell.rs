@@ -2,8 +2,13 @@
 //! Wraps `ModeError` for the auto-narrow path and adds `NarrowFailed`
 //! for the command form's post-child reapply.
 
+use std::path::{Path, PathBuf};
+
 use crate::domain::reporter::Reporter;
-use crate::domain::{AccountError, AccountOp, HostUserName, KeychainError, Op, TenantUserName};
+use crate::domain::{
+    AccountError, AccountOp, HostUserName, KeychainError, Op, ProbeError, TenantUserName,
+};
+use crate::profile::expand_tenant_path;
 use crate::{InboundLevel, ModeLevel};
 
 use super::reapply::{ReapplyPlan, ReapplyScope};
@@ -17,7 +22,10 @@ use super::{ModeError, Tenants};
 /// tenants) — refuse-with-EX_USAGE because the operator needs to
 /// re-bootstrap (`tenant destroy && tenant create`). `UnlockFailed`
 /// fires on substrate failures of either the retrieval or unlock
-/// call — surfaces as EX_IOERR.
+/// call — surfaces as EX_IOERR. The two `Directory*` variants are the
+/// `-d/--directory` pre-flight refusals (both EX_USAGE); a probe that
+/// fails to run at all is a substrate failure and rides `DirectoryProbe`
+/// at EX_IOERR.
 #[derive(Debug)]
 pub(crate) enum ShellError {
     Account(AccountError),
@@ -30,6 +38,69 @@ pub(crate) enum ShellError {
         name: TenantUserName,
     },
     UnlockFailed(KeychainError),
+    DirectoryInvalid {
+        raw: String,
+        reason: &'static str,
+    },
+    DirectoryUnavailable {
+        path: PathBuf,
+    },
+    DirectoryProbe {
+        path: PathBuf,
+        err: ProbeError,
+    },
+}
+
+/// Resolve a `-d/--directory` value against the TENANT's filesystem.
+/// Three accepted shapes: absolute ⇒ literal; `$HOME`-prefix ⇒ the
+/// tenant's home (the same prefix-only contract as a share's
+/// `tenant_path`); anything else ⇒ relative to the tenant's home. The
+/// relative shape is the primary UX — it sidesteps the quoting footgun
+/// where an unquoted `$HOME` expands to the OPERATOR's home before clap
+/// ever sees it. Mid-string `$HOME` refuses rather than passing through
+/// as a surprising literal.
+///
+/// Deliberately NOT taught to `expand_tenant_path`: shares' template
+/// semantics flow through that helper too, and a relative share
+/// `tenant_path` must keep its current literal behavior.
+pub(crate) fn resolve_shell_directory(
+    name: &TenantUserName,
+    raw: &str,
+) -> Result<PathBuf, ShellError> {
+    let resolved = if raw == "$HOME" || raw.starts_with("$HOME/") {
+        expand_tenant_path(name.as_str(), raw)
+    } else if raw.contains("$HOME") {
+        return Err(ShellError::DirectoryInvalid {
+            raw: raw.to_string(),
+            reason: "contains `$HOME` not at the start; `$HOME` expands only as a path prefix",
+        });
+    } else if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        // Relative ⇒ tenant home. Routed through `expand_tenant_path` so
+        // `/Users/<name>` has exactly one source.
+        expand_tenant_path(name.as_str(), &format!("$HOME/{raw}"))
+    };
+    // Any surviving `$` refuses — checked on the RESOLVED path, not the
+    // raw input, so it also catches a `$` trailing a legal `$HOME/`
+    // prefix (`$HOME/projects/$scratch`), which an input-side check
+    // would return past. `sudo -i` escapes its command "except
+    // alphanumerics, underscores, hyphens, and dollar signs", so a `$`
+    // survives into the tenant's login shell and expands there — even
+    // inside the wrapper's single quotes, which sudo has already
+    // neutralized. An unset variable would silently truncate the path
+    // and run the operator's command in the WRONG directory at exit 0;
+    // a set one would splice its value into shell code. Quoting cannot
+    // fix this across sudo's re-parse, so the shape is refused instead.
+    // Never fires spuriously: the tenant-name charset can't introduce a
+    // `$`, so the only source is the operator's own value.
+    if resolved.to_string_lossy().contains('$') {
+        return Err(ShellError::DirectoryInvalid {
+            raw: raw.to_string(),
+            reason: "contains `$`, which the tenant's login shell would expand before `cd` runs",
+        });
+    }
+    Ok(resolved)
 }
 
 impl<'a> Tenants<'a> {
@@ -37,6 +108,13 @@ impl<'a> Tenants<'a> {
     /// `inbound` controls the command form's inbound-loopback axis;
     /// the interactive form ignores it (it always auto-narrows inbound
     /// to restricted, and `--inbound` is parse-rejected without argv).
+    /// `directory` is the raw `-d/--directory` value, valid on BOTH
+    /// forms; it resolves and pre-flights here — before the branch, so
+    /// nothing widens, unlocks or reapplies on either path until the
+    /// directory is known-good (the `[[shares]]` pre-flight doctrine).
+    // Eight distinct-typed params read at one call site each; bundling
+    // them would add a struct that exists only to satisfy the lint.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn shell(
         &self,
         name: &TenantUserName,
@@ -44,12 +122,48 @@ impl<'a> Tenants<'a> {
         argv: &[String],
         mode: ModeLevel,
         inbound: InboundLevel,
+        directory: Option<&str>,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
+        let dir = self.prepare_shell_directory(name, directory)?;
         if argv.is_empty() {
-            return self.shell_interactive(name, host, reporter);
+            return self.shell_interactive(name, host, dir.as_deref(), reporter);
         }
-        self.shell_command(name, host, argv, mode, inbound, reporter)
+        self.shell_command(name, host, argv, mode, inbound, dir.as_deref(), reporter)
+    }
+
+    /// Resolve + probe the requested working directory. A path that
+    /// doesn't resolve (through symlinks) to a directory the tenant can
+    /// enter refuses at EX_USAGE naming the RESOLVED path — the operator
+    /// typed `projects/foo`, so the error has to say
+    /// `/Users/<name>/projects/foo` for the fix to be obvious. No `-d` ⇒
+    /// no resolution, no probe.
+    ///
+    /// The probe is gated on a live sudo session, like every other
+    /// `sudo -n` probe in the codebase: sudo exits 1 when it can't
+    /// authenticate, which `/bin/test` also uses for "no", so a cold
+    /// timestamp would make every existing directory look absent and
+    /// refuse the operator's first command in a fresh terminal. Uncached
+    /// ⇒ skip the pre-flight and let the entry reapply prompt as usual;
+    /// an unusable dir then surfaces as the wrapper's own `cd` failure.
+    /// Never refuse on an answer we can't trust.
+    fn prepare_shell_directory(
+        &self,
+        name: &TenantUserName,
+        directory: Option<&str>,
+    ) -> Result<Option<PathBuf>, ShellError> {
+        let Some(raw) = directory else {
+            return Ok(None);
+        };
+        let path = resolve_shell_directory(name, raw)?;
+        if !self.machine.sudo_session_cached() {
+            return Ok(Some(path));
+        }
+        match self.machine.tenant_dir_present(name, &path) {
+            Ok(true) => Ok(Some(path)),
+            Ok(false) => Err(ShellError::DirectoryUnavailable { path }),
+            Err(err) => Err(ShellError::DirectoryProbe { path, err }),
+        }
     }
 
     /// Light reapply (PF + host membership + tenant-side symlinks),
@@ -59,6 +173,7 @@ impl<'a> Tenants<'a> {
         &self,
         name: &TenantUserName,
         host: &HostUserName,
+        dir: Option<&Path>,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
         // Intent emitted before the narrow tries, so the operator sees
@@ -67,7 +182,10 @@ impl<'a> Tenants<'a> {
         let reapply_plan = self
             .build_reapply_plan(name, host, ModeLevel::Runtime, None, ReapplyScope::Light)
             .map_err(ShellError::Mode)?;
-        let login = AccountOp::LoginAsUser { name: name.into() };
+        let login = AccountOp::LoginAsUser {
+            name: name.into(),
+            dir: dir.map(Path::to_path_buf),
+        };
         let mut plan_entries = reapply_plan.as_plan_entries();
         plan_entries.push((Op::Account(&login), None));
         reporter.shell_plan(&plan_entries);
@@ -75,7 +193,7 @@ impl<'a> Tenants<'a> {
             .map_err(ShellError::Mode)?;
         self.unlock_tenant_keychain(name, reporter)?;
         reporter.step(Op::Account(&login));
-        self.machine.login(name).map_err(ShellError::Account)
+        self.machine.login(name, dir).map_err(ShellError::Account)
     }
 
     /// Command-form shell. Build + execute the entry reapply at the
@@ -92,6 +210,7 @@ impl<'a> Tenants<'a> {
     ///   already reflects the requested posture).
     /// - child-ran + narrow-failed → `NarrowFailed` carrying both the
     ///   child exit and the narrow error; child exit propagates.
+    #[allow(clippy::too_many_arguments)]
     fn shell_command(
         &self,
         name: &TenantUserName,
@@ -99,6 +218,7 @@ impl<'a> Tenants<'a> {
         argv: &[String],
         mode: ModeLevel,
         inbound: InboundLevel,
+        dir: Option<&Path>,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
         reporter.shell_command_intent(name, mode);
@@ -125,7 +245,7 @@ impl<'a> Tenants<'a> {
 
         self.unlock_tenant_keychain(name, reporter)?;
 
-        let child_result = self.machine.exec_as_tenant(name, argv);
+        let child_result = self.machine.exec_as_tenant(name, argv, dir);
 
         // Narrow when EITHER axis widened. Runtime egress + restricted
         // inbound is the steady posture; a no-widen call skips the

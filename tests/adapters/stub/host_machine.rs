@@ -16,6 +16,9 @@ use tenant::domain::{
 };
 use tenant::profile::{ProfileError, default_profile_toml};
 
+/// One recorded `exec_as_tenant` call: `(tenant, argv, dir)`.
+type ExecCall = (String, Vec<String>, Option<PathBuf>);
+
 #[derive(Default)]
 pub struct StubHostMachine {
     /// Operator identity returned from `current_host_user_name`. Set by
@@ -27,9 +30,12 @@ pub struct StubHostMachine {
     account_ops: RefCell<Vec<AccountOp>>,
     profile_ops: RefCell<Vec<ProfileOp>>,
     firewall_ops: RefCell<Vec<FirewallOp>>,
-    logins: RefCell<Vec<String>>,
+    /// `(tenant, dir)` per login carve-out call — the dir is the
+    /// resolved `tenant shell -d` value, `None` when the flag is absent.
+    logins: RefCell<Vec<(String, Option<PathBuf>)>>,
 
-    exec_calls: RefCell<Vec<(String, Vec<String>)>>,
+    /// `(tenant, argv, dir)` per exec carve-out call.
+    exec_calls: RefCell<Vec<ExecCall>>,
 
     exec_exit_code: Cell<i32>,
 
@@ -159,6 +165,16 @@ pub struct StubHostMachine {
     /// tenant-side probe touched — load-bearing for the pre-exec
     /// doctor's "SymlinkDrift check skipped when sudo uncached" pin.
     tenant_path_kind_calls: RefCell<Vec<(String, PathBuf)>>,
+
+    /// Pre-loaded answers for `tenant_dir_present` (the `tenant shell -d`
+    /// pre-flight). Unmatched paths default to `false` — an untouched
+    /// host has no such directory.
+    tenant_dirs_present: RefCell<HashMap<(String, PathBuf), bool>>,
+
+    tenant_dir_present_failure: RefCell<Option<ProbeError>>,
+
+    /// Records every `(name, path)` the pre-flight probed, in order.
+    tenant_dir_present_calls: RefCell<Vec<(String, PathBuf)>>,
 
     /// Pre-loaded kinds for `host_path_kind`. Unmatched paths default
     /// to `PathKind::Absent` — matches what an untouched host looks
@@ -322,11 +338,31 @@ impl StubHostMachine {
         self.firewall_ops.borrow().clone()
     }
 
+    /// Tenant names passed to the login carve-out, in call order.
     pub fn logins(&self) -> Vec<String> {
+        self.logins
+            .borrow()
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
+
+    /// Login calls with the `tenant shell -d` working directory the
+    /// carve-out received (`None` for every dir-less invocation).
+    pub fn login_calls(&self) -> Vec<(String, Option<PathBuf>)> {
         self.logins.borrow().clone()
     }
 
     pub fn exec_calls(&self) -> Vec<(String, Vec<String>)> {
+        self.exec_calls
+            .borrow()
+            .iter()
+            .map(|(n, argv, _)| (n.clone(), argv.clone()))
+            .collect()
+    }
+
+    /// Exec calls with the `tenant shell -d` working directory.
+    pub fn exec_calls_with_dir(&self) -> Vec<ExecCall> {
         self.exec_calls.borrow().clone()
     }
 
@@ -500,6 +536,23 @@ impl StubHostMachine {
             .borrow_mut()
             .insert((name.to_string(), path.to_path_buf()), kind);
         self
+    }
+
+    pub fn with_tenant_dir_present(self, name: &str, path: &std::path::Path) -> Self {
+        self.tenant_dirs_present
+            .borrow_mut()
+            .insert((name.to_string(), path.to_path_buf()), true);
+        self
+    }
+
+    pub fn fail_next_tenant_dir_present(self, err: ProbeError) -> Self {
+        *self.tenant_dir_present_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    /// Snapshot of every `tenant_dir_present` call, in invocation order.
+    pub fn tenant_dir_present_calls(&self) -> Vec<(String, PathBuf)> {
+        self.tenant_dir_present_calls.borrow().clone()
     }
 
     pub fn fail_next_tenant_path_kind(self, err: ProbeError) -> Self {
@@ -709,15 +762,28 @@ impl HostMachine for StubHostMachine {
         Ok(())
     }
 
-    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
-        self.logins.borrow_mut().push(name.to_string());
+    fn login(
+        &self,
+        name: &TenantUserName,
+        dir: Option<&std::path::Path>,
+    ) -> Result<i32, AccountError> {
+        self.logins
+            .borrow_mut()
+            .push((name.to_string(), dir.map(std::path::Path::to_path_buf)));
         Ok(self.login_exit_code.get())
     }
 
-    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
-        self.exec_calls
-            .borrow_mut()
-            .push((name.to_string(), argv.to_vec()));
+    fn exec_as_tenant(
+        &self,
+        name: &TenantUserName,
+        argv: &[String],
+        dir: Option<&std::path::Path>,
+    ) -> Result<i32, AccountError> {
+        self.exec_calls.borrow_mut().push((
+            name.to_string(),
+            argv.to_vec(),
+            dir.map(std::path::Path::to_path_buf),
+        ));
         if let Some(err) = self.exec_failure.borrow_mut().take() {
             return Err(err);
         }
@@ -953,6 +1019,25 @@ impl HostMachine for StubHostMachine {
             }
         }
         Ok(PathKind::Absent)
+    }
+
+    fn tenant_dir_present(
+        &self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+    ) -> Result<bool, ProbeError> {
+        self.tenant_dir_present_calls
+            .borrow_mut()
+            .push((name.to_string(), path.to_path_buf()));
+        if let Some(err) = self.tenant_dir_present_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        Ok(self
+            .tenant_dirs_present
+            .borrow()
+            .get(&(name.to_string(), path.to_path_buf()))
+            .copied()
+            .unwrap_or(false))
     }
 
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {

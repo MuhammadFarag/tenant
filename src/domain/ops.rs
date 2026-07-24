@@ -79,8 +79,13 @@ pub enum AccountOp {
         name: TenantUserName,
     },
 
+    /// `dir` is the resolved working directory from `tenant shell -d`,
+    /// already probed. Carried for plan/echo render only (both these
+    /// variants panic in `execute_account`) — but carried it must be:
+    /// the pre-confirm line has to show the `cd` the real run does.
     LoginAsUser {
         name: TenantUserName,
+        dir: Option<PathBuf>,
     },
 
     /// Run a single command as the tenant inside a login shell.
@@ -90,6 +95,7 @@ pub enum AccountOp {
     ExecAsUser {
         name: TenantUserName,
         argv: Vec<String>,
+        dir: Option<PathBuf>,
     },
 
     /// Pre-creates `parent(tenant_path)` before the symlink lands.
@@ -387,8 +393,8 @@ fn account_business_label(op: &AccountOp) -> String {
         AccountOp::DeleteUserRecord { name } => {
             format!("Residual user record '{name}' cleaned up")
         }
-        AccountOp::LoginAsUser { name } => format!("Entering shell as '{name}'"),
-        AccountOp::ExecAsUser { name, argv } => {
+        AccountOp::LoginAsUser { name, .. } => format!("Entering shell as '{name}'"),
+        AccountOp::ExecAsUser { name, argv, .. } => {
             // Basename of argv[0]: operator reads "the command 'ls' ran",
             // not "the command '/usr/bin/ls' ran".
             let bin = argv
@@ -503,6 +509,14 @@ fn keychain_business_label(op: &KeychainOp) -> String {
     }
 }
 
+/// `" in <dir>"` when `tenant shell -d` supplied a working directory,
+/// empty otherwise — so a dir-less plan bullet stays byte-identical.
+fn in_dir_suffix(dir: &Option<PathBuf>) -> String {
+    dir.as_ref()
+        .map(|d| format!(" in {}", d.display()))
+        .unwrap_or_default()
+}
+
 fn account_intent_label(op: &AccountOp) -> String {
     match op {
         AccountOp::CreateShareGroup { group, gid } => {
@@ -523,12 +537,14 @@ fn account_intent_label(op: &AccountOp) -> String {
         AccountOp::DeleteUserRecord { name } => {
             format!("Clean up residue user record '{name}'")
         }
-        AccountOp::LoginAsUser { name } => format!("Log in as '{name}'"),
-        AccountOp::ExecAsUser { name, argv } => {
+        AccountOp::LoginAsUser { name, dir } => {
+            format!("Log in as '{name}'{}", in_dir_suffix(dir))
+        }
+        AccountOp::ExecAsUser { name, argv, dir } => {
             // No shell-escaping in the display bullet — operator typed it,
             // they can read it. Substrate-side argv is passed through as a
             // tokenized vector, so metachars reach the tenant unchanged.
-            format!("Run as '{name}': {}", argv.join(" "))
+            format!("Run as '{name}': {}{}", argv.join(" "), in_dir_suffix(dir))
         }
         AccountOp::EnsureDirAsUser { path, .. } => {
             format!("Ensure directory {} exists (as tenant)", path.display())

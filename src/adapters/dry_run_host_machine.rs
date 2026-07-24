@@ -20,13 +20,18 @@ impl HostMachine for DryRunHostMachine {
     fn execute_account(&self, _op: &AccountOp) -> Result<(), AccountError> {
         Ok(())
     }
-    fn login(&self, _name: &TenantUserName) -> Result<i32, AccountError> {
+    fn login(
+        &self,
+        _name: &TenantUserName,
+        _dir: Option<&std::path::Path>,
+    ) -> Result<i32, AccountError> {
         Ok(0)
     }
     fn exec_as_tenant(
         &self,
         _name: &TenantUserName,
         _argv: &[String],
+        _dir: Option<&std::path::Path>,
     ) -> Result<i32, AccountError> {
         Ok(0)
     }
@@ -138,6 +143,19 @@ impl HostMachine for DryRunHostMachine {
         _path: &std::path::Path,
     ) -> Result<PathKind, ProbeError> {
         Ok(PathKind::Absent)
+    }
+
+    /// `true` so a `tenant shell -d … --dry-run` preview shows the plan
+    /// instead of a fabricated refusal. The preview cannot probe, and a
+    /// dry run must never assert something about host state it doesn't
+    /// know — the inverse placeholder to `tenant_path_kind`'s `Absent`,
+    /// and exactly why this question needed its own carve-out.
+    fn tenant_dir_present(
+        &self,
+        _name: &TenantUserName,
+        _path: &std::path::Path,
+    ) -> Result<bool, ProbeError> {
+        Ok(true)
     }
 
     /// Synthesize `Dir` for cowork-pattern paths so doctor's

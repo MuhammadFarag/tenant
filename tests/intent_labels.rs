@@ -120,7 +120,10 @@ fn intent_delete_user_record() {
 
 #[test]
 fn intent_login_as_user() {
-    let op = AccountOp::LoginAsUser { name: "dev".into() };
+    let op = AccountOp::LoginAsUser {
+        name: "dev".into(),
+        dir: None,
+    };
     assert_eq!(Op::Account(&op).intent_label(), "Log in as 'dev'");
 }
 
@@ -129,6 +132,7 @@ fn intent_exec_as_user() {
     let op = AccountOp::ExecAsUser {
         name: "dev".into(),
         argv: vec!["ls".into(), "/tmp".into()],
+        dir: None,
     };
     assert_eq!(Op::Account(&op).intent_label(), "Run as 'dev': ls /tmp");
 }
@@ -142,6 +146,7 @@ fn business_exec_as_user_uses_basename() {
     let op = AccountOp::ExecAsUser {
         name: "dev".into(),
         argv: vec!["/usr/local/bin/curl".into(), "https://x".into()],
+        dir: None,
     };
     assert_eq!(
         Op::Account(&op).business_label(),
@@ -397,6 +402,7 @@ fn intent_label_differs_from_business_label_for_exec_as_user() {
     let op = AccountOp::ExecAsUser {
         name: "dev".into(),
         argv: vec!["ls".into(), "/tmp".into()],
+        dir: None,
     };
     assert_ne!(
         Op::Account(&op).intent_label(),
@@ -526,5 +532,31 @@ fn business_delete_stashed_password() {
     assert_eq!(
         Op::Keychain(&op).business_label(),
         "Tenant 'dev' password removed from operator keychain"
+    );
+}
+
+#[test]
+fn intent_login_as_user_with_directory() {
+    // The plan bullet must be honest about the `cd` the real run does.
+    let op = AccountOp::LoginAsUser {
+        name: "dev".into(),
+        dir: Some(std::path::PathBuf::from("/Users/dev/projects/foo")),
+    };
+    assert_eq!(
+        Op::Account(&op).intent_label(),
+        "Log in as 'dev' in /Users/dev/projects/foo"
+    );
+}
+
+#[test]
+fn intent_exec_as_user_with_directory() {
+    let op = AccountOp::ExecAsUser {
+        name: "dev".into(),
+        argv: vec!["ls".into(), "/tmp".into()],
+        dir: Some(std::path::PathBuf::from("/Users/dev/projects/foo")),
+    };
+    assert_eq!(
+        Op::Account(&op).intent_label(),
+        "Run as 'dev': ls /tmp in /Users/dev/projects/foo"
     );
 }

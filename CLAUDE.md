@@ -17,9 +17,11 @@ Verbs:
   loopback section + reload pf; restricted gates on profile `[inbound]`
   ports (empty ⇒ locked), permissive opens all loopback TCP; egress renders
   at runtime steady-state (axes don't compose across commands).
-- `shell <name> [--mode install|runtime] [--inbound restricted|permissive] [-- <cmd>]`
-  — enter the tenant. Empty argv = interactive login; argv after `--` =
-  single-command form. Light reapply (auto-narrow + host membership +
+- `shell <name> [--mode install|runtime] [--inbound restricted|permissive]
+  [-d <dir>] [-- <cmd>]` — enter the tenant. Empty argv = interactive login;
+  argv after `--` = single-command form. `-d/--directory` (both forms)
+  starts in a tenant-side dir — relative ⇒ under the tenant's home.
+  Light reapply (auto-narrow + host membership +
   tenant-side symlinks, no recursive ACL); install-mode widens for the call
   and narrows back. Command-form `--inbound permissive` widens inbound for
   the call then narrows back to restricted; interactive entry auto-narrows
@@ -80,7 +82,8 @@ src/domain/tenants.rs / tenants/
                     Per-verb submodules own their full code (error type + impl Tenants block +
                     helpers): validation.rs, create.rs, destroy.rs, reapply.rs (mode/reload/
                     ReapplyScope/build_+execute_reapply_plan/build_reapply_plan_from_profile),
-                    shares.rs, shell.rs, doctor.rs, setup.rs (host-wide opt-in host prep;
+                    shares.rs, shell.rs (+ resolve_shell_directory — the `-d` tenant-side
+                    path resolver), doctor.rs, setup.rs (host-wide opt-in host prep;
                     SetupError), bootstrap.rs (BootstrapError/BootstrapPlan/bootstrap/
                     bootstrap_all/surface_bootstrap_error; reuses the reapply widen/narrow
                     bracket + shell's keychain pre-spawn step).
@@ -322,6 +325,70 @@ already made.
   runs a best-effort inline narrow. Child exit propagates; narrow failure →
   `⚠` warning that doesn't override it. `ShellError::NarrowFailed
   { child_exit, narrow_err }` carries both.
+- **`tenant shell -d/--directory` resolves TENANT-side, and pre-flights
+  before anything widens.** Valid on BOTH forms (no `requires = "argv"` —
+  unlike `--mode`/`--inbound`, the interactive form wants it too); absent ⇒
+  today's behavior byte-identical, down to the argv. `resolve_shell_directory`
+  (in `shell.rs`, NOT `profile.rs`) accepts three shapes — relative
+  (`projects/foo`) ⇒ under the tenant's home via `expand_tenant_path`,
+  absolute ⇒ literal, `$HOME`-prefix ⇒ tenant home — and refuses mid-string
+  `$HOME` (`ShellError::DirectoryInvalid`, `EX_USAGE`, copy naming
+  `--directory` rather than shares' `tenant_path`). Relative is the primary
+  UX: it sidesteps the footgun where an unquoted `$HOME` expands to the
+  OPERATOR's home before clap sees it. `expand_tenant_path` is deliberately
+  NOT taught about relative paths — shares' template semantics flow through
+  it too. A resolved path carrying any other `$` ALSO refuses: `sudo -i`
+  escapes its command except alphanumerics, `_`, `-`, and `$`, so a `$`
+  survives sudo's re-parse and expands in the TENANT's login shell — inside
+  quoting sudo has already neutralized — silently running the command in a
+  truncated path. Quoting can't fix that across the re-parse; the shape is
+  refused instead — checked on the RESOLVED path, not the raw value, so a
+  `$` trailing a legal `$HOME/` prefix can't slip past an early return.
+  `Tenants::shell` resolves + probes once BEFORE the
+  interactive/command branch, so neither path widens, unlocks or reapplies
+  against an unusable dir (the `[[shares]]` pre-flight doctrine); one
+  refusal (`EX_USAGE`, naming the RESOLVED path) covers absent / not-a-dir /
+  unreadable, a probe that can't run is `EX_IOERR`. Both summaries name the
+  directory — the `cd` is part of what the operator consents to.
+- **The `-d` pre-flight uses `tenant_dir_present`, NOT `tenant_path_kind`,
+  and is gated on a live sudo session.** Two traps, both load-bearing.
+  (1) `tenant_path_kind` classifies with `test -L` FIRST, so a dangling
+  symlink (a removed share's leftover link) returns `Symlink(..)` and would
+  pass a "`Symlink` proceeds" check even though `cd` fails — `cd` follows
+  links, so the probe must too (`test -d`, one call, one bool — which
+  stats, so it does NOT prove the tenant may SEARCH the dir; this
+  pre-flight catches wrong-shape mistakes, not every permission edge).
+  Collapsing
+  to a bool also lets `DryRunHostMachine` answer `true` (a preview must not
+  manufacture a refusal) while `tenant_path_kind` keeps the `Absent`
+  placeholder shares need — opposite defaults for the same path, which is
+  precisely why this needed its own carve-out. (2) `sudo -n` exits 1 when it
+  can't authenticate and `/bin/test` uses exit 1 for "no", so on a COLD sudo
+  timestamp every directory looks absent; refusing on that would reject the
+  operator's first command in every fresh terminal. So the probe runs only
+  when `sudo_session_cached()` — uncached ⇒ skip the pre-flight, let the
+  entry reapply prompt as usual, and let an unusable dir surface as the
+  wrapper's own `cd` failure. Never refuse on an answer we can't trust.
+  (The adapter additionally maps a recognized sudo-auth stderr signature to
+  `ProbeError`, matching `probe_access_as_tenant`.)
+- **`sudo -iu` pins cwd to the tenant's home, so `-d` is applied by an inner
+  `/bin/sh -c`.** That is what `-i` means, and sudo's own `--chdir` is
+  sudoers-policy-gated on macOS — not portable. The adapter wraps
+  `sudo -iu <name> -- /bin/sh -c 'cd <dir> && exec "$@"' sh <argv…>` (exec)
+  and `… 'cd <dir> && exec "$SHELL"'` (login): the `"$@"`/`sh` trick
+  preserves argv boundaries with zero re-quoting, and `$SHELL` expands
+  tenant-side where `sudo -i` set it. Absolute `/bin/sh` (Darwin doctrine).
+  The dir is `sh_quote`d (bare words pass through, else single-quoted with
+  `'` → `'\''`) so a dir with a space can't re-split the script; with a dir
+  the `describe_account` display is DERIVED from the real argv
+  (`render_argv`) so display and execution can't drift — the dir-less arms
+  keep their hand-built, deliberately-unescaped display (whose EXECUTED argv
+  is pinned directly via the now-`pub account_argv`, since those arms never
+  call through it). The carve-outs take
+  `dir: Option<&Path>` and `AccountOp::LoginAsUser`/`ExecAsUser` carry
+  `dir: Option<PathBuf>` for honest plan/echo render (intent label gains an
+  ` in <dir>` suffix); `execute_account` still panics on both. Bootstrap's
+  command loop passes `None` — its commands embed their own `cd`/guards.
 - **Auto-narrow protects only the `tenant shell` entry path.** `sudo -iu
   tenant` bypasses the binary and inherits the current posture;
   `tenant shell` is the canonical entry.

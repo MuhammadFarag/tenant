@@ -14,12 +14,25 @@ pub trait HostMachine {
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError>;
 
     /// Interactive login as the tenant. Returns the child's exit code; stdio
-    /// inherits from the calling process.
-    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError>;
+    /// inherits from the calling process. `dir` is the already-resolved,
+    /// already-probed working directory from `tenant shell -d`; `None` keeps
+    /// the pre-flag behavior (`sudo -i` lands in the tenant's home).
+    fn login(
+        &self,
+        name: &TenantUserName,
+        dir: Option<&std::path::Path>,
+    ) -> Result<i32, AccountError>;
 
     /// Run a single command as the tenant inside a login shell. Returns the
-    /// child's exit code; stdio inherits. `argv` must be non-empty.
-    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError>;
+    /// child's exit code; stdio inherits. `argv` must be non-empty. `dir` as
+    /// for `login` — bootstrap's command loop passes `None` (its commands
+    /// embed their own `cd`/guards).
+    fn exec_as_tenant(
+        &self,
+        name: &TenantUserName,
+        argv: &[String],
+        dir: Option<&std::path::Path>,
+    ) -> Result<i32, AccountError>;
 
     fn describe_profile(&self, op: &ProfileOp) -> String;
     fn execute_profile(&self, op: &ProfileOp) -> Result<(), ProfileError>;
@@ -57,6 +70,26 @@ pub trait HostMachine {
         name: &TenantUserName,
         path: &std::path::Path,
     ) -> Result<PathKind, ProbeError>;
+
+    /// True iff `path` resolves — THROUGH symlinks — to a directory, as
+    /// the tenant sees it (`sudo -n -u <name> /bin/test -d <path>`).
+    /// Note `-d` stats; it does NOT prove the tenant may SEARCH the
+    /// directory, so a `0700` dir owned by someone else still answers
+    /// true and fails at `cd`. Deliberate: this pre-flight catches the
+    /// wrong-shape mistakes, not every permission edge. This is
+    /// `tenant shell -d`'s pre-flight, and deliberately NOT
+    /// `tenant_path_kind`: that one classifies with `test -L` FIRST, so a
+    /// dangling symlink comes back `Symlink(..)` and would pass a
+    /// "`Symlink` proceeds" check even though `cd` will fail. `cd` follows
+    /// links, so the probe must too. Collapsing to one bool also lets
+    /// `DryRunHostMachine` answer the question honestly (`true` — a preview
+    /// can't probe, and must not manufacture a refusal), which the shared
+    /// `tenant_path_kind` placeholder can't: shares need `Absent` there.
+    fn tenant_dir_present(
+        &self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+    ) -> Result<bool, ProbeError>;
 
     /// Reads filesystem kind of a host-side path via the host's identity
     /// (no `sudo`, no tenant impersonation). Use this for paths the host

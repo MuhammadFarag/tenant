@@ -168,7 +168,10 @@ fn macos_describes_delete_user_record() {
 fn macos_describes_login_as_user() {
     let s = MacosHostMachine;
     assert_eq!(
-        s.describe_account(&AccountOp::LoginAsUser { name: "dev".into() }),
+        s.describe_account(&AccountOp::LoginAsUser {
+            name: "dev".into(),
+            dir: None,
+        }),
         "sudo -iu dev",
     );
 }
@@ -186,6 +189,7 @@ fn macos_describes_exec_as_user() {
         s.describe_account(&AccountOp::ExecAsUser {
             name: "dev".into(),
             argv: vec!["ls".into(), "/tmp".into()],
+            dir: None,
         }),
         "sudo -iu dev -- ls /tmp",
     );
@@ -206,6 +210,7 @@ fn macos_describes_exec_as_user_preserves_quoted_argv_element() {
         s.describe_account(&AccountOp::ExecAsUser {
             name: "dev".into(),
             argv: vec!["bash".into(), "-c".into(), "curl https://x | bash".into(),],
+            dir: None,
         }),
         "sudo -iu dev -- bash -c curl https://x | bash",
     );
@@ -693,4 +698,120 @@ fn macos_sudoers_dropins_listing_argv_is_bare_sudo() {
 fn macos_sudo_session_cached_argv_keeps_dash_n() {
     use tenant::adapters::macos::host_machine::sudo_session_cached_argv;
     assert_eq!(sudo_session_cached_argv(), vec!["sudo", "-n", "-v"]);
+}
+
+#[test]
+fn macos_describes_login_as_user_with_directory() {
+    // `sudo -iu` always lands in the tenant's home (that is what `-i`
+    // means) and sudo's own `--chdir` is sudoers-policy-gated on macOS,
+    // so a requested working directory is applied by an inner
+    // `/bin/sh -c` wrapper (absolute path per the Darwin doctrine).
+    // `$SHELL` stays inside the single-quoted script so it expands
+    // tenant-side, where `sudo -i` has already set it to the tenant's
+    // login shell.
+    let s = MacosHostMachine;
+    assert_eq!(
+        s.describe_account(&AccountOp::LoginAsUser {
+            name: "dev".into(),
+            dir: Some(PathBuf::from("/Users/dev/projects/foo")),
+        }),
+        "sudo -iu dev -- /bin/sh -c 'cd /Users/dev/projects/foo && exec \"$SHELL\"'",
+    );
+}
+
+#[test]
+fn macos_describes_exec_as_user_with_directory() {
+    // The `"$@"` + `sh` trick preserves argv boundaries: the operator's
+    // command arrives as positional parameters of the inner shell, so
+    // nothing is re-quoted or re-split on the way to the tenant.
+    let s = MacosHostMachine;
+    assert_eq!(
+        s.describe_account(&AccountOp::ExecAsUser {
+            name: "dev".into(),
+            argv: vec!["ls".into(), "/tmp".into()],
+            dir: Some(PathBuf::from("/Users/dev/projects/foo")),
+        }),
+        "sudo -iu dev -- /bin/sh -c 'cd /Users/dev/projects/foo && exec \"$@\"' sh ls /tmp",
+    );
+}
+
+#[test]
+fn macos_describes_directory_needing_quotes() {
+    // Unlike the bare argv arms (whose display deliberately skips
+    // shell-escaping — the operator typed it, they can read it), the
+    // wrapper's script element is a string the ADAPTER composes, and a
+    // directory with a space would re-split inside it. So the dir is
+    // shell-quoted when it isn't already a bare word, and the display
+    // renders the exact argv the substrate runs. POSIX has no escape
+    // inside single quotes: `'` closes, `\'` escapes, `'` reopens.
+    let s = MacosHostMachine;
+    assert_eq!(
+        s.describe_account(&AccountOp::LoginAsUser {
+            name: "dev".into(),
+            dir: Some(PathBuf::from("/Users/dev/my work")),
+        }),
+        "sudo -iu dev -- /bin/sh -c 'cd '\\''/Users/dev/my work'\\'' && exec \"$SHELL\"'",
+    );
+}
+
+#[test]
+fn macos_account_argv_wraps_only_when_directory_present() {
+    // The negative pin that matters: EXECUTED argv, not the display.
+    // The dir-less `describe_account` arms are hand-built strings that
+    // never call `account_argv`, so without this a regression that
+    // wrapped `dir: None` in `/bin/sh -c` would ship green.
+    use tenant::adapters::macos::host_machine::account_argv;
+    assert_eq!(
+        account_argv(&AccountOp::LoginAsUser {
+            name: "dev".into(),
+            dir: None,
+        }),
+        vec!["sudo", "-iu", "dev"],
+    );
+    assert_eq!(
+        account_argv(&AccountOp::ExecAsUser {
+            name: "dev".into(),
+            argv: vec!["ls".into(), "/tmp".into()],
+            dir: None,
+        }),
+        vec!["sudo", "-iu", "dev", "--", "ls", "/tmp"],
+    );
+    // With a dir: the operator's argv lands as positional parameters
+    // AFTER the `sh` argv[0] placeholder, so `"$@"` inside the script is
+    // exactly what they typed — one element per element, no re-splitting.
+    assert_eq!(
+        account_argv(&AccountOp::ExecAsUser {
+            name: "dev".into(),
+            argv: vec!["bash".into(), "-c".into(), "echo a b".into()],
+            dir: Some(PathBuf::from("/w")),
+        }),
+        vec![
+            "sudo",
+            "-iu",
+            "dev",
+            "--",
+            "/bin/sh",
+            "-c",
+            "cd /w && exec \"$@\"",
+            "sh",
+            "bash",
+            "-c",
+            "echo a b",
+        ],
+    );
+    assert_eq!(
+        account_argv(&AccountOp::LoginAsUser {
+            name: "dev".into(),
+            dir: Some(PathBuf::from("/Users/dev/my work")),
+        }),
+        vec![
+            "sudo",
+            "-iu",
+            "dev",
+            "--",
+            "/bin/sh",
+            "-c",
+            "cd '/Users/dev/my work' && exec \"$SHELL\"",
+        ],
+    );
 }

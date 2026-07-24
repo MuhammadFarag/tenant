@@ -18,11 +18,22 @@ impl HostMachine for NeverHostMachine {
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError> {
         panic!("host machine unexpectedly invoked (execute_account) with op: {op:?}");
     }
-    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
-        panic!("host machine unexpectedly invoked (login) with name: {name:?}");
+    fn login(
+        &self,
+        name: &TenantUserName,
+        dir: Option<&std::path::Path>,
+    ) -> Result<i32, AccountError> {
+        panic!("host machine unexpectedly invoked (login): name={name:?} dir={dir:?}");
     }
-    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
-        panic!("host machine unexpectedly invoked (exec_as_tenant): name={name:?} argv={argv:?}");
+    fn exec_as_tenant(
+        &self,
+        name: &TenantUserName,
+        argv: &[String],
+        dir: Option<&std::path::Path>,
+    ) -> Result<i32, AccountError> {
+        panic!(
+            "host machine unexpectedly invoked (exec_as_tenant): name={name:?} argv={argv:?} dir={dir:?}"
+        );
     }
     fn describe_profile(&self, op: &ProfileOp) -> String {
         panic!("host machine unexpectedly invoked (describe_profile) with op: {op:?}");
@@ -93,6 +104,15 @@ impl HostMachine for NeverHostMachine {
         path: &std::path::Path,
     ) -> Result<PathKind, ProbeError> {
         panic!("host machine unexpectedly invoked (tenant_path_kind): name={name:?} path={path:?}");
+    }
+    fn tenant_dir_present(
+        &self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+    ) -> Result<bool, ProbeError> {
+        panic!(
+            "host machine unexpectedly invoked (tenant_dir_present): name={name:?} path={path:?}"
+        );
     }
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
         panic!("host machine unexpectedly invoked (host_path_kind): path={path:?}");

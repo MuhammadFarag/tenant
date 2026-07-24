@@ -176,9 +176,10 @@ impl<'a> Tenants<'a> {
             let echo_op = AccountOp::ExecAsUser {
                 name: name.into(),
                 argv: argv.clone(),
+                dir: None,
             };
             reporter.step(Op::Account(&echo_op));
-            match self.machine.exec_as_tenant(name, &argv) {
+            match self.machine.exec_as_tenant(name, &argv, None) {
                 Ok(0) => reporter.bootstrap_command_ran(name, command),
                 Ok(code) => {
                     return Err(BootstrapError::CommandFailed {

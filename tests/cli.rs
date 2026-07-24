@@ -76,6 +76,33 @@ fn shell_help_includes_examples_block() {
 }
 
 #[test]
+fn shell_help_documents_directory_path_shapes() {
+    // The three accepted shapes and the tenant-side resolution rule are
+    // the whole contract of `-d`; the unquoted-`$HOME` warning is the
+    // footgun the relative form exists to avoid, so help must name it.
+    let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["shell", "--help"]);
+    assert_eq!(code, 0);
+    for needle in [
+        "-d, --directory",
+        "relative",
+        "absolute",
+        "$HOME",
+        "OPERATOR's home",
+        "tenant shell alice -d projects/foo -- claude",
+        // The two rules an operator can hit and not understand: a `$`
+        // outside the leading `$HOME` refuses, and the pre-flight is
+        // conditional on a live sudo session.
+        "anywhere else refuses",
+        "sudo session is active",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "shell --help should mention {needle:?}: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn mode_help_includes_examples_block() {
     let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["mode", "--help"]);
     assert_eq!(code, 0);

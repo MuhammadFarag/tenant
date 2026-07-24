@@ -431,7 +431,12 @@ impl<'t, 'm> Reporter<'t, 'm> {
 
     /// No confirm prompt — operator becomes the shell directly. The
     /// summary gives the pre-exec doctor audit visual context.
-    pub fn shell_summary(&mut self, name: &TenantUserName, host: &HostUserName) {
+    pub fn shell_summary(
+        &mut self,
+        name: &TenantUserName,
+        host: &HostUserName,
+        directory: Option<&str>,
+    ) {
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(self.terminal.stdout, "About to enter tenant '{name}'.");
         let _ = writeln!(self.terminal.stdout);
@@ -452,6 +457,14 @@ impl<'t, 'm> Reporter<'t, 'm> {
             self.terminal.stdout,
             "  \u{2022} launch an interactive login shell as '{name}'"
         );
+        // The `cd` is part of what the operator is consenting to, so it
+        // shows in the summary as well as the (verbose-only) plan line.
+        if let Some(dir) = directory {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "  \u{2022} start in '{dir}' (resolved on {name}'s filesystem)"
+            );
+        }
         let _ = writeln!(self.terminal.stdout);
         let _ = writeln!(
             self.terminal.stdout,
@@ -606,6 +619,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         host: &HostUserName,
         mode: ModeLevel,
         argv: &[String],
+        directory: Option<&str>,
     ) {
         let group = tenant_share_group_name(name.as_str());
         let joined = argv.join(" ");
@@ -642,7 +656,15 @@ impl<'t, 'm> Reporter<'t, 'm> {
             self.terminal.stdout,
             "  \u{2022} refresh tenant-side symlinks for declared shares"
         );
-        let _ = writeln!(self.terminal.stdout, "  \u{2022} run as '{name}': {joined}");
+        let _ = match directory {
+            // Same honesty rule as the interactive summary: the working
+            // directory is part of what the operator is consenting to.
+            Some(dir) => writeln!(
+                self.terminal.stdout,
+                "  \u{2022} run as '{name}' in '{dir}': {joined}"
+            ),
+            None => writeln!(self.terminal.stdout, "  \u{2022} run as '{name}': {joined}"),
+        };
         if mode != ModeLevel::Runtime {
             let _ = writeln!(
                 self.terminal.stdout,
@@ -960,6 +982,49 @@ impl<'t, 'm> Reporter<'t, 'm> {
             self.terminal.stderr,
             "tenant: refusing to enter '{name}': stashed password absent \
              \u{2014} run `tenant destroy {name} && tenant create {name}` to re-bootstrap"
+        );
+    }
+
+    /// Refusal frame for a lexically invalid `-d/--directory` (mid-string
+    /// `$HOME`, or any other `$` in the resolved path). `reason` carries
+    /// the specific clause. Named for the flag the operator typed — a
+    /// message saying `tenant_path` (the `[[shares]]` wording this
+    /// mirrors) would send them hunting through their profile for a
+    /// command-line mistake.
+    pub fn refuse_shell_directory_invalid(&mut self, raw: &str, reason: &str) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to enter: --directory {raw:?} {reason}"
+        );
+    }
+
+    /// Refusal frame for a `-d/--directory` that resolved to something
+    /// the tenant can't `cd` into. Names the RESOLVED path — the
+    /// operator typed `projects/foo`; the fix is only obvious once they
+    /// see `/Users/dev/projects/foo`. One message covers absent /
+    /// not-a-directory / unreadable: the probe is a single `test -d`, so
+    /// claiming to know WHICH would assert more than it established, and
+    /// the operator's next move is the same either way.
+    pub fn refuse_shell_directory_unavailable(
+        &mut self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+    ) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to enter '{name}': {} is not a directory '{name}' can enter",
+            path.display()
+        );
+    }
+
+    /// Stderr frame for a `-d/--directory` pre-flight probe that could
+    /// not run at all (sudo/spawn failure). Substrate breakage, not
+    /// operator input — no recovery hint, parallel to `shell_failed`.
+    pub fn shell_directory_probe_failed(&mut self, path: &std::path::Path, err: &ProbeError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to probe directory {}: {err}",
+            path.display()
         );
     }
 

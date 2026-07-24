@@ -31,7 +31,8 @@ pub struct Cli {
     pub dry_run: bool,
 
     /// Skip the interactive confirmation prompt that mutating verbs
-    /// (create / destroy / mode / reload) emit before executing.
+    /// (create / destroy / mode / inbound / reload / bootstrap) emit
+    /// before executing.
     #[arg(short = 'y', long, global = true)]
     pub yes: bool,
 
@@ -221,7 +222,7 @@ Examples:
     ///
     /// `tenant shell <name> [--mode install|runtime] -- <cmd...>`
     /// (command form): same reapply at the requested tier (runtime by
-    /// default), runs `<cmd...>` as the tenant via `sudo -nu <name>`,
+    /// default), runs `<cmd...>` as the tenant via `sudo -iu <name>`,
     /// then always reapplies at runtime tier on completion —
     /// guarantees on-disk state returns to runtime even if `--mode
     /// install` widened it. The child's exit code propagates to the
@@ -234,6 +235,19 @@ Examples:
     /// / permissive inbound silently. The egress (`--mode`) and inbound
     /// (`--inbound`) widenings are orthogonal: each leaves the axis it
     /// doesn't name at steady state, and both narrow back on completion.
+    ///
+    /// `-d/--directory` is valid on BOTH forms and takes a path resolved
+    /// on the TENANT's filesystem: relative (`projects/foo`) resolves
+    /// under the tenant's home, absolute is literal, and a QUOTED
+    /// `'$HOME/projects/foo'` expands to the tenant's home. Unquoted,
+    /// your own shell expands `$HOME` to the OPERATOR's home first — so
+    /// prefer the plain relative form; a `$` anywhere but the leading
+    /// `$HOME` refuses. When a sudo session is active the directory is
+    /// probed as the tenant before anything is applied, and a missing or
+    /// non-directory path refuses without touching the firewall; with no
+    /// cached sudo the probe is skipped rather than guessed (it cannot
+    /// tell "no such directory" from "sudo needs a password"), so an
+    /// unusable path surfaces as the shell's own `cd` failure instead.
     #[command(after_help = "\
 Examples:
   tenant shell alice                     enter an interactive login shell
@@ -241,7 +255,10 @@ Examples:
   tenant shell alice --mode install -- pip install foo
                                          widen egress for the call, narrow on completion
   tenant shell alice --inbound permissive -- gh auth login
-                                         widen inbound loopback for the call, narrow on completion")]
+                                         widen inbound loopback for the call, narrow on completion
+  tenant shell alice -d projects/foo -- claude
+                                         start in /Users/alice/projects/foo (tenant-side path)
+  tenant shell alice -d projects/foo     interactive login shell, starting in that directory")]
     Shell {
         /// Tenant short username.
         name: TenantUserName,
@@ -258,6 +275,18 @@ Examples:
         /// `--mode`: widening inbound leaves egress at runtime tier.
         #[arg(long, value_enum, requires = "argv")]
         inbound: Option<InboundLevel>,
+        /// Working directory to start in, resolved TENANT-side. Three
+        /// shapes: relative (`projects/foo`) ⇒ under the tenant's home
+        /// (`/Users/<name>/projects/foo`); absolute (`/Users/Shared/…`)
+        /// ⇒ literal; quoted `$HOME`-prefix (`'$HOME/projects/foo'`) ⇒
+        /// the tenant's home. Quote `$HOME` or your shell expands it to
+        /// the OPERATOR's home before tenant sees it — prefer the plain
+        /// relative form. A `$` anywhere else refuses: the tenant's
+        /// login shell would expand it before `cd` runs. Refuses if the
+        /// resolved directory is missing or isn't a directory. Valid on
+        /// BOTH forms, unlike `--mode` / `--inbound`.
+        #[arg(short = 'd', long = "directory")]
+        directory: Option<String>,
         /// Command to run as the tenant (everything after `--`). Empty
         /// argv selects the interactive login-shell form.
         #[arg(last = true)]

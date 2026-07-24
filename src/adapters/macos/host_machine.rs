@@ -59,10 +59,19 @@ impl HostMachine for MacosHostMachine {
             }
             AccountOp::LookupUserRecord { name } => format!("dscl . -read /Users/{name}"),
             AccountOp::DeleteUserRecord { name } => format!("sudo dscl . -delete /Users/{name}"),
-            AccountOp::LoginAsUser { name } => format!("sudo -iu {name}"),
-            AccountOp::ExecAsUser { name, argv } => {
-                format!("sudo -iu {name} -- {}", argv.join(" "))
-            }
+            // With a dir, the display is derived from the real argv so the
+            // two can't drift — the wrapper's script element is composed by
+            // the adapter, not typed by the operator, so it IS shell-exact.
+            // Without one, the historical hand-built display shape stands
+            // (argv joined verbatim, no escaping — the operator typed it).
+            AccountOp::LoginAsUser { name, dir } => match dir {
+                Some(_) => render_argv(&account_argv(op)),
+                None => format!("sudo -iu {name}"),
+            },
+            AccountOp::ExecAsUser { name, argv, dir } => match dir {
+                Some(_) => render_argv(&account_argv(op)),
+                None => format!("sudo -iu {name} -- {}", argv.join(" ")),
+            },
             AccountOp::EnsureDirAsUser { name, path } => {
                 format!("sudo -n -u {name} /bin/mkdir -p {}", path.display())
             }
@@ -143,10 +152,13 @@ impl HostMachine for MacosHostMachine {
         spawn_capturing(&argv)
     }
 
-    fn login(&self, name: &TenantUserName) -> Result<i32, AccountError> {
+    fn login(&self, name: &TenantUserName, dir: Option<&Path>) -> Result<i32, AccountError> {
         // Stdio inherits so sudo can prompt for the host password and the
         // launched login shell can drive the controlling terminal.
-        let argv = account_argv(&AccountOp::LoginAsUser { name: name.clone() });
+        let argv = account_argv(&AccountOp::LoginAsUser {
+            name: name.clone(),
+            dir: dir.map(Path::to_path_buf),
+        });
         let (program, rest) = argv
             .split_first()
             .ok_or_else(|| AccountError::Spawn(io::Error::other("argv is empty")))?;
@@ -157,13 +169,19 @@ impl HostMachine for MacosHostMachine {
         Ok(status.code().unwrap_or(1))
     }
 
-    fn exec_as_tenant(&self, name: &TenantUserName, argv: &[String]) -> Result<i32, AccountError> {
+    fn exec_as_tenant(
+        &self,
+        name: &TenantUserName,
+        argv: &[String],
+        dir: Option<&Path>,
+    ) -> Result<i32, AccountError> {
         // The `--` separator in `sudo -iu <name> -- <argv...>` is
         // load-bearing — without it, an argv[0] starting with `-` would
         // be interpreted as a sudo flag.
         let full = account_argv(&AccountOp::ExecAsUser {
             name: name.clone(),
             argv: argv.to_vec(),
+            dir: dir.map(Path::to_path_buf),
         });
         let (program, rest) = full
             .split_first()
@@ -583,6 +601,39 @@ impl HostMachine for MacosHostMachine {
                 code: -1,
                 stderr: String::from_utf8_lossy(&exists_out.stderr).into_owned(),
             }),
+        }
+    }
+
+    fn tenant_dir_present(
+        &self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+    ) -> Result<bool, ProbeError> {
+        // `test -d` follows symlinks, so a dangling link answers false —
+        // which is what `cd` will do too. /bin/test absolute per the
+        // Darwin scatter. Exit 1 is `test` saying no; ONLY a recognized
+        // sudo-auth stderr signature is machinery failure (sudo also
+        // exits 1 when it can't authenticate, so the code alone can't
+        // tell them apart — same posture as `probe_access_as_tenant`).
+        let path_str = path.to_string_lossy().into_owned();
+        let output = Command::new("sudo")
+            .args(["-n", "-u", name.as_str(), "/bin/test", "-d", &path_str])
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if stderr.contains("sudo: a password is required")
+            || stderr.contains("sudo: a terminal is required")
+        {
+            return Err(ProbeError::NonZero {
+                code: output.status.code().unwrap_or(-1),
+                stderr,
+            });
+        }
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            Some(code) => Err(ProbeError::NonZero { code, stderr }),
+            None => Err(ProbeError::NonZero { code: -1, stderr }),
         }
     }
 
@@ -1202,10 +1253,57 @@ fn profile_fragment_path(fragment: &str) -> Result<PathBuf, ProfileError> {
         .join(format!("{fragment}.toml")))
 }
 
+/// `sudo -iu <name> -- /bin/sh -c <script> [args…]`. `sudo -i` always lands
+/// in the tenant's home (that is what `-i` means) and sudo's own `--chdir`
+/// is sudoers-policy-gated on macOS, so `tenant shell -d` applies the
+/// working directory with this inner shell instead. Absolute `/bin/sh` per
+/// the Darwin absolute-paths doctrine.
+fn sudo_sh_argv(name: &TenantUserName, tail: &[String]) -> Vec<String> {
+    let mut full = vec![
+        "sudo".into(),
+        "-iu".into(),
+        name.0.clone(),
+        "--".into(),
+        "/bin/sh".into(),
+        "-c".into(),
+    ];
+    full.extend(tail.iter().cloned());
+    full
+}
+
+fn cd_wrapper(dir: &Path, exec_tail: &str) -> String {
+    format!("cd {} && {exec_tail}", sh_quote(&dir.display().to_string()))
+}
+
+/// POSIX single-quoting. Bare words pass through unquoted so the common
+/// path renders like the command an operator would type; anything else is
+/// wrapped, with embedded `'` closed-escaped-reopened (`'\''` — POSIX has
+/// no escape *inside* single quotes). Without this a directory containing
+/// a space would re-split inside the wrapper script.
+fn sh_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_./-".contains(&b))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+fn render_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|a| sh_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Describe-side renders its own strings (byte-exact verbose output); this
 /// builder stays separate so a change to one form doesn't silently drift
-/// the other.
-fn account_argv(op: &AccountOp) -> Vec<String> {
+/// the other. `pub` for the argv contract pins in
+/// `tests/macos_host_machine.rs` — the dir-less shapes have no other
+/// executable-side coverage (their `describe_account` arms are
+/// hand-built and never call through here).
+pub fn account_argv(op: &AccountOp) -> Vec<String> {
     match op {
         AccountOp::CreateShareGroup { group, gid } => vec![
             "sudo".into(),
@@ -1260,14 +1358,27 @@ fn account_argv(op: &AccountOp) -> Vec<String> {
             "-delete".into(),
             format!("/Users/{name}"),
         ],
-        AccountOp::LoginAsUser { name } => {
-            vec!["sudo".into(), "-iu".into(), name.0.clone()]
-        }
-        AccountOp::ExecAsUser { name, argv } => {
-            let mut full = vec!["sudo".into(), "-iu".into(), name.0.clone(), "--".into()];
-            full.extend(argv.iter().cloned());
-            full
-        }
+        AccountOp::LoginAsUser { name, dir } => match dir {
+            // `$SHELL` stays single-quoted so it expands tenant-side, where
+            // `sudo -i` has already set it to the tenant's login shell.
+            Some(dir) => sudo_sh_argv(name, &[cd_wrapper(dir, "exec \"$SHELL\"")]),
+            None => vec!["sudo".into(), "-iu".into(), name.0.clone()],
+        },
+        AccountOp::ExecAsUser { name, argv, dir } => match dir {
+            // `"$@"` + the `sh` argv[0] placeholder hand the operator's
+            // command to the inner shell as positional parameters — argv
+            // boundaries survive with zero re-quoting.
+            Some(dir) => {
+                let mut tail = vec![cd_wrapper(dir, "exec \"$@\""), "sh".to_string()];
+                tail.extend(argv.iter().cloned());
+                sudo_sh_argv(name, &tail)
+            }
+            None => {
+                let mut full = vec!["sudo".into(), "-iu".into(), name.0.clone(), "--".into()];
+                full.extend(argv.iter().cloned());
+                full
+            }
+        },
         AccountOp::EnsureDirAsUser { name, path } => vec![
             "sudo".into(),
             "-n".into(),

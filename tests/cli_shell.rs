@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tenant::domain::{
     AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp, KeychainError, PathKind,
-    UserId,
+    ProbeError, UserId,
 };
 
 mod adapters;
@@ -2673,5 +2673,539 @@ fn shell_command_inbound_and_mode_compose_within_one_call() {
             FirewallOp::Reload,
         ],
         "both axes widen on entry, both narrow on finally"
+    );
+}
+
+// ── `-d/--directory` ────────────────────────────────────────────────
+
+#[test]
+fn shell_command_form_absolute_directory_reaches_exec_carve_out() {
+    // `-d <absolute>` is taken literally and threaded to the
+    // `exec_as_tenant` carve-out, which wraps it into the `sh -c 'cd …'`
+    // form at the adapter (argv shape pinned in
+    // tests/macos_host_machine.rs). The pre-flight probe accepts `Dir`.
+    let dir = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_tenant_dir_present("dev", &dir);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &[
+            "shell",
+            "dev",
+            "-d",
+            "/Users/Shared/tenants/dev",
+            "--",
+            "ls",
+        ],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        exec.exec_calls_with_dir(),
+        vec![("dev".to_string(), vec!["ls".to_string()], Some(dir))],
+    );
+}
+
+#[test]
+fn shell_interactive_absolute_directory_reaches_login_carve_out() {
+    // The flag is valid on the interactive form too (no
+    // `requires = "argv"` — unlike `--mode`/`--inbound`).
+    let dir = PathBuf::from("/Users/Shared/tenants/dev");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_tenant_dir_present("dev", &dir);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--directory", "/Users/Shared/tenants/dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        exec.login_calls(),
+        vec![("dev".to_string(), Some(dir))],
+        "interactive form threads the resolved dir to the login carve-out"
+    );
+}
+
+#[test]
+fn shell_without_directory_flag_passes_none_to_both_carve_outs() {
+    // Negative pin: dir-less invocations are byte-identical to
+    // pre-feature behavior — `None` reaches both carve-outs, and the
+    // pre-flight probe never runs (no `tenant_path_kind` call).
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        exec.exec_calls_with_dir(),
+        vec![("dev".to_string(), vec!["ls".to_string()], None)],
+    );
+    assert!(
+        exec.tenant_path_kind_calls().is_empty(),
+        "no -d ⇒ no pre-flight probe: {:?}",
+        exec.tenant_path_kind_calls()
+    );
+
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, _stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 0);
+    assert_eq!(exec.login_calls(), vec![("dev".to_string(), None)]);
+    assert!(exec.tenant_path_kind_calls().is_empty());
+}
+
+#[test]
+fn shell_relative_directory_resolves_under_tenant_home() {
+    // The primary UX. A bare relative path is resolved against the
+    // TENANT's home, which is what sidesteps the quoting footgun:
+    // an unquoted `$HOME` would have expanded to the OPERATOR's home
+    // in their shell before clap ever saw it.
+    let dir = PathBuf::from("/Users/dev/projects/foo");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_tenant_dir_present("dev", &dir);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "projects/foo", "--", "ls"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        exec.exec_calls_with_dir(),
+        vec![("dev".to_string(), vec!["ls".to_string()], Some(dir.clone()))],
+    );
+    assert_eq!(
+        exec.tenant_dir_present_calls(),
+        vec![("dev".to_string(), dir)],
+        "the pre-flight probes the RESOLVED path, as the tenant"
+    );
+}
+
+#[test]
+fn shell_home_prefixed_directory_resolves_to_tenant_home() {
+    // Quoted `$HOME` prefix — the same prefix-only contract a share's
+    // `tenant_path` gets, via the same `expand_tenant_path` helper.
+    let dir = PathBuf::from("/Users/dev/projects/foo");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_tenant_dir_present("dev", &dir);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "$HOME/projects/foo", "--", "ls"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        exec.exec_calls_with_dir(),
+        vec![("dev".to_string(), vec!["ls".to_string()], Some(dir))],
+    );
+}
+
+#[test]
+fn shell_refuses_mid_string_home_in_directory() {
+    // Mid-string `$HOME` is a likely authoring mistake, refused rather
+    // than passed through as a surprising literal — same rule as the
+    // shares template validation, but the copy names `--directory`, not
+    // `tenant_path`. Refusal is lexical: it beats even the probe.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "/etc/$HOME/foo", "--", "ls"],
+    );
+    assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to enter: --directory \"/etc/$HOME/foo\" contains `$HOME` not at \
+         the start; `$HOME` expands only as a path prefix\n"
+    );
+    assert!(
+        exec.tenant_path_kind_calls().is_empty(),
+        "lexical refusal precedes the probe: {:?}",
+        exec.tenant_path_kind_calls()
+    );
+    assert!(exec.firewall_ops().is_empty(), "nothing may have widened");
+    assert!(exec.exec_calls().is_empty());
+}
+
+#[test]
+fn shell_refuses_absent_directory_before_any_firewall_op() {
+    // The pre-flight doctrine: fail before any substrate mutation.
+    // ZERO firewall ops proves the refusal beat the entry reapply, and
+    // no exec/login proves nothing was handed to the tenant. The copy
+    // names the RESOLVED path — the operator typed `projects/foo`.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "projects/foo", "--", "ls"],
+    );
+    assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to enter 'dev': /Users/dev/projects/foo is not a directory \
+         'dev' can enter\n"
+    );
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "pre-flight must beat the widen: {:?}",
+        exec.firewall_ops()
+    );
+    assert!(exec.account_ops().is_empty(), "no host-membership catch-up");
+    assert!(exec.exec_calls().is_empty());
+    assert!(exec.logins().is_empty());
+}
+
+#[test]
+fn shell_refuses_directory_the_tenant_cannot_enter() {
+    // One question, one refusal: `test -d` as the tenant. A regular
+    // file, a path the tenant can't stat, and an absent path all answer
+    // false — and all mean the same thing to the operator ("you can't
+    // cd there"), so they share one honest message.
+    let dir = PathBuf::from("/Users/dev/notes.md");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev"); // no with_tenant_dir_present ⇒ probe answers false
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "notes.md"],
+    );
+    assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to enter 'dev': /Users/dev/notes.md is not a directory 'dev' can enter\n"
+    );
+    assert_eq!(
+        exec.tenant_dir_present_calls(),
+        vec![("dev".to_string(), dir)],
+        "the pre-flight asks the dir question, NOT tenant_path_kind"
+    );
+    assert!(
+        exec.tenant_path_kind_calls().is_empty(),
+        "tenant_path_kind classifies `test -L` FIRST — it cannot answer \
+         'is this enterable', so -d must not use it: {:?}",
+        exec.tenant_path_kind_calls()
+    );
+    assert!(exec.logins().is_empty());
+}
+
+#[test]
+fn shell_refuses_dangling_symlink_directory() {
+    // A symlink whose target is gone (a removed share's leftover link)
+    // reads as `PathKind::Symlink(..)` to `tenant_path_kind` — which is
+    // why `-d` doesn't use it. `test -d` follows the link and answers
+    // false, so the refusal lands BEFORE the widen instead of surfacing
+    // as a raw `cd` failure after the firewall opened and the child was
+    // spawned.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_tenant_path_kind(
+            "dev",
+            &PathBuf::from("/Users/dev/src"),
+            PathKind::Symlink(PathBuf::from("/Users/Shared/tenants/dev/gone")),
+        );
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &[
+            "shell", "dev", "--mode", "install", "-d", "src", "--", "make",
+        ],
+    );
+    assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
+    assert!(
+        stderr.contains("/Users/dev/src is not a directory 'dev' can enter"),
+        "stderr={stderr:?}"
+    );
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "install-tier widen must not fire behind a dangling link: {:?}",
+        exec.firewall_ops()
+    );
+    assert!(exec.exec_calls().is_empty());
+}
+
+#[test]
+fn shell_accepts_symlinked_directory() {
+    // `cd` follows links, and a symlinked projects dir is exactly what
+    // a declared `[[shares]]` entry installs — refusing it would refuse
+    // the most common target on the box. `test -d` resolves through the
+    // link, so a LIVE symlink answers true (a dangling one answers
+    // false — see the sibling test).
+    let dir = PathBuf::from("/Users/dev/src");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_tenant_dir_present("dev", &dir);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "src"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(exec.login_calls(), vec![("dev".to_string(), Some(dir))]);
+}
+
+#[test]
+fn shell_directory_probe_failure_is_substrate_error() {
+    // A probe that can't RUN is substrate breakage, not operator input
+    // — EX_IOERR, distinct from the EX_USAGE refusals. The adapter
+    // reaches this arm only on a recognized sudo-auth stderr signature
+    // (a bare exit 1 is `test` saying "no", not machinery failure), so
+    // the injected error carries one.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .fail_next_tenant_dir_present(ProbeError::NonZero {
+            code: 1,
+            stderr: "sudo: a password is required".to_string(),
+        });
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "projects/foo"],
+    );
+    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
+    assert!(
+        stderr.starts_with("tenant: failed to probe directory /Users/dev/projects/foo: "),
+        "stderr={stderr:?}"
+    );
+    assert!(exec.firewall_ops().is_empty());
+    assert!(exec.logins().is_empty());
+}
+
+#[test]
+fn shell_directory_pre_flight_skipped_when_sudo_uncached() {
+    // The trap this gate exists for: `sudo -n` exits 1 when it can't
+    // authenticate, and `/bin/test` uses exit 1 for "no" — so on a cold
+    // timestamp EVERY directory looks absent. Refusing on that answer
+    // would reject the operator's first command in every fresh terminal.
+    // Uncached ⇒ no probe, no refusal; the dir still reaches the child
+    // and the entry reapply prompts for sudo as it always has.
+    let dir = PathBuf::from("/Users/dev/projects/foo");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_sudo_session_cached(false); // and NO with_tenant_dir_present
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "projects/foo", "--", "ls"],
+    );
+    assert_eq!(
+        code, 0,
+        "must not refuse on an untrustworthy answer; stderr={stderr:?}"
+    );
+    assert!(
+        exec.tenant_dir_present_calls().is_empty(),
+        "uncached sudo ⇒ the probe must not even run: {:?}",
+        exec.tenant_dir_present_calls()
+    );
+    assert_eq!(
+        exec.exec_calls_with_dir(),
+        vec![("dev".to_string(), vec!["ls".to_string()], Some(dir))],
+    );
+}
+
+#[test]
+fn shell_refuses_directory_containing_a_dollar_sign() {
+    // `sudo -i` escapes its command "except alphanumerics, underscores,
+    // hyphens, and dollar signs", so a `$` survives sudo's re-parse and
+    // expands in the TENANT's login shell — inside quoting that sudo has
+    // already neutralized. An unset variable would truncate the path and
+    // run the command in a DIFFERENT directory, silently, at exit 0.
+    // Quoting can't fix that, so the shape is refused.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "projects/$scratch", "--", "ls"],
+    );
+    assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: refusing to enter: --directory \"projects/$scratch\" contains `$`, which the \
+         tenant's login shell would expand before `cd` runs\n"
+    );
+    assert!(exec.tenant_dir_present_calls().is_empty());
+    assert!(exec.firewall_ops().is_empty());
+}
+
+#[test]
+fn shell_refuses_dollar_after_a_legal_home_prefix() {
+    // Regression pin: the `$` guard checks the RESOLVED path, not the
+    // raw input. An input-side check returns early on the legal
+    // `$HOME/` prefix and never sees a `$` further along — so
+    // `$HOME/projects/$scratch` was accepted, the probe (argv-level, no
+    // shell) answered true for the literal path, and the child ran in
+    // `/Users/dev/projects` at exit 0. Silently, in the wrong directory.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_tenant_dir_present("dev", &PathBuf::from("/Users/dev/projects/$scratch"));
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-d", "$HOME/projects/$scratch", "--", "ls"],
+    );
+    assert_eq!(code, 64, "EX_USAGE expected; stderr={stderr:?}");
+    assert!(
+        stderr.contains("contains `$`, which the tenant's login shell would expand"),
+        "stderr={stderr:?}"
+    );
+    assert!(exec.exec_calls().is_empty(), "the child must not run");
+    assert!(exec.firewall_ops().is_empty());
+}
+
+#[test]
+fn shell_directory_composes_with_permissive_inbound() {
+    // `-d` is orthogonal to BOTH posture axes (locked decision #6): the
+    // inbound widen still fires and narrows back, and the dir still
+    // reaches the child.
+    let dir = PathBuf::from("/Users/dev/projects/foo");
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_tenant_dir_present("dev", &dir);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &[
+            "shell",
+            "dev",
+            "--inbound",
+            "permissive",
+            "-d",
+            "projects/foo",
+            "--",
+            "gh",
+            "auth",
+            "login",
+        ],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        exec.exec_calls_with_dir(),
+        vec![(
+            "dev".to_string(),
+            vec!["gh".to_string(), "auth".to_string(), "login".to_string()],
+            Some(dir)
+        )],
+    );
+    assert_eq!(
+        exec.firewall_ops().len(),
+        4,
+        "permissive widen + restricted narrow = two rounds: {:?}",
+        exec.firewall_ops()
+    );
+}
+
+#[test]
+fn shell_interactive_plan_line_renders_the_cd() {
+    // Decision #2's whole point: the pre-confirm plan must show the `cd`
+    // the real run will do, not just the login. Verbose dry-run is where
+    // the operator reads the mechanism.
+    let (code, stdout, _stderr) = run_with(
+        stub_with_tenant("dev"),
+        &["shell", "dev", "-d", "projects/foo", "--dry-run", "-v"],
+    );
+    assert_eq!(code, 64, "dry-run shell ends at the stash-absent refusal");
+    assert!(
+        stdout.contains("Log in as 'dev' in /Users/dev/projects/foo"),
+        "plan must name the resolved dir: {stdout}"
+    );
+    assert!(
+        stdout
+            .contains("sudo -iu dev -- /bin/sh -c 'cd /Users/dev/projects/foo && exec \"$SHELL\"'"),
+        "plan's shell line must show the real wrapped argv: {stdout}"
+    );
+    assert!(
+        stdout.contains("start in 'projects/foo' (resolved on dev's filesystem)"),
+        "summary must name the directory the operator consented to: {stdout}"
+    );
+}
+
+#[test]
+fn shell_command_summary_names_the_directory() {
+    let (code, stdout, _stderr) = run_with(
+        stub_with_tenant("dev"),
+        &[
+            "shell",
+            "dev",
+            "-d",
+            "projects/foo",
+            "--dry-run",
+            "--",
+            "ls",
+        ],
+    );
+    assert_eq!(code, 64);
+    assert!(
+        stdout.contains("run as 'dev' in 'projects/foo': ls"),
+        "command-form summary must name the directory: {stdout}"
+    );
+}
+
+#[test]
+fn shell_directory_composes_with_install_mode() {
+    // `-d` is orthogonal to the tier axis: the install widen still
+    // fires, the child still gets the dir, and the runtime narrow
+    // still lands on completion.
+    let dir = PathBuf::from("/Users/dev/projects/foo");
+    let exec = StubHostMachine::new()
+        .with_existing_profile(
+            "dev",
+            &profile_with_shares(&["runtime.example"], &["install.example"], &[]),
+        )
+        .with_default_stash("dev")
+        .with_tenant_dir_present("dev", &dir);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &[
+            "shell",
+            "dev",
+            "--mode",
+            "install",
+            "-d",
+            "projects/foo",
+            "--",
+            "pip",
+            "install",
+            "foo",
+        ],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        exec.exec_calls_with_dir(),
+        vec![(
+            "dev".to_string(),
+            vec!["pip".to_string(), "install".to_string(), "foo".to_string()],
+            Some(dir)
+        )],
+    );
+    assert_eq!(
+        exec.firewall_ops().len(),
+        4,
+        "install-mode widen + narrow = two InstallAnchor/Reload rounds: {:?}",
+        exec.firewall_ops()
     );
 }

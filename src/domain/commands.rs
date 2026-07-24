@@ -122,6 +122,9 @@ pub(crate) fn dispatch(
             name,
             mode,
             inbound,
+            // Renamed at the bind: `directory` is already the
+            // HostUserDirectory port in this scope.
+            directory: shell_directory,
             argv,
         } => {
             if let Err(e) = tenants::validate_name(&name) {
@@ -155,9 +158,15 @@ pub(crate) fn dispatch(
                     let resolved_inbound = inbound.unwrap_or(InboundLevel::Restricted);
                     if show_summary {
                         if argv.is_empty() {
-                            reporter.shell_summary(&name, host);
+                            reporter.shell_summary(&name, host, shell_directory.as_deref());
                         } else {
-                            reporter.shell_command_summary(&name, host, resolved_mode, &argv);
+                            reporter.shell_command_summary(
+                                &name,
+                                host,
+                                resolved_mode,
+                                &argv,
+                                shell_directory.as_deref(),
+                            );
                         }
                         tenants.pre_exec_doctor_summary(
                             Some(&name),
@@ -172,6 +181,7 @@ pub(crate) fn dispatch(
                         &argv,
                         resolved_mode,
                         resolved_inbound,
+                        shell_directory.as_deref(),
                         reporter,
                     ) {
                         Ok(code) => {
@@ -206,6 +216,20 @@ pub(crate) fn dispatch(
                         Err(tenants::ShellError::StashAbsent { name: refused }) => {
                             reporter.shell_refuse_stash_absent(&refused);
                             EX_USAGE
+                        }
+                        // `-d` pre-flight refusals: EX_USAGE (operator input),
+                        // fired before anything widened or unlocked.
+                        Err(tenants::ShellError::DirectoryInvalid { raw, reason }) => {
+                            reporter.refuse_shell_directory_invalid(&raw, reason);
+                            EX_USAGE
+                        }
+                        Err(tenants::ShellError::DirectoryUnavailable { path }) => {
+                            reporter.refuse_shell_directory_unavailable(&name, &path);
+                            EX_USAGE
+                        }
+                        Err(tenants::ShellError::DirectoryProbe { path, err }) => {
+                            reporter.shell_directory_probe_failed(&path, &err);
+                            EX_IOERR
                         }
                         Err(tenants::ShellError::UnlockFailed(err)) => {
                             // Substrate breakage on retrieval or unlock — surfaces
@@ -830,6 +854,9 @@ fn build_bootstrap_command_ops(
         .map(|command| AccountOp::ExecAsUser {
             name: name.into(),
             argv: vec!["/bin/sh".to_string(), "-c".to_string(), command.clone()],
+            // Bootstrap commands embed their own `cd`/guards — the
+            // `-d` axis is `tenant shell`'s alone.
+            dir: None,
         })
         .collect()
 }
