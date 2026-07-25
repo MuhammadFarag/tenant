@@ -30,64 +30,7 @@ pub fn display_fragment_path_for(fragment: &str) -> String {
 /// entries + a `[[shares]]` block) without committing the operator to
 /// any specific entry — they're hints, not defaults.
 pub fn default_profile_toml() -> String {
-    "# Per-tenant profile. See `tenant help profile` for the full schema.\n\
-     # Apply edits with `tenant reload <name>`.\n\
-     \n\
-     schema_version = 1\n\
-     \n\
-     # Optional: share common allowlist / inbound / shares across a fleet by\n\
-     # including ordered fragments from\n\
-     # ~/.config/tenant/profiles/includes/<name>.toml — each is merged before\n\
-     # this file (this file wins last). Uncomment to enable:\n\
-     # include = [\"base\"]\n\
-     \n\
-     [allowlist.runtime]\n\
-     # Hosts the tenant can reach during normal use. A bare host opens TCP\n\
-     # 443 only; an inline table declares that host's TCP ports (e.g. 22 for\n\
-     # git-over-ssh). Uncomment to enable:\n\
-     hosts = [\n\
-     #   \"api.anthropic.com\",\n\
-     #   { host = \"github.com\", ports = [443, 22] },\n\
-     ]\n\
-     \n\
-     [allowlist.install]\n\
-     # Additional hosts the tenant can reach under `tenant mode <name> install`\n\
-     # or `tenant shell <name> --mode install -- <cmd>`. Uncomment to enable:\n\
-     hosts = [\n\
-     #   \"registry.npmjs.org\",\n\
-     #   \"pypi.org\",\n\
-     #   \"files.pythonhosted.org\",\n\
-     ]\n\
-     \n\
-     # Filesystem shares. Each [[shares]] entry grants the tenant's share group\n\
-     # access to a host path and (optionally) symlinks it under the tenant's\n\
-     # home. `mode` is \"ro\" or \"rw\"; `tenant_path` accepts `$HOME` as a path\n\
-     # prefix only. Uncomment and edit:\n\
-     #\n\
-     # [[shares]]\n\
-     # host_path = \"/Users/<host>/projects/foo\"\n\
-     # mode = \"ro\"\n\
-     # tenant_path = \"$HOME/projects/foo\"\n\
-     \n\
-     [inbound]\n\
-     # TCP loopback (127.0.0.1) ports the tenant exposes under the default\n\
-     # `restricted` posture. SURFACE-REDUCTION, NOT isolation: a declared port\n\
-     # is reachable by the host AND peer tenants (pf can't see the initiator on\n\
-     # shared loopback). UDP loopback is unfiltered (TCP only). Empty == locked.\n\
-     # Widen temporarily with `tenant inbound <name> permissive`. Uncomment:\n\
-     ports = [\n\
-     #   3000,\n\
-     ]\n\
-     \n\
-     [bootstrap]\n\
-     # Idempotent shell commands `tenant bootstrap <name>` runs AS the tenant\n\
-     # (each via `/bin/sh -c`, in order, stopping on the first failure), under\n\
-     # a temporary install-tier egress widen. Guard so re-runs no-op\n\
-     # (e.g. `command -v x || install x`). Uncomment and edit:\n\
-     commands = [\n\
-     #   \"test -d ~/projects/foo || git clone https://github.com/you/foo ~/projects/foo\",\n\
-     ]\n"
-    .to_string()
+    include_str!("resources/default_profile.toml").to_string()
 }
 
 #[derive(Debug)]

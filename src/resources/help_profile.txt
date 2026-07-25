@@ -1,0 +1,168 @@
+tenant profile — per-tenant TOML configuration
+
+Location
+
+  ~/.config/tenant/profiles/<name>.toml
+  (Fragments resolve from ~/.config/tenant/profiles/includes/<name>.toml)
+
+  Read on every `tenant create` (scaffolded), `tenant mode`,
+  `tenant reload`, and `tenant shell`. Edits take effect on the
+  next `tenant reload <name>` (or `tenant shell <name>` entry).
+
+Schema
+
+  schema_version = 1
+  include = ["base"] # Optional ordered list of fragments to merge first
+
+  [allowlist.runtime]
+  hosts = [
+    "api.anthropic.com", # Bare strings default to TCP 443
+    { host = "github.com", ports = [443, 22] } # Inline table declares TCP ports (22 = git-over-ssh)
+  ]
+
+  [allowlist.install]
+  hosts = ["registry.npmjs.org", "pypi.org"]
+
+  Fragments (the `include` array) are resolved from the `includes/`
+  subdirectory. Fragments are partial profiles — any subset of
+  sections, but no nested `include`. Merging concatenates lists in
+  order (fragments first, the profile's own entries last); the
+  merged result must form a complete profile.
+
+  Two allowlist tiers gate PF egress. Runtime is the baseline;
+  install is the widened set used under `tenant mode <name> install`
+  (persistent) or `tenant shell <name> --mode install -- <cmd>`
+  (auto-narrows back to runtime on completion).
+
+  Egress hosts can be bare strings (TCP 443 only) or inline tables
+  with a `ports` array to allow specific TCP ports.
+
+Shares
+
+  [[shares]]
+  host_path = "/Users/alice/projects/foo"
+  mode = "ro"
+  tenant_path = "$HOME/projects/foo"
+
+  Each [[shares]] entry grants the tenant's share group access to a
+  host path and (optionally) symlinks it under the tenant's home.
+
+    host_path    Literal absolute path on the host.
+    mode         "ro" (read-only) or "rw" (read-write). POSIX
+                 bit-string forms (e.g. "r--") are rejected because
+                 their file-vs-directory semantics diverge.
+    tenant_path  $HOME-templated path inside the tenant's home.
+                 $HOME resolves only as a path prefix: position 0
+                 ($HOME alone or $HOME/...). Mid-string $HOME is
+                 refused as a likely typo.
+
+  File vs directory: ro on a directory grants list+read; rw grants
+  full create/append/delete with inheritance to nested entries.
+  Files mirror the same intent. The tenant_path is created as a
+  symlink to host_path on reapply; an existing non-symlink at
+  tenant_path is refused (the operator's data could be at risk).
+
+  Recursive apply: `tenant reload` walks each share's host_path
+  tree (`chmod -R +a`), so children that pre-date the share's
+  first apply — or new content the operator adds to the host_path
+  between reloads — pick up the share-group ACE on the next
+  reload. macOS file_inherit/directory_inherit flags cover
+  children created after the apply; the recursive walk covers
+  everything else.
+
+  `tenant mode` and `tenant shell` do NOT walk the recursive ACL
+  pass — they refresh the PF posture, host-group membership, and
+  tenant-side symlinks only. This keeps the everyday entry verbs
+  fast; the recursive walk lives on `tenant reload`. Run reload
+  after adding shares or whenever `tenant doctor` reports ACL
+  drift.
+
+  Removing a [[shares]] entry does NOT auto-revoke the ACL or
+  symlink — `tenant doctor <name>` surfaces orphans. Manual cleanup
+  is the operator's call.
+
+Inbound loopback ports
+
+  [inbound]
+  ports = [3000, 8080]
+
+  A bare TCP port list gating inbound loopback (127.0.0.1) in the
+  default `restricted` posture. An absent section or empty list
+  (`ports = []`) locks inbound loopback entirely. `tenant inbound
+  <name> permissive` is the temporary all-ports widen (the
+  localhost-redirect OAuth window); `tenant shell <name>` and
+  `tenant reload` narrow inbound back to restricted.
+
+  HONEST SCOPE — read before relying on this:
+
+    This is surface-reduction, NOT host-vs-peer isolation. A
+    declared port is reachable by the host AND by peer tenants
+    alike — pf cannot see the initiator on shared loopback
+    (127.0.0.1), so it is open to everyone on the box, not just the
+    host.
+
+    A tenant cannot reach its OWN undeclared loopback port. The
+    block is indiscriminate: declare a port to restore the tenant's
+    own intra-process loopback use of it.
+
+    TCP only. UDP loopback is unfiltered — the [inbound] list does
+    not constrain it.
+
+Co-working directory (auto-provisioned, not configurable)
+
+  /Users/Shared/tenants/<name>/
+
+  Provisioned by `tenant create` alongside the profile and
+  re-applied on `tenant reload`. `tenant mode` and `tenant shell`
+  do NOT touch the cowork dir under their light reapply — if the
+  dir is missing or its inheritable ACL has been stripped, the
+  remediation is `tenant doctor <name>` (to surface) +
+  `tenant reload <name>` (to converge).
+  Owned `<host>:<name>-tenant-share`, mode 2770 (setgid + group-rwx
+  + zero-other), with an inheritable rw ACL granting the share
+  group full access. Host and tenant both have rwx via group
+  membership; files either side creates inside it stay
+  read/writable by the other via the inheritable ACL (no umask
+  fiddling required inside the tenant).
+
+  Unlike [[shares]] (which grant access to pre-existing host
+  paths), the co-working directory is a fresh tenant-managed
+  workspace. `tenant destroy <name>` does NOT remove it — the dir
+  may hold operator-authored work, and destroy emits a notice
+  line naming the path so the operator can clean up manually.
+
+Bootstrap commands
+
+  [bootstrap]
+  commands = [
+    "command -v rg || brew install ripgrep",
+    "test -d ~/dotfiles || git clone https://github.com/you/dotfiles ~/dotfiles",
+  ]
+
+  `tenant bootstrap <name>` runs each command AS the tenant, via
+  /bin/sh -c, in declared order, stopping on the first that exits
+  non-zero. The commands run inside a temporary install-tier egress
+  widen (so a command may reach install-only hosts like package
+  registries), and egress narrows back on completion.
+
+  You promise the commands are idempotent — the design leans on guard
+  idioms (`command -v x || install x`, `test -d ... ||`) — so the verb
+  is safe to re-run anytime; the already-satisfied prefix no-ops. There
+  is no state file and no run-once tracking. Commands may be declared in
+  include fragments too, so bare `tenant bootstrap` converges a whole
+  fleet (edit a shared fragment, run it).
+
+  Non-goal: tenant does not manage or template the tenant's filesystem
+  CONTENTS (it writes no dotfiles and renders no templates itself). What
+  it runs are the idempotent commands YOU declare in [bootstrap] — the
+  contents they produce are yours to own.
+
+Applying changes
+
+  Re-render the firewall anchor and re-apply shares after editing:
+
+    tenant reload <name>
+
+  Audit the result:
+
+    tenant doctor <name>

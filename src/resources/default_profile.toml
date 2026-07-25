@@ -1,0 +1,57 @@
+# Per-tenant profile. See `tenant help profile` for the full schema.
+# Apply edits with `tenant reload <name>`.
+
+schema_version = 1
+
+# Optional: share common allowlist / inbound / shares across a fleet by
+# including ordered fragments from
+# ~/.config/tenant/profiles/includes/<name>.toml — each is merged before
+# this file (this file wins last). Uncomment to enable:
+# include = ["base"]
+
+[allowlist.runtime]
+# Hosts the tenant can reach during normal use. A bare host opens TCP
+# 443 only; an inline table declares that host's TCP ports (e.g. 22 for
+# git-over-ssh). Uncomment to enable:
+hosts = [
+#   "api.anthropic.com",
+#   { host = "github.com", ports = [443, 22] },
+]
+
+[allowlist.install]
+# Additional hosts the tenant can reach under `tenant mode <name> install`
+# or `tenant shell <name> --mode install -- <cmd>`. Uncomment to enable:
+hosts = [
+#   "registry.npmjs.org",
+#   "pypi.org",
+#   "files.pythonhosted.org",
+]
+
+# Filesystem shares. Each [[shares]] entry grants the tenant's share group
+# access to a host path and (optionally) symlinks it under the tenant's
+# home. `mode` is "ro" or "rw"; `tenant_path` accepts `$HOME` as a path
+# prefix only. Uncomment and edit:
+#
+# [[shares]]
+# host_path = "/Users/<host>/projects/foo"
+# mode = "ro"
+# tenant_path = "$HOME/projects/foo"
+
+[inbound]
+# TCP loopback (127.0.0.1) ports the tenant exposes under the default
+# `restricted` posture. SURFACE-REDUCTION, NOT isolation: a declared port
+# is reachable by the host AND peer tenants (pf can't see the initiator on
+# shared loopback). UDP loopback is unfiltered (TCP only). Empty == locked.
+# Widen temporarily with `tenant inbound <name> permissive`. Uncomment:
+ports = [
+#   3000,
+]
+
+[bootstrap]
+# Idempotent shell commands `tenant bootstrap <name>` runs AS the tenant
+# (each via `/bin/sh -c`, in order, stopping on the first failure), under
+# a temporary install-tier egress widen. Guard so re-runs no-op
+# (e.g. `command -v x || install x`). Uncomment and edit:
+commands = [
+#   "test -d ~/projects/foo || git clone https://github.com/you/foo ~/projects/foo",
+]

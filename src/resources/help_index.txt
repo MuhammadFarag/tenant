@@ -1,0 +1,7 @@
+tenant help — long-form topic help
+
+Available topics:
+
+  profile    Per-tenant profile TOML schema and [[shares]] format
+
+Run `tenant help <topic>` to view a topic.
