@@ -716,7 +716,13 @@ impl HostMachine for MacosHostMachine {
         // (duplicate-add is a no-op per node), and macOS canonicalizes
         // bit names on storage (`read,write,execute` →
         // `list,add_file,search`), so any substring-match pre-check
-        // would always miss — Grant runs unconditionally.
+        // would always miss — Grant runs unconditionally. One wrinkle:
+        // macOS does NOT dedupe across the direct/inherited boundary,
+        // so nodes present at apply time show two `ls -le` entries (one
+        // direct, one inherited). Bounded and inert — the direct
+        // duplicate stays idempotent, so it never accumulates further;
+        // not worth a strip-and-regrant given the `chmod -R -a`
+        // asymmetry below.
         //
         // Revoke stays bare: it's single-pass at the top-level of the
         // share host_path, which is host-owned by design. `chmod -R -a`

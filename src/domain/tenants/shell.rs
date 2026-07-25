@@ -284,6 +284,12 @@ impl<'a> Tenants<'a> {
     /// surfaces the refusal frame — matches the production refusal
     /// shape so a dry-run preview mirrors what a real run would do
     /// against a legacy tenant.
+    ///
+    /// The unlock is unconditional by design — do NOT add a locked-state
+    /// pre-probe (e.g. a doctor `TenantKeychainLocked` finding):
+    /// `security show-keychain-info` via `sudo -iu` triggers a
+    /// SecurityAgent GUI prompt on Darwin 25.x, which hangs a headless
+    /// run.
     fn unlock_tenant_keychain(
         &self,
         name: &TenantUserName,

@@ -116,6 +116,10 @@ pub enum AccountOp {
     /// Add the host operator as a secondary member of the tenant's
     /// share group. Idempotent at the substrate, so the catch-up path
     /// can re-run this on every reload/mode/shell without cost.
+    ///
+    /// Limitation: macOS snapshots a process's supplementary groups at
+    /// creation, so the operator's already-open shells won't see new
+    /// membership until a new Terminal window opens.
     AddHostToShareGroup {
         group: GroupName,
         host: HostUserName,
