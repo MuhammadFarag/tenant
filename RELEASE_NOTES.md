@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.7
+# tenant 0.1.0-alpha.8
 
-Seventh alpha. Still alpha quality: the verbs work end-to-end on the
+Eighth alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,6 +21,23 @@ The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
+
+## New since 0.1.0-alpha.7
+
+A small release — polish on the alpha.7 features, no new verbs.
+
+- **The profile scaffold now carries a `[bootstrap]` section.** A
+  fresh `tenant create` writes the section with a commented example
+  and the ground rules (runs as the tenant via `/bin/sh -c`, in
+  order, stops on first failure, temporary install-tier egress
+  widen), so the feature is discoverable while editing the profile —
+  not only via `tenant help profile`. Example entries stay commented:
+  a fresh tenant's `tenant bootstrap` remains a quiet no-op.
+
+- **Internal: operator-facing text extracted to embedded resources.**
+  The profile scaffold and `tenant help` bodies now live as plain
+  files compiled into the binary. No behavior change — the scaffold
+  and help output are byte-identical.
 
 ## New since 0.1.0-alpha.6
 
@@ -68,24 +85,6 @@ grant access.
   session is active to probe with), and a `$` anywhere but the
   leading `$HOME` refuses rather than being silently expanded by the
   tenant's login shell.
-
-## New since 0.1.0-alpha.5
-
-- **Per-host egress ports in the allowlist.** An allowlist `hosts`
-  entry can declare which TCP ports it opens: a bare string keeps the
-  old meaning (TCP 443 only), an inline table declares its own ports
-  (`{ host = "github.com", ports = [443, 22] }` for git-over-ssh).
-  Existing profiles render byte-identical anchors — upgrading does not
-  surface anchor drift.
-
-- **Profile `include` fragments — share config across a fleet.** A
-  profile may declare `include = ["base"]`; fragments live in
-  `~/.config/tenant/profiles/includes/<name>.toml` and are partial
-  profiles merged in order (fragments first, the profile's own entries
-  last; nothing overrides). Edit the fragment once, `tenant reload` to
-  converge every includer; editing a fragment without reloading
-  surfaces as anchor drift in `tenant doctor` on every tenant that
-  includes it. Nested includes are refused (depth one).
 
 ## What works in this release
 
@@ -136,14 +135,14 @@ Or build from source / download the pre-built ARM binary:
 
 ```
 # Build from source at this release
-cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.7
+cargo install --git https://github.com/MuhammadFarag/tenant --tag v0.1.0-alpha.8
 
 # Or download the pre-built ARM binary
-curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.7/tenant-v0.1.0-alpha.7-aarch64-apple-darwin.tar.gz | tar -xz
+curl -L https://github.com/MuhammadFarag/tenant/releases/download/v0.1.0-alpha.8/tenant-v0.1.0-alpha.8-aarch64-apple-darwin.tar.gz | tar -xz
 sudo mv tenant /usr/local/bin/
 ```
 
-Verify with `tenant --version` (expect `tenant 0.1.0-alpha.7`).
+Verify with `tenant --version` (expect `tenant 0.1.0-alpha.8`).
 
 ## Known rough edges
 
