@@ -20,25 +20,26 @@ description: Release the tenant CLI — version conventions, tag/publish flow, a
 
 ## Flow
 
-1. Edit `RELEASE_NOTES.md`.
-2. `just release-prepare X.Y.Z` — refuses unless local main == origin/main,
-   so push any prep commits first.
-3. Inspect: `git show vX.Y.Z`.
-4. `just release-publish` — pushes commit + tag; GitHub Actions builds.
-5. Wait for the Action to finish.
-6. `just release-bump-dev <NEXT>`.
-7. **Bump the Homebrew tap** (manual — NOT automated by
-   `.github/workflows/release.yml`). The tap is the sibling clone
-   `../homebrew-tenant` (also at `~/src/homebrew-tenant`); it goes stale
-   between releases, so `git pull --ff-only` first. Update
-   `Formula/tenant.rb` (`url` + `sha256` — take the sha from
-   `curl -sL <release-url>/<tarball>.sha256`, or download and hash the
-   tarball). Commit message convention is bare `tenant X.Y.Z`. An unbumped
-   tap silently keeps serving the previous version to `brew upgrade tenant`.
+1. Claude: edit `RELEASE_NOTES.md` (leaving it uncommitted is fine —
+   prepare commits it).
+2. Operator, from the host: `just release-host X.Y.Z <NEXT>` — one shot:
+   pushes main, runs `release-prepare` (all its guards), `release-publish`,
+   polls until the Action publishes the tarball, bumps the Homebrew tap
+   (`url` + `sha256` in `Formula/tenant.rb`, commit `tenant X.Y.Z`, push),
+   then `release-bump-dev <NEXT>`.
 
-Sandbox constraint: this environment cannot `git push` — pushes (prep
-commits, release-publish, the tap bump) are the operator's; prepare
-everything and hand off.
+The individual recipes (`release-prepare` / `release-publish` /
+`release-bump-dev`) remain for stepwise runs or recovery; abort a prepared
+but unpublished release with `git reset --hard HEAD~1 && git tag -d vX.Y.Z`.
+
+The tap bump matters: the tap repo is NOT automated by
+`.github/workflows/release.yml`, and an unbumped tap silently keeps serving
+the previous version to `brew upgrade tenant`. The clone is the sibling
+`../homebrew-tenant` (also at `~/src/homebrew-tenant`); `release-host`
+takes the path as an optional third argument.
+
+Sandbox constraint: this environment cannot `git push` — `release-host` is
+the operator's command; Claude prepares `RELEASE_NOTES.md` and hands off.
 
 Operator install (pre-tap): download the release tarball, or
 `cargo install --git https://github.com/MuhammadFarag/tenant`.

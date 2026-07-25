@@ -61,6 +61,38 @@ release-publish:
     @test "$(git rev-parse --abbrev-ref HEAD)" = "main" || (echo "not on main" >&2; exit 1)
     git push --follow-tags origin main
 
+# One-shot host-side release: push main, prepare + publish vVERSION, wait
+# for the GitHub Action's tarball, bump the Homebrew tap, then bump main to
+# NEXT_VERSION-dev. Run from the host (needs push access to both repos).
+# Prereq: RELEASE_NOTES.md written (uncommitted edits are fine — prepare
+# commits them). Individual steps remain available as their own recipes.
+release-host VERSION NEXT_VERSION TAP="../homebrew-tenant":
+    #!/bin/sh -eu
+    test -d "{{TAP}}/.git" || { echo "Homebrew tap clone not found at {{TAP}}" >&2; exit 1; }
+    git push origin main
+    just release-prepare "{{VERSION}}"
+    git show --no-patch --oneline "v{{VERSION}}"
+    just release-publish
+    TARBALL="tenant-v{{VERSION}}-aarch64-apple-darwin.tar.gz"
+    URL="https://github.com/MuhammadFarag/tenant/releases/download/v{{VERSION}}/${TARBALL}"
+    echo "Waiting for the release Action to publish ${TARBALL} ..."
+    waited=0
+    until SHA=$(curl -fsL "${URL}.sha256" 2>/dev/null | awk '{print $1}') && test -n "${SHA}"; do
+        waited=$((waited + 15))
+        test "${waited}" -le 900 || { echo "timed out after 15m waiting for ${URL}.sha256" >&2; exit 1; }
+        sleep 15
+    done
+    echo "Artifact published (sha256 ${SHA}). Bumping tap ..."
+    cd "{{TAP}}"
+    git pull --ff-only
+    sed -i '' -e "s|^  url \".*\"|  url \"${URL}\"|" -e "s|^  sha256 \".*\"|  sha256 \"${SHA}\"|" Formula/tenant.rb
+    git add Formula/tenant.rb
+    git commit -m "tenant {{VERSION}}"
+    git push origin main
+    cd "{{justfile_directory()}}"
+    just release-bump-dev "{{NEXT_VERSION}}"
+    echo "Released v{{VERSION}}; tap bumped; main back at {{NEXT_VERSION}}-dev."
+
 # Bump main to NEXT_VERSION-dev after release-publish.
 release-bump-dev NEXT_VERSION:
     @echo '{{NEXT_VERSION}}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || (echo "NEXT_VERSION must be X.Y.Z (no v prefix, no suffix)" >&2; exit 1)
