@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.8
+# tenant 0.1.0-alpha.9
 
-Eighth alpha. Still alpha quality: the verbs work end-to-end on the
+Ninth alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,6 +21,57 @@ The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
+
+## New since 0.1.0-alpha.8
+
+A compatibility release for macOS 26.6. **Existing tenants need a
+one-time manual step** — see the first item.
+
+- **The tenant keychain is now `tenant.keychain-db`, not
+  `login.keychain-db`.** macOS 26.6 binds a keychain named
+  `login.keychain-db` to the user's Data Protection keybag and refuses
+  to create or unlock it from outside that user's login session — which
+  is what `sudo -iu <tenant>` from your session is. On an updated host
+  every `tenant shell` and `tenant bootstrap` failed at the keychain
+  unlock (`security` exit 51), and `tenant create` died at
+  `create-keychain`. Any other filename is exempt, on 26.6 and on every
+  earlier release, so `create`, `shell`, `bootstrap`, and `doctor` now
+  use `tenant.keychain-db`. Same four `security` steps, same stashed
+  password, same unlock at shell entry.
+
+  **Migration for tenants created before this release:** their
+  `login.keychain-db` can no longer be opened from your session, but
+  the stashed password is still valid. Recreate the keychain under the
+  new name, keyed to that stash (replace `NAME` with the tenant):
+
+  ```
+  sudo -iu NAME security create-keychain -p "$(security find-generic-password -a NAME -s tenant-NAME -w)" tenant.keychain-db
+  sudo -iu NAME security default-keychain -s tenant.keychain-db
+  sudo -iu NAME security list-keychains -s tenant.keychain-db
+  sudo -iu NAME security set-keychain-settings tenant.keychain-db
+  ```
+
+  `tenant doctor NAME` reports "keychain absent" for an unmigrated
+  tenant and prints this recipe with the name filled in. The new
+  keychain starts empty, so apps inside the tenant re-authenticate
+  once; the old `login.keychain-db` stays on disk, unused. Tenants
+  created with this release need nothing.
+
+- **Run-as-tenant probes no longer mistake a cold sudo cache for an
+  answer.** `sudo -n` exits 1 when it cannot authenticate — the same
+  code `/bin/test` uses for "no" — so `doctor` could report a healthy
+  tenant's keychain as absent, and the host-secrets isolation check
+  could report "denied" when it had not actually run. Exit 1 now counts
+  only when sudo printed nothing to stderr; otherwise the probe fails
+  loudly. As a consequence, `shell`, `mode`, `inbound`, `reload`, and
+  `bootstrap` on a tenant with `[[shares]]` prompt for sudo **before**
+  showing the plan when your sudo timestamp is cold — one prompt per
+  terminal session, the same one the verb would have needed a moment
+  later.
+
+- **Text.** Doctor's stashed-password finding no longer describes the
+  keychain unlock as a future feature. The keychain ✓ and error lines
+  no longer say "login keychain".
 
 ## New since 0.1.0-alpha.7
 
