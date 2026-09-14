@@ -111,16 +111,16 @@ impl<'a> Tenants<'a> {
                 };
                 self.run(&ensure_cowork, reporter)
                     .map_err(CreateError::CoworkDir)?;
-                // Bootstrap the tenant's login.keychain-db so
+                // Provision the tenant's `tenant.keychain-db` so
                 // credential-stashing apps (Claude OAuth, etc.) don't
                 // trip the "could not find the keychain" warning, and
                 // stash the protecting secret in the operator's
-                // keychain so a future shell-entry unlock pass can
-                // retrieve it. One password covers both — the
+                // keychain so `shell` / `bootstrap` can unlock it
+                // non-interactively. One password covers both — the
                 // keychain is unlockable only by the same secret
                 // that's been written into the operator's keychain.
                 let keychain_password = KeychainPassword::generate();
-                let create_kc = KeychainOp::CreateLoginKeychain {
+                let create_kc = KeychainOp::CreateTenantKeychain {
                     name: name.into(),
                     password: keychain_password.clone(),
                 };

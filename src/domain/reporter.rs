@@ -686,16 +686,16 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// `✓` line confirming the tenant's `login.keychain-db` was
-    /// unlocked. Emitted by the shell verb's pre-spawn keychain pass
-    /// (both interactive and command forms) so the operator sees the
-    /// unlock landed — a silent regression where the unlock pass
-    /// skipped would otherwise be invisible. Real-mode only.
+    /// `✓` line confirming the tenant's keychain was unlocked. Emitted
+    /// by the pre-spawn unlock pass of `shell` (both forms) and
+    /// `bootstrap` so the operator sees the unlock landed — a silent
+    /// regression where the unlock pass skipped would otherwise be
+    /// invisible. Real-mode only.
     pub fn shell_keychain_unlocked(&mut self, name: &TenantUserName) {
         if self.dry_run {
             return;
         }
-        self.ok(&format!("Tenant '{name}' login keychain unlocked"));
+        self.ok(&format!("Tenant '{name}' keychain unlocked"));
     }
 
     /// Yellow `⚠` stderr one-liner for narrow-on-finally failure (command
@@ -973,8 +973,8 @@ impl<'t, 'm> Reporter<'t, 'm> {
     }
 
     /// Refusal frame for `ShellError::StashAbsent`: the tenant exists
-    /// (eligibility passed) but the operator-side keychain stash for
-    /// its login password is missing. Legacy tenants created before
+    /// (eligibility passed) but the operator-side stash of its
+    /// keychain password is missing. Legacy tenants created before
     /// the bootstrap-stash landed need a one-time re-bootstrap; the
     /// hint names the exact recovery verbs verbatim.
     pub fn shell_refuse_stash_absent(&mut self, name: &TenantUserName) {
@@ -1028,16 +1028,17 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stderr frame for `ShellError::UnlockFailed`: substrate failure
-    /// on either the operator-stash retrieval or the in-tenant
-    /// `security unlock-keychain` call. No recovery hint — substrate
-    /// failure is investigative ground, not an operator-action surface
-    /// (parallel to `shell_failed` / `shell_narrow_firewall_failed`).
+    /// Stderr frame for `ShellError::UnlockFailed` and
+    /// `BootstrapError::UnlockFailed`: substrate failure on either the
+    /// operator-stash retrieval or the in-tenant `security unlock-keychain`
+    /// call. No recovery hint — substrate failure is investigative
+    /// ground, not an operator-action surface (parallel to
+    /// `shell_failed` / `shell_narrow_firewall_failed`).
     /// `KeychainError::Display` carries the substrate exit code + stderr.
     pub fn shell_unlock_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
-            "tenant: failed to unlock login keychain for '{name}': {err}"
+            "tenant: failed to unlock keychain for '{name}': {err}"
         );
     }
 
@@ -1590,7 +1591,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
     pub fn create_keychain_provision_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
-            "tenant: failed to provision login keychain for '{name}': {err} \
+            "tenant: failed to provision keychain for '{name}': {err} \
              \u{2014} run `tenant destroy {name}` to clean up"
         );
     }

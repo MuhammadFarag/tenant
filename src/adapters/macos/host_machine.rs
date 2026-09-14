@@ -12,7 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError,
     FirewallOp, GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError,
-    KeychainOp, KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
+    KeychainOp, KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TENANT_KEYCHAIN_FILE,
+    TenantUserName, tenant_keychain_path,
 };
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
@@ -767,17 +768,19 @@ impl HostMachine for MacosHostMachine {
         // the four in sequence; the plan-side rendering shows them in
         // order.
         match op {
-            KeychainOp::CreateLoginKeychain { name, .. } => {
-                format!("sudo -iu {name} security create-keychain -p <password> login.keychain-db")
+            KeychainOp::CreateTenantKeychain { name, .. } => {
+                format!(
+                    "sudo -iu {name} security create-keychain -p <password> {TENANT_KEYCHAIN_FILE}"
+                )
             }
             KeychainOp::SetDefaultKeychain { name } => {
-                format!("sudo -iu {name} security default-keychain -s login.keychain-db")
+                format!("sudo -iu {name} security default-keychain -s {TENANT_KEYCHAIN_FILE}")
             }
             KeychainOp::AddKeychainToSearchList { name } => {
-                format!("sudo -iu {name} security list-keychains -s login.keychain-db")
+                format!("sudo -iu {name} security list-keychains -s {TENANT_KEYCHAIN_FILE}")
             }
             KeychainOp::DisableKeychainAutoLock { name } => {
-                format!("sudo -iu {name} security set-keychain-settings login.keychain-db")
+                format!("sudo -iu {name} security set-keychain-settings {TENANT_KEYCHAIN_FILE}")
             }
             KeychainOp::StashPassword { name, .. } => {
                 format!("security add-generic-password -U -a {name} -s tenant-{name} -w <password>")
@@ -802,15 +805,15 @@ impl HostMachine for MacosHostMachine {
         // sequentially by `Tenants::create`; partial-state cleanup is
         // transitive via `tenant destroy`'s `sysadminctl -deleteUser`
         // moving the home to `/Users/Deleted Users/`. The
-        // partially-provisioned `login.keychain-db` rides along with
+        // partially-provisioned `tenant.keychain-db` rides along with
         // the home, so no per-variant rollback is needed at the
         // substrate.
         //
-        // `CreateLoginKeychain` exits non-zero with an "already exists"
+        // `CreateTenantKeychain` exits non-zero with an "already exists"
         // stderr (historically code 25299 / errSecDuplicateKeychain,
         // but the exit code shifts across macOS versions — see
         // destroy's `errSecItemNotFound` 44 for the same family of
-        // non-stable codes) when the tenant's `login.keychain-db` is
+        // non-stable codes) when the tenant's `tenant.keychain-db` is
         // already present. This happens on retry after a partial
         // create, or on any re-run where the previous tenant's home
         // survived in `/Users/Deleted Users/` and the substrate is
@@ -825,23 +828,30 @@ impl HostMachine for MacosHostMachine {
         // re-applied unconditionally so the post-state is consistent
         // regardless of which leg of the sequence the previous attempt
         // died on.
-        let kc = "login.keychain-db";
         match op {
-            KeychainOp::CreateLoginKeychain { name, password } => {
+            KeychainOp::CreateTenantKeychain { name, password } => {
                 run_security_as_tenant_allowing_duplicate(
                     name.as_str(),
-                    &["create-keychain", "-p", password.expose_secret(), kc],
+                    &[
+                        "create-keychain",
+                        "-p",
+                        password.expose_secret(),
+                        TENANT_KEYCHAIN_FILE,
+                    ],
                 )
             }
-            KeychainOp::SetDefaultKeychain { name } => {
-                run_security_as_tenant(name.as_str(), &["default-keychain", "-s", kc])
-            }
-            KeychainOp::AddKeychainToSearchList { name } => {
-                run_security_as_tenant(name.as_str(), &["list-keychains", "-s", kc])
-            }
-            KeychainOp::DisableKeychainAutoLock { name } => {
-                run_security_as_tenant(name.as_str(), &["set-keychain-settings", kc])
-            }
+            KeychainOp::SetDefaultKeychain { name } => run_security_as_tenant(
+                name.as_str(),
+                &["default-keychain", "-s", TENANT_KEYCHAIN_FILE],
+            ),
+            KeychainOp::AddKeychainToSearchList { name } => run_security_as_tenant(
+                name.as_str(),
+                &["list-keychains", "-s", TENANT_KEYCHAIN_FILE],
+            ),
+            KeychainOp::DisableKeychainAutoLock { name } => run_security_as_tenant(
+                name.as_str(),
+                &["set-keychain-settings", TENANT_KEYCHAIN_FILE],
+            ),
             KeychainOp::StashPassword { name, password } => {
                 stash_password_in_operator_keychain(name, password)
             }
@@ -925,22 +935,12 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {
-        // Existence check via `sudo -n -u <name> /bin/test -e <path>`
-        // — NOT `std::fs::metadata` from the operator process. The
-        // keychain file lives under `/Users/<tenant>/Library/`, which
-        // is mode 0700 owned by the tenant; the operator can't
-        // traverse into it, so a bare `metadata()` returns EACCES on
-        // every healthy tenant and the probe never returns a verdict.
-        // Running `test -e` AS THE TENANT lets the kernel resolve the
-        // path inside the tenant's own permission cone — same shape
-        // `tenant_path_kind` uses for its symlink/existence probes.
-        //
         // Exit code map: 0 → present, 1 → absent, other → sudo-auth
         // failure (passwordless sudo not configured, terminal
         // required, etc.) surfaces as ProbeError::NonZero.
-        let path = format!("/Users/{name}/Library/Keychains/login.keychain-db");
-        let output = Command::new("sudo")
-            .args(["-n", "-u", name.as_str(), "/bin/test", "-e", &path])
+        let argv = tenant_keychain_present_argv(name.as_str());
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
             .output()
             .map_err(ProbeError::Spawn)?;
         match output.status.code() {
@@ -997,10 +997,10 @@ impl HostMachine for MacosHostMachine {
         password: &KeychainPassword,
     ) -> Result<(), KeychainError> {
         // `sudo -iu <name> security unlock-keychain -p <pw>
-        // login.keychain-db`. `-iu` is load-bearing on the same grounds
+        // tenant.keychain-db`. `-iu` is load-bearing on the same grounds
         // as the provision-flow `run_security_as_tenant` calls (HOME /
         // USER / PWD must switch to the tenant so the relative
-        // `login.keychain-db` resolves under their Library/Keychains).
+        // `tenant.keychain-db` resolves under their Library/Keychains).
         // Password on argv — same platform-limit carve-out as
         // `create-keychain -p` (see provision comment block).
         //
@@ -1074,6 +1074,24 @@ pub fn kernel_pf_rules_argv(name: &str) -> Vec<String> {
         "-a".into(),
         format!("tenant-{name}"),
         "-sr".into(),
+    ]
+}
+
+/// `sudo -n -u <name> /bin/test -e <keychain path>` for
+/// `tenant_keychain_present` — NOT `std::fs::metadata` from the operator
+/// process: `/Users/<tenant>/Library/` is mode 0700 owned by the tenant,
+/// so the operator gets EACCES on every healthy tenant. Running `test -e`
+/// AS THE TENANT resolves the path inside the tenant's own permission
+/// cone — same shape `tenant_path_kind` uses.
+pub fn tenant_keychain_present_argv(name: &str) -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "-n".into(),
+        "-u".into(),
+        name.into(),
+        "/bin/test".into(),
+        "-e".into(),
+        tenant_keychain_path(name),
     ]
 }
 
@@ -1487,7 +1505,7 @@ fn acl_entry(group: &str, mode: AclMode) -> String {
 
 /// `run_security_as_tenant` variant that swallows the
 /// duplicate-keychain failure as `Ok(())`. Used only by
-/// `KeychainOp::CreateLoginKeychain` in `execute_keychain`; the other
+/// `KeychainOp::CreateTenantKeychain` in `execute_keychain`; the other
 /// three `security` sub-commands the provision flow drives are
 /// natively idempotent on macOS and use the strict helper.
 fn run_security_as_tenant_allowing_duplicate(
@@ -1579,19 +1597,19 @@ pub fn unlock_keychain_argv(password: &KeychainPassword) -> Vec<String> {
         "unlock-keychain".to_string(),
         "-p".to_string(),
         password.expose_secret().to_string(),
-        "login.keychain-db".to_string(),
+        TENANT_KEYCHAIN_FILE.to_string(),
     ]
 }
 
 fn run_security_as_tenant(tenant: &str, args: &[&str]) -> Result<(), KeychainError> {
     // `-iu` (login-shell + user) — NOT plain `-u`. `security
-    // create-keychain login.keychain-db` resolves the relative path
+    // create-keychain tenant.keychain-db` resolves the relative path
     // against `$HOME`; bare `sudo -u <tenant>` preserves the
     // operator's HOME (so the call writes against
     // `/Users/<operator>/Library/Keychains/`, fails with
     // errSecWrPerm = code 195). `-i` switches HOME / USER / PWD to
     // the tenant's login environment, so the keychain lands at the
-    // tenant's standard location: `/Users/<tenant>/Library/Keychains/login.keychain-db`.
+    // tenant's standard location: `/Users/<tenant>/Library/Keychains/`.
     let mut argv = vec!["-iu", tenant, "security"];
     argv.extend_from_slice(args);
     let output = Command::new("sudo")

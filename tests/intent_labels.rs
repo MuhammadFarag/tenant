@@ -416,14 +416,14 @@ fn intent_label_differs_from_business_label_for_exec_as_user() {
 // ============================================================
 
 #[test]
-fn intent_create_login_keychain() {
-    let op = tenant::domain::KeychainOp::CreateLoginKeychain {
+fn intent_create_tenant_keychain() {
+    let op = tenant::domain::KeychainOp::CreateTenantKeychain {
         name: "dev".into(),
         password: tenant::domain::KeychainPassword::test_dummy("ignored"),
     };
     assert_eq!(
         Op::Keychain(&op).intent_label(),
-        "Create login keychain for tenant 'dev'"
+        "Create keychain for tenant 'dev'"
     );
 }
 
@@ -432,7 +432,7 @@ fn intent_set_default_keychain() {
     let op = tenant::domain::KeychainOp::SetDefaultKeychain { name: "dev".into() };
     assert_eq!(
         Op::Keychain(&op).intent_label(),
-        "Set tenant 'dev' default keychain to login.keychain-db"
+        "Set tenant 'dev' default keychain to tenant.keychain-db"
     );
 }
 
@@ -441,7 +441,7 @@ fn intent_add_keychain_to_search_list() {
     let op = tenant::domain::KeychainOp::AddKeychainToSearchList { name: "dev".into() };
     assert_eq!(
         Op::Keychain(&op).intent_label(),
-        "Add login.keychain-db to tenant 'dev' search list"
+        "Add tenant.keychain-db to tenant 'dev' search list"
     );
 }
 
@@ -450,7 +450,7 @@ fn intent_disable_keychain_auto_lock() {
     let op = tenant::domain::KeychainOp::DisableKeychainAutoLock { name: "dev".into() };
     assert_eq!(
         Op::Keychain(&op).intent_label(),
-        "Disable auto-lock on tenant 'dev' login keychain"
+        "Disable auto-lock on tenant 'dev' keychain"
     );
 }
 
@@ -476,14 +476,14 @@ fn intent_delete_stashed_password() {
 }
 
 #[test]
-fn business_create_login_keychain() {
-    let op = tenant::domain::KeychainOp::CreateLoginKeychain {
+fn business_create_tenant_keychain() {
+    let op = tenant::domain::KeychainOp::CreateTenantKeychain {
         name: "dev".into(),
         password: tenant::domain::KeychainPassword::test_dummy("ignored"),
     };
     assert_eq!(
         Op::Keychain(&op).business_label(),
-        "Tenant 'dev' login keychain created"
+        "Tenant 'dev' keychain created"
     );
 }
 

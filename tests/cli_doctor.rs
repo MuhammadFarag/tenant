@@ -2277,7 +2277,7 @@ fn doctor_all_surfaces_user_directory_error_when_tenant_enumeration_fails() {
 // ============================================================
 //
 // `HostMachine::tenant_keychain_present(name)` returns true iff
-// /Users/<tenant>/Library/Keychains/login.keychain-db is present
+// /Users/<tenant>/Library/Keychains/tenant.keychain-db is present
 // on disk; `stash_present(name)` returns true iff the operator's
 // keychain carries a generic-password entry under (tenant,
 // tenant-<tenant>). Both surface Warning-tier findings; recovery
@@ -2286,7 +2286,7 @@ fn doctor_all_surfaces_user_directory_error_when_tenant_enumeration_fails() {
 
 #[test]
 fn doctor_tenant_keychain_absent_emits_warning() {
-    // Stub configured to report the tenant's login keychain as
+    // Stub configured to report the tenant's keychain as
     // absent → one TenantKeychainAbsent warning. Pin the byte-exact
     // one-liner.
     let stub_reader = make_tenant_stub_reader("dev");
@@ -2294,7 +2294,7 @@ fn doctor_tenant_keychain_absent_emits_warning() {
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        stdout.contains("warning: tenant 'dev' login keychain absent"),
+        stdout.contains("warning: tenant 'dev' keychain absent"),
         "expected TenantKeychainAbsent warning; stdout={stdout:?}"
     );
     assert!(
@@ -2312,7 +2312,7 @@ fn doctor_tenant_keychain_present_emits_no_warning() {
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        !stdout.contains("login keychain absent"),
+        !stdout.contains("keychain absent"),
         "no TenantKeychainAbsent finding expected; stdout={stdout:?}"
     );
 }
@@ -2366,7 +2366,7 @@ fn doctor_strict_keychain_warning_exits_1() {
 #[test]
 fn doctor_keychain_findings_carry_guidance_in_verbose() {
     // -v emits the 4-section guidance body for both keychain
-    // findings. Smoke-check the recovery command appears.
+    // findings. Smoke-check the recovery commands appear.
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubHostMachine::new()
         .with_tenant_keychain_present("dev", false)
@@ -2377,14 +2377,18 @@ fn doctor_keychain_findings_carry_guidance_in_verbose() {
         stdout.contains("Why this matters"),
         "verbose should emit guidance block header; stdout={stdout:?}"
     );
-    // Recovery command appears in BOTH findings' guidance.
+    assert!(
+        stdout.contains(
+            "sudo -iu dev security create-keychain -p \"$(security find-generic-password -a dev -s tenant-dev -w)\" tenant.keychain-db"
+        ),
+        "keychain-absent guidance should name the recreate recipe; stdout={stdout:?}"
+    );
     let recovery_count = stdout
         .matches("tenant destroy dev && tenant create dev")
         .count();
-    assert!(
-        recovery_count >= 2,
-        "both keychain findings should name the recovery in -v; \
-         found {recovery_count} occurrences; stdout={stdout:?}"
+    assert_eq!(
+        recovery_count, 3,
+        "stash one-liner + stash guidance + keychain-absent alternative; stdout={stdout:?}"
     );
 }
 
@@ -2401,7 +2405,7 @@ fn doctor_tenant_keychain_probe_failure_surfaces_and_walk_continues() {
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 0, "audit-as-courtesy: probe failure does not abort");
     assert!(
-        !stdout.contains("login keychain absent"),
+        !stdout.contains("keychain absent"),
         "no finding emits when the probe itself failed; stdout={stdout:?}"
     );
     assert!(

@@ -365,6 +365,39 @@ fn bootstrap_widen_execute_failure_exits_74_no_exec() {
 }
 
 #[test]
+fn bootstrap_unlocks_keychain_before_commands() {
+    let profile = profile_with_bootstrap(&[], &[], &["cmd"]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("alice", &profile)
+        .with_default_stash("alice");
+    let (code, stdout, stderr) =
+        run_with_exec(stub_with_tenant("alice"), &exec, &["bootstrap", "alice"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        exec.unlock_calls(),
+        vec!["alice".to_string()],
+        "unlock_tenant_keychain must fire exactly once for the tenant"
+    );
+    let want = format!(
+        "{}\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-alice\n\
+         ✓ Firewall ruleset reloaded\n\
+         ✓ Host 'operator' added to share group 'alice-tenant-share'\n\
+         ✓ Tenant 'alice' keychain unlocked\n\
+         ✓ Ran as 'alice': cmd\n\
+         ✓ Firewall anchor installed at /etc/pf.anchors/tenant-alice\n\
+         ✓ Firewall ruleset reloaded\n\
+         ✓ Host 'operator' added to share group 'alice-tenant-share'\n\
+         {}\n\
+         Tenant 'alice' bootstrapped.\n\
+         Next: audit with `tenant doctor alice`.\n",
+        section_line("Bootstrapping tenant 'alice'"),
+        section_line("Done"),
+    );
+    assert_eq!(stdout, want);
+}
+
+#[test]
 fn bootstrap_unlock_failure_exits_74() {
     // Decision 4: keychain errors OTHER than a missing stash (the
     // find/unlock substrate itself breaking) map to EX_IOERR, distinct
@@ -382,7 +415,7 @@ fn bootstrap_unlock_failure_exits_74() {
         run_with_exec(stub_with_tenant("alice"), &exec, &["bootstrap", "alice"]);
     assert_eq!(code, 74, "unlock substrate failure exits EX_IOERR");
     assert!(
-        stderr.contains("failed to unlock login keychain for 'alice'"),
+        stderr.contains("failed to unlock keychain for 'alice'"),
         "unlock-failure frame expected: {stderr:?}"
     );
     assert!(

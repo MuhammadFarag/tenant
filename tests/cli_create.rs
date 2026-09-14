@@ -507,7 +507,7 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
          ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
-         ✓ Tenant 'dev' login keychain created\n\
+         ✓ Tenant 'dev' keychain created\n\
          ✓ Tenant 'dev' default keychain set\n\
          ✓ Tenant 'dev' keychain added to search list\n\
          ✓ Tenant 'dev' keychain auto-lock disabled\n\
@@ -594,13 +594,13 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
          $ sudo chmod -R +a \"group:dev-tenant-share allow \
          read,write,execute,delete,append,file_inherit,directory_inherit\" /Users/Shared/tenants/dev\n\
          ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
-         $ sudo -iu dev security create-keychain -p <password> login.keychain-db\n\
-         ✓ Tenant 'dev' login keychain created\n\
-         $ sudo -iu dev security default-keychain -s login.keychain-db\n\
+         $ sudo -iu dev security create-keychain -p <password> tenant.keychain-db\n\
+         ✓ Tenant 'dev' keychain created\n\
+         $ sudo -iu dev security default-keychain -s tenant.keychain-db\n\
          ✓ Tenant 'dev' default keychain set\n\
-         $ sudo -iu dev security list-keychains -s login.keychain-db\n\
+         $ sudo -iu dev security list-keychains -s tenant.keychain-db\n\
          ✓ Tenant 'dev' keychain added to search list\n\
-         $ sudo -iu dev security set-keychain-settings login.keychain-db\n\
+         $ sudo -iu dev security set-keychain-settings tenant.keychain-db\n\
          ✓ Tenant 'dev' keychain auto-lock disabled\n\
          $ security add-generic-password -U -a dev -s tenant-dev -w <password>\n\
          ✓ Tenant 'dev' password stashed in operator keychain\n\
@@ -652,7 +652,7 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
          ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
-         ✓ Tenant 'dev' login keychain created\n\
+         ✓ Tenant 'dev' keychain created\n\
          ✓ Tenant 'dev' default keychain set\n\
          ✓ Tenant 'dev' keychain added to search list\n\
          ✓ Tenant 'dev' keychain auto-lock disabled\n\
@@ -1166,7 +1166,7 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
          ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
-         ✓ Tenant 'dev' login keychain created\n\
+         ✓ Tenant 'dev' keychain created\n\
          ✓ Tenant 'dev' default keychain set\n\
          ✓ Tenant 'dev' keychain added to search list\n\
          ✓ Tenant 'dev' keychain auto-lock disabled\n\
@@ -1807,7 +1807,7 @@ fn create_surfaces_user_directory_error_when_gid_allocation_fails() {
 /// Two consecutive `tenant create` invocations generate distinct
 /// passwords. Defends against a regression that hard-codes the
 /// password or seeds the RNG deterministically. The password lives
-/// on the first provision sub-step (`CreateLoginKeychain`).
+/// on the first provision sub-step (`CreateTenantKeychain`).
 #[test]
 fn create_uses_fresh_keychain_password_each_invocation() {
     let exec1 = StubHostMachine::new();
@@ -1818,12 +1818,12 @@ fn create_uses_fresh_keychain_password_each_invocation() {
     assert_eq!(code2, 0);
 
     let pw1 = match &exec1.keychain_ops()[0] {
-        KeychainOp::CreateLoginKeychain { password, .. } => password.expose_secret().to_string(),
-        other => panic!("expected CreateLoginKeychain, got: {other:?}"),
+        KeychainOp::CreateTenantKeychain { password, .. } => password.expose_secret().to_string(),
+        other => panic!("expected CreateTenantKeychain, got: {other:?}"),
     };
     let pw2 = match &exec2.keychain_ops()[0] {
-        KeychainOp::CreateLoginKeychain { password, .. } => password.expose_secret().to_string(),
-        other => panic!("expected CreateLoginKeychain, got: {other:?}"),
+        KeychainOp::CreateTenantKeychain { password, .. } => password.expose_secret().to_string(),
+        other => panic!("expected CreateTenantKeychain, got: {other:?}"),
     };
     assert_ne!(
         pw1, pw2,
@@ -1832,9 +1832,9 @@ fn create_uses_fresh_keychain_password_each_invocation() {
 }
 
 /// Within a single create, the password threads through
-/// `CreateLoginKeychain` (the first provision sub-step that carries a
+/// `CreateTenantKeychain` (the first provision sub-step that carries a
 /// password) and `StashPassword` — both must carry the SAME bytes so
-/// a future shell-entry unlock pass can retrieve the same secret. The
+/// the `shell` / `bootstrap` unlock retrieves the same secret. The
 /// 3 middle provision sub-steps (`SetDefaultKeychain` /
 /// `AddKeychainToSearchList` / `DisableKeychainAutoLock`) don't carry
 /// passwords and are excluded from this pin.
@@ -1850,11 +1850,11 @@ fn create_provision_and_stash_share_the_same_password() {
         "expected 4 provision sub-steps + StashPassword (5 ops), got: {ops:?}"
     );
     let create_pw = match &ops[0] {
-        KeychainOp::CreateLoginKeychain { name, password } => {
+        KeychainOp::CreateTenantKeychain { name, password } => {
             assert_eq!(name.as_str(), "dev");
             password.expose_secret().to_string()
         }
-        other => panic!("expected CreateLoginKeychain first, got: {other:?}"),
+        other => panic!("expected CreateTenantKeychain first, got: {other:?}"),
     };
     // The 3 middle provision sub-steps carry no password; pin their
     // identity but not the password.
@@ -1928,7 +1928,7 @@ fn create_dry_run_plan_redacts_password() {
 }
 
 /// `KeychainError` on the FIRST provision sub-step
-/// (`CreateLoginKeychain`) surfaces as `EX_IOERR` + the dedicated
+/// (`CreateTenantKeychain`) surfaces as `EX_IOERR` + the dedicated
 /// stderr frame; tenant user + group are already on host (no
 /// automatic rollback — recovery is `tenant destroy <name>`, matching
 /// the Profile / Firewall posture). After the ADT split, failures on
@@ -1946,7 +1946,7 @@ fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
     // Pre-failure ✓ stream is operator-visible: group + host + user +
     // cowork dir all succeeded before the keychain step.
-    // CreateLoginKeychain fired (and failed) — no ✓ line for it; no
+    // CreateTenantKeychain fired (and failed) — no ✓ line for it; no
     // later keychain ops.
     let want_stdout = format!(
         "{}\n\
@@ -1958,7 +1958,7 @@ fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
     );
     assert_eq!(stdout, want_stdout);
     assert!(
-        stderr.starts_with("tenant: failed to provision login keychain for 'dev':"),
+        stderr.starts_with("tenant: failed to provision keychain for 'dev':"),
         "expected create_keychain_provision_failed frame; stderr={stderr:?}"
     );
     assert!(
@@ -1966,16 +1966,16 @@ fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
         "expected recovery hint; stderr={stderr:?}"
     );
     // Four account ops ran (group + host-add + user + cowork dir),
-    // one keychain op attempted (the failing CreateLoginKeychain).
+    // one keychain op attempted (the failing CreateTenantKeychain).
     // No automatic rollback.
     assert_eq!(exec.account_ops().len(), 4, "account ops not rolled back");
     assert_eq!(exec.keychain_ops().len(), 1);
     assert!(
         matches!(
             exec.keychain_ops()[0],
-            KeychainOp::CreateLoginKeychain { .. }
+            KeychainOp::CreateTenantKeychain { .. }
         ),
-        "expected CreateLoginKeychain; got: {:?}",
+        "expected CreateTenantKeychain; got: {:?}",
         exec.keychain_ops()[0]
     );
 }
@@ -1995,28 +1995,28 @@ fn create_partial_keychain_provision_failure_at_step_2_surfaces() {
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // CreateLoginKeychain emitted its ✓ before the failure.
+    // CreateTenantKeychain emitted its ✓ before the failure.
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
          ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
-         ✓ Tenant 'dev' login keychain created\n",
+         ✓ Tenant 'dev' keychain created\n",
         section_line("Creating tenant 'dev'"),
     );
     assert_eq!(stdout, want_stdout);
     assert!(
-        stderr.starts_with("tenant: failed to provision login keychain for 'dev':"),
+        stderr.starts_with("tenant: failed to provision keychain for 'dev':"),
         "expected create_keychain_provision_failed frame; stderr={stderr:?}"
     );
-    // Two keychain ops attempted: CreateLoginKeychain (ok),
+    // Two keychain ops attempted: CreateTenantKeychain (ok),
     // SetDefaultKeychain (failed). The later three didn't fire.
     let ops = exec.keychain_ops();
     assert_eq!(ops.len(), 2, "expected 2 keychain ops, got: {ops:?}");
     assert!(
-        matches!(&ops[0], KeychainOp::CreateLoginKeychain { .. }),
-        "first op should be CreateLoginKeychain; got: {:?}",
+        matches!(&ops[0], KeychainOp::CreateTenantKeychain { .. }),
+        "first op should be CreateTenantKeychain; got: {:?}",
         ops[0]
     );
     assert!(
@@ -2027,8 +2027,8 @@ fn create_partial_keychain_provision_failure_at_step_2_surfaces() {
 }
 
 /// A Stash failure leaves the keychain fully provisioned (all 4 sub-
-/// steps succeeded) but unreachable by a future shell-entry unlock
-/// pass. Same posture — recovery is `tenant destroy <name>`.
+/// steps succeeded) but unreachable by the `shell` / `bootstrap`
+/// unlock. Same posture — recovery is `tenant destroy <name>`.
 #[test]
 fn create_keychain_stash_failure_surfaces_with_keychain_provisioned() {
     let exec = StubHostMachine::new().fail_next_keychain_stash(KeychainError::NonZero {
@@ -2044,7 +2044,7 @@ fn create_keychain_stash_failure_surfaces_with_keychain_provisioned() {
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
          ✓ User account 'dev' provisioned (UID 600)\n\
          ✓ Co-working directory ensured at /Users/Shared/tenants/dev\n\
-         ✓ Tenant 'dev' login keychain created\n\
+         ✓ Tenant 'dev' keychain created\n\
          ✓ Tenant 'dev' default keychain set\n\
          ✓ Tenant 'dev' keychain added to search list\n\
          ✓ Tenant 'dev' keychain auto-lock disabled\n",

@@ -236,13 +236,12 @@ impl FromStr for TenantUserName {
     }
 }
 
-/// Random secret used to protect the tenant's login keychain AND
-/// stashed in the operator's keychain so a future non-interactive
-/// unlock pass works. Distinct from any macOS account password.
-/// Hex-encoded 32-byte
-/// random read from `/dev/urandom`; `Debug` redacts the value so
-/// accidental `{:?}` formatting in logs / error trails / panics never
-/// leaks the secret.
+/// Random secret used to protect the tenant's keychain AND stashed in
+/// the operator's keychain so `shell` / `bootstrap` can unlock it
+/// non-interactively. Distinct from any macOS account password.
+/// Hex-encoded 32-byte random read from `/dev/urandom`; `Debug`
+/// redacts the value so accidental `{:?}` formatting in logs / error
+/// trails / panics never leaks the secret.
 #[derive(Clone, PartialEq, Eq)]
 pub struct KeychainPassword(String);
 

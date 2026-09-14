@@ -87,14 +87,14 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
     // Section + ✓ for each substrate step before login. No closing
     // line — login transfers control to the shell. The keychain
     // unlock pass emits its own ✓ between the reapply and login (the
-    // tenant's `login.keychain-db` is unlocked from the
+    // tenant's `tenant.keychain-db` is unlocked from the
     // operator-stashed password before the child shell starts).
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Tenant 'dev' login keychain unlocked\n",
+         ✓ Tenant 'dev' keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want);
@@ -188,7 +188,7 @@ fn shell_surfaces_substrate_failure_on_unlock_call() {
     assert_eq!(stdout, want_stdout);
     assert_eq!(
         stderr,
-        "tenant: failed to unlock login keychain for 'dev': \
+        "tenant: failed to unlock keychain for 'dev': \
          security exited with code 51: \
          The user name or passphrase you entered is not correct.\n"
     );
@@ -241,7 +241,7 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
          ✓ Firewall ruleset reloaded\n\
          $ sudo dseditgroup -o edit -n . -a operator -t user dev-tenant-share\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Tenant 'dev' login keychain unlocked\n\
+         ✓ Tenant 'dev' keychain unlocked\n\
          $ sudo -iu dev\n",
         section_line("Entering tenant 'dev'"),
     );
@@ -423,7 +423,7 @@ fn shell_propagates_child_exit_code() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Tenant 'dev' login keychain unlocked\n",
+         ✓ Tenant 'dev' keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want);
@@ -2017,10 +2017,10 @@ fn shell_clap_rejects_mode_without_argv() {
 // ================================================================
 //
 // `tenant shell <name>` retrieves the operator-stashed password and
-// unlocks the tenant's `login.keychain-db` BEFORE handing off to
+// unlocks the tenant's `tenant.keychain-db` BEFORE handing off to
 // login / exec_as_tenant. The unlock pass is the LAST step before
 // exec (after `execute_reapply_plan`). Already-unlocked is a no-op
-// at the substrate; the operator sees `✓ Tenant 'X' login keychain
+// at the substrate; the operator sees `✓ Tenant 'X' keychain
 // unlocked` either way so a silent regression is visible.
 
 #[test]
@@ -2040,7 +2040,7 @@ fn shell_unlocks_keychain_before_login() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Tenant 'dev' login keychain unlocked\n",
+         ✓ Tenant 'dev' keychain unlocked\n",
         section_line("Entering tenant 'dev'"),
     );
     assert_eq!(stdout, want);
@@ -2078,7 +2078,7 @@ fn shell_command_form_also_unlocks() {
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
          ✓ Firewall ruleset reloaded\n\
          ✓ Host 'operator' added to share group 'dev-tenant-share'\n\
-         ✓ Tenant 'dev' login keychain unlocked\n\
+         ✓ Tenant 'dev' keychain unlocked\n\
          {}\n\
          Command exited with code 0.\n",
         section_line("Running command as tenant 'dev'"),

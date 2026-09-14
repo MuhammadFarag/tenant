@@ -1196,7 +1196,7 @@ impl HostMachine for StubHostMachine {
     fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError> {
         self.keychain_ops.borrow_mut().push(op.clone());
         match op {
-            KeychainOp::CreateLoginKeychain { .. } => {
+            KeychainOp::CreateTenantKeychain { .. } => {
                 if let Some(err) = self.keychain_create_failure.borrow_mut().take() {
                     return Err(err);
                 }

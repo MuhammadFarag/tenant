@@ -152,10 +152,8 @@ pub trait HostMachine {
     /// than open (spam failures).
     fn sudo_session_cached(&self) -> bool;
 
-    /// True iff `/Users/<tenant>/Library/Keychains/login.keychain-db`
-    /// is present on disk. Doctor consults this to surface
-    /// `Finding::TenantKeychainAbsent`. Filesystem-existence check from
-    /// the operator process — mirrors `tenant_path_kind`'s shape.
+    /// True iff `tenant_keychain_path(name)` is present on disk.
+    /// Doctor consults this to surface `Finding::TenantKeychainAbsent`.
     fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError>;
 
     /// True iff the operator's login keychain carries a
@@ -173,8 +171,8 @@ pub trait HostMachine {
         name: &TenantUserName,
     ) -> Result<KeychainPassword, KeychainError>;
 
-    /// Unlock the tenant's `login.keychain-db` via
-    /// `sudo -iu <name> security unlock-keychain -p <pw> login.keychain-db`.
+    /// Unlock the tenant's keychain via
+    /// `sudo -iu <name> security unlock-keychain -p <pw> tenant.keychain-db`.
     /// Already-unlocked exits 0 on the substrate — no idempotence guard.
     fn unlock_tenant_keychain(
         &self,

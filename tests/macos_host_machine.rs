@@ -509,15 +509,15 @@ fn macos_describes_acl_revoke_rw() {
 // here.
 
 #[test]
-fn macos_describes_create_login_keychain() {
+fn macos_describes_create_tenant_keychain() {
     let s = MacosHostMachine;
-    let op = tenant::domain::KeychainOp::CreateLoginKeychain {
+    let op = tenant::domain::KeychainOp::CreateTenantKeychain {
         name: "dev".into(),
         password: tenant::domain::KeychainPassword::test_dummy("ignored-by-describe"),
     };
     assert_eq!(
         s.describe_keychain(&op),
-        "sudo -iu dev security create-keychain -p <password> login.keychain-db"
+        "sudo -iu dev security create-keychain -p <password> tenant.keychain-db"
     );
 }
 
@@ -527,7 +527,7 @@ fn macos_describes_set_default_keychain() {
     let op = tenant::domain::KeychainOp::SetDefaultKeychain { name: "dev".into() };
     assert_eq!(
         s.describe_keychain(&op),
-        "sudo -iu dev security default-keychain -s login.keychain-db"
+        "sudo -iu dev security default-keychain -s tenant.keychain-db"
     );
 }
 
@@ -537,7 +537,7 @@ fn macos_describes_add_keychain_to_search_list() {
     let op = tenant::domain::KeychainOp::AddKeychainToSearchList { name: "dev".into() };
     assert_eq!(
         s.describe_keychain(&op),
-        "sudo -iu dev security list-keychains -s login.keychain-db"
+        "sudo -iu dev security list-keychains -s tenant.keychain-db"
     );
 }
 
@@ -547,7 +547,7 @@ fn macos_describes_disable_keychain_auto_lock() {
     let op = tenant::domain::KeychainOp::DisableKeychainAutoLock { name: "dev".into() };
     assert_eq!(
         s.describe_keychain(&op),
-        "sudo -iu dev security set-keychain-settings login.keychain-db"
+        "sudo -iu dev security set-keychain-settings tenant.keychain-db"
     );
 }
 
@@ -593,7 +593,7 @@ fn macos_unlock_keychain_argv_tail() {
             "unlock-keychain",
             "-p",
             "test-keychain-pw",
-            "login.keychain-db",
+            "tenant.keychain-db",
         ],
     );
 }
@@ -605,7 +605,7 @@ fn macos_unlock_keychain_argv_tail() {
 // ProbeError::Spawn instead of a clean Ok(false). The fix runs the
 // existence check AS THE TENANT via `sudo -n -u <name> /bin/test -e
 // <path>`; this test exercises that path against `root`, whose
-// home (`/var/root/`) doesn't contain a `Library/Keychains/login.keychain-db`
+// home (`/var/root/`) doesn't contain a `Library/Keychains/tenant.keychain-db`
 // on a default macOS install — so the probe should return Ok(false).
 // `#[ignore]` because the test requires passwordless `sudo -n -u root`,
 // which isn't configured in headless CI environments.
@@ -617,7 +617,7 @@ fn macos_tenant_keychain_present_returns_false_for_absent_path() {
     let machine = MacosHostMachine;
     // `root` exists on every macOS host. The keychain path under
     // `/Users/root/...` doesn't (root's home is `/var/root/`); the
-    // probe builds the `/Users/<name>/Library/Keychains/login.keychain-db`
+    // probe builds the `/Users/<name>/Library/Keychains/tenant.keychain-db`
     // path literally, so this is a deterministic-absent case that the
     // old `std::fs::metadata` impl would have surfaced as
     // ProbeError::Spawn (EACCES traversing into `/Users/root/`'s
@@ -627,7 +627,24 @@ fn macos_tenant_keychain_present_returns_false_for_absent_path() {
         .expect("sudo -n -u root /bin/test should yield a kernel verdict");
     assert!(
         !verdict,
-        "keychain at /Users/root/Library/Keychains/login.keychain-db must not exist"
+        "keychain at /Users/root/Library/Keychains/tenant.keychain-db must not exist"
+    );
+}
+
+#[test]
+fn macos_tenant_keychain_present_argv() {
+    use tenant::adapters::macos::host_machine::tenant_keychain_present_argv;
+    assert_eq!(
+        tenant_keychain_present_argv("dev"),
+        vec![
+            "sudo",
+            "-n",
+            "-u",
+            "dev",
+            "/bin/test",
+            "-e",
+            "/Users/dev/Library/Keychains/tenant.keychain-db",
+        ],
     );
 }
 

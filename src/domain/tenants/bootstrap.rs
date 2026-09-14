@@ -195,13 +195,12 @@ impl<'a> Tenants<'a> {
 
     /// Mirror of shell's shared pre-spawn keychain step (`shell.rs`
     /// `unlock_tenant_keychain`): retrieve the operator-stashed password,
-    /// unlock the tenant's `login.keychain-db`, emit the `✓` line.
+    /// unlock the tenant's `tenant.keychain-db`, emit the `✓` line.
     /// Bootstrap commands hit git/brew credential helpers, so a locked
     /// keychain fails them confusingly. Mirrored, not shared — shell's
     /// helper returns `ShellError`; threading a neutral error across two
-    /// verbs would be a leaky abstraction (the doctrine-sanctioned choice
-    /// per the design notes: a copy with this comment over a shared error
-    /// type). The `✓` reporter line is reused verbatim (verb-agnostic).
+    /// verbs would be a leaky abstraction. The `✓` reporter line is
+    /// reused verbatim (verb-agnostic).
     fn unlock_keychain_for_bootstrap(
         &self,
         name: &TenantUserName,

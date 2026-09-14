@@ -5,7 +5,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::domain::tenants::tenant_share_group_name;
-use crate::domain::{AccessMode, AccessOutcome, GroupName, HostUserName, TenantUserName};
+use crate::domain::{
+    AccessMode, AccessOutcome, GroupName, HostUserName, TENANT_KEYCHAIN_FILE, TenantUserName,
+    tenant_keychain_path,
+};
 
 /// Order is load-bearing: `--strict` maps max severity to exit code
 /// (Info → 0, Warning → 1, Critical → 2).
@@ -44,7 +47,7 @@ pub enum Category {
     /// 0644 by design and WILL surface as `Allowed`; classified
     /// `info` because the exposure is intentional.
     TenantArtifact,
-    /// Keychain-bootstrap drift: tenant's `login.keychain-db` absent,
+    /// Keychain-bootstrap drift: tenant's `tenant.keychain-db` absent,
     /// or operator-side stash absent. Distinct category because the
     /// (file-existence-on-disk, presence-of-stash) signal doesn't fit
     /// the `probe_access_as_tenant` shape the other categories share.
@@ -128,16 +131,16 @@ pub enum Finding {
         host: HostUserName,
         group: GroupName,
     },
-    /// Tenant's `login.keychain-db` is absent on disk (manual delete,
-    /// or a partial-create that never landed). OAuth-class apps inside
-    /// the tenant will fire `errSecNoSuchKeychain`.
+    /// Tenant's `tenant.keychain-db` is absent on disk (tenant created
+    /// under an older keychain filename, manual delete, or a
+    /// partial-create that never landed). OAuth-class apps inside the
+    /// tenant will fire `errSecNoSuchKeychain`.
     TenantKeychainAbsent {
         tenant: TenantUserName,
     },
     /// Operator-side stash for the tenant is absent under
-    /// (account=tenant, service=tenant-<tenant>). A future shell-
-    /// entry unlock pass would have no way to retrieve the
-    /// protecting password without the stash.
+    /// (account=tenant, service=tenant-<tenant>). Without it `shell` /
+    /// `bootstrap` can't retrieve the protecting password.
     StashAbsent {
         tenant: TenantUserName,
     },
@@ -677,48 +680,53 @@ Alternative
   Adds just the membership without running the full reload. Use when
   `tenant reload` is blocked by an unrelated refusal."
             )),
-            Finding::TenantKeychainAbsent { tenant } => Some(format!(
-                "Why this matters
-  Tenant '{tenant}'s login keychain at /Users/{tenant}/Library/Keychains/login.keychain-db
+            Finding::TenantKeychainAbsent { tenant } => {
+                let keychain_path = tenant_keychain_path(tenant.as_str());
+                Some(format!(
+                    "Why this matters
+  Tenant '{tenant}'s keychain at {keychain_path}
   is absent. Claude OAuth and other credential-stashing apps running
   inside the tenant fire `errSecNoSuchKeychain` warnings and have no
   persistent place to write tokens \u{2014} every login interaction
   re-prompts because nothing survives across sessions. The most common
-  causes are a manual `rm` against the tenant's Library/Keychains
+  causes are a tenant created before the keychain moved off the
+  `login.keychain-db` name (macOS 26.6 binds that name to the user's
+  Data Protection keybag and refuses unlocks from the operator's
+  session), a manual `rm` against the tenant's Library/Keychains
   directory, or a partial-create that left the file off disk.
 
 Recommended fix
-  tenant destroy {tenant} && tenant create {tenant}
-  Re-bootstraps the tenant from scratch: the destroy moves the home to
-  /Users/Deleted Users/, the create runs the 4-step keychain provision
-  sequence cleanly. Idempotent at the substrate (destroy converges on
-  absent tenants; create runs `security create-keychain` with the
-  duplicate-keychain escape hatch).
+  sudo -iu {tenant} security create-keychain -p \"$(security find-generic-password -a {tenant} -s tenant-{tenant} -w)\" {TENANT_KEYCHAIN_FILE}
+  sudo -iu {tenant} security default-keychain -s {TENANT_KEYCHAIN_FILE}
+  sudo -iu {tenant} security list-keychains -s {TENANT_KEYCHAIN_FILE}
+  sudo -iu {tenant} security set-keychain-settings {TENANT_KEYCHAIN_FILE}
+  Creates the keychain keyed to the password already stashed in the
+  operator's keychain, makes it the tenant's default and sole
+  search-list entry, and clears auto-lock \u{2014} the same four steps
+  `tenant create` runs, without touching the tenant's home. Step one
+  fails if the stash is absent; doctor reports that separately and
+  the alternative below covers it.
 
 Side-effects to know about
-  \u{2022} Any tenant-side state in /Users/{tenant}/ moves to
-    /Users/Deleted Users/{tenant}/ (recoverable until the host empties
-    /Users/Deleted Users or the host is rebuilt).
-  \u{2022} A fresh keychain password is generated and stashed in the
-    operator's keychain; the prior password (if any) is discarded.
-  \u{2022} Any apps the tenant had open with the old keychain attached
-    will lose their reference; restart them after the re-create.
+  \u{2022} The new keychain starts empty: apps inside the tenant
+    re-authenticate once. Anything stored in a pre-26.6
+    `login.keychain-db` stays in that file, unused.
+  \u{2022} The password is on the command line for the duration of step
+    one \u{2014} the same exposure `tenant create` has today.
 
 Alternative
-  sudo -iu {tenant} security create-keychain -p <password> login.keychain-db
-  Manually re-create the keychain, then run the 3 follow-up `security`
-  sub-steps (`default-keychain -s`, `list-keychains -s`,
-  `set-keychain-settings`) and `security add-generic-password -a {tenant}
-  -s tenant-{tenant} -w <password>` against the operator's keychain to
-  re-stash. Tedious; the full destroy + create path is faster and
-  matches the substrate the create flow runs."
-            )),
+  tenant destroy {tenant} && tenant create {tenant}
+  Re-bootstraps the tenant from scratch with a fresh password and
+  stash. Moves the tenant's home to /Users/Deleted Users/{tenant}/;
+  use it when the stash is gone too."
+                ))
+            }
             Finding::StashAbsent { tenant } => Some(format!(
                 "Why this matters
   The operator's login keychain doesn't carry a generic-password entry
   under (account={tenant}, service=tenant-{tenant}). A future shell-
   entry unlock pass would read from that entry to retrieve the
-  password that protects the tenant's `login.keychain-db`; without
+  password that protects the tenant's `{TENANT_KEYCHAIN_FILE}`; without
   the stash, post-reboot the tenant's keychain stays locked and OAuth
   tokens it carries become unreachable. The most common cause is a
   manual `security delete-generic-password` run against the operator's
@@ -891,7 +899,7 @@ impl fmt::Display for Finding {
             ),
             Finding::TenantKeychainAbsent { tenant } => write!(
                 f,
-                "warning: tenant '{tenant}' login keychain absent \u{2014} \
+                "warning: tenant '{tenant}' keychain absent \u{2014} \
                  apps inside the tenant won't be able to persist credentials"
             ),
             Finding::StashAbsent { tenant } => write!(

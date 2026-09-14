@@ -249,38 +249,48 @@ pub enum FirewallOp {
     Enable,
 }
 
-/// Keychain operations: pre-create the tenant's `login.keychain-db`
+/// Not `login.keychain-db`: macOS 26.6 binds that name to the user's
+/// Data Protection keybag and refuses to create or unlock it from any
+/// process outside the user's login session; `sudo -iu` from the
+/// operator's session is one. Any other name works on every release, so
+/// there is no version branching.
+pub const TENANT_KEYCHAIN_FILE: &str = "tenant.keychain-db";
+
+pub fn tenant_keychain_path(name: &str) -> String {
+    format!("/Users/{name}/Library/Keychains/{TENANT_KEYCHAIN_FILE}")
+}
+
+/// Keychain operations: pre-create the tenant's `tenant.keychain-db`
 /// so credential-stashing apps (Claude OAuth, etc.) don't trip the
 /// "could not find the keychain" warning, and persist the protecting
-/// secret in the operator's keychain so a future non-interactive
-/// unlock pass can retrieve it. `Stash` / `DeleteStashed` write to
-/// the OPERATOR's login keychain (no `sudo`); the four `*Keychain*`
-/// provision variants write the TENANT's login keychain via
-/// `sudo -iu <name> security`.
+/// secret in the operator's keychain so `shell` / `bootstrap` can
+/// unlock it non-interactively. `StashPassword` /
+/// `DeleteStashedPassword` write to the OPERATOR's login keychain (no
+/// `sudo`); the four `*Keychain*` provision variants write the
+/// TENANT's keychain via `sudo -iu <name> security`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeychainOp {
-    /// `security create-keychain -p <pw> login.keychain-db`. The
+    /// `security create-keychain -p <pw> tenant.keychain-db`. The
     /// `password` is the secret protecting the new keychain (also
-    /// stashed in operator's keychain via `StashPassword`). Natively
-    /// idempotent against an existing keychain — see
-    /// `execute_keychain`'s comment block in
-    /// adapters/macos/host_machine.rs.
-    CreateLoginKeychain {
+    /// stashed in operator's keychain via `StashPassword`). The
+    /// adapter maps the "already exists" failure to `Ok(())` — see
+    /// `execute_keychain`.
+    CreateTenantKeychain {
         name: TenantUserName,
         password: KeychainPassword,
     },
 
-    /// `security default-keychain -s login.keychain-db`. Sets the
+    /// `security default-keychain -s tenant.keychain-db`. Sets the
     /// tenant's default keychain pointer in their per-user prefs.
     /// Natively idempotent (overwrites the pointer).
     SetDefaultKeychain { name: TenantUserName },
 
-    /// `security list-keychains -s login.keychain-db`. Replaces the
+    /// `security list-keychains -s tenant.keychain-db`. Replaces the
     /// tenant's keychain search list with just the new one (+ the
     /// system keychain that macOS preserves implicitly).
     AddKeychainToSearchList { name: TenantUserName },
 
-    /// `security set-keychain-settings login.keychain-db` (no flags
+    /// `security set-keychain-settings tenant.keychain-db` (no flags
     /// = no auto-lock timer, no lock-on-sleep). Load-bearing for the
     /// "Claude OAuth tokens persist across sessions" guarantee.
     DisableKeychainAutoLock { name: TenantUserName },
@@ -293,7 +303,7 @@ pub enum KeychainOp {
     /// (~milliseconds, single `security` invocation) is accepted;
     /// alternative is the Security Framework C API via FFI, which is
     /// out of scope for solo-Mac. Service-name `tenant-<name>` is the
-    /// contract a future shell-entry unlock pass reads from.
+    /// contract the `shell` / `bootstrap` unlock reads from.
     StashPassword {
         name: TenantUserName,
         password: KeychainPassword,
@@ -492,8 +502,8 @@ fn acl_business_label(op: &AclOp) -> String {
 
 fn keychain_business_label(op: &KeychainOp) -> String {
     match op {
-        KeychainOp::CreateLoginKeychain { name, .. } => {
-            format!("Tenant '{name}' login keychain created")
+        KeychainOp::CreateTenantKeychain { name, .. } => {
+            format!("Tenant '{name}' keychain created")
         }
         KeychainOp::SetDefaultKeychain { name } => {
             format!("Tenant '{name}' default keychain set")
@@ -629,17 +639,17 @@ fn acl_intent_label(op: &AclOp) -> String {
 
 fn keychain_intent_label(op: &KeychainOp) -> String {
     match op {
-        KeychainOp::CreateLoginKeychain { name, .. } => {
-            format!("Create login keychain for tenant '{name}'")
+        KeychainOp::CreateTenantKeychain { name, .. } => {
+            format!("Create keychain for tenant '{name}'")
         }
         KeychainOp::SetDefaultKeychain { name } => {
-            format!("Set tenant '{name}' default keychain to login.keychain-db")
+            format!("Set tenant '{name}' default keychain to {TENANT_KEYCHAIN_FILE}")
         }
         KeychainOp::AddKeychainToSearchList { name } => {
-            format!("Add login.keychain-db to tenant '{name}' search list")
+            format!("Add {TENANT_KEYCHAIN_FILE} to tenant '{name}' search list")
         }
         KeychainOp::DisableKeychainAutoLock { name } => {
-            format!("Disable auto-lock on tenant '{name}' login keychain")
+            format!("Disable auto-lock on tenant '{name}' keychain")
         }
         KeychainOp::StashPassword { name, .. } => {
             format!("Stash tenant '{name}' password in operator keychain")

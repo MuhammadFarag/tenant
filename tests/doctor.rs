@@ -1192,7 +1192,7 @@ fn finding_host_not_in_share_group_severity_is_warning() {
 // Finding::TenantKeychainAbsent — Display + severity + guidance
 // ============================================================
 //
-// Tenant's `login.keychain-db` is absent on disk. Warning-tier
+// Tenant's `tenant.keychain-db` is absent on disk. Warning-tier
 // because the tenant can still function for non-keychain operations;
 // the drift signals "OAuth-class apps will break".
 
@@ -1203,7 +1203,7 @@ fn finding_display_tenant_keychain_absent() {
     };
     assert_eq!(
         format!("{f}"),
-        "warning: tenant 'dev' login keychain absent \u{2014} \
+        "warning: tenant 'dev' keychain absent \u{2014} \
          apps inside the tenant won't be able to persist credentials"
     );
 }
@@ -1222,39 +1222,41 @@ fn guidance_tenant_keychain_absent_byte_form() {
         tenant: TenantUserName::from("dev"),
     };
     let expected = "Why this matters
-  Tenant 'dev's login keychain at /Users/dev/Library/Keychains/login.keychain-db
+  Tenant 'dev's keychain at /Users/dev/Library/Keychains/tenant.keychain-db
   is absent. Claude OAuth and other credential-stashing apps running
   inside the tenant fire `errSecNoSuchKeychain` warnings and have no
   persistent place to write tokens \u{2014} every login interaction
   re-prompts because nothing survives across sessions. The most common
-  causes are a manual `rm` against the tenant's Library/Keychains
+  causes are a tenant created before the keychain moved off the
+  `login.keychain-db` name (macOS 26.6 binds that name to the user's
+  Data Protection keybag and refuses unlocks from the operator's
+  session), a manual `rm` against the tenant's Library/Keychains
   directory, or a partial-create that left the file off disk.
 
 Recommended fix
-  tenant destroy dev && tenant create dev
-  Re-bootstraps the tenant from scratch: the destroy moves the home to
-  /Users/Deleted Users/, the create runs the 4-step keychain provision
-  sequence cleanly. Idempotent at the substrate (destroy converges on
-  absent tenants; create runs `security create-keychain` with the
-  duplicate-keychain escape hatch).
+  sudo -iu dev security create-keychain -p \"$(security find-generic-password -a dev -s tenant-dev -w)\" tenant.keychain-db
+  sudo -iu dev security default-keychain -s tenant.keychain-db
+  sudo -iu dev security list-keychains -s tenant.keychain-db
+  sudo -iu dev security set-keychain-settings tenant.keychain-db
+  Creates the keychain keyed to the password already stashed in the
+  operator's keychain, makes it the tenant's default and sole
+  search-list entry, and clears auto-lock \u{2014} the same four steps
+  `tenant create` runs, without touching the tenant's home. Step one
+  fails if the stash is absent; doctor reports that separately and
+  the alternative below covers it.
 
 Side-effects to know about
-  \u{2022} Any tenant-side state in /Users/dev/ moves to
-    /Users/Deleted Users/dev/ (recoverable until the host empties
-    /Users/Deleted Users or the host is rebuilt).
-  \u{2022} A fresh keychain password is generated and stashed in the
-    operator's keychain; the prior password (if any) is discarded.
-  \u{2022} Any apps the tenant had open with the old keychain attached
-    will lose their reference; restart them after the re-create.
+  \u{2022} The new keychain starts empty: apps inside the tenant
+    re-authenticate once. Anything stored in a pre-26.6
+    `login.keychain-db` stays in that file, unused.
+  \u{2022} The password is on the command line for the duration of step
+    one \u{2014} the same exposure `tenant create` has today.
 
 Alternative
-  sudo -iu dev security create-keychain -p <password> login.keychain-db
-  Manually re-create the keychain, then run the 3 follow-up `security`
-  sub-steps (`default-keychain -s`, `list-keychains -s`,
-  `set-keychain-settings`) and `security add-generic-password -a dev
-  -s tenant-dev -w <password>` against the operator's keychain to
-  re-stash. Tedious; the full destroy + create path is faster and
-  matches the substrate the create flow runs.";
+  tenant destroy dev && tenant create dev
+  Re-bootstraps the tenant from scratch with a fresh password and
+  stash. Moves the tenant's home to /Users/Deleted Users/dev/;
+  use it when the stash is gone too.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
@@ -1292,7 +1294,7 @@ fn guidance_stash_absent_byte_form() {
   The operator's login keychain doesn't carry a generic-password entry
   under (account=dev, service=tenant-dev). A future shell-
   entry unlock pass would read from that entry to retrieve the
-  password that protects the tenant's `login.keychain-db`; without
+  password that protects the tenant's `tenant.keychain-db`; without
   the stash, post-reboot the tenant's keychain stays locked and OAuth
   tokens it carries become unreachable. The most common cause is a
   manual `security delete-generic-password` run against the operator's

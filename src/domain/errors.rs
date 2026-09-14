@@ -200,8 +200,8 @@ pub enum KeychainError {
         stderr: String,
     },
     /// Stashed password absent in the operator's keychain. Destroy
-    /// converges on this; a future shell-entry unlock pass would
-    /// refuse on this.
+    /// converges on this; the `shell` / `bootstrap` unlock refuses on
+    /// it.
     NotFound,
 }
 

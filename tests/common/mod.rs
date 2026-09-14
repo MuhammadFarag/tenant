@@ -237,23 +237,23 @@ pub fn create_verbose_plan_entries(
             None,
         ),
         (
-            format!("Create login keychain for tenant '{name}'"),
-            format!("sudo -iu {name} security create-keychain -p <password> login.keychain-db"),
+            format!("Create keychain for tenant '{name}'"),
+            format!("sudo -iu {name} security create-keychain -p <password> tenant.keychain-db"),
             None,
         ),
         (
-            format!("Set tenant '{name}' default keychain to login.keychain-db"),
-            format!("sudo -iu {name} security default-keychain -s login.keychain-db"),
+            format!("Set tenant '{name}' default keychain to tenant.keychain-db"),
+            format!("sudo -iu {name} security default-keychain -s tenant.keychain-db"),
             None,
         ),
         (
-            format!("Add login.keychain-db to tenant '{name}' search list"),
-            format!("sudo -iu {name} security list-keychains -s login.keychain-db"),
+            format!("Add tenant.keychain-db to tenant '{name}' search list"),
+            format!("sudo -iu {name} security list-keychains -s tenant.keychain-db"),
             None,
         ),
         (
-            format!("Disable auto-lock on tenant '{name}' login keychain"),
-            format!("sudo -iu {name} security set-keychain-settings login.keychain-db"),
+            format!("Disable auto-lock on tenant '{name}' keychain"),
+            format!("sudo -iu {name} security set-keychain-settings tenant.keychain-db"),
             None,
         ),
         (

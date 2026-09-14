@@ -928,7 +928,7 @@ fn build_create_plan_ops(
             group,
             mode: 0o2770,
         },
-        create_keychain: KeychainOp::CreateLoginKeychain {
+        create_keychain: KeychainOp::CreateTenantKeychain {
             name: name.into(),
             password: plan_placeholder.clone(),
         },

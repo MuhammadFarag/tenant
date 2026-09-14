@@ -16,6 +16,6 @@ pub use host_user_directory::HostUserDirectory;
 pub use ids::{GroupId, GroupName, HostUserName, KeychainPassword, TenantUserName, UserId};
 pub use ops::{
     AccessMode, AccessOutcome, AccountOp, AclMode, AclOp, FirewallOp, KeychainOp, Op, PamOp,
-    PathKind, ProfileOp,
+    PathKind, ProfileOp, TENANT_KEYCHAIN_FILE, tenant_keychain_path,
 };
 pub(crate) use tenants::Tenants;

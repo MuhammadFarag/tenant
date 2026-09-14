@@ -276,7 +276,7 @@ impl<'a> Tenants<'a> {
 
     /// Shared pre-spawn step (both interactive + command forms): retrieve
     /// the operator-stashed password, unlock the tenant's
-    /// `login.keychain-db`, emit the `✓` line. Already-unlocked is a
+    /// `tenant.keychain-db`, emit the `✓` line. Already-unlocked is a
     /// no-op at the substrate (exit 0 either way); the ✓ still emits
     /// so a silent regression where the pass skipped would be visible.
     /// The dry-run posture lives in the `DryRunHostMachine` carve-outs:
