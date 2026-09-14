@@ -216,7 +216,7 @@ impl<'a> Tenants<'a> {
         self.machine
             .unlock_tenant_keychain(name, &password)
             .map_err(BootstrapError::UnlockFailed)?;
-        reporter.shell_keychain_unlocked(name);
+        reporter.keychain_unlocked(name);
         Ok(())
     }
 
@@ -283,7 +283,7 @@ pub(crate) fn surface_bootstrap_error(
         BootstrapError::StashAbsent { name: refused } => {
             reporter.bootstrap_refuse_stash_absent(refused);
         }
-        BootstrapError::UnlockFailed(e) => reporter.shell_unlock_failed(name, e),
+        BootstrapError::UnlockFailed(e) => reporter.keychain_unlock_failed(name, e),
         BootstrapError::CommandFailed { command, code } => {
             reporter.bootstrap_command_failed(name, command, *code);
         }

@@ -724,14 +724,14 @@ Alternative
             Finding::StashAbsent { tenant } => Some(format!(
                 "Why this matters
   The operator's login keychain doesn't carry a generic-password entry
-  under (account={tenant}, service=tenant-{tenant}). A future shell-
-  entry unlock pass would read from that entry to retrieve the
-  password that protects the tenant's `{TENANT_KEYCHAIN_FILE}`; without
-  the stash, post-reboot the tenant's keychain stays locked and OAuth
-  tokens it carries become unreachable. The most common cause is a
-  manual `security delete-generic-password` run against the operator's
-  keychain, or a partial-create that landed the keychain but missed
-  the stash.
+  under (account={tenant}, service=tenant-{tenant}). `tenant shell` and
+  `tenant bootstrap` read that entry to retrieve the password that
+  protects the tenant's `{TENANT_KEYCHAIN_FILE}`; without the stash they
+  refuse to enter, and after a reboot the tenant's keychain stays
+  locked so OAuth tokens it carries become unreachable. The most
+  common cause is a manual `security delete-generic-password` run
+  against the operator's keychain, or a partial-create that landed
+  the keychain but missed the stash.
 
 Recommended fix
   tenant destroy {tenant} && tenant create {tenant}
@@ -905,7 +905,7 @@ impl fmt::Display for Finding {
             Finding::StashAbsent { tenant } => write!(
                 f,
                 "warning: stashed password absent for tenant '{tenant}' \u{2014} \
-                 a future `tenant shell` unlock pass would have nothing to retrieve; \
+                 `tenant shell` and `tenant bootstrap` can't unlock the keychain without it; \
                  run `tenant destroy {tenant} && tenant create {tenant}` to re-bootstrap"
             ),
         }

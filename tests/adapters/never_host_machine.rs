@@ -135,6 +135,9 @@ impl HostMachine for NeverHostMachine {
     fn sudo_session_cached(&self) -> bool {
         panic!("host machine unexpectedly invoked (sudo_session_cached)");
     }
+    fn authenticate_sudo(&self) -> Result<(), ProbeError> {
+        panic!("host machine unexpectedly invoked (authenticate_sudo)");
+    }
     fn describe_keychain(&self, op: &KeychainOp) -> String {
         panic!("host machine unexpectedly invoked (describe_keychain) with op: {op:?}");
     }

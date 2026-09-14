@@ -107,7 +107,7 @@ fn render_block_rule_scoped_to_tenant_via_user_keyword() {
     );
 }
 
-// ── inbound loopback section (cycle 24) ──────────────────────────────
+// ── inbound loopback section ─────────────────────────────────────────
 
 #[test]
 fn render_locked_omits_inbound_pass() {
@@ -262,7 +262,7 @@ fn anchor_is_permissive_false_for_restricted_with_ports() {
     );
 }
 
-// ── per-host egress ports (cycle: egress-ports) ──────────────────────
+// ── per-host egress ports ────────────────────────────────────────────
 //
 // The renderer groups hosts by their verbatim port list, one table + one
 // pass rule per group. The `[443]` DEFAULT group renders first, always,
@@ -316,9 +316,9 @@ fn render_bare_only_empty_is_byte_identical_to_pre_ports_render() {
 }
 
 #[test]
-fn render_mixed_entries_matches_worked_example_b() {
-    // Brief example B (the git-over-ssh case): a default-group host and a
-    // `[443, 22]` host. Pins table order (default first, then group in
+fn render_mixed_entries_orders_tables_and_rules() {
+    // The git-over-ssh case: a default-group host and a `[443, 22]`
+    // host. Pins table order (default first, then group in
     // first-occurrence order), table naming (`allowed_443_22`), and rule
     // order (default 443 rule, then the group rule, then the catchall).
     let hosts = vec![
@@ -384,7 +384,7 @@ fn render_same_nondefault_ports_share_one_table() {
 fn render_port_order_makes_distinct_groups() {
     // Group key is the ports list VERBATIM: `[22, 443]` and `[443, 22]`
     // are distinct groups with distinct tables — deterministic and
-    // documented (decision 5).
+    // documented on `render_anchor`.
     let hosts = vec![
         EgressHost {
             host: "a.example".to_string(),
@@ -408,11 +408,11 @@ fn render_port_order_makes_distinct_groups() {
 
 #[test]
 fn render_single_nondefault_port_renders_bare() {
-    // Brief example C: one host, one non-default port → table
-    // `<allowed_993>`, rule with a bare `port 993` (no list braces).
-    // Byte-exact so it ALSO pins the no-default-hosts edge (decision 5):
-    // the default `<allowed>` table still renders (empty `{ }`) and the
-    // default `port 443` rule still emits, ahead of the group's.
+    // One host, one non-default port → table `<allowed_993>`, rule with
+    // a bare `port 993` (no list braces). Byte-exact so it ALSO pins
+    // the no-default-hosts edge: the default `<allowed>` table still
+    // renders (empty `{ }`) and the default `port 443` rule still
+    // emits, ahead of the group's.
     let hosts = vec![EgressHost {
         host: "mail.example.com".to_string(),
         ports: vec![993],

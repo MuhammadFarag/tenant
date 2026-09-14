@@ -495,8 +495,8 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
     // the ✓ stream + `account_ops()` assertions below. Create sets the
     // primary group ONCE here (CreateTenantUser `-GID`); it must NOT also
     // emit a separate `EnsurePrimaryGroup` — that is reload's Full-reapply
-    // convergence op (finding #26). The exact `account_ops()` list below
-    // (which has no EnsurePrimaryGroup) enforces the no-double-set.
+    // convergence op. The exact `account_ops()` list below (which has no
+    // EnsurePrimaryGroup) enforces the no-double-set.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -628,14 +628,14 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
 
 #[test]
 fn create_profile_write_failure_surfaces_with_user_and_group_present() {
-    // Per the design lock: CreateShareGroup + CreateTenantUser have
-    // both succeeded by the time the profile step fires, so a
-    // profile-write failure does NOT roll back the user or group.
-    // Operator sees an EX_IOERR with the `create_profile_failed` message
-    // that names the profile path (so they don't have to grep source).
-    // Their recovery is `tenant destroy <name>` — destroy's Destroyable
-    // arm cleans up the user+group, and the missing profile case is a
-    // successful noop for the profile-rm step.
+    // CreateShareGroup + CreateTenantUser have both succeeded by the time
+    // the profile step fires, so a profile-write failure does NOT roll
+    // back the user or group. Operator sees an EX_IOERR with the
+    // `create_profile_failed` message that names the profile path (so
+    // they don't have to grep source). Their recovery is
+    // `tenant destroy <name>` — destroy's Destroyable arm cleans up the
+    // user+group, and the missing profile case is a successful noop for
+    // the profile-rm step.
     let exec = StubHostMachine::new().fail_next_profile(tenant::profile::ProfileError {
         message: "disk full".into(),
     });
@@ -1468,7 +1468,7 @@ fn create_post_provision_refusal_carries_recovery_hint() {
     let bad_share = profile_with_shares(
         &[],
         &[],
-        &[("/nonexistent/cycle10/create-sentinel", "rw", "$HOME/src")],
+        &[("/nonexistent/create-sentinel", "rw", "$HOME/src")],
     );
     let exec = StubHostMachine::new().with_create_profile_content("dev", &bad_share);
     let (code, _stdout, stderr) =
@@ -1645,9 +1645,8 @@ fn create_with_yes_flag_skips_prompt_proceeds() {
 
 #[test]
 fn create_with_invalid_input_reprompts_then_accepts() {
-    // Q16 edge case: typing `maybe` (neither y nor n) triggers a
-    // reprompt with the "Please answer y or n." hint. Second line
-    // `y` proceeds.
+    // Edge case: typing `maybe` (neither y nor n) triggers a reprompt
+    // with the "Please answer y or n." hint. Second line `y` proceeds.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),

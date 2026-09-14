@@ -236,7 +236,7 @@ pub(crate) fn dispatch(
                             // as EX_IOERR, parallel to other shell substrate
                             // failures. StashAbsent (operator action required)
                             // routes separately above.
-                            reporter.shell_unlock_failed(&name, &err);
+                            reporter.keychain_unlock_failed(&name, &err);
                             EX_IOERR
                         }
                     }

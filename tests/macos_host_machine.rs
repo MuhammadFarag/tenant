@@ -648,6 +648,42 @@ fn macos_tenant_keychain_present_argv() {
     );
 }
 
+#[test]
+fn macos_sudo_test_verdict_reads_exit_1_as_no_only_without_stderr() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+    use tenant::adapters::macos::host_machine::sudo_test_verdict;
+    use tenant::domain::ProbeError;
+    let output = |code: i32, stderr: &str| Output {
+        status: ExitStatus::from_raw(code << 8),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    };
+    assert!(matches!(sudo_test_verdict(&output(0, "")), Ok(true)));
+    assert!(matches!(
+        sudo_test_verdict(&output(0, "warning\n")),
+        Ok(true)
+    ));
+    assert!(matches!(sudo_test_verdict(&output(1, "")), Ok(false)));
+    assert!(matches!(
+        sudo_test_verdict(&output(1, "sudo: a password is required\n")),
+        Err(ProbeError::NonZero { code: 1, .. })
+    ));
+    assert!(matches!(
+        sudo_test_verdict(&output(2, "")),
+        Err(ProbeError::NonZero { code: 2, .. })
+    ));
+    let killed = Output {
+        status: ExitStatus::from_raw(9),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    assert!(matches!(
+        sudo_test_verdict(&killed),
+        Err(ProbeError::NonZero { code: -1, .. })
+    ));
+}
+
 // Point-of-use sudo for the doctor verb. The three host-config read
 // probes (`read_pf_status`, `read_kernel_pf_rules`, `read_env_policy`)
 // shell out with BARE sudo — NO `-n`. On a fresh terminal the FIRST of
@@ -707,10 +743,15 @@ fn macos_sudoers_dropins_listing_argv_is_bare_sudo() {
     );
 }
 
+#[test]
+fn macos_authenticate_sudo_argv_prompts() {
+    use tenant::adapters::macos::host_machine::authenticate_sudo_argv;
+    assert_eq!(authenticate_sudo_argv(), vec!["sudo", "-v"]);
+}
+
 // The non-interactive cache CHECK keeps `-n` — its whole job is to
-// answer "would the next sudo prompt?" WITHOUT itself prompting. This is
-// the one sudo call that MUST stay `-n` after the point-of-use change;
-// pinning it guards against an over-broad "drop -n everywhere" edit.
+// answer "would the next sudo prompt?" WITHOUT itself prompting; pinning
+// it guards against an over-broad "drop -n everywhere" edit.
 #[test]
 fn macos_sudo_session_cached_argv_keeps_dash_n() {
     use tenant::adapters::macos::host_machine::sudo_session_cached_argv;

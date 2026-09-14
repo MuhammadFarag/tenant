@@ -152,6 +152,12 @@ pub trait HostMachine {
     /// than open (spam failures).
     fn sudo_session_cached(&self) -> bool;
 
+    /// Prompting counterpart (`sudo -v`), for post-consent use: lets a
+    /// deferred `sudo -n` probe answer before the first mutation. A
+    /// carve-out, not an Op: like doctor's probes it is how the verb
+    /// learns, not what it does — there is no plan step to narrate.
+    fn authenticate_sudo(&self) -> Result<(), ProbeError>;
+
     /// True iff `tenant_keychain_path(name)` is present on disk.
     /// Doctor consults this to surface `Finding::TenantKeychainAbsent`.
     fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError>;

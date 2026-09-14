@@ -322,11 +322,11 @@ fn finding_anchor_body_drift_severity_is_warning() {
 // Finding::InboundExposure / InboundPermissive — Display + severity
 // ============================================================
 //
-// The inbound loopback axis (cycle 24). `InboundExposure` is the
-// steady restricted-with-ports posture (Info: the declared ports are
-// open by intent, but reachable by host AND peer tenants — pf can't see
-// the initiator on shared 127.0.0.1). `InboundPermissive` is the
-// temporary all-ports widen (Warning: every loopback port is open).
+// The inbound loopback axis. `InboundExposure` is the steady
+// restricted-with-ports posture (Info: the declared ports are open by
+// intent, but reachable by host AND peer tenants — pf can't see the
+// initiator on shared 127.0.0.1). `InboundPermissive` is the temporary
+// all-ports widen (Warning: every loopback port is open).
 
 #[test]
 fn finding_display_inbound_exposure_single_port() {
@@ -1272,7 +1272,7 @@ fn finding_display_stash_absent() {
     assert_eq!(
         format!("{f}"),
         "warning: stashed password absent for tenant 'dev' \u{2014} \
-         a future `tenant shell` unlock pass would have nothing to retrieve; \
+         `tenant shell` and `tenant bootstrap` can't unlock the keychain without it; \
          run `tenant destroy dev && tenant create dev` to re-bootstrap"
     );
 }
@@ -1292,14 +1292,14 @@ fn guidance_stash_absent_byte_form() {
     };
     let expected = "Why this matters
   The operator's login keychain doesn't carry a generic-password entry
-  under (account=dev, service=tenant-dev). A future shell-
-  entry unlock pass would read from that entry to retrieve the
-  password that protects the tenant's `tenant.keychain-db`; without
-  the stash, post-reboot the tenant's keychain stays locked and OAuth
-  tokens it carries become unreachable. The most common cause is a
-  manual `security delete-generic-password` run against the operator's
-  keychain, or a partial-create that landed the keychain but missed
-  the stash.
+  under (account=dev, service=tenant-dev). `tenant shell` and
+  `tenant bootstrap` read that entry to retrieve the password that
+  protects the tenant's `tenant.keychain-db`; without the stash they
+  refuse to enter, and after a reboot the tenant's keychain stays
+  locked so OAuth tokens it carries become unreachable. The most
+  common cause is a manual `security delete-generic-password` run
+  against the operator's keychain, or a partial-create that landed
+  the keychain but missed the stash.
 
 Recommended fix
   tenant destroy dev && tenant create dev

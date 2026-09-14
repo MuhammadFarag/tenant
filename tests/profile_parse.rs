@@ -185,8 +185,8 @@ fn inline_table_host_round_trips_host_and_ports_in_order() {
 
 #[test]
 fn mixed_bare_and_table_array_parses() {
-    // The git-over-ssh case (brief example B): a bare host next to an
-    // inline-table host in the same array.
+    // The git-over-ssh case: a bare host next to an inline-table host in
+    // the same array.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -212,8 +212,8 @@ fn mixed_bare_and_table_array_parses() {
 
 #[test]
 fn empty_ports_entry_refused_with_byte_exact_message() {
-    // Decision 3: a host with no ports is unreachable — refuse at parse,
-    // naming the host. Byte-exact message pin.
+    // A host with no ports is unreachable — refuse at parse, naming the
+    // host. Byte-exact message pin.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -744,8 +744,8 @@ fn parse_partial_fragment_declaring_empty_include_is_refused() {
 
 #[test]
 fn parse_partial_duplicate_include_refused() {
-    // Decision 4: a repeated include entry is certainly an authoring
-    // mistake — refuse at parse, naming the entry.
+    // A repeated include entry is certainly an authoring mistake — refuse
+    // at parse, naming the entry.
     let toml = "schema_version = 1\ninclude = [\"base\", \"base\"]\n";
     let err = parse_partial(toml, ProfileRole::Tenant).expect_err("duplicate include must refuse");
     assert!(
@@ -758,9 +758,9 @@ fn parse_partial_duplicate_include_refused() {
 
 #[test]
 fn parse_partial_bad_fragment_name_refused() {
-    // Decision 1: include entries pass the same lexical rail as tenant
-    // names (`[a-z][a-z0-9_-]{0,30}`), foreclosing path traversal without
-    // a second charset.
+    // Include entries pass the same lexical rail as tenant names
+    // (`[a-z][a-z0-9_-]{0,30}`), foreclosing path traversal without a
+    // second charset.
     for bad in ["../etc", "Base", ".hidden", "a/b", "with space", ""] {
         let toml = format!("include = [\"{bad}\"]\n");
         let err = parse_partial(&toml, ProfileRole::Tenant)
@@ -847,9 +847,9 @@ fn merge_unions_runtime_hosts_fragments_first() {
 
 #[test]
 fn merge_does_not_dedupe_repeated_host() {
-    // Decision 3: union = concatenation, no dedupe. A host in both a
-    // fragment and the profile renders TWICE (the renderer + pf tables
-    // tolerate duplicates); a silent dedup would be invisible to the
+    // Union = concatenation, no dedupe. A host in both a fragment and
+    // the profile renders TWICE (the renderer + pf tables tolerate
+    // duplicates); a silent dedup would be invisible to the
     // distinct-host union tests, so pin the duplicate explicitly.
     let frag = parse_partial(
         "[allowlist.runtime]\nhosts = [\"dup.example\"]\n",
@@ -987,7 +987,7 @@ fn merge_refuses_when_no_schema_version_anywhere() {
 
 #[test]
 fn merge_refuses_verbatim_tenant_path_collision() {
-    // Decision 2: the collision compare is verbatim (template strings,
+    // The collision compare is verbatim (template strings,
     // byte-for-byte), NOT expanded paths.
     let frag = parse_partial(
         "[allowlist.runtime]\nhosts = []\n\
@@ -1008,7 +1008,7 @@ fn merge_refuses_verbatim_tenant_path_collision() {
     )
     .unwrap();
     let err = merge(vec![frag, prof]).expect_err("tenant_path collision must refuse");
-    // Byte-exact pin — decision 2's canonical refusal.
+    // Byte-exact pin of the canonical refusal.
     assert_eq!(
         err.message,
         "two shares map to the same tenant_path \"$HOME/src\"; drop the include or \

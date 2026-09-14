@@ -659,11 +659,11 @@ fn reload_no_arg_continues_on_per_tenant_failure() {
 
 #[test]
 fn reload_all_continues_when_one_tenants_share_group_gid_read_fails() {
-    // The gid-read failure channel (finding #26) must also be
-    // continue-on-failure in the multi-tenant walk, not abort it. Both
-    // tenants have profiles; the one-shot `fail_next_share_group_gid`
-    // trips the FIRST tenant processed (alphabetical: 'dev'), so 'dev'
-    // fails its plan-build and 'staging' continues and succeeds.
+    // The gid-read failure channel must also be continue-on-failure in
+    // the multi-tenant walk, not abort it. Both tenants have profiles;
+    // the one-shot `fail_next_share_group_gid` trips the FIRST tenant
+    // processed (alphabetical: 'dev'), so 'dev' fails its plan-build
+    // and 'staging' continues and succeeds.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_existing_profile("staging", &tenant::profile::default_profile_toml())
@@ -720,7 +720,7 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
             },
             // Tenant-side membership catch-up sits beside the host-side
             // one: re-assert the tenant's primary group (OS-update
-            // resilience, finding #26) before the filesystem fixups.
+            // resilience) before the filesystem fixups.
             AccountOp::EnsurePrimaryGroup {
                 name: "dev".into(),
                 gid: GroupId(600),
@@ -887,9 +887,9 @@ fn reload_pre_exec_doctor_quiet_skips_sudo_probes_when_sudo_uncached() {
     // When the operator has no cached sudo timestamp, the pre-exec
     // audit must skip the GENUINE sudo probes
     // and emit ZERO failure frames — even when those probes are rigged
-    // to fail. This fixes the fresh-terminal spam (#2/#8/#14) and
-    // removes the #8 double-print structurally (uncached ⇒ zero sudo
-    // probes ⇒ zero frames). The auth-free probes (host_in_group,
+    // to fail. That keeps a fresh terminal free of probe-failure spam and
+    // double-printed frames structurally (uncached ⇒ zero sudo probes ⇒
+    // zero frames). The auth-free probes (host_in_group,
     // cowork, anchor-body) are NOT suppressed by the gate — they run
     // regardless of cache state; this test keeps the host clean on
     // those so the only observable effect of `uncached` is the
@@ -1046,19 +1046,15 @@ fn reload_pre_exec_doctor_runs_sudo_probes_when_sudo_cached() {
 }
 
 #[test]
-fn reload_pre_exec_doctor_acl_drift_surfaces_but_symlink_drift_gated_when_uncached() {
-    // collect_share_drift is split by auth requirement. The AclDrift
-    // check reads `ls -lde` from the operator process (NO
-    // sudo) and must run regardless of sudo cache state; the
-    // SymlinkDrift check probes `sudo -n -u <tenant>` and must stay
-    // gated. Rig BOTH drifts on a single share, run uncached, and
-    // assert only AclDrift surfaces.
-    //
-    // The reload verb's own plan-build invokes tenant_path_kind once
-    // on the share path (independent of the pre-pass). So on the
-    // uncached path the ONLY tenant_path_kind call is the verb's —
-    // the pre-exec doctor adds none, the mechanism by which
-    // SymlinkDrift stays silent.
+fn reload_on_cold_sudo_authenticates_at_plan_build_so_pre_exec_doctor_probes_symlink_drift() {
+    // collect_share_drift is split by auth requirement: the AclDrift
+    // check reads `ls -lde` from the operator process (NO sudo); the
+    // SymlinkDrift check probes `sudo -n -u <tenant>` and is gated on a
+    // cached timestamp. A share-bearing reload authenticates at plan
+    // build (its own occupancy probe needs sudo), so by the time the
+    // pre-exec doctor runs the cache is warm and BOTH halves surface.
+    // Rig both drifts on a single share, start cold, expect two
+    // warnings and two tenant_path_kind calls (verb + doctor).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "ro", "$HOME/src")]);
     let tenant_path = PathBuf::from("/Users/dev/src");
     let exec = StubHostMachine::new()
@@ -1071,7 +1067,7 @@ fn reload_pre_exec_doctor_acl_drift_surfaces_but_symlink_drift_gated_when_uncach
             " 0: user:operator allow list,add_file,search\n",
         )
         // SymlinkDrift (sudo): the tenant-side path is absent, which
-        // WOULD drift — but the gated probe must not run it.
+        // drifts once the warm cache lets the probe run.
         .with_tenant_path_kind("dev", &tenant_path, PathKind::Absent);
     let (code, stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
@@ -1080,33 +1076,22 @@ fn reload_pre_exec_doctor_acl_drift_surfaces_but_symlink_drift_gated_when_uncach
         b"",
     );
     assert_eq!(code, 0, "verb proceeds; the pre-pass is a courtesy");
-    // Only the auth-free AclDrift surfaces: one warning, not two.
+    assert_eq!(exec.authenticate_sudo_calls(), 1, "cold ⇒ one `sudo -v`");
     assert!(
-        stdout.contains(
-            "\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
-        ),
-        "uncached: only the auth-free AclDrift aggregates (1 warning), \
-         SymlinkDrift stays gated; stdout={stdout:?}"
+        stdout.contains("\u{26a0} Doctor: 2 warnings for tenant 'dev'"),
+        "warm cache after plan build: AclDrift AND SymlinkDrift aggregate; stdout={stdout:?}"
     );
-    // No sudo failure frame; the pre-pass stays quiet on the gated half.
     assert!(
         !stderr.contains("failed"),
-        "uncached share-drift split emits no failure frame; stderr={stderr:?}"
+        "no probe failure frame; stderr={stderr:?}"
     );
-    // tenant_path_kind on the share path ran exactly once — the verb's
-    // own plan-build — proving the pre-exec doctor's SymlinkDrift
-    // branch did NOT invoke it.
+    // Verb plan-build + pre-exec doctor SymlinkDrift check.
     let calls: Vec<_> = exec
         .tenant_path_kind_calls()
         .into_iter()
         .filter(|(_, p)| p == &tenant_path)
         .collect();
-    assert_eq!(
-        calls.len(),
-        1,
-        "uncached: only the verb's plan-build probes tenant_path_kind; \
-         the pre-exec SymlinkDrift check stays gated; calls={calls:?}"
-    );
+    assert_eq!(calls.len(), 2, "calls={calls:?}");
 }
 
 #[test]
@@ -1266,7 +1251,7 @@ fn reload_all_uses_full_reapply_scope_per_tenant_emitting_grant_and_cowork() {
 }
 
 // ================================================================
-// Primary-group reassertion (OS-update resilience, finding #26)
+// Primary-group reassertion (OS-update resilience)
 // ================================================================
 
 #[test]

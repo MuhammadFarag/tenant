@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
@@ -319,41 +319,18 @@ impl HostMachine for MacosHostMachine {
         path: &std::path::Path,
         mode: AccessMode,
     ) -> Result<AccessOutcome, ProbeError> {
-        // `/bin/test -<flag> <path>` exit codes: 0 = Allowed,
-        // 1 = Denied (includes file-doesn't-exist; mechanism-of-denial
-        // is the remediation surface's job), ≥2 = Unknown.
-        // /bin/test absolute path because /usr/bin/test is absent on
-        // Darwin 25.x.
+        // Denied includes file-doesn't-exist; mechanism-of-denial is the
+        // remediation surface's job.
         let flag = match mode {
             AccessMode::Read => "-r",
             AccessMode::List => "-x",
         };
-        let path_str = path.to_string_lossy().into_owned();
-        let output = Command::new("sudo")
-            .args(["-n", "-u", name.as_str(), "/bin/test", flag, &path_str])
-            .output()
-            .map_err(ProbeError::Spawn)?;
-        match output.status.code() {
-            Some(0) => Ok(AccessOutcome::Allowed),
-            Some(1) => Ok(AccessOutcome::Denied),
-            Some(code) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                // Distinguish "sudo couldn't authenticate" (machinery
-                // failure → ProbeError) from "test answered something
-                // weird" (kernel state weird → Unknown).
-                if stderr.contains("sudo: a password is required")
-                    || stderr.contains("sudo: a terminal is required")
-                {
-                    Err(ProbeError::NonZero { code, stderr })
-                } else {
-                    Ok(AccessOutcome::Unknown)
-                }
-            }
-            None => Err(ProbeError::NonZero {
-                code: -1,
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            }),
-        }
+        let argv = file_test_as_tenant_argv(name.as_str(), flag, &path.to_string_lossy());
+        Ok(if run_file_test_as_tenant(&argv)? {
+            AccessOutcome::Allowed
+        } else {
+            AccessOutcome::Denied
+        })
     }
 
     fn read_env_policy(&self) -> Result<String, HostFileError> {
@@ -529,80 +506,49 @@ impl HostMachine for MacosHostMachine {
         // resolution; SymlinkDrift compares string-exact against the
         // declared host_path.
         //
-        // Per-utility absolute paths because Darwin 25.x scatters them:
-        // test at /bin/test (not /usr/bin/test), readlink at
-        // /usr/bin/readlink (not /bin/readlink), ln at /bin/ln.
+        // readlink absolute at /usr/bin/readlink (not /bin/readlink):
+        // Darwin 25.x scatters utilities.
         let path_str = path.to_string_lossy().into_owned();
-        let symlink_out = Command::new("sudo")
-            .args(["-n", "-u", name.as_str(), "/bin/test", "-L", &path_str])
-            .output()
-            .map_err(ProbeError::Spawn)?;
-        if let Some(code) = symlink_out.status.code() {
-            if code == 0 {
-                let readlink_out = Command::new("sudo")
-                    .args(["-n", "-u", name.as_str(), "/usr/bin/readlink", &path_str])
-                    .output()
-                    .map_err(ProbeError::Spawn)?;
-                match readlink_out.status.code() {
-                    Some(0) => {
-                        let target = String::from_utf8_lossy(&readlink_out.stdout)
-                            .trim_end_matches('\n')
-                            .to_string();
-                        return Ok(PathKind::Symlink(std::path::PathBuf::from(target)));
-                    }
-                    Some(code) => {
-                        return Err(ProbeError::NonZero {
-                            code,
-                            stderr: String::from_utf8_lossy(&readlink_out.stderr).into_owned(),
-                        });
-                    }
-                    None => {
-                        return Err(ProbeError::NonZero {
-                            code: -1,
-                            stderr: String::from_utf8_lossy(&readlink_out.stderr).into_owned(),
-                        });
-                    }
+        let file_test = |flag: &str| {
+            run_file_test_as_tenant(&file_test_as_tenant_argv(name.as_str(), flag, &path_str))
+        };
+        if file_test("-L")? {
+            let readlink_out = Command::new("sudo")
+                .args(["-n", "-u", name.as_str(), "/usr/bin/readlink", &path_str])
+                .output()
+                .map_err(ProbeError::Spawn)?;
+            match readlink_out.status.code() {
+                Some(0) => {
+                    let target = String::from_utf8_lossy(&readlink_out.stdout)
+                        .trim_end_matches('\n')
+                        .to_string();
+                    return Ok(PathKind::Symlink(std::path::PathBuf::from(target)));
+                }
+                Some(code) => {
+                    return Err(ProbeError::NonZero {
+                        code,
+                        stderr: String::from_utf8_lossy(&readlink_out.stderr).into_owned(),
+                    });
+                }
+                None => {
+                    return Err(ProbeError::NonZero {
+                        code: -1,
+                        stderr: String::from_utf8_lossy(&readlink_out.stderr).into_owned(),
+                    });
                 }
             }
-            if code != 1 {
-                // Codes other than 0/1 are sudo-auth failure.
-                return Err(ProbeError::NonZero {
-                    code,
-                    stderr: String::from_utf8_lossy(&symlink_out.stderr).into_owned(),
-                });
-            }
-        } else {
-            return Err(ProbeError::NonZero {
-                code: -1,
-                stderr: String::from_utf8_lossy(&symlink_out.stderr).into_owned(),
-            });
         }
         // `test -d` first so an existing directory comes back as Dir;
         // `test -e` then catches any other non-symlink entry (file,
         // fifo, socket, etc.) as Other.
-        let dir_out = Command::new("sudo")
-            .args(["-n", "-u", name.as_str(), "/bin/test", "-d", &path_str])
-            .output()
-            .map_err(ProbeError::Spawn)?;
-        if let Some(0) = dir_out.status.code() {
+        if file_test("-d")? {
             return Ok(PathKind::Dir);
         }
-        let exists_out = Command::new("sudo")
-            .args(["-n", "-u", name.as_str(), "/bin/test", "-e", &path_str])
-            .output()
-            .map_err(ProbeError::Spawn)?;
-        match exists_out.status.code() {
-            Some(0) => Ok(PathKind::Other),
-            Some(1) => Ok(PathKind::Absent),
-            Some(code) => Err(ProbeError::NonZero {
-                code,
-                stderr: String::from_utf8_lossy(&exists_out.stderr).into_owned(),
-            }),
-            None => Err(ProbeError::NonZero {
-                code: -1,
-                stderr: String::from_utf8_lossy(&exists_out.stderr).into_owned(),
-            }),
-        }
+        Ok(if file_test("-e")? {
+            PathKind::Other
+        } else {
+            PathKind::Absent
+        })
     }
 
     fn tenant_dir_present(
@@ -611,31 +557,12 @@ impl HostMachine for MacosHostMachine {
         path: &std::path::Path,
     ) -> Result<bool, ProbeError> {
         // `test -d` follows symlinks, so a dangling link answers false —
-        // which is what `cd` will do too. /bin/test absolute per the
-        // Darwin scatter. Exit 1 is `test` saying no; ONLY a recognized
-        // sudo-auth stderr signature is machinery failure (sudo also
-        // exits 1 when it can't authenticate, so the code alone can't
-        // tell them apart — same posture as `probe_access_as_tenant`).
-        let path_str = path.to_string_lossy().into_owned();
-        let output = Command::new("sudo")
-            .args(["-n", "-u", name.as_str(), "/bin/test", "-d", &path_str])
-            .output()
-            .map_err(ProbeError::Spawn)?;
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if stderr.contains("sudo: a password is required")
-            || stderr.contains("sudo: a terminal is required")
-        {
-            return Err(ProbeError::NonZero {
-                code: output.status.code().unwrap_or(-1),
-                stderr,
-            });
-        }
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            Some(code) => Err(ProbeError::NonZero { code, stderr }),
-            None => Err(ProbeError::NonZero { code: -1, stderr }),
-        }
+        // which is what `cd` will do too.
+        run_file_test_as_tenant(&file_test_as_tenant_argv(
+            name.as_str(),
+            "-d",
+            &path.to_string_lossy(),
+        ))
     }
 
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
@@ -921,11 +848,10 @@ impl HostMachine for MacosHostMachine {
     fn sudo_session_cached(&self) -> bool {
         // `sudo -n -v` validates the cached timestamp without running
         // a command: exit 0 ⇒ a fresh timestamp exists, non-zero ⇒
-        // none (or expired). The `-n` is load-bearing — this is the
-        // one sudo call that MUST stay non-interactive, since its
-        // whole job is to answer "would the next sudo prompt?" without
-        // itself prompting. A spawn failure reads as "not cached" so
-        // the gate fails closed.
+        // none (or expired). The `-n` is load-bearing — its whole job
+        // is to answer "would the next sudo prompt?" without itself
+        // prompting. A spawn failure reads as "not cached" so the gate
+        // fails closed.
         let argv = sudo_session_cached_argv();
         Command::new(&argv[0])
             .args(&argv[1..])
@@ -934,27 +860,25 @@ impl HostMachine for MacosHostMachine {
             .unwrap_or(false)
     }
 
-    fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {
-        // Exit code map: 0 → present, 1 → absent, other → sudo-auth
-        // failure (passwordless sudo not configured, terminal
-        // required, etc.) surfaces as ProbeError::NonZero.
-        let argv = tenant_keychain_present_argv(name.as_str());
-        let output = Command::new(&argv[0])
+    fn authenticate_sudo(&self) -> Result<(), ProbeError> {
+        // Inherited stdio: sudo prompts on the tty and streams its retry
+        // lines live, so there is no stderr to capture.
+        let argv = authenticate_sudo_argv();
+        let status = Command::new(&argv[0])
             .args(&argv[1..])
-            .output()
+            .status()
             .map_err(ProbeError::Spawn)?;
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            Some(code) => Err(ProbeError::NonZero {
-                code,
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            }),
-            None => Err(ProbeError::NonZero {
-                code: -1,
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            }),
+        if status.success() {
+            return Ok(());
         }
+        Err(ProbeError::NonZero {
+            code: status.code().unwrap_or(-1),
+            stderr: String::new(),
+        })
+    }
+
+    fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError> {
+        run_file_test_as_tenant(&tenant_keychain_present_argv(name.as_str()))
     }
 
     fn find_stashed_password(
@@ -1077,27 +1001,57 @@ pub fn kernel_pf_rules_argv(name: &str) -> Vec<String> {
     ]
 }
 
-/// `sudo -n -u <name> /bin/test -e <keychain path>` for
-/// `tenant_keychain_present` — NOT `std::fs::metadata` from the operator
-/// process: `/Users/<tenant>/Library/` is mode 0700 owned by the tenant,
-/// so the operator gets EACCES on every healthy tenant. Running `test -e`
-/// AS THE TENANT resolves the path inside the tenant's own permission
-/// cone — same shape `tenant_path_kind` uses.
+/// Verdict of a `sudo -n -u <tenant> /bin/test <flag> <path>` probe.
+/// `/bin/test` never writes stderr for a plain yes/no, and `sudo -n`
+/// reports "a password is required" / "a terminal is required" with
+/// exit 1 — the same code as "no". Exit 1 is only a verdict when
+/// stderr is empty.
+pub fn sudo_test_verdict(output: &Output) -> Result<bool, ProbeError> {
+    match (output.status.code(), output.stderr.is_empty()) {
+        (Some(0), _) => Ok(true),
+        (Some(1), true) => Ok(false),
+        (code, _) => Err(ProbeError::NonZero {
+            code: code.unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }),
+    }
+}
+
 pub fn tenant_keychain_present_argv(name: &str) -> Vec<String> {
+    file_test_as_tenant_argv(name, "-e", &tenant_keychain_path(name))
+}
+
+/// `/bin/test` AS THE TENANT — NOT `std::fs::metadata` from the operator
+/// process: tenant-side paths like `/Users/<tenant>/Library/` are mode
+/// 0700, so the operator gets EACCES on every healthy tenant.
+/// Absolute `/bin/test`: `/usr/bin/test` is absent on Darwin 25.x.
+fn file_test_as_tenant_argv(name: &str, flag: &str, path: &str) -> Vec<String> {
     vec![
         "sudo".into(),
         "-n".into(),
         "-u".into(),
         name.into(),
         "/bin/test".into(),
-        "-e".into(),
-        tenant_keychain_path(name),
+        flag.into(),
+        path.into(),
     ]
 }
 
-/// `sudo -n -v` cache CHECK. KEEPS `-n` — its whole job is to answer
-/// "would the next sudo prompt?" WITHOUT itself prompting. The one sudo
-/// call that must stay non-interactive after the point-of-use change.
+fn run_file_test_as_tenant(argv: &[String]) -> Result<bool, ProbeError> {
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+        .map_err(ProbeError::Spawn)?;
+    sudo_test_verdict(&output)
+}
+
+pub fn authenticate_sudo_argv() -> Vec<String> {
+    vec!["sudo".into(), "-v".into()]
+}
+
+/// `sudo -n -v` cache CHECK. Keeps `-n` — its whole job is to answer
+/// "would the next sudo prompt?" WITHOUT itself prompting. Every other
+/// `-n` call runs as the tenant (`sudo -n -u <tenant>`).
 pub fn sudo_session_cached_argv() -> Vec<String> {
     vec!["sudo".into(), "-n".into(), "-v".into()]
 }

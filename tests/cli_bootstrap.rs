@@ -358,6 +358,21 @@ fn bootstrap_widen_execute_failure_exits_74_no_exec() {
         "no command runs when the widen fails: {:?}",
         exec.exec_calls()
     );
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            FirewallOp::InstallAnchor {
+                name: "alice".into(),
+                body: install_tier_body("alice", &["r.example"], &["i.example"]),
+            },
+            FirewallOp::InstallAnchor {
+                name: "alice".into(),
+                body: runtime_tier_body("alice", &["r.example"]),
+            },
+            FirewallOp::Reload,
+        ],
+        "the failed widen is followed by the best-effort narrow"
+    );
     assert!(
         stderr.contains("firewall"),
         "widen failure frame should mention firewall: {stderr:?}"
@@ -398,10 +413,80 @@ fn bootstrap_unlocks_keychain_before_commands() {
 }
 
 #[test]
+fn bootstrap_on_cold_sudo_refuses_occupied_tenant_path_before_widening() {
+    let profile = profile_with_bootstrap(&[], &[], &["cmd"]);
+    let profile = format!(
+        "{profile}\n[[shares]]\nhost_path = \"/tmp\"\ntenant_path = \"$HOME/src\"\nmode = \"rw\"\n"
+    );
+    let exec = StubHostMachine::new()
+        .with_existing_profile("alice", &profile)
+        .with_default_stash("alice")
+        .with_sudo_session_cached(false)
+        .with_tenant_path_kind(
+            "alice",
+            &std::path::PathBuf::from("/Users/alice/src"),
+            tenant::domain::PathKind::Other,
+        );
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("alice"), &exec, &["bootstrap", "alice"]);
+    assert_eq!(code, 74, "stderr={stderr:?}");
+    assert!(
+        stderr.contains("cannot bootstrap 'alice'") && stderr.contains("/Users/alice/src"),
+        "refuse_bootstrap_share frame expected: {stderr:?}"
+    );
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "refusal must precede the install-tier widen: {:?}",
+        exec.firewall_ops()
+    );
+    assert!(exec.exec_calls().is_empty());
+    assert_eq!(
+        exec.tenant_path_kind_calls().len(),
+        1,
+        "refused at plan build: nothing executed, so no narrow-back re-probe"
+    );
+}
+
+#[test]
+fn bootstrap_on_cold_sudo_authentication_failure_exits_74_without_mutation() {
+    let profile = profile_with_bootstrap(&[], &[], &["cmd"]);
+    let profile = format!(
+        "{profile}\n[[shares]]\nhost_path = \"/tmp\"\ntenant_path = \"$HOME/src\"\nmode = \"rw\"\n"
+    );
+    let exec = StubHostMachine::new()
+        .with_existing_profile("alice", &profile)
+        .with_default_stash("alice")
+        .with_sudo_session_cached(false)
+        .fail_next_authenticate_sudo(tenant::domain::ProbeError::NonZero {
+            code: 1,
+            stderr: String::new(),
+        });
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("alice"), &exec, &["bootstrap", "alice"]);
+    assert_eq!(code, 74);
+    assert_eq!(
+        stderr,
+        "tenant: failed to probe host state for 'alice': probe exited with code 1\n"
+    );
+    assert_eq!(
+        exec.authenticate_sudo_calls(),
+        1,
+        "authenticates exactly once"
+    );
+    assert!(exec.tenant_path_kind_calls().is_empty() && exec.exec_calls().is_empty());
+    assert!(
+        exec.firewall_ops().is_empty() && exec.account_ops().is_empty(),
+        "plan build failed, so nothing mutated: fw={:?} account={:?}",
+        exec.firewall_ops(),
+        exec.account_ops()
+    );
+}
+
+#[test]
 fn bootstrap_unlock_failure_exits_74() {
-    // Decision 4: keychain errors OTHER than a missing stash (the
-    // find/unlock substrate itself breaking) map to EX_IOERR, distinct
-    // from StashAbsent's EX_USAGE. Here the stash is present (find
+    // Keychain errors OTHER than a missing stash (the find/unlock
+    // substrate itself breaking) map to EX_IOERR, distinct from
+    // StashAbsent's EX_USAGE. Here the stash is present (find
     // succeeds) but the in-tenant `security unlock-keychain` fails.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
     let exec = StubHostMachine::new()
@@ -595,11 +680,11 @@ fn bootstrap_no_arg_continues_past_a_failing_tenant() {
 
 #[test]
 fn bootstrap_no_arg_continues_past_a_stash_absent_tenant() {
-    // The handover's explicit legacy-tenant case: 'dev' declares commands
-    // but has no operator-side stash, so it refuses mid-walk (StashAbsent
-    // inside bootstrap(), not a plan-build failure); 'staging' still runs.
-    // Distinguishes walk-continuation on a bootstrap()-level failure from
-    // the plan-build failure the sibling test covers.
+    // Legacy-tenant case: 'dev' declares commands but has no operator-side
+    // stash, so it refuses mid-walk (StashAbsent inside bootstrap(), not a
+    // plan-build failure); 'staging' still runs. Distinguishes
+    // walk-continuation on a bootstrap()-level failure from the plan-build
+    // failure the sibling test covers.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile_with_bootstrap(&[], &[], &["echo dev"]))
         .with_existing_profile(

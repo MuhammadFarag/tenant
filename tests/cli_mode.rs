@@ -314,7 +314,7 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
 
 #[test]
 fn mode_light_does_not_reassert_primary_group() {
-    // Primary-group reassertion (OS-update resilience, finding #26) is a
+    // Primary-group reassertion (OS-update resilience) is a
     // Full/reload-only convergence op, NOT part of Light reapply: it sits
     // with the cowork/recursive-grant passes Light skips, and convergence
     // is reload's "apply everything" role. mode neither reads the gid nor
@@ -1171,6 +1171,102 @@ fn mode_refuses_when_tenant_path_is_real_directory() {
         "AclOp should NOT have fired: {:?}",
         exec.acl_ops()
     );
+}
+
+#[test]
+fn mode_on_cold_sudo_still_refuses_occupied_tenant_path() {
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_sudo_session_cached(false)
+        .with_tenant_path_kind("dev", &PathBuf::from("/Users/dev/src"), PathKind::Other);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 74, "stderr={stderr:?}");
+    assert!(
+        stderr.contains("cannot apply mode for 'dev'") && stderr.contains("/Users/dev/src"),
+        "refuse_mode_share frame naming the occupied path expected: {stderr:?}"
+    );
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "refusal must precede every mutation: {:?}",
+        exec.firewall_ops()
+    );
+    assert!(
+        !exec
+            .account_ops()
+            .iter()
+            .any(|op| matches!(op, AccountOp::EnsureSymlinkAsUser { .. })),
+        "the occupied path must never be linked over: {:?}",
+        exec.account_ops()
+    );
+}
+
+#[test]
+fn mode_with_cached_sudo_does_not_authenticate() {
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(exec.authenticate_sudo_calls(), 0);
+}
+
+#[test]
+fn mode_without_shares_does_not_authenticate_on_cold_sudo() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_sudo_session_cached(false);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(exec.authenticate_sudo_calls(), 0);
+}
+
+#[test]
+fn mode_declined_on_cold_sudo_authenticated_once_and_mutated_nothing() {
+    // Accepted cost of authenticating at plan build: an operator who
+    // declines at Proceed? has already answered the sudo prompt. Every
+    // path through this verb needs sudo to execute, so the prompt moved
+    // earlier rather than appearing where there was none.
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_sudo_session_cached(false);
+    let (code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime"],
+        b"n\n",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("Aborted by operator. No changes made."),
+        "{stdout:?}"
+    );
+    assert_eq!(exec.authenticate_sudo_calls(), 1);
+    assert!(exec.firewall_ops().is_empty() && exec.account_ops().is_empty());
+}
+
+#[test]
+fn mode_on_cold_sudo_authentication_failure_exits_74_without_mutation() {
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_sudo_session_cached(false)
+        .fail_next_authenticate_sudo(tenant::domain::ProbeError::NonZero {
+            code: 1,
+            stderr: String::new(),
+        });
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 74, "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to probe host state for 'dev': probe exited with code 1\n"
+    );
+    assert!(exec.tenant_path_kind_calls().is_empty());
+    assert!(exec.firewall_ops().is_empty() && exec.account_ops().is_empty());
 }
 
 #[test]

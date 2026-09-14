@@ -139,14 +139,14 @@ impl<'a> Tenants<'a> {
     /// `/Users/<name>/projects/foo` for the fix to be obvious. No `-d` ⇒
     /// no resolution, no probe.
     ///
-    /// The probe is gated on a live sudo session, like every other
-    /// `sudo -n` probe in the codebase: sudo exits 1 when it can't
-    /// authenticate, which `/bin/test` also uses for "no", so a cold
-    /// timestamp would make every existing directory look absent and
-    /// refuse the operator's first command in a fresh terminal. Uncached
-    /// ⇒ skip the pre-flight and let the entry reapply prompt as usual;
-    /// an unusable dir then surfaces as the wrapper's own `cd` failure.
-    /// Never refuse on an answer we can't trust.
+    /// The probe is gated on a live sudo session: `sudo -n` can't
+    /// authenticate on a cold timestamp, so the probe would fail and
+    /// refuse the operator's first command in every fresh terminal.
+    /// Uncached ⇒ skip the pre-flight and let the entry reapply prompt as
+    /// usual; an unusable dir then surfaces as the wrapper's own `cd`
+    /// failure. A share-bearing tenant has already authenticated at plan
+    /// build (`build_share_ops`) by the time this runs, so the gate only
+    /// stays cold for share-less profiles.
     fn prepare_shell_directory(
         &self,
         name: &TenantUserName,
@@ -305,7 +305,7 @@ impl<'a> Tenants<'a> {
         self.machine
             .unlock_tenant_keychain(name, &password)
             .map_err(ShellError::UnlockFailed)?;
-        reporter.shell_keychain_unlocked(name);
+        reporter.keychain_unlocked(name);
         Ok(())
     }
 }

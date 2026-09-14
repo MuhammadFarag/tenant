@@ -223,6 +223,10 @@ impl HostMachine for DryRunHostMachine {
         true
     }
 
+    fn authenticate_sudo(&self) -> Result<(), ProbeError> {
+        Ok(())
+    }
+
     fn describe_keychain(&self, op: &KeychainOp) -> String {
         MacosHostMachine.describe_keychain(op)
     }

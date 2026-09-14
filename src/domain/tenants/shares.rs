@@ -66,6 +66,15 @@ impl<'a> Tenants<'a> {
         }
         let group = tenant_share_group_name(name.as_str());
         let home_dir = PathBuf::from(format!("/Users/{name}"));
+        // `sudo -n` exits 1 on a cold timestamp — the same code `/bin/test`
+        // uses for "no" — so the occupancy probe below can't answer until
+        // the operator has authenticated. Prompt here, pre-plan, so the
+        // refusal still lands ahead of Proceed?; the same warm cache then
+        // lets shell's pre-exec doctor summary and `-d` pre-flight run
+        // instead of skipping.
+        if !self.machine.sudo_session_cached() {
+            self.machine.authenticate_sudo().map_err(ModeError::Probe)?;
+        }
         let mut out = Vec::with_capacity(parsed_profile.shares.len());
         for share in &parsed_profile.shares {
             if !share.host_path.exists() {

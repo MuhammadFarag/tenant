@@ -316,10 +316,10 @@ pub enum KeychainOp {
 }
 
 /// Host-config sub-domain: opt-in host-prep mutations driven by the
-/// `tenant setup` verb. Sibling-by-substrate to the parked sudoers
-/// brief — named for the substrate it touches (`/etc/pam.d`), not the
-/// verb. Reuses `HostFileError` (the shared host-config substrate
-/// error). Today one variant; sudoers / pf-prereqs are future siblings.
+/// `tenant setup` verb. Named for the substrate it touches
+/// (`/etc/pam.d`), not the verb. Reuses `HostFileError` (the shared
+/// host-config substrate error). Today one variant; sudoers /
+/// pf-prereqs are future siblings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PamOp {
     /// Ensure `auth sufficient pam_tid.so` is present in

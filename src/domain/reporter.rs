@@ -686,12 +686,11 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// `✓` line confirming the tenant's keychain was unlocked. Emitted
-    /// by the pre-spawn unlock pass of `shell` (both forms) and
-    /// `bootstrap` so the operator sees the unlock landed — a silent
-    /// regression where the unlock pass skipped would otherwise be
-    /// invisible. Real-mode only.
-    pub fn shell_keychain_unlocked(&mut self, name: &TenantUserName) {
+    /// `✓` line confirming the tenant's keychain was unlocked, so a silent
+    /// regression where the unlock pass skipped stays visible. Verb-neutral
+    /// name: `shell` (both forms) and `bootstrap` emit it byte-identically.
+    /// Real-mode only.
+    pub fn keychain_unlocked(&mut self, name: &TenantUserName) {
         if self.dry_run {
             return;
         }
@@ -1028,14 +1027,14 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stderr frame for `ShellError::UnlockFailed` and
+    /// Verb-neutral stderr frame for `ShellError::UnlockFailed` and
     /// `BootstrapError::UnlockFailed`: substrate failure on either the
     /// operator-stash retrieval or the in-tenant `security unlock-keychain`
     /// call. No recovery hint — substrate failure is investigative
     /// ground, not an operator-action surface (parallel to
     /// `shell_failed` / `shell_narrow_firewall_failed`).
     /// `KeychainError::Display` carries the substrate exit code + stderr.
-    pub fn shell_unlock_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
+    pub fn keychain_unlock_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
             "tenant: failed to unlock keychain for '{name}': {err}"
@@ -1411,9 +1410,9 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout, "{painted}");
     }
 
-    /// Calibrated shell-entry inbound posture line (cycle 24). Locked
-    /// (no declared ports, anchor not permissive) is quiet — `posture`
-    /// is `None`, nothing emits. `InboundExposure` (restricted with
+    /// Calibrated shell-entry inbound posture line. Locked (no
+    /// declared ports, anchor not permissive) is quiet — `posture` is
+    /// `None`, nothing emits. `InboundExposure` (restricted with
     /// ports) gets a dim info-flavored line naming the ports; the loud
     /// `InboundPermissive` gets a yellow ⚠ warning plus a narrow hint.
     /// Distinct from `doctor_summary_pending`'s warning aggregate: the
@@ -1668,12 +1667,15 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    // Covers both reapply probes that surface as `ModeError::Probe`: the
+    // Covers every reapply probe that surfaces as `ModeError::Probe`: the
     // share-symlink `tenant_path_kind` filesystem probe (mode/inbound/
-    // reload) and reload's `read_share_group_gid` directory read. Phrased
+    // reload), the `sudo -v` authentication a cold-sudo plan build needs
+    // before that probe, and reload's `read_share_group_gid` directory
+    // read. Phrased
     // as "host state" rather than "filesystem" so it's honest for the
-    // directory-services read too; the `ProbeError` detail names the
-    // specific failing command.
+    // directory-services read too; the `ProbeError` detail carries the
+    // failing command's stderr (empty for `sudo -v`, whose retry lines
+    // already streamed to the terminal).
     pub fn mode_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1714,7 +1716,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
     pub fn shell_narrow_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
         let _ = writeln!(
             self.terminal.stderr,
-            "tenant: failed to probe tenant filesystem state for '{name}' before shell entry: {err}"
+            "tenant: failed to probe host state for '{name}' before shell entry: {err}"
         );
     }
 

@@ -72,15 +72,13 @@ pub struct StubHostMachine {
     pf_conf_state: RefCell<String>,
 
     /// Preloaded share-group gids for `read_share_group_gid`, populated by
-    /// the `with_share_group_gid` builder (added in Cycle 3, when the
-    /// resolved-gid test first needs a non-default value). Unmatched groups
-    /// fall back to the canonical tenant-floor `GroupId(600)` so Full-
-    /// reapply tests that don't assert the gid value stay stable.
+    /// the `with_share_group_gid` builder. Unmatched groups fall back to
+    /// the canonical tenant-floor `GroupId(600)` so Full-reapply tests
+    /// that don't assert the gid value stay stable.
     share_group_gids: RefCell<HashMap<String, GroupId>>,
 
     /// One-shot failure injection for `read_share_group_gid`, populated by
-    /// the `fail_next_share_group_gid` builder (added in Cycle 3 for the
-    /// gid-read-failure path).
+    /// the `fail_next_share_group_gid` builder.
     share_group_gid_failure: RefCell<Option<ProbeError>>,
 
     /// Override for what `ProfileOp::Create` writes. Production always
@@ -209,7 +207,13 @@ pub struct StubHostMachine {
     /// `sudo_session_cached`. Defaults to `true` (set in `new`) so the
     /// pre-exec doctor pass runs its full probe set in existing tests;
     /// `with_sudo_session_cached(false)` exercises the quiet-skip gate.
+    /// While `false`, `tenant_path_kind` fails like a real `sudo -n`;
+    /// `authenticate_sudo` or the first firewall op (bare sudo) caches
+    /// the timestamp.
     sudo_session_cached: Cell<bool>,
+
+    authenticate_sudo_calls: Cell<usize>,
+    authenticate_sudo_failure: RefCell<Option<ProbeError>>,
 
     /// Records every `PamOp` passed to `execute_pam`, in call order.
     /// Setup tests assert the Touch-ID op fired (or didn't) via `pam_ops()`.
@@ -555,6 +559,15 @@ impl StubHostMachine {
         self.tenant_dir_present_calls.borrow().clone()
     }
 
+    pub fn fail_next_authenticate_sudo(self, err: ProbeError) -> Self {
+        *self.authenticate_sudo_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn authenticate_sudo_calls(&self) -> usize {
+        self.authenticate_sudo_calls.get()
+    }
+
     pub fn fail_next_tenant_path_kind(self, err: ProbeError) -> Self {
         *self.tenant_path_kind_failure.borrow_mut() = Some(err);
         self
@@ -841,10 +854,10 @@ impl HostMachine for StubHostMachine {
     }
 
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
-        // One-shot failure injection first (Cycle 3 failure-path test),
-        // then a preloaded gid (`with_share_group_gid`), else the canonical
-        // tenant-floor default so existing Full-reapply tests that don't
-        // care about the gid value see a stable `EnsurePrimaryGroup`.
+        // One-shot failure injection first, then a preloaded gid
+        // (`with_share_group_gid`), else the canonical tenant-floor default
+        // so existing Full-reapply tests that don't care about the gid
+        // value see a stable `EnsurePrimaryGroup`.
         if let Some(err) = self.share_group_gid_failure.borrow_mut().take() {
             return Err(err);
         }
@@ -865,6 +878,7 @@ impl HostMachine for StubHostMachine {
     }
 
     fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError> {
+        self.sudo_session_cached.set(true);
         self.firewall_ops.borrow_mut().push(op.clone());
         let mut overrides = self.firewall_overrides.borrow_mut();
         if let Some(idx) = overrides.iter().position(|(target, _)| target == op) {
@@ -996,6 +1010,12 @@ impl HostMachine for StubHostMachine {
         self.tenant_path_kind_calls
             .borrow_mut()
             .push((name.0.clone(), path.to_path_buf()));
+        if !self.sudo_session_cached.get() {
+            return Err(ProbeError::NonZero {
+                code: 1,
+                stderr: "sudo: a password is required\n".to_string(),
+            });
+        }
         if let Some(err) = self.tenant_path_kind_failure.borrow_mut().take() {
             return Err(err);
         }
@@ -1125,6 +1145,16 @@ impl HostMachine for StubHostMachine {
 
     fn sudo_session_cached(&self) -> bool {
         self.sudo_session_cached.get()
+    }
+
+    fn authenticate_sudo(&self) -> Result<(), ProbeError> {
+        self.authenticate_sudo_calls
+            .set(self.authenticate_sudo_calls.get() + 1);
+        if let Some(err) = self.authenticate_sudo_failure.borrow_mut().take() {
+            return Err(err);
+        }
+        self.sudo_session_cached.set(true);
+        Ok(())
     }
 
     fn describe_keychain(&self, op: &KeychainOp) -> String {

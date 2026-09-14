@@ -1076,7 +1076,7 @@ fn doctor_anchor_body_in_sync_with_declared_inbound_ports_no_finding() {
     );
 }
 
-// ── inbound-exposure finding (cycle 24) ──────────────────────────────
+// ── inbound-exposure finding ─────────────────────────────────────────
 
 #[test]
 fn doctor_inbound_declared_ports_emits_info_finding() {

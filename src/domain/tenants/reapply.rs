@@ -58,16 +58,16 @@ pub(crate) struct ReapplyPlan {
     pub(crate) reload: FirewallOp,
     pub(crate) add_host: AccountOp,
     /// Tenant-side membership catch-up: re-assert the tenant user's
-    /// primary group to the share group (OS-update resilience, #26).
-    /// `Some` under Full, `None` under Light — same split as
-    /// `ensure_cowork_dir`: re-asserting the primary group is a host-state
-    /// CONVERGENCE repair, and convergence is reload's "apply everything"
-    /// role. mode/shell stay Light to keep the quick paths minimal (one
-    /// fewer dscl read per entry) with `tenant reload` as the documented
-    /// drift remedy. (Note: shell's `sudo -iu` login runs AFTER the
-    /// reapply, so reasserting here WOULD reach the about-to-start session
-    /// — that self-heal-on-entry is the separate shell-entry-safety
-    /// concern, finding #29, not this op's scope.)
+    /// primary group to the share group (OS-update resilience). `Some`
+    /// under Full, `None` under Light — same split as `ensure_cowork_dir`:
+    /// re-asserting the primary group is a host-state CONVERGENCE repair,
+    /// and convergence is reload's "apply everything" role. mode/shell
+    /// stay Light to keep the quick paths minimal (one fewer dscl read per
+    /// entry) with `tenant reload` as the documented drift remedy. (Note:
+    /// shell's `sudo -iu` login runs AFTER the reapply, so reasserting
+    /// here WOULD reach the about-to-start session — that
+    /// self-heal-on-entry is the separate shell-entry-safety concern, not
+    /// this op's scope.)
     pub(crate) ensure_primary_group: Option<AccountOp>,
     pub(crate) ensure_cowork_dir: Option<AccountOp>,
     pub(crate) share_ops: Vec<ShareOps>,
