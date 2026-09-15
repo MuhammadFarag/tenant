@@ -23,11 +23,9 @@ Verbs (full semantics live in `src/cli.rs` doc comments / `tenant --help`):
 
 This file is the always-loaded core: file map, cross-cutting doctrine, dev
 loop. A shipped feature adds at most a few lines here. Everything else
-lives closer to its use — WHY-traps as comments at the code site they
-govern, procedures in `.claude/skills/` (`release`, `add-verb`), per-cycle
-narrative in `.features/roadmap-shipped.md`, empirical records in
-`.features/` (e.g. `loopback-cross-tenant-isolation.md`), chronology in
-`git log`.
+lives in the code itself — names, types and tests — not in comments (see
+Comments). Procedures live in `.claude/skills/` (`release`, `add-verb`),
+chronology in `git log`. Reference only tracked files.
 
 ## File map
 
@@ -60,8 +58,8 @@ tests/doctor.rs, *_parse.rs — combinatorial pure-fn coverage
 
 ## Doctrine
 
-Cross-cutting rules a cold reader could plausibly violate. Site-specific
-traps are doc-commented where they apply — read the file you're editing.
+Cross-cutting rules a cold reader could plausibly violate. They live here
+only — code comments don't restate or cite them.
 
 ### Shape
 
@@ -109,8 +107,7 @@ traps are doc-commented where they apply — read the file you're editing.
   resolve independently; every reapply renders both, the uncontrolled axis
   to steady state. Widenings never compose across commands
   (implicit-current-mode doctrine). `restricted` is surface-reduction, NOT
-  host-vs-peer isolation — pf can't see the initiator on shared loopback
-  (empirical record: `.features/loopback-cross-tenant-isolation.md`).
+  host-vs-peer isolation — pf can't see the initiator on shared loopback.
 - **`ReapplyScope::{Light, Full}` splits reapply by cost.** Light
   (mode/shell) skips the recursive ACL + cowork passes — inheritable ACE
   bits make that sound in steady state; Full (reload,
@@ -137,16 +134,36 @@ traps are doc-commented where they apply — read the file you're editing.
   dispatch. Pure string formatters take `&str`; the type-safety win is at
   the boundaries and ADT variants.
 - **`-v`/`--dry-run`/`-y` are clap-global**; per-verb flags stay scoped.
-- **Comments carry WHY, not WHAT**; tracked source carries no internal
-  planning-process references.
+
+### Comments
+
+- **Default is no comment.** Knowledge lives in the code: a name that
+  says the difference, a type that forbids the bad state, a test that pins
+  the behavior. Comment only a trap the code can't express — external
+  behavior (sudo, dscl, pfctl, PAM, `security`), a security reason,
+  load-bearing ordering — in 1–3 lines at that site. In a test, that
+  comment is one line naming the trap a non-obvious pin guards.
+- **Doctrine here, mechanism there.** A bullet in this file may point
+  into the code (`see destroy.rs`); the site comment then carries the
+  external fact (pfctl doesn't GC anchors), never the rule.
+- **Never:** restating the code or a test's name/assertions; a test
+  re-explaining production mechanics; restating doctrine from this file;
+  history ("legacy", "previously", "today's shape", cycle refs);
+  bookkeeping ("pub for the pin in …", "single source so X can't drift");
+  multi-line section banners; `//!` headers restating the file map.
+- **Prose that explains a name is a smell.** Rename or restructure; if
+  that's out of scope, leave one line `// TODO(smell): …` — one marker
+  per smell, at the site you'd edit. A defect is not a smell: fix it or
+  file an issue. Harvest with `rg 'TODO\(smell\)'`.
+- **Exempt:** `src/cli.rs` doc comments — they are `--help`.
 
 ## Test discipline
 
 E2E-first. Bulk in `tests/cli_<verb>.rs` through `tenant::run` with
 `StubUserDirectory` + `StubHostMachine`; shared helpers in
 `tests/common/mod.rs`. Inline `#[cfg(test)] mod tests` is out of style;
-standalone unit files need justification (substrate-boundary pins;
-combinatorial pure-fn coverage). `run_with` wires `NeverHostMachine`
+standalone unit files are only for substrate-boundary pins and
+combinatorial pure-fn coverage. `run_with` wires `NeverHostMachine`
 (panics on any substrate call); `run_with_exec` lets the test own the
 machine. Behavioral assertions = op identity; display assertions =
 byte-exact (cosmetic tweaks need test edits).
@@ -158,7 +175,7 @@ just check   # fmt + clippy -D warnings + test (pre-merge gate)
 just fmt     # in-place format
 just test    # cargo test
 just run create somename --dry-run -v   # invoke the binary; args after `run` forward
-just build   # release binary at target/release/tenant
+just build   # release binary
 just install # cargo install --path . (puts `tenant` on PATH via ~/.cargo/bin)
 ```
 
