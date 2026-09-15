@@ -1,7 +1,4 @@
 //! Per-tenant profile config — TOML at `~/.config/tenant/profiles/<name>.toml`.
-//! Carries the PF allowlist (runtime / install tiers), any
-//! `[[shares]]` filesystem-share declarations, and the `[inbound]`
-//! TCP-loopback port list (the `restricted` inbound posture).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -10,25 +7,16 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-/// Display path with literal `~` for user-facing plan/echo lines —
-/// host-independent rendering.
 pub fn display_path_for(name: &str) -> String {
     format!("~/.config/tenant/profiles/{name}.toml")
 }
 
-/// Display path for an `include` fragment, literal `~` form. Fragments
-/// live under the `includes/` subdirectory so the tenant/fragment
-/// distinction is physical (a tenant legally named `base` writes
-/// `profiles/base.toml`, which can't collide with `includes/`).
+/// Fragments live under `includes/` so a tenant legally named `base`
+/// (`profiles/base.toml`) can't collide with a fragment.
 pub fn display_fragment_path_for(fragment: &str) -> String {
     format!("~/.config/tenant/profiles/includes/{fragment}.toml")
 }
 
-/// Default profile content scaffolded at create-time. Empty hosts arrays
-/// mean "no egress allowlisted yet"; the operator edits before use.
-/// Commented `# ...` examples scaffold the common shape (allowlist
-/// entries + a `[[shares]]` block) without committing the operator to
-/// any specific entry — they're hints, not defaults.
 pub fn default_profile_toml() -> String {
     include_str!("resources/default_profile.toml").to_string()
 }
@@ -52,29 +40,14 @@ impl From<io::Error> for ProfileError {
     }
 }
 
-/// Parsed per-tenant profile.
-///
-/// `schema_version` is checked against the supported set (currently just
-/// `1`) before structural deserialization so a future schema bump
-/// produces an operator-readable refusal rather than a low-level serde
-/// error frame. Host order is preserved across parse so the anchor
-/// file's host order matches the operator's grouping intent.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct Profile {
     pub schema_version: u32,
     pub allowlist: Allowlist,
-    /// Absent `[[shares]]` deserializes to empty via `#[serde(default)]`,
-    /// preserving backward-compat with pre-shares profiles.
     #[serde(default)]
     pub shares: Vec<Share>,
-    /// Absent `[inbound]` deserializes to empty ports via
-    /// `#[serde(default)]`, preserving backward-compat with pre-inbound
-    /// profiles. Empty ports is the locked posture.
     #[serde(default)]
     pub inbound: Inbound,
-    /// Absent `[bootstrap]` deserializes to empty commands via
-    /// `#[serde(default)]`, preserving backward-compat with pre-bootstrap
-    /// profiles. Empty commands ⇒ `tenant bootstrap` is a quiet no-op.
     #[serde(default)]
     pub bootstrap: Bootstrap,
 }
@@ -90,12 +63,7 @@ pub struct Tier {
     pub hosts: Vec<HostEntry>,
 }
 
-/// A single allowlist host with the TCP ports it may be reached on.
-/// Serde-normalized via `RawHostEntry` so downstream (the renderer's
-/// `EgressHost` resolution) never sees the untagged enum: a bare string
-/// entry fills `ports = [443]` (backward-compat — every pre-ports profile
-/// is bare-only), an inline table declares its own ports. TCP only (no
-/// proto field), matching `[inbound]` and the egress catchall.
+/// TCP only. A bare string entry normalizes to `ports = [443]`.
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
 #[serde(from = "RawHostEntry")]
 pub struct HostEntry {
@@ -103,9 +71,6 @@ pub struct HostEntry {
     pub ports: Vec<u16>,
 }
 
-/// Wire form of a `hosts` array element: a bare `"host"` string or an
-/// inline `{ host = …, ports = [...] }` table. Normalized into `HostEntry`
-/// by the `From` impl so the bare-vs-table distinction stops at parse.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RawHostEntry {
@@ -125,42 +90,28 @@ impl From<RawHostEntry> for HostEntry {
     }
 }
 
-/// TCP loopback ports the tenant exposes under the default `restricted`
-/// inbound posture. Bare port list — no proto field (TCP only; UDP
-/// loopback is unfiltered). Empty (or absent section) is the locked
-/// posture: no inbound pass is rendered. An absent `ports` key inside a
-/// present `[inbound]` section also defaults to empty.
+/// TCP only — UDP loopback is unfiltered. Empty is the locked posture.
 #[derive(Debug, Deserialize, PartialEq, Eq, Default)]
 pub struct Inbound {
     #[serde(default)]
     pub ports: Vec<u16>,
 }
 
-/// Shell commands the `tenant bootstrap` verb runs AS the tenant, each
-/// via `/bin/sh -c <command>`. The operator promises they're idempotent
-/// (the design leans on guard idioms like `command -v x || install x`),
-/// so the verb is re-runnable anytime. Absent (or empty) ⇒ nothing to
-/// run. Bare command list — no proto/tier field; commands are not a
-/// tier axis (they run once, when the operator invokes the verb).
+/// Each runs as the tenant via `/bin/sh -c`; the operator owns idempotency
+/// (guard idioms like `command -v x || install x`).
 #[derive(Debug, Deserialize, PartialEq, Eq, Default)]
 pub struct Bootstrap {
     #[serde(default)]
     pub commands: Vec<String>,
 }
 
-/// Wire shape for BOTH tenant profiles and `include` fragments: every
-/// section optional/defaulted. `Profile` (unchanged) is the merged,
-/// validated result; downstream consumers never see a `PartialProfile`.
-/// The completeness checks (schema_version present, both tiers declared)
-/// live in `merge`, not here — a fragment carrying only
-/// `[allowlist.runtime]` is a legal partial.
+/// Wire shape for both tenant profiles and fragments. Completeness checks
+/// live in `merge`, so a fragment carrying only `[allowlist.runtime]` is legal.
 #[derive(Debug, Deserialize, PartialEq, Eq, Default)]
 pub struct PartialProfile {
     #[serde(default)]
     pub schema_version: Option<u32>,
-    /// Ordered fragment names resolved from `profiles/includes/<name>.toml`,
-    /// merged left-to-right before the tenant profile. Refused in a fragment
-    /// (depth one). Serde-default so include-free profiles round-trip.
+    /// Merged left-to-right before the tenant profile; refused in a fragment.
     #[serde(default)]
     pub include: Vec<String>,
     #[serde(default)]
@@ -173,8 +124,6 @@ pub struct PartialProfile {
     pub bootstrap: Bootstrap,
 }
 
-/// Independently-optional allowlist tiers. A fragment may declare one, the
-/// other, both, or neither; `merge` requires each present somewhere.
 #[derive(Debug, Deserialize, PartialEq, Eq, Default)]
 pub struct PartialAllowlist {
     #[serde(default)]
@@ -183,18 +132,14 @@ pub struct PartialAllowlist {
     pub install: Option<Tier>,
 }
 
-/// Distinguishes the two roles a `PartialProfile` plays at parse. A
-/// `Fragment` declaring `include` is refused (depth one); a `Tenant`
-/// profile's `include` list drives the load path's fragment resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileRole {
     Tenant,
     Fragment,
 }
 
-/// `host_path` is a literal absolute path; `tenant_path` is a `$HOME`-
-/// templated string that the parser does NOT resolve — the type
-/// distinction signals "not yet resolved" at the layer boundary.
+/// `tenant_path` stays an unresolved `$HOME` template (`String`, not
+/// `PathBuf`) until `expand_tenant_path`.
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
 pub struct Share {
     pub host_path: PathBuf,
@@ -202,10 +147,8 @@ pub struct Share {
     pub tenant_path: String,
 }
 
-/// Intent-named only (`ro` / `rw`). POSIX bit-string forms are rejected
-/// because POSIX bit semantics diverge for files vs directories (`r`
-/// alone on a directory means "list names but can't open any" — almost
-/// never the operator intent).
+/// Intent names, not POSIX bits: `r` alone on a directory lists names but
+/// can't open any — almost never what the operator means.
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum ShareMode {
@@ -213,10 +156,7 @@ pub enum ShareMode {
     Rw,
 }
 
-/// Expand `$HOME` to `/Users/<name>` only when it appears as the path
-/// prefix. Mid-string `$HOME` flows through literally — caught by
-/// `parse`'s prefix-only validation, so this fallback is only reached
-/// for paths that don't contain `$HOME` at all.
+/// Prefix-only; mid-string `$HOME` is refused earlier by `parse_partial`.
 pub fn expand_tenant_path(name: &str, template: &str) -> PathBuf {
     if template == "$HOME" {
         PathBuf::from(format!("/Users/{name}"))
@@ -227,32 +167,18 @@ pub fn expand_tenant_path(name: &str, template: &str) -> PathBuf {
     }
 }
 
-/// Pre-checks `schema_version` against the supported set (currently `1`)
-/// before structural deserialization so a version bump produces an
-/// operator-readable refusal naming the version, not a serde error
-/// frame. Post-parse, enforces the `$HOME` prefix-only contract on each
-/// `[[shares]]` `tenant_path` — mid-string `$HOME` (`$HOME$HOME/src`,
-/// `/etc/$HOME/foo`) is a likely authoring mistake and refused rather
-/// than passed through as a surprising literal.
+/// Does not resolve `include` (no fragment reader here) — use
+/// `load_profile` for that; a profile leaning on a fragment fails merge's
+/// completeness check.
 pub fn parse(content: &str) -> Result<Profile, ProfileError> {
-    // The no-fragments composition: a directly-parsed profile is a single
-    // part. `load_profile` (the include-resolving path) is what reads and
-    // prepends fragments; `parse` does not resolve `include` (it has no
-    // fragment reader), so a profile relying on a fragment for a section
-    // surfaces the same completeness refusal it would if the fragment were
-    // empty. Value-identical to today for include-free profiles.
     merge(vec![parse_partial(content, ProfileRole::Tenant)?])
 }
 
-/// Parse one file (tenant profile or fragment) into a `PartialProfile`.
-/// Runs the per-file validations (schema pre-check, `ports = []` refusal,
-/// `$HOME` prefix-only, include lexical rail) so a refusal names the
-/// mistake in the file that authored it — the load path adds which file.
-/// A `Fragment` declaring the `include` key at all is refused (depth one).
+/// Validations run per file so a refusal names the file that authored the
+/// mistake.
 pub fn parse_partial(content: &str, role: ProfileRole) -> Result<PartialProfile, ProfileError> {
-    // Pre-check before typed deserialize so the refusal phrasing doesn't
-    // depend on serde's error formatting. Optional in a partial: absent
-    // schema_version falls through (completeness is a merge concern).
+    // Schema pre-check before typed deserialize so a version bump refuses
+    // readably instead of as a serde error.
     let raw: toml::Value = toml::from_str(content).map_err(|e: toml::de::Error| ProfileError {
         message: format!("invalid TOML: {e}"),
     })?;
@@ -266,13 +192,9 @@ pub fn parse_partial(content: &str, role: ProfileRole) -> Result<PartialProfile,
     let partial: PartialProfile = toml::from_str(content).map_err(|e| ProfileError {
         message: e.to_string(),
     })?;
-    // Depth one: refuse the `include` KEY's presence in a fragment — even
-    // `include = []`, which "declares include" per the doctrine yet resolves
-    // nothing. Failing on presence (not just a non-empty list) fails earlier
-    // and truer: an operator who writes `include = []` in a fragment and
-    // later fills it in shouldn't be surprised the refusal appears only then.
-    // `raw` is already parsed above; `partial.include` can't distinguish an
-    // absent key from `[]`.
+    // Refuse on key presence, even `include = []`: `partial.include` can't
+    // tell absent from empty, and an empty list later filled in shouldn't
+    // start refusing only then.
     if role == ProfileRole::Fragment && raw.get("include").is_some() {
         return Err(ProfileError {
             message: "a fragment may not declare `include`; nesting is not supported \
@@ -299,16 +221,10 @@ pub fn parse_partial(content: &str, role: ProfileRole) -> Result<PartialProfile,
     Ok(partial)
 }
 
-/// Fold ordered parts (fragments first, tenant profile last) into the
-/// merged, validated `Profile`. Per-tier host lists, inbound ports, and
-/// shares union by concatenation in order (no dedupe — a value appearing
-/// twice renders twice, which the renderer/pf already tolerate). Then the
-/// merged result is checked for completeness (schema_version present, both
-/// allowlist tiers declared somewhere) and the shares `tenant_path`
-/// verbatim-collision refusal.
+/// Parts are fragments first, tenant profile last. Lists concatenate in
+/// order with no dedupe — pf tolerates a value rendered twice.
 pub fn merge(parts: Vec<PartialProfile>) -> Result<Profile, ProfileError> {
-    // schema_version: present somewhere. Every present value is already
-    // validated == 1 by `parse_partial`, so the first found is canonical.
+    // Every present value was already validated == 1, so first wins.
     let schema_version = parts
         .iter()
         .find_map(|p| p.schema_version)
@@ -351,19 +267,12 @@ pub fn merge(parts: Vec<PartialProfile>) -> Result<Profile, ProfileError> {
         .iter()
         .flat_map(|p| p.inbound.ports.iter().copied())
         .collect();
-    // Concatenate fragments-first, no dedupe (same posture as ports /
-    // hosts / shares). Empty/whitespace entries are already refused
-    // per-file by `parse_partial`, so the merged list has none.
     let commands: Vec<String> = parts
         .iter()
         .flat_map(|p| p.bootstrap.commands.iter().cloned())
         .collect();
-    // Verbatim tenant_path collision, only across a genuine union (more
-    // than one part). A single include-free profile with two shares at the
-    // same tenant_path parsed before this feature (last-symlink-wins
-    // downstream), so value-identity forbids a new refusal for it — the
-    // collision is a union concern, and the escape hatch ("drop the
-    // include") only makes sense when an include is in play.
+    // Union-only: a single profile with two shares at one tenant_path stays
+    // accepted (last symlink wins), and "drop the include" needs an include.
     if parts.len() > 1 {
         let mut seen_paths: HashSet<&str> = HashSet::new();
         for share in &shares {
@@ -387,10 +296,6 @@ pub fn merge(parts: Vec<PartialProfile>) -> Result<Profile, ProfileError> {
     })
 }
 
-/// Lexical rail on `include` entries — the same charset as tenant names
-/// (`[a-z][a-z0-9_-]{0,30}`) plus a duplicate-entry refusal. The charset
-/// forecloses path traversal (`../`, `/`, leading dots) without a second
-/// vocabulary. Refuses at parse, naming the bad entry.
 fn validate_includes(includes: &[String]) -> Result<(), ProfileError> {
     let mut seen: HashSet<&str> = HashSet::new();
     for name in includes {
@@ -404,10 +309,9 @@ fn validate_includes(includes: &[String]) -> Result<(), ProfileError> {
     Ok(())
 }
 
-/// `[a-z][a-z0-9_-]{0,30}` — mirrors `validate_name`'s tenant-name charset
-/// (kept here to stay a pure-string check with no upward dependency on the
-/// domain layer). The leading-lowercase rule excludes `.`/`/`/`-` starts,
-/// so `../etc`, `/abs`, and `.hidden` all refuse.
+// TODO(smell): share one charset check with the tenant-name `validate_name` instead of mirroring it here
+/// `[a-z][a-z0-9_-]{0,30}`; the leading-lowercase rule is what forecloses
+/// path traversal (`../etc`, `/abs`, `.hidden`).
 fn validate_fragment_name(name: &str) -> Result<(), ProfileError> {
     let refuse = |detail: &str| {
         Err(ProfileError {
@@ -437,10 +341,6 @@ fn validate_fragment_name(name: &str) -> Result<(), ProfileError> {
     Ok(())
 }
 
-/// An allowlist entry with `ports = []` is a contradiction — a host with
-/// no ports is unreachable, so listing it is a likely authoring mistake.
-/// Refused at parse (a bare string entry can't reach this: it normalizes
-/// to `[443]`).
 fn validate_host_entry_ports(entry: &HostEntry) -> Result<(), ProfileError> {
     if entry.ports.is_empty() {
         return Err(ProfileError {
@@ -454,9 +354,6 @@ fn validate_host_entry_ports(entry: &HostEntry) -> Result<(), ProfileError> {
     Ok(())
 }
 
-/// An empty or whitespace-only `[bootstrap]` command is a no-op in the
-/// list — an authoring mistake, same posture as `ports = []`. Refused at
-/// parse (per-file, so the refusal names the file that authored it).
 fn validate_bootstrap_command(command: &str) -> Result<(), ProfileError> {
     if command.trim().is_empty() {
         return Err(ProfileError {
@@ -468,8 +365,6 @@ fn validate_bootstrap_command(command: &str) -> Result<(), ProfileError> {
     Ok(())
 }
 
-/// Prefix-only `$HOME`: position 0 followed by `/`, or the whole path.
-/// Any other occurrence refused as likely typo.
 fn validate_tenant_path_template(template: &str) -> Result<(), ProfileError> {
     if template == "$HOME" || template.starts_with("$HOME/") {
         return Ok(());

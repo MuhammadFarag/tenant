@@ -1,7 +1,4 @@
-//! E2E tests for the `tenant help <topic>` custom subcommand. Distinct
-//! from clap's built-in `--help`: this verb dispatches through Reporter
-//! to render a long-form topic body to stdout. The only topic today is
-//! `profile`; new topics ship with a per-topic body test here.
+//! `tenant help <topic>`: the custom topic verb, not clap's `--help`.
 
 mod adapters;
 mod common;
@@ -19,14 +16,7 @@ fn help_profile_exits_zero_and_renders_to_stdout() {
 
 #[test]
 fn help_profile_body_covers_load_bearing_concepts() {
-    // The profile body must call out: the file location, the schema
-    // anchor (`schema_version`), the two allowlist tiers, the
-    // [[shares]] block + `$HOME` rule, the `[inbound]` ports section +
-    // its honest-scope caveats, the `[bootstrap]` commands section +
-    // its narrowed non-goal (no templating of file CONTENTS), and the
-    // `tenant reload <name>` apply step. Pin by substring rather than
-    // byte-exact — the body's prose is allowed to shift; the concepts
-    // are not.
+    // Substring pins: the prose may shift, the concepts may not.
     let (_code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["help", "profile"]);
     let needles = [
         "~/.config/tenant/profiles/<name>.toml",
@@ -42,15 +32,10 @@ fn help_profile_body_covers_load_bearing_concepts() {
         "rw",
         "[inbound]",
         "ports",
-        // Honest-scope caveats: surface-reduction (not host-vs-peer),
-        // intra-tenant cost, UDP unfiltered.
         "surface-reduction",
         "peer tenants",
         "OWN undeclared",
         "UDP",
-        // Bootstrap section (Half 2): the schema anchor, the verb, the
-        // shell contract, and the narrowed non-goal (contents, not the
-        // old `[provision]` copy).
         "[bootstrap]",
         "tenant bootstrap",
         "/bin/sh -c",
@@ -67,9 +52,6 @@ fn help_profile_body_covers_load_bearing_concepts() {
 
 #[test]
 fn help_with_unknown_topic_is_clap_parse_error() {
-    // clap's ValueEnum rejects unknown topics at parse — exits 2 with
-    // an error frame on stderr (clap's standard exit code for bad
-    // arg/enum values). We don't need to render anything.
     let (code, _stdout, stderr) = run_with(StubUserDirectory::default(), &["help", "nonsense"]);
     assert_eq!(
         code, 2,
@@ -83,9 +65,6 @@ fn help_with_unknown_topic_is_clap_parse_error() {
 
 #[test]
 fn help_with_no_topic_lists_available_topics() {
-    // Bare `tenant help` is the natural muscle-memory invocation; rather
-    // than erroring out it renders an index of available topics so the
-    // operator can discover what to ask for. Exit 0, stdout-only.
     let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["help"]);
     assert_eq!(code, 0, "bare `help` should succeed; stderr={stderr:?}");
     assert!(stderr.is_empty(), "stderr should be empty: {stderr:?}");
@@ -99,9 +78,7 @@ fn help_with_no_topic_lists_available_topics() {
 
 #[test]
 fn help_profile_does_not_touch_substrate() {
-    // help is a meta verb — no HostUserDirectory probes, no HostMachine ops.
-    // `run_with` wires NeverHostMachine (panicking impl) so a successful
-    // exit through this path proves no substrate call escaped.
+    // `run_with` wires NeverHostMachine, so a clean exit proves no substrate call.
     let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["help", "profile"]);
     assert_eq!(code, 0);
 }

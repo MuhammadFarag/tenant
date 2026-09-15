@@ -6,22 +6,13 @@ use super::errors::{AccountError, AclError, FirewallError, HostFileError, Keycha
 use super::host_machine::{HostMachine, WritableOp};
 use crate::profile::ProfileError;
 
-/// Which filesystem access predicate doctor's probe checks. `List` is
-/// the doctor-domain word for POSIX execute-on-a-directory (the bit
-/// that grants traversal / enumeration), not POSIX's "execute".
+/// `List` is execute-on-a-directory (traversal / enumeration), not POSIX "execute".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessMode {
     Read,
     List,
 }
 
-/// Kind of filesystem entry at a tenant-side path, as the tenant sees
-/// it. `Symlink(target)` carries the resolved target so doctor can
-/// compare against the declared `host_path`. `Dir` distinguishes a
-/// real directory from `Other` (regular file, fifo, socket, etc.) —
-/// the cowork-dir pre-flight accepts an existing `Dir` (mkdir-p
-/// no-ops) but refuses `Other`. Shares treat both as occupants
-/// (substrate never clobbers real operator data, regardless of kind).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathKind {
     Absent,
@@ -30,9 +21,7 @@ pub enum PathKind {
     Other,
 }
 
-/// Probe verdict. `Denied` does not distinguish mechanism (POSIX, ACL,
-/// sandbox, TCC) — that's the remediation surface's job. Doctor's
-/// `classify` collapses every non-Allowed outcome to no-finding.
+/// `Denied` doesn't distinguish mechanism (POSIX, ACL, sandbox, TCC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessOutcome {
     Allowed,
@@ -57,41 +46,31 @@ pub enum AccountOp {
         gid: GroupId,
     },
 
-    /// Distinct from `DeleteUserRecord`: deletes the user via the
-    /// OD-aware tool (handles home-directory move-to-Deleted-Users),
-    /// whereas `DeleteUserRecord` only touches the directory-services
-    /// record.
+    /// Full removal (home moves to Deleted Users); `DeleteUserRecord` only drops the
+    /// directory-services record.
     DeleteTenantUser {
         name: TenantUserName,
     },
 
-    /// Probe variant: `Ok(())` means the record exists, `Err` means
-    /// it doesn't. The Tenants struct uses that result to gate the conditional
-    /// `DeleteUserRecord` cleanup.
+    // TODO(smell): LookupUserRecord is a probe encoded as Ok/Err on an Op; make it a bool carve-out
+    /// `Ok(())` = record present; `NonZero` = absent.
     LookupUserRecord {
         name: TenantUserName,
     },
 
-    /// Belt-and-braces cleanup for a stale record that `DeleteTenantUser`
-    /// may have left behind; runs only when `LookupUserRecord` finds
-    /// the record present.
+    /// Cleanup for a stale record `DeleteTenantUser` can leave behind.
     DeleteUserRecord {
         name: TenantUserName,
     },
 
-    /// `dir` is the resolved working directory from `tenant shell -d`,
-    /// already probed. Carried for plan/echo render only (both these
-    /// variants panic in `execute_account`) — but carried it must be:
-    /// the pre-confirm line has to show the `cd` the real run does.
+    // TODO(smell): LoginAsUser / ExecAsUser are render-only (execute_account panics); move them out of AccountOp
+    /// Render-only (`execute_account` panics); the real call is `HostMachine::login`.
     LoginAsUser {
         name: TenantUserName,
         dir: Option<PathBuf>,
     },
 
-    /// Run a single command as the tenant inside a login shell.
-    /// `argv` must be non-empty (dispatch routes empty argv to the
-    /// interactive `LoginAsUser` branch before any `ExecAsUser` is
-    /// constructed).
+    /// Render-only, like `LoginAsUser`; the real call is `HostMachine::exec_as_tenant`.
     ExecAsUser {
         name: TenantUserName,
         argv: Vec<String>,
@@ -104,22 +83,14 @@ pub enum AccountOp {
         path: PathBuf,
     },
 
-    /// Installs the `tenant_path → host_path` symlink. An existing
-    /// REAL file or directory at `link` is the `TenantPathOccupied`
-    /// case the Tenants struct guards against before the substrate runs.
     EnsureSymlinkAsUser {
         name: TenantUserName,
         link: PathBuf,
         target: PathBuf,
     },
 
-    /// Add the host operator as a secondary member of the tenant's
-    /// share group. Idempotent at the substrate, so the catch-up path
-    /// can re-run this on every reload/mode/shell without cost.
-    ///
-    /// Limitation: macOS snapshots a process's supplementary groups at
-    /// creation, so the operator's already-open shells won't see new
-    /// membership until a new Terminal window opens.
+    /// Idempotent. macOS snapshots supplementary groups at process creation, so the
+    /// operator's already-open shells won't see the membership.
     AddHostToShareGroup {
         group: GroupName,
         host: HostUserName,
@@ -130,14 +101,6 @@ pub enum AccountOp {
         host: HostUserName,
     },
 
-    /// Provision the per-tenant co-working directory under
-    /// `/Users/Shared/tenants/<name>`. Owner is the host operator,
-    /// primary group is the tenant's share group, mode `2770`
-    /// (setgid, group-rwx, zero-other). The inheritable rw ACL grant
-    /// on the dir propagates collaborative bits to tenant-created
-    /// descendants; `chmod -R +a` is recursive so the catch-up path
-    /// picks up children added between reapply cycles. All four
-    /// substrate calls are natively idempotent on macOS.
     EnsureCoworkDir {
         path: PathBuf,
         owner: HostUserName,
@@ -145,16 +108,8 @@ pub enum AccountOp {
         mode: u32,
     },
 
-    /// Re-assert the tenant user's primary group to its share group.
-    /// An OS update can "normalize" a non-standard local account's
-    /// `PrimaryGroupID` back to macOS's default `staff` (20) — which both
-    /// breaks the tenant's access to its own shares + cowork dir AND
-    /// grants it `staff`'s reach into the host home. `gid` is resolved
-    /// from the live share-group record at plan-build time
-    /// (`HostMachine::read_share_group_gid`); the substrate `dscl
-    /// . -create` overwrites idempotently regardless of the current
-    /// value. Set once at create via `CreateTenantUser`, so this is the
-    /// convergence (Full reapply) op, not a first-apply one.
+    /// An OS update can reset a local account's `PrimaryGroupID` to `staff` (20), breaking
+    /// share + cowork access and granting `staff`'s reach into the host home.
     EnsurePrimaryGroup {
         name: TenantUserName,
         gid: GroupId,
@@ -170,11 +125,6 @@ pub enum ProfileOp {
     Delete { name: TenantUserName },
 }
 
-/// Substrate-vocab sibling to `profile::ShareMode` (profile-vocab); the
-/// Tenants struct maps `ShareMode → AclMode` at op-construction time. Distinct
-/// types so the layer boundary is visible — if `ShareMode` grows a
-/// profile-only flag, `AclMode` stays binary and the mapping absorbs
-/// the divergence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AclMode {
     Ro,
@@ -182,9 +132,6 @@ pub enum AclMode {
 }
 
 impl AclMode {
-    /// Canonical ACL bit list per mode. Centralized so describe-side
-    /// rendering and any substrate-side idempotence check reference
-    /// the same bytes — drift would silently break idempotence.
     pub fn acl_bits(self) -> &'static str {
         match self {
             AclMode::Ro => "read,execute,file_inherit,directory_inherit",
@@ -193,10 +140,7 @@ impl AclMode {
     }
 }
 
-/// ACL operations are unprivileged (no `sudo`): the host operator is
-/// expected to own or have ACL-write on `path`. Both variants are
-/// idempotent at the substrate; inheritable bits propagate the grant
-/// to descendants automatically.
+/// Unprivileged (no `sudo`): the operator must own or have ACL-write on `path`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AclOp {
     Grant {
@@ -212,128 +156,77 @@ pub enum AclOp {
     },
 }
 
-/// `Anchor` stays in the variant names — it's the project's domain
-/// vocabulary for "named per-tenant firewall ruleset".
+/// `RemoveAnchor` (absent file) and `Enable` (already enabled) are idempotent.
+/// `BackupConfig` writes a fixed path, no timestamps, so recovery is deterministic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FirewallOp {
-    /// `body` is the precomputed anchor content (from `render_anchor`).
     InstallAnchor { name: TenantUserName, body: String },
 
-    /// Idempotent: an absent anchor file is success.
     RemoveAnchor { name: TenantUserName },
 
-    /// Fixed backup path (no timestamps) — deterministic recovery,
-    /// overwritten each invocation.
     BackupConfig,
 
-    /// Recovery half of `BackupConfig`. Runs on `Reload` failure
-    /// during create.
     RestoreConfigFromBackup,
 
-    /// `content` is the precomputed pf.conf body (from
-    /// `ensure_anchor_ref` / `remove_anchor_ref`).
     UpdateConfig { content: String },
 
-    /// Non-zero exit triggers the recovery path on create.
     Reload,
 
-    /// Flush in-kernel rules under the named anchor. Load-bearing on
-    /// destroy: reloading the parent config does NOT garbage-collect
-    /// anchors whose `load anchor` directive has been removed —
-    /// without this, destroy leaves the previous tenant's rules under
-    /// an orphan anchor name, and the next tenant getting the same
-    /// UID would silently inherit them. Idempotent at the substrate.
     FlushAnchor { name: TenantUserName },
 
-    /// Idempotent: "already enabled" maps to `Ok(())`.
     Enable,
 }
 
-/// Not `login.keychain-db`: macOS 26.6 binds that name to the user's
-/// Data Protection keybag and refuses to create or unlock it from any
-/// process outside the user's login session; `sudo -iu` from the
-/// operator's session is one. Any other name works on every release, so
-/// there is no version branching.
+/// Not `login.keychain-db`: macOS 26.6 binds that name to the Data Protection keybag and
+/// refuses it outside the user's login session, which `sudo -iu` is. Other names work on
+/// every release.
 pub const TENANT_KEYCHAIN_FILE: &str = "tenant.keychain-db";
 
 pub fn tenant_keychain_path(name: &str) -> String {
     format!("/Users/{name}/Library/Keychains/{TENANT_KEYCHAIN_FILE}")
 }
 
-/// Keychain operations: pre-create the tenant's `tenant.keychain-db`
-/// so credential-stashing apps (Claude OAuth, etc.) don't trip the
-/// "could not find the keychain" warning, and persist the protecting
-/// secret in the operator's keychain so `shell` / `bootstrap` can
-/// unlock it non-interactively. `StashPassword` /
-/// `DeleteStashedPassword` write to the OPERATOR's login keychain (no
-/// `sudo`); the four `*Keychain*` provision variants write the
-/// TENANT's keychain via `sudo -iu <name> security`.
+/// Pre-creates the tenant keychain so credential-storing apps don't hit "could not find
+/// the keychain", and stashes its password in the OPERATOR's keychain so `shell` /
+/// `bootstrap` can unlock it non-interactively.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeychainOp {
-    /// `security create-keychain -p <pw> tenant.keychain-db`. The
-    /// `password` is the secret protecting the new keychain (also
-    /// stashed in operator's keychain via `StashPassword`). The
-    /// adapter maps the "already exists" failure to `Ok(())` — see
-    /// `execute_keychain`.
+    /// "Already exists" maps to `Ok(())` in the adapter.
     CreateTenantKeychain {
         name: TenantUserName,
         password: KeychainPassword,
     },
 
-    /// `security default-keychain -s tenant.keychain-db`. Sets the
-    /// tenant's default keychain pointer in their per-user prefs.
     /// Natively idempotent (overwrites the pointer).
     SetDefaultKeychain { name: TenantUserName },
 
-    /// `security list-keychains -s tenant.keychain-db`. Replaces the
-    /// tenant's keychain search list with just the new one (+ the
-    /// system keychain that macOS preserves implicitly).
+    // TODO(smell): rename AddKeychainToSearchList; it replaces the search list rather than appending
+    /// Replaces the search list with just this keychain (+ the implicit system keychain).
     AddKeychainToSearchList { name: TenantUserName },
 
-    /// `security set-keychain-settings tenant.keychain-db` (no flags
-    /// = no auto-lock timer, no lock-on-sleep). Load-bearing for the
-    /// "Claude OAuth tokens persist across sessions" guarantee.
+    /// No flags = no auto-lock, no lock-on-sleep; load-bearing for OAuth tokens persisting.
     DisableKeychainAutoLock { name: TenantUserName },
 
-    /// `security add-generic-password -U -a <name> -s tenant-<name>
-    /// -w <password>` against the operator's login keychain. Password
-    /// lives on argv: macOS `security` does NOT support stdin reads
-    /// on `-w` (the `-` argument is taken as a literal one-character
-    /// password, not a stdin sentinel). Brief argv exposure
-    /// (~milliseconds, single `security` invocation) is accepted;
-    /// alternative is the Security Framework C API via FFI, which is
-    /// out of scope for solo-Mac. Service-name `tenant-<name>` is the
-    /// contract the `shell` / `bootstrap` unlock reads from.
+    /// The password rides argv: `security -w` has no stdin mode (`-` is a literal password).
+    /// Brief argv exposure is accepted over Security.framework FFI. Service `tenant-<name>`
+    /// is the contract the `shell` / `bootstrap` unlock reads.
     StashPassword {
         name: TenantUserName,
         password: KeychainPassword,
     },
 
-    /// `security delete-generic-password -a <name> -s tenant-<name>`.
-    /// Maps an absent entry (legacy tenant, prior destroy) to
-    /// `KeychainError::NotFound` so `destroy` can converge.
+    /// An absent entry maps to `KeychainError::NotFound`, which destroy treats as converged.
     DeleteStashedPassword { name: TenantUserName },
 }
 
-/// Host-config sub-domain: opt-in host-prep mutations driven by the
-/// `tenant setup` verb. Named for the substrate it touches
-/// (`/etc/pam.d`), not the verb. Reuses `HostFileError` (the shared
-/// host-config substrate error). Today one variant; sudoers /
-/// pf-prereqs are future siblings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PamOp {
-    /// Ensure `auth sufficient pam_tid.so` is present in
-    /// `/etc/pam.d/sudo_local` (the OS-update-safe customization file).
-    /// The adapter backs up sudo_local before mutating and is globally
-    /// idempotent — it no-ops if Touch ID is already enabled in either
-    /// `/etc/pam.d/sudo` or `/etc/pam.d/sudo_local`, so a duplicate
-    /// directive never accumulates.
+    /// Appends `pam_tid` to `/etc/pam.d/sudo_local`; no-ops if `sudo` or `sudo_local`
+    /// already has it.
     EnableTouchIdForSudo,
 }
 
-/// Display-only wrapper used for uniform describe-dispatch. Execution
-/// stays on the bare per-domain ADTs (via `WritableOp`) so per-domain
-/// error types are preserved end-to-end.
+/// Display-only umbrella; execution stays on the per-domain ADTs to keep their error types.
 pub enum Op<'a> {
     Account(&'a AccountOp),
     Profile(&'a ProfileOp),
@@ -344,7 +237,6 @@ pub enum Op<'a> {
 }
 
 impl<'a> Op<'a> {
-    /// Render the op as an operator-facing display line.
     pub fn describe_via(&self, machine: &dyn HostMachine) -> String {
         match self {
             Op::Account(op) => machine.describe_account(op),
@@ -356,9 +248,8 @@ impl<'a> Op<'a> {
         }
     }
 
-    /// Past-tense capability label for the `✓` progress lines.
-    /// Substrate-agnostic, distinct from `describe_via`'s mechanism-
-    /// level shell echo.
+    // TODO(smell): rename business_label / intent_label so the names say past-tense progress line vs plan bullet
+    /// Past-tense `✓` progress line.
     pub fn business_label(&self) -> String {
         match self {
             Op::Account(op) => account_business_label(op),
@@ -370,11 +261,7 @@ impl<'a> Op<'a> {
         }
     }
 
-    /// Future-tense capability label for the verbose plan bullets.
-    /// Substrate-agnostic; sibling to `business_label`. Probe variants
-    /// (`LookupUserRecord` / `DeleteUserRecord`) are sharpened apart
-    /// from their business_label so the future-tense bullet reads
-    /// naturally.
+    /// Future-tense verbose plan bullet.
     pub fn intent_label(&self) -> String {
         match self {
             Op::Account(op) => account_intent_label(op),
@@ -409,8 +296,6 @@ fn account_business_label(op: &AccountOp) -> String {
         }
         AccountOp::LoginAsUser { name, .. } => format!("Entering shell as '{name}'"),
         AccountOp::ExecAsUser { name, argv, .. } => {
-            // Basename of argv[0]: operator reads "the command 'ls' ran",
-            // not "the command '/usr/bin/ls' ran".
             let bin = argv
                 .first()
                 .map(|s| s.rsplit('/').next().unwrap_or(s.as_str()))
@@ -523,8 +408,6 @@ fn keychain_business_label(op: &KeychainOp) -> String {
     }
 }
 
-/// `" in <dir>"` when `tenant shell -d` supplied a working directory,
-/// empty otherwise — so a dir-less plan bullet stays byte-identical.
 fn in_dir_suffix(dir: &Option<PathBuf>) -> String {
     dir.as_ref()
         .map(|d| format!(" in {}", d.display()))
@@ -555,9 +438,7 @@ fn account_intent_label(op: &AccountOp) -> String {
             format!("Log in as '{name}'{}", in_dir_suffix(dir))
         }
         AccountOp::ExecAsUser { name, argv, dir } => {
-            // No shell-escaping in the display bullet — operator typed it,
-            // they can read it. Substrate-side argv is passed through as a
-            // tokenized vector, so metachars reach the tenant unchanged.
+            // Unescaped on purpose: display-only, and the operator typed it.
             format!("Run as '{name}': {}{}", argv.join(" "), in_dir_suffix(dir))
         }
         AccountOp::EnsureDirAsUser { path, .. } => {

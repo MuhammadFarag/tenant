@@ -5,29 +5,7 @@ mod common;
 use adapters::*;
 use common::*;
 
-// ================================================================
-// Setup verb — host-wide, opt-in host preparation
-// ================================================================
-//
-// `tenant setup` is NOT a per-tenant verb: no name argument, no
-// eligibility/name checks, no pre-exec doctor pass. It presents a
-// menu of opt-in host-prep items (today exactly one: Touch ID for
-// sudo) and offers each. Key divergences from the convergent verbs:
-//
-// - Per-item offer defaults to NO (`[y/N]`) — it's an auth-stack
-//   change and an optional preference, not a converge-to-declared
-//   state.
-// - Non-TTY without `--yes` DECLINES (no-op), unlike create/destroy
-//   which proceed on non-TTY. An auth change must never auto-apply
-//   from a pipe.
-// - `--yes` accepts every item (scripted host bootstrap).
-// - No pre-probe for "already enabled": the item is always offered;
-//   `PamOp::EnableTouchIdForSudo` is substrate-idempotent (no-ops if
-//   Touch ID is already on in either pam file). This keeps `--dry-run`
-//   honest (shows the plan, never gated on placeholder host state).
-//
-// E2E through `tenant::run`: `run_with_stdin` simulates a TTY (offer
-// fires), `run_with_exec` is non-TTY (auto-decision).
+// `run_with_stdin` simulates a TTY (the offer fires); `run_with_exec` is non-TTY.
 
 fn no_tenants() -> StubUserDirectory {
     StubUserDirectory::default()
@@ -37,8 +15,6 @@ fn no_tenants() -> StubUserDirectory {
 
 #[test]
 fn setup_offer_accepted_enables_touch_id() {
-    // TTY, operator answers "y" → the Touch-ID PamOp executes exactly
-    // once; exit 0; success surface names the enabled state.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"y\n");
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -57,7 +33,6 @@ fn setup_offer_accepted_enables_touch_id() {
 
 #[test]
 fn setup_offer_declined_does_nothing() {
-    // TTY, "n" → no PamOp, exit 0, a skip line.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"n\n");
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -70,7 +45,6 @@ fn setup_offer_declined_does_nothing() {
 
 #[test]
 fn setup_offer_defaults_to_no_on_empty_input() {
-    // TTY, bare ENTER → default NO (auth change is opt-in). No PamOp.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"\n");
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -82,8 +56,6 @@ fn setup_offer_defaults_to_no_on_empty_input() {
 
 #[test]
 fn setup_eof_on_prompt_declines() {
-    // TTY but stdin closes immediately (EOF) → decline (the prompt's
-    // `read_line` returns Ok(0)). No PamOp, exit 0.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"");
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -92,8 +64,6 @@ fn setup_eof_on_prompt_declines() {
 
 #[test]
 fn setup_reprompts_on_unrecognized_then_accepts() {
-    // Unrecognized input reprompts (does not decline); a following "y"
-    // proceeds. Pins the offer's reprompt loop (distinct from `confirm`).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"maybe\ny\n");
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -112,7 +82,6 @@ fn setup_reprompts_on_unrecognized_then_accepts() {
 
 #[test]
 fn setup_yes_flag_enables_without_prompt() {
-    // `--yes` (non-TTY) accepts the item without prompting.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(no_tenants(), &exec, &["-y", "setup"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -131,9 +100,6 @@ fn setup_yes_flag_enables_without_prompt() {
 
 #[test]
 fn setup_non_tty_without_yes_declines() {
-    // run_with_exec is non-TTY. Without `--yes`, setup must DECLINE the
-    // auth-stack change rather than auto-proceed (the opposite of
-    // create/destroy). No PamOp; exit 0.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_exec(no_tenants(), &exec, &["setup"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -147,9 +113,7 @@ fn setup_non_tty_without_yes_declines() {
 
 #[test]
 fn setup_dry_run_previews_without_executing() {
-    // --dry-run swaps in the DryRun substrate (the stub is wrapped, so
-    // its pam_ops stays empty) and previews the would-prompt line. No
-    // real mutation.
+    // The dry-run substrate wraps the stub, so its pam_ops stays empty.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(no_tenants(), &exec, &["--dry-run", "setup"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -167,8 +131,6 @@ fn setup_dry_run_previews_without_executing() {
 
 #[test]
 fn setup_verbose_shows_mechanism() {
-    // `-v` exposes the substrate mechanism (the sudo_local append) so
-    // the operator can see exactly what enabling Touch ID runs.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(no_tenants(), &exec, &["-v", "-y", "setup"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -182,7 +144,6 @@ fn setup_verbose_shows_mechanism() {
 
 #[test]
 fn setup_pam_failure_surfaces_io_error() {
-    // execute_pam fails → EX_IOERR (74) + a stderr failure frame.
     let exec = StubHostMachine::new().fail_next_pam(tenant::domain::HostFileError::NonZero {
         code: 1,
         stderr: "tee: permission denied".to_string(),

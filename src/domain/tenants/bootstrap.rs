@@ -1,11 +1,5 @@
-//! Bootstrap-verb error type and the `Tenants::bootstrap` orchestrator.
-//! Runs the merged profile's `[bootstrap]` commands AS the tenant inside
-//! an install-tier egress widen with narrow-on-finally — the SAME
-//! composition as shell's command form (`shell.rs` `shell_command`),
-//! with two deliberate differences: the "work" is a loop over the
-//! declared commands (stop on the first non-zero exit), and there is NO
-//! child-exit propagation (bootstrap is not shell — a failing command is
-//! `EX_IOERR`, per the exit-code doctrine).
+//! Same widen → work → narrow-on-finally shape as `shell_command`, but no child-exit
+//! propagation: a failing command is `EX_IOERR` (bootstrap is not shell).
 
 use crate::ModeLevel;
 use crate::domain::reporter::Reporter;
@@ -17,19 +11,7 @@ use crate::domain::{
 use super::Tenants;
 use super::reapply::{ModeError, ReapplyPlan, ReapplyScope};
 
-/// Failure surface for `bootstrap` (single-tenant + fleet walk).
-///
-/// `Mode` wraps the widen/narrow reapply failures (shared with mode/
-/// reload). `StashAbsent`/`UnlockFailed` mirror shell's keychain
-/// pre-spawn error mapping (`StashAbsent` → `EX_USAGE` refusal naming
-/// destroy/recreate; other unlock errors → `EX_IOERR`). `CommandFailed`
-/// carries the command string + its non-zero exit code (surfaced, not
-/// propagated — bootstrap exits `EX_IOERR`). `Account` is an exec spawn
-/// failure. `NarrowFailed` fires when the commands ALL ran but the
-/// post-run narrow reapply failed — the `⚠` doesn't mask the commands'
-/// outcome (they succeeded), but the verb still exits `EX_IOERR` because
-/// a substrate op failed (bootstrap is not shell — no child-exit
-/// propagation to carry a success code past a substrate failure).
+// TODO(smell): per-variant exit codes live only in dispatch; put them on the error type
 #[derive(Debug)]
 pub(crate) enum BootstrapError {
     Mode(ModeError),
@@ -40,31 +22,18 @@ pub(crate) enum BootstrapError {
     NarrowFailed { narrow_err: ModeError },
 }
 
-/// Pre-built plan for a single tenant's bootstrap: the merged profile's
-/// `commands` (rendered verbatim pre-confirm — the honesty backstop) and
-/// the install-tier widen reapply plan (Light scope). Built upfront in
-/// dispatch so a broken include / share pre-flight surfaces pre-prompt,
-/// exactly like reload's `ReapplyPlan`. `commands.is_empty()` gates the
-/// quiet no-op (a tenant declaring none is a convergent success).
+/// Built upfront in dispatch so include / share pre-flight failures surface pre-prompt.
 pub(crate) struct BootstrapPlan {
     pub(crate) commands: Vec<String>,
     pub(crate) widen: ReapplyPlan,
 }
 
-/// Outcome of the fleet walk (`bootstrap_all`). `failed` drives the
-/// caller's `0`/`74` exit. Skipped (no-command) tenants are counted
-/// locally in the walk for the summary line, not carried out here.
 #[derive(Debug)]
 pub(crate) struct BootstrapAllOutcome {
     pub(crate) failed: u32,
 }
 
 impl<'a> Tenants<'a> {
-    /// Load the merged profile ONCE, extract its `[bootstrap]` commands,
-    /// and build the install-tier widen reapply plan from the same parse
-    /// (via `build_reapply_plan_from_profile`, so the profile isn't read
-    /// twice). Profile-read / include / share pre-flight failures surface
-    /// here as `ModeError` — dispatch renders them pre-prompt.
     pub(crate) fn build_bootstrap_plan(
         &self,
         name: &TenantUserName,
@@ -83,28 +52,6 @@ impl<'a> Tenants<'a> {
         Ok(BootstrapPlan { commands, widen })
     }
 
-    /// Run a single tenant's bootstrap. `plan.commands` is guaranteed
-    /// non-empty by the caller (dispatch routes the empty case to the
-    /// quiet-noop reporter line before ever reaching here). Composition
-    /// mirrors `shell_command`'s widen → unlock → work → narrow-on-finally,
-    /// with one deliberate strengthening: bootstrap's widen is
-    /// UNCONDITIONAL (always install tier), so once it lands the keychain
-    /// unlock joins the commands as post-widen "work" — the mandatory
-    /// narrow-on-finally then fires even when the unlock fails (a legacy
-    /// tenant's absent stash), so the install-tier widen is never
-    /// stranded. (Shell only widens under `--mode install`, so its
-    /// unlock-failure can `?`-return without a dangling widen.)
-    ///
-    /// - widen-execute-failure → best-effort inline narrow, then `Mode`.
-    /// - keychain `StashAbsent`/`UnlockFailed` → surfaced as the primary
-    ///   error; narrow-on-finally still fires (best-effort).
-    /// - commands run in order; the first non-zero exit stops the loop.
-    /// - narrow-on-finally ALWAYS fires (we widened to install tier).
-    /// - work-ok + narrow-ok → done.
-    /// - work-ok + narrow-failed → `NarrowFailed`.
-    /// - work-failed → the work error is primary; the finally narrow's own
-    ///   failure is dropped (best-effort, mirrors shell's widen-exec-fail
-    ///   secondary drop).
     pub(crate) fn bootstrap(
         &self,
         name: &TenantUserName,
@@ -115,25 +62,19 @@ impl<'a> Tenants<'a> {
         reporter.bootstrap_intent(name);
 
         if let Err(entry_err) = self.execute_reapply_plan(&plan.widen, reporter) {
-            // Best-effort narrow; drop any secondary failure — the widen
-            // failure is the operator's primary signal.
+            // Best-effort: the widen failure is the operator's signal, so a narrow error is dropped.
             let _ = self
                 .narrow_plan(name, host)
                 .and_then(|p| self.execute_reapply_plan(&p, reporter));
             return Err(BootstrapError::Mode(entry_err));
         }
 
-        // Widen landed. Keychain unlock + the command loop are the
-        // post-widen "work"; the narrow-on-finally below ALWAYS follows,
-        // so an unlock failure narrows the widen back rather than leaving
-        // the tenant stranded at install tier.
+        // Unlock counts as post-widen work: the narrow below must still fire when it fails,
+        // or the tenant is stranded at install tier (the widen here is unconditional).
         let run_result = self
             .unlock_keychain_for_bootstrap(name, reporter)
             .and_then(|()| self.run_bootstrap_commands(name, &plan.commands, reporter));
 
-        // Narrow-on-finally: mandatory regardless of work outcome (we
-        // always widened to install tier). Rebuilt fresh at runtime tier,
-        // exactly like shell_command's post-child narrow.
         let narrow_result = self
             .narrow_plan(name, host)
             .and_then(|p| self.execute_reapply_plan(&p, reporter));
@@ -148,9 +89,6 @@ impl<'a> Tenants<'a> {
         }
     }
 
-    /// Runtime-tier Light narrow plan — the steady egress posture the
-    /// widen returns to. Shared by the widen-fail best-effort path and
-    /// the mandatory narrow-on-finally.
     fn narrow_plan(
         &self,
         name: &TenantUserName,
@@ -159,12 +97,6 @@ impl<'a> Tenants<'a> {
         self.build_reapply_plan(name, host, ModeLevel::Runtime, None, ReapplyScope::Light)
     }
 
-    /// Run each command AS the tenant via `/bin/sh -c <command>` (the
-    /// `exec_as_tenant` carve-out provides the `sudo -iu` login context).
-    /// The `ExecAsUser` op is constructed purely for the verbose `$` echo
-    /// (plan/echo render only — `execute_account` panics on it; the real
-    /// run is the `exec_as_tenant` call, exactly like shell). Stops on the
-    /// first non-zero exit (`CommandFailed`) or spawn failure (`Account`).
     fn run_bootstrap_commands(
         &self,
         name: &TenantUserName,
@@ -193,14 +125,8 @@ impl<'a> Tenants<'a> {
         Ok(())
     }
 
-    /// Mirror of shell's shared pre-spawn keychain step (`shell.rs`
-    /// `unlock_tenant_keychain`): retrieve the operator-stashed password,
-    /// unlock the tenant's `tenant.keychain-db`, emit the `✓` line.
-    /// Bootstrap commands hit git/brew credential helpers, so a locked
-    /// keychain fails them confusingly. Mirrored, not shared — shell's
-    /// helper returns `ShellError`; threading a neutral error across two
-    /// verbs would be a leaky abstraction. The `✓` reporter line is
-    /// reused verbatim (verb-agnostic).
+    // TODO(smell): duplicates shell.rs unlock_tenant_keychain except for the error type; share one helper
+    /// Bootstrap commands hit git/brew credential helpers, which fail confusingly when locked.
     fn unlock_keychain_for_bootstrap(
         &self,
         name: &TenantUserName,
@@ -220,13 +146,6 @@ impl<'a> Tenants<'a> {
         Ok(())
     }
 
-    /// Walk every tenant, bootstrapping each in turn. Mirrors `reload_all`:
-    /// per-tenant failures are recorded and the walk CONTINUES; any
-    /// failure ⇒ the caller exits `EX_IOERR`. A tenant declaring no
-    /// commands is a quiet skip (not a failure). A legacy tenant missing
-    /// its keychain stash refuses that ONE tenant (`StashAbsent`) and the
-    /// walk moves on — one broken tenant must not strand the fleet
-    /// converge.
     pub(crate) fn bootstrap_all(
         &self,
         directory: &dyn HostUserDirectory,
@@ -262,12 +181,6 @@ impl<'a> Tenants<'a> {
     }
 }
 
-/// Route a `BootstrapError` to the reporter's stderr frames. Shared by
-/// the fleet walk above (per-tenant, walk continues) and the single-tenant
-/// dispatch in `commands.rs` (dispatch owns the exit-code mapping —
-/// `StashAbsent` is `EX_USAGE`, every other arm `EX_IOERR`). The `Mode`
-/// arm reuses the verb-agnostic mode frames for Acl/Account/Probe and
-/// bootstrap-named frames for Profile/Firewall/Share.
 pub(crate) fn surface_bootstrap_error(
     reporter: &mut Reporter,
     name: &TenantUserName,

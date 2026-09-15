@@ -1,10 +1,4 @@
-//! Combinatorial coverage on `profile::parse`. Tests the free-function
-//! parser directly because no verb wires the read+parse path until 2.4
-//! (create-side firewall step), and the matrix here is parser-state-shaped
-//! (schema version × structural completeness × TOML well-formedness) which
-//! is awkward to drive through the CLI surface. Same in-tree precedent
-//! and justification as `tests/macos_host_machine.rs`'s per-variant pins on
-//! `MacosHostMachine::describe_*`.
+//! Unit tests: `profile` parse/merge is a combinatorial pure-function state space.
 
 use std::path::PathBuf;
 
@@ -13,7 +7,6 @@ use tenant::profile::{
     ShareMode, Tier, default_profile_toml, expand_tenant_path, merge, parse, parse_partial,
 };
 
-// A bare profile host resolves to TCP 443 — the pre-ports meaning.
 fn bare(host: &str) -> HostEntry {
     HostEntry {
         host: host.to_string(),
@@ -41,11 +34,7 @@ fn parse_default_toml_yields_schema_1_with_empty_allowlists() {
 
 #[test]
 fn parse_populated_runtime_hosts_preserves_input_order() {
-    // Hand-rolled TOML (not via serde::to_string) so we pin the wire
-    // format the operator edits. Order matters: the operator groups
-    // hosts in profile.toml in a meaningful order (e.g. provider,
-    // ecosystem) and `render_anchor` later emits them in the same order
-    // for diff stability.
+    // Hand-rolled TOML (not serde) so this pins the wire format the operator edits.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -104,10 +93,7 @@ fn parse_refuses_missing_schema_version() {
                 [allowlist.install]\n\
                 hosts = []\n";
     let err = parse(toml).expect_err("missing schema_version must be refused");
-    // Refused by merge's completeness check: schema_version is optional in
-    // a PartialProfile but must be present in the merged result. The
-    // dispatcher's Reporter call wraps this in the path-naming frame so the
-    // operator gets full context end-to-end.
+    // Refused at merge (completeness), not at parse_partial.
     assert!(
         err.message.contains("schema_version"),
         "expected message to mention schema_version, got: {}",
@@ -137,16 +123,10 @@ fn parse_refuses_invalid_toml_syntax() {
     );
 }
 
-// --- per-host egress ports ---------------------------------------------
-//
-// A `hosts` array element is either a bare string (TCP 443 only —
-// backward-compat) or an inline `{ host = …, ports = [...] }` table
-// declaring that host's TCP ports. Normalized to `HostEntry { host, ports }`
-// at parse; `ports = []` is refused (a host with no ports is unreachable).
+// --- per-host egress ports ---
 
 #[test]
 fn bare_host_string_resolves_to_port_443() {
-    // Backward-compat: a bare string keeps today's meaning (443 only).
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -185,8 +165,6 @@ fn inline_table_host_round_trips_host_and_ports_in_order() {
 
 #[test]
 fn mixed_bare_and_table_array_parses() {
-    // The git-over-ssh case: a bare host next to an inline-table host in
-    // the same array.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -212,8 +190,6 @@ fn mixed_bare_and_table_array_parses() {
 
 #[test]
 fn empty_ports_entry_refused_with_byte_exact_message() {
-    // A host with no ports is unreachable — refuse at parse, naming the
-    // host. Byte-exact message pin.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -231,8 +207,7 @@ fn empty_ports_entry_refused_with_byte_exact_message() {
 
 #[test]
 fn malformed_host_entry_table_missing_host_errors() {
-    // A table entry missing `host` is a parse error. serde's untagged
-    // enum gives a blunt message — pin only that it errors, not the text.
+    // serde's untagged-enum message is blunt: pin only that it errors.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -243,15 +218,7 @@ fn malformed_host_entry_table_missing_host_errors() {
     parse(toml).expect_err("table entry missing host must be refused");
 }
 
-// --- [[shares]] table-array --------------------------------------------
-//
-// The profile grows an optional table-array declaring per-tenant
-// filesystem shares: `(host_path, mode, tenant_path)` triples. Mode is a
-// string discriminator (`"ro"` / `"rw"`) — POSIX bit-string forms
-// rejected because POSIX bit semantics differ for files vs directories.
-// `tenant_path` is stored raw (template form with `$HOME` if used); the
-// Tenants struct expands at op-construction time. Backward-compat: missing
-// `[[shares]]` array yields an empty Vec.
+// --- [[shares]] table-array ---
 
 fn toml_with_shares_section(shares_body: &str) -> String {
     format!(
@@ -307,10 +274,6 @@ fn parses_share_entry_with_ro_mode() {
 
 #[test]
 fn parses_multiple_share_entries_preserves_declared_order() {
-    // Profile-declared order, not alphabetical-by-host-path. Same
-    // convention as `allowlist.runtime.hosts`. Operator-readable;
-    // order doesn't affect correctness (idempotent substrate) —
-    // preserving intent is the small win.
     let toml = toml_with_shares_section(
         "[[shares]]\n\
          host_path = \"/Users/Shared/zeta\"\n\
@@ -335,11 +298,6 @@ fn parses_multiple_share_entries_preserves_declared_order() {
 
 #[test]
 fn parses_share_entry_with_home_prefixed_tenant_path() {
-    // `$HOME` is the only template variable; expansion happens in
-    // the Tenants struct when it resolves the share entry. The parser stores
-    // the raw string so the type itself signals "this is a template,
-    // not yet resolved" — a substrate call against a raw template
-    // would be a type mistake at construction time.
     let toml = toml_with_shares_section(
         "[[shares]]\n\
          host_path = \"/Users/Shared/sandbox/dev\"\n\
@@ -352,9 +310,6 @@ fn parses_share_entry_with_home_prefixed_tenant_path() {
 
 #[test]
 fn absent_shares_array_yields_empty_vec() {
-    // Backward-compat: profiles written before the share substrate
-    // shipped have no `[[shares]]` section. Parse must succeed and
-    // yield an empty Vec so older profiles keep working.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -372,8 +327,6 @@ fn absent_shares_array_yields_empty_vec() {
 
 #[test]
 fn unknown_mode_value_rejected() {
-    // Only `"ro"` and `"rw"` accepted. POSIX bit-string forms
-    // (`"r"`, `"rwe"`, etc.) and uppercase variants all fail parse.
     let toml = toml_with_shares_section(
         "[[shares]]\n\
          host_path = \"/Users/Shared/sandbox/dev\"\n\
@@ -418,11 +371,7 @@ fn missing_mode_rejected() {
     );
 }
 
-// --- expand_tenant_path -----------------------------------------------
-//
-// `$HOME` is the only template variable. The Tenants struct expands it to
-// `/Users/<tenant>` at op-construction time; the substrate sees
-// absolute paths. Literal absolute paths flow through unchanged.
+// --- expand_tenant_path ---
 
 #[test]
 fn expand_tenant_path_with_home_subpath() {
@@ -450,8 +399,6 @@ fn expand_tenant_path_bare_home_is_tenant_home_dir() {
 
 #[test]
 fn expand_tenant_path_literal_absolute_passes_through() {
-    // No `$HOME` prefix: keep the literal absolute path. Operator's
-    // declaration is what the substrate sees.
     assert_eq!(
         expand_tenant_path("dev", "/opt/shared"),
         PathBuf::from("/opt/shared")
@@ -460,21 +407,14 @@ fn expand_tenant_path_literal_absolute_passes_through() {
 
 #[test]
 fn expand_tenant_path_does_not_expand_mid_string_home() {
-    // `$HOME` is a prefix marker, not a free-text substitution.
-    // (Parse-time validation refuses mid-string $HOME; this test
-    // pins the expansion function's behavior IF a mid-string value
-    // got past parse — defense in depth at the substrate.)
+    // Parse refuses mid-string `$HOME`; this pins expansion if one slips past anyway.
     assert_eq!(
         expand_tenant_path("dev", "/etc/$HOME/foo"),
         PathBuf::from("/etc/$HOME/foo")
     );
 }
 
-// --- $HOME prefix-only validation -------------------------------------
-//
-// `parse` refuses any tenant_path containing `$HOME` not at position 0
-// (followed by `/` or as the whole path). Catches operator typos like
-// `$HOME$HOME/src` that would silently expand to weird literal paths.
+// --- $HOME prefix-only validation ---
 
 #[test]
 fn parse_refuses_tenant_path_with_double_home() {
@@ -515,7 +455,6 @@ fn parse_refuses_tenant_path_with_mid_string_home() {
 
 #[test]
 fn parse_accepts_tenant_path_bare_home() {
-    // `$HOME` alone (no slash) IS valid — expands to /Users/<name>.
     let toml = toml_with_shares_section(
         "[[shares]]\n\
          host_path = \"/tmp\"\n\
@@ -540,14 +479,7 @@ fn missing_tenant_path_rejected() {
     );
 }
 
-// --- [inbound] section -------------------------------------------------
-//
-// The profile grows an optional `[inbound]` table declaring the TCP
-// loopback ports the tenant exposes under the default `restricted`
-// posture: `ports = [<u16> ...]`. No proto field (TCP only — UDP
-// loopback is unfiltered). Absent section / empty list both mean
-// "locked" (no inbound pass emitted). Same backward-compat posture as
-// `[[shares]]`: missing section deserializes to an empty Vec.
+// --- [inbound] section ---
 
 fn toml_with_inbound_section(inbound_body: &str) -> String {
     format!(
@@ -579,9 +511,6 @@ fn parses_single_inbound_port() {
 
 #[test]
 fn absent_inbound_section_yields_empty_ports() {
-    // Backward-compat: profiles written before the inbound axis shipped
-    // have no `[inbound]` section. Parse must succeed and yield an empty
-    // Vec — the locked posture.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -610,8 +539,6 @@ fn empty_inbound_ports_list_yields_empty_ports() {
 
 #[test]
 fn inbound_port_above_u16_max_rejected() {
-    // 70000 > 65535; serde u16 deserialize rejects it. Catches operator
-    // typos that would otherwise render an out-of-range pf port.
     let toml = toml_with_inbound_section("[inbound]\nports = [70000]\n");
     let err = parse(&toml).expect_err("out-of-u16 port must be refused");
     assert!(
@@ -634,8 +561,6 @@ fn inbound_non_integer_port_rejected() {
 
 #[test]
 fn default_profile_toml_parses_with_empty_inbound_ports() {
-    // The scaffolded `[inbound]` block is fully commented (example port
-    // commented out) so it parses to the locked posture.
     let profile = parse(&default_profile_toml()).expect("default toml must parse");
     assert!(
         profile.inbound.ports.is_empty(),
@@ -646,13 +571,7 @@ fn default_profile_toml_parses_with_empty_inbound_ports() {
 
 #[test]
 fn default_profile_toml_carries_commented_include_hint() {
-    // Scaffold gains a COMMENTED `# include = ["base"]` hint naming the
-    // includes/ subdirectory. Commented, not active: an active include
-    // would fail every real `tenant create` — the post-provision
-    // load_profile would resolve read_profile_fragment("base") against a
-    // not-yet-created includes/base.toml and hard-fail (EX_IOERR).
-    // Value-identity of the parsed default is pinned by the two
-    // default_profile_toml tests above.
+    // Must stay commented: an active include fails every `tenant create` (no includes/base.toml yet).
     let toml = default_profile_toml();
     assert!(
         toml.contains("# include = [\"base\"]"),
@@ -662,7 +581,6 @@ fn default_profile_toml_carries_commented_include_hint() {
         toml.contains("includes/"),
         "hint must name the includes/ subdirectory; got:\n{toml}"
     );
-    // Commented ⇒ the parsed default declares no includes.
     let partial = parse_partial(&toml, ProfileRole::Tenant).expect("default must parse");
     assert!(
         partial.include.is_empty(),
@@ -671,15 +589,7 @@ fn default_profile_toml_carries_commented_include_hint() {
     );
 }
 
-// --- include fragments: PartialProfile / parse_partial / merge ---------
-//
-// Half 1 of "Common configuration": a profile may declare
-// `include = ["base"]` — an ordered list of fragment names resolved from
-// `profiles/includes/<name>.toml`. `PartialProfile` is the wire shape for
-// BOTH tenant profiles and fragments (every section optional). `merge`
-// folds parts fragments-first + profile-last into the validated `Profile`
-// everyone downstream already consumes. `parse` becomes the no-fragments
-// composition of the two (value-identical for include-free profiles).
+// --- include fragments: PartialProfile / parse_partial / merge ---
 
 #[test]
 fn parse_partial_tenant_profile_populates_declared_sections() {
@@ -693,8 +603,6 @@ fn parse_partial_tenant_profile_populates_declared_sections() {
 
 #[test]
 fn parse_partial_fragment_may_omit_schema_and_tiers() {
-    // A fragment is a partial profile: every section optional. One tier,
-    // no schema_version, is legal here — completeness is a merge concern.
     let frag = "[allowlist.runtime]\nhosts = [\"api.anthropic.com\"]\n";
     let p = parse_partial(frag, ProfileRole::Fragment).expect("partial fragment must parse");
     assert_eq!(p.schema_version, None);
@@ -704,15 +612,13 @@ fn parse_partial_fragment_may_omit_schema_and_tiers() {
 
 #[test]
 fn parse_partial_empty_fragment_is_legal() {
-    // An empty fragment is the identity element of the merge.
     let p = parse_partial("", ProfileRole::Fragment).expect("empty fragment must parse");
     assert_eq!(p, PartialProfile::default());
 }
 
 #[test]
 fn parse_partial_fragment_declaring_include_is_refused() {
-    // Depth one: `include` inside a fragment is refused at parse. No
-    // nesting ⇒ no cycle detection.
+    // Depth one: no nesting, so no cycle detection.
     let frag = "include = [\"other\"]\n\
                 [allowlist.runtime]\n\
                 hosts = []\n";
@@ -726,10 +632,6 @@ fn parse_partial_fragment_declaring_include_is_refused() {
 
 #[test]
 fn parse_partial_fragment_declaring_empty_include_is_refused() {
-    // Depth one refuses the presence of the `include` KEY, not just a
-    // non-empty list: `include = []` in a fragment still declares include
-    // and is a likely authoring mistake (refuse now, not only when the
-    // operator later fills it in).
     let frag = "include = []\n\
                 [allowlist.runtime]\n\
                 hosts = []\n";
@@ -744,8 +646,6 @@ fn parse_partial_fragment_declaring_empty_include_is_refused() {
 
 #[test]
 fn parse_partial_duplicate_include_refused() {
-    // A repeated include entry is certainly an authoring mistake — refuse
-    // at parse, naming the entry.
     let toml = "schema_version = 1\ninclude = [\"base\", \"base\"]\n";
     let err = parse_partial(toml, ProfileRole::Tenant).expect_err("duplicate include must refuse");
     assert!(
@@ -758,9 +658,6 @@ fn parse_partial_duplicate_include_refused() {
 
 #[test]
 fn parse_partial_bad_fragment_name_refused() {
-    // Include entries pass the same lexical rail as tenant names
-    // (`[a-z][a-z0-9_-]{0,30}`), foreclosing path traversal without a
-    // second charset.
     for bad in ["../etc", "Base", ".hidden", "a/b", "with space", ""] {
         let toml = format!("include = [\"{bad}\"]\n");
         let err = parse_partial(&toml, ProfileRole::Tenant)
@@ -775,8 +672,7 @@ fn parse_partial_bad_fragment_name_refused() {
 
 #[test]
 fn parse_partial_fragment_name_length_boundary() {
-    // The length rail mirrors validate_name's MAX_NAME_LEN = 31 (total
-    // chars): 31 accepted, 32 refused. Pins the off-by-one the plan flagged.
+    // Mirrors validate_name's MAX_NAME_LEN = 31.
     let ok = "a".repeat(31);
     parse_partial(&format!("include = [\"{ok}\"]\n"), ProfileRole::Tenant)
         .expect("31-char include name must be accepted");
@@ -795,8 +691,6 @@ fn parse_partial_fragment_name_length_boundary() {
 
 #[test]
 fn parse_partial_schema_version_pre_check_runs_per_file() {
-    // schema_version is optional in a fragment, but validated against the
-    // supported set when present — same pre-check as tenant profiles.
     let frag = "schema_version = 2\n";
     let err = parse_partial(frag, ProfileRole::Fragment).expect_err("schema 2 must refuse");
     assert_eq!(
@@ -807,8 +701,6 @@ fn parse_partial_schema_version_pre_check_runs_per_file() {
 
 #[test]
 fn parse_partial_runs_per_file_ports_and_home_validators() {
-    // The existing per-entry validations run per file so a fragment's own
-    // mistakes refuse here (the load path names which file).
     let bad_ports = "[allowlist.runtime]\nhosts = [{ host = \"x\", ports = [] }]\n";
     parse_partial(bad_ports, ProfileRole::Fragment).expect_err("ports = [] must refuse");
     let bad_home = "[[shares]]\n\
@@ -823,7 +715,6 @@ fn parse_partial_runs_per_file_ports_and_home_validators() {
 
 #[test]
 fn merge_unions_runtime_hosts_fragments_first() {
-    // Per-tier host lists union in order: fragments first, profile last.
     let frag = parse_partial(
         "[allowlist.runtime]\nhosts = [\"frag.example\"]\n",
         ProfileRole::Fragment,
@@ -847,10 +738,6 @@ fn merge_unions_runtime_hosts_fragments_first() {
 
 #[test]
 fn merge_does_not_dedupe_repeated_host() {
-    // Union = concatenation, no dedupe. A host in both a fragment and
-    // the profile renders TWICE (the renderer + pf tables tolerate
-    // duplicates); a silent dedup would be invisible to the
-    // distinct-host union tests, so pin the duplicate explicitly.
     let frag = parse_partial(
         "[allowlist.runtime]\nhosts = [\"dup.example\"]\n",
         ProfileRole::Fragment,
@@ -874,9 +761,6 @@ fn merge_does_not_dedupe_repeated_host() {
 
 #[test]
 fn merge_unions_install_hosts_fragments_first() {
-    // The install tier is a Tier construction distinct from runtime — pin
-    // it independently so a copy-paste bug (e.g. reading `runtime` for
-    // both tiers) can't hide behind the runtime-union test above.
     let frag = parse_partial(
         "[allowlist.install]\nhosts = [\"frag.pkg\"]\n",
         ProfileRole::Fragment,
@@ -896,7 +780,6 @@ fn merge_unions_install_hosts_fragments_first() {
         merged.allowlist.install.hosts,
         vec![bare("frag.pkg"), bare("prof.pkg")]
     );
-    // Cross-check the tiers didn't bleed: install content stayed out of runtime.
     assert!(merged.allowlist.runtime.hosts.is_empty());
 }
 
@@ -954,7 +837,6 @@ fn merge_unions_shares_fragments_first() {
 
 #[test]
 fn merge_refuses_when_a_tier_is_never_declared() {
-    // Merged completeness: both allowlist tiers must be declared somewhere.
     let frag = parse_partial(
         "[allowlist.runtime]\nhosts = [\"x\"]\n",
         ProfileRole::Fragment,
@@ -987,8 +869,6 @@ fn merge_refuses_when_no_schema_version_anywhere() {
 
 #[test]
 fn merge_refuses_verbatim_tenant_path_collision() {
-    // The collision compare is verbatim (template strings,
-    // byte-for-byte), NOT expanded paths.
     let frag = parse_partial(
         "[allowlist.runtime]\nhosts = []\n\
          [[shares]]\n\
@@ -1008,7 +888,6 @@ fn merge_refuses_verbatim_tenant_path_collision() {
     )
     .unwrap();
     let err = merge(vec![frag, prof]).expect_err("tenant_path collision must refuse");
-    // Byte-exact pin of the canonical refusal.
     assert_eq!(
         err.message,
         "two shares map to the same tenant_path \"$HOME/src\"; drop the include or \
@@ -1018,11 +897,7 @@ fn merge_refuses_verbatim_tenant_path_collision() {
 
 #[test]
 fn parse_single_file_duplicate_tenant_path_stays_value_identical() {
-    // Value-identity gate (DoD #3): an include-free profile with two shares
-    // at the same tenant_path parsed before this feature (no collision
-    // check; last-symlink-wins downstream). The collision refusal is a
-    // union concern (parts > 1), so `parse` of a single file must NOT
-    // acquire a new refusal.
+    // The collision refusal applies only across parts; a single file must not acquire it.
     let toml = "schema_version = 1\n\
                 [allowlist.runtime]\n\
                 hosts = []\n\
@@ -1042,8 +917,6 @@ fn parse_single_file_duplicate_tenant_path_stays_value_identical() {
 
 #[test]
 fn merge_verbatim_collision_ignores_different_spelling() {
-    // `$HOME/foo` vs an explicit `/Users/dev/foo` spelling slips through —
-    // deterministic, documented, harmless (same class as a host listed twice).
     let frag = parse_partial(
         "[allowlist.runtime]\nhosts = []\n\
          [[shares]]\n\
@@ -1068,8 +941,6 @@ fn merge_verbatim_collision_ignores_different_spelling() {
 
 #[test]
 fn merge_include_only_profile_is_legal_when_fragment_complete() {
-    // A tenant profile whose only content is `include = ["base"]` is legal
-    // if the base is complete.
     let frag = parse_partial(
         "schema_version = 1\n\
          [allowlist.runtime]\n\
@@ -1087,9 +958,6 @@ fn merge_include_only_profile_is_legal_when_fragment_complete() {
 
 #[test]
 fn parse_equals_single_part_merge_for_include_free_profiles() {
-    // Backward-compat gate: for an include-free profile, `parse` is
-    // value-identical to `merge(vec![parse_partial(..)])` — the no-fragments
-    // composition. `Profile` equality ⇒ anchor byte-identity downstream.
     let toml = "schema_version = 1\n\
                 [allowlist.runtime]\n\
                 hosts = [\"a\"]\n\
@@ -1100,16 +968,7 @@ fn parse_equals_single_part_merge_for_include_free_profiles() {
     assert_eq!(via_parse, via_merge);
 }
 
-// --- [bootstrap] section -----------------------------------------------
-//
-// The profile grows an optional `[bootstrap]` table declaring shell
-// commands the `tenant bootstrap` verb runs as the tenant:
-// `commands = ["<shell string>", ...]`. Same backward-compat posture as
-// `[inbound]`: absent section / empty list deserialize to an empty Vec
-// (nothing to run). Merge concatenates fragments-first (one more list
-// beside ports); an empty/whitespace-only entry is an authoring mistake
-// refused per-file at parse (mirrors `ports = []`); duplicates are NOT
-// refused (concat-no-dedupe — idempotence makes run two a no-op).
+// --- [bootstrap] section ---
 
 fn toml_with_bootstrap_section(bootstrap_body: &str) -> String {
     format!(
@@ -1142,9 +1001,6 @@ fn parses_bootstrap_commands_in_declared_order() {
 
 #[test]
 fn absent_bootstrap_section_yields_empty_commands() {
-    // Backward-compat: profiles written before the bootstrap axis shipped
-    // have no `[bootstrap]` section. Parse must succeed and yield an empty
-    // Vec — nothing to run.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -1173,10 +1029,6 @@ fn empty_bootstrap_commands_list_yields_empty_commands() {
 
 #[test]
 fn default_profile_toml_parses_with_empty_bootstrap_commands() {
-    // The scaffold's `[bootstrap]` example entries are commented, so it
-    // parses to an empty command list — a `tenant bootstrap` against a
-    // fresh tenant is a quiet no-op. Value-identity of the parsed default
-    // is pinned by the default_profile_toml tests above.
     let profile = parse(&default_profile_toml()).expect("default toml must parse");
     assert!(
         profile.bootstrap.commands.is_empty(),
@@ -1187,10 +1039,6 @@ fn default_profile_toml_parses_with_empty_bootstrap_commands() {
 
 #[test]
 fn default_profile_toml_carries_commented_bootstrap_hint() {
-    // Scaffold carries a `[bootstrap]` section with commented example
-    // entries — discoverable when editing, but a fresh tenant's
-    // `tenant bootstrap` stays a quiet no-op (empty commands, pinned
-    // above).
     let toml = default_profile_toml();
     assert!(
         toml.contains("[bootstrap]"),
@@ -1204,9 +1052,7 @@ fn default_profile_toml_carries_commented_bootstrap_hint() {
 
 #[test]
 fn parse_refuses_empty_bootstrap_command() {
-    // Same posture as `ports = []`: a no-op command in the list is an
-    // authoring mistake. Refused at parse (per-file, in parse_partial);
-    // the load path names which file, so the message stays generic.
+    // The load path names the file, so the message stays generic.
     let toml = toml_with_bootstrap_section("[bootstrap]\ncommands = [\"echo ok\", \"\"]\n");
     let err = parse(&toml).expect_err("empty command string must refuse");
     assert!(
@@ -1229,8 +1075,6 @@ fn parse_refuses_whitespace_only_bootstrap_command() {
 
 #[test]
 fn parse_partial_bootstrap_legal_in_fragment() {
-    // A fragment may carry `[bootstrap]` — fleet-shared bootstrap via
-    // includes. The per-file empty-command refusal still applies.
     let frag = "[bootstrap]\ncommands = [\"echo frag\"]\n[allowlist.runtime]\nhosts = []\n";
     let p = parse_partial(frag, ProfileRole::Fragment).expect("bootstrap in fragment must parse");
     assert_eq!(p.bootstrap.commands, vec!["echo frag".to_string()]);
@@ -1263,8 +1107,6 @@ fn merge_unions_bootstrap_commands_fragments_first() {
 
 #[test]
 fn merge_does_not_dedupe_repeated_bootstrap_command() {
-    // Concat-no-dedupe doctrine: a command in both a fragment and the
-    // profile renders twice. Idempotence makes the second run a no-op.
     let frag = parse_partial(
         "[bootstrap]\ncommands = [\"echo same\"]\n[allowlist.runtime]\nhosts = []\n",
         ProfileRole::Fragment,

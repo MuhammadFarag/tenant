@@ -1,7 +1,4 @@
-//! Cross-cutting CLI parser tests. Per-verb tests live in
-//! `tests/cli_<verb>.rs` (cli_create / cli_destroy / cli_shell / cli_mode /
-//! cli_doctor); shared helpers — `NeverHostMachine`, `run_with`, `run_with_exec`,
-//! `TEST_HOST`, plus stub-builder factories — live in `tests/common/mod.rs`.
+//! Cross-cutting CLI parser tests; per-verb tests live in `tests/cli_<verb>.rs`.
 
 mod adapters;
 mod common;
@@ -21,16 +18,12 @@ fn dry_run_accepted_as_global_flag_before_subcommand() {
         &["--dry-run", "create", "dev"],
     );
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
-    // Dry-run: summary + prompt-preview, no substrate.
     assert_eq!(stdout, create_dry_run_block("dev", 600, 600, None));
 }
 
 #[test]
 fn top_level_help_includes_long_about_text() {
-    // clap renders `long_about` under `--help` and `about` under `-h`.
-    // Pin substrings from the long body: UID floor, per-tenant config
-    // path, and a verb-set anchor. Substring-level rather than byte-
-    // exact because clap's surrounding layout is its concern.
+    // Substring, not byte-exact: clap owns the surrounding layout.
     let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["--help"]);
     assert_eq!(code, 0, "--help exited with {code}; stderr={stderr:?}");
     assert!(
@@ -49,7 +42,6 @@ fn top_level_help_includes_long_about_text() {
 
 #[test]
 fn top_level_short_help_includes_about_one_liner() {
-    // `-h` surfaces the short `about` text instead of `long_about`.
     let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["-h"]);
     assert_eq!(code, 0, "-h exited with {code}; stderr={stderr:?}");
     assert!(
@@ -60,9 +52,6 @@ fn top_level_short_help_includes_about_one_liner() {
 
 #[test]
 fn shell_help_includes_examples_block() {
-    // `after_help` on Shell emits an Examples: block listing the three
-    // common invocations. Pin only the section header + one
-    // representative example.
     let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["shell", "--help"]);
     assert_eq!(code, 0);
     assert!(
@@ -77,9 +66,6 @@ fn shell_help_includes_examples_block() {
 
 #[test]
 fn shell_help_documents_directory_path_shapes() {
-    // The three accepted shapes and the tenant-side resolution rule are
-    // the whole contract of `-d`; the unquoted-`$HOME` warning is the
-    // footgun the relative form exists to avoid, so help must name it.
     let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["shell", "--help"]);
     assert_eq!(code, 0);
     for needle in [
@@ -89,9 +75,6 @@ fn shell_help_documents_directory_path_shapes() {
         "$HOME",
         "OPERATOR's home",
         "tenant shell alice -d projects/foo -- claude",
-        // The two rules an operator can hit and not understand: a `$`
-        // outside the leading `$HOME` refuses, and the pre-flight is
-        // conditional on a live sudo session.
         "anywhere else refuses",
         "sudo session is active",
     ] {
@@ -118,9 +101,6 @@ fn mode_help_includes_examples_block() {
 
 #[test]
 fn each_verb_help_includes_long_body() {
-    // Sanity: every verb's long-body docstring surfaces under
-    // `<verb> --help`. Picks a distinctive substring per verb so the
-    // test catches "doc rewrite dropped a key concept" regressions.
     let cases = &[
         ("create", "Provision a new tenant"),
         ("destroy", "Convergent"),
@@ -142,9 +122,6 @@ fn each_verb_help_includes_long_body() {
 
 #[test]
 fn setup_takes_no_positional_argument() {
-    // `setup` is host-wide — unlike create/destroy/mode/etc. it accepts
-    // NO tenant name. A stray positional must be a clap parse error
-    // (exit 2), not silently ignored.
     let (code, _stdout, stderr) = run_with(StubUserDirectory::default(), &["setup", "foo"]);
     assert_eq!(
         code, 2,

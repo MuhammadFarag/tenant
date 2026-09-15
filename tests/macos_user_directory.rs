@@ -1,9 +1,4 @@
-//! `MacosUserDirectory`-vs-dscl integration smoke test. Symmetric with
-//! `tests/macos_host_machine.rs`, which pins the `MacosHostMachine::describe_*`
-//! argv contract. This file pins that the per-call dscl wired into each
-//! `HostUserDirectory` trait method behaves correctly against a real macOS
-//! directory service. Gated on macOS — the rest of the test suite runs
-//! on any platform via `StubUserDirectory`.
+//! Smoke tests of `MacosUserDirectory` against the real macOS directory service.
 
 #[cfg(target_os = "macos")]
 use tenant::domain::{GroupName, HostUserDirectory, TenantUserName, UserId};
@@ -11,10 +6,7 @@ use tenant::domain::{GroupName, HostUserDirectory, TenantUserName, UserId};
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_reader_observes_host_state() {
-    // Smoke test that the real `MacosUserDirectory` translates dscl
-    // output into the trait return shape the rest of the codebase
-    // expects. `root` (UID 0) and `wheel` (group) are universally
-    // present on macOS, so this is host-stable.
+    // `root` and `wheel` exist on every macOS host.
     let reader = tenant::adapters::macos::MacosUserDirectory;
     assert!(
         reader
@@ -40,12 +32,7 @@ fn macos_reader_observes_host_state() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_reader_returns_false_for_absent_record() {
-    // Per-call dscl pattern-matches `eDSRecordNotFound` to distinguish
-    // "absent" (Ok(false) / Ok(None)) from real substrate breakage
-    // (Err). This pins the absence-detection contract — a regression
-    // that swapped the pattern match for "any nonzero ⇒ absent" would
-    // still pass `has_user`, but any other dscl failure would silently
-    // report absent instead of erroring.
+    // Only `eDSRecordNotFound` may read as absent; any other dscl failure must stay an Err.
     let reader = tenant::adapters::macos::MacosUserDirectory;
     assert!(
         !reader

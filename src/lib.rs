@@ -13,9 +13,6 @@ pub use terminal::Terminal;
 
 use domain::reporter::Reporter;
 
-// `run` takes a parsed `Cli` plus a `Terminal` bundle; argv-to-Cli
-// parsing lives at the binary boundary (main / test helpers) so the
-// core stays clap-error-routing free.
 pub fn run(
     cli: Cli,
     directory: &dyn domain::HostUserDirectory,
@@ -30,9 +27,7 @@ pub fn run(
     })
 }
 
-// Reads `host` from the passed-in machine before optionally wrapping —
-// so the dry-run wrapper inherits the real env-var answer rather than a
-// placeholder.
+// `host` comes from the real machine so dry-run shows the real operator.
 fn with_active_machine<R>(
     machine: &dyn domain::HostMachine,
     dry_run: bool,

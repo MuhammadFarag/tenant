@@ -5,34 +5,11 @@ mod common;
 use adapters::*;
 use common::*;
 
-// ================================================================
-// Inbound verb — the inbound loopback posture axis
-// ================================================================
-//
-// `tenant inbound <name> restricted|permissive` is mode's sibling on a
-// SECOND axis: per-tenant INBOUND loopback (TCP) posture, orthogonal to
-// the egress runtime/install tier. Locked design (see CLAUDE.md doctrine
-// + .features/loopback-cross-tenant-isolation.md):
-// - `restricted` (DEFAULT): inbound loopback allowed only on the
-//   profile's declared `[inbound] ports`; empty ⇒ locked.
-// - `permissive` (temporary widen): all inbound loopback TCP; narrows
-//   back like `install`.
-// - Axis composition (implicit-current-mode, no state file): the inbound
-//   verb renders the EGRESS axis at runtime tier (steady state) and the
-//   inbound axis at the requested level. The two widenings do NOT compose
-//   across separate commands.
-// - HONEST SCOPE: `restricted` is surface-reduction, NOT host-vs-peer
-//   isolation (a declared port is reachable by host AND peer tenants).
-
-// ----------------------------------------------------------------
-// Clap parse + dry-run vertical slice
-// ----------------------------------------------------------------
+// --- Clap parse + dry-run ---
 
 #[test]
 fn inbound_restricted_dry_run_default_shows_intent() {
-    // Smallest red→green. Dry-run swaps in DryRunHostMachine whose
-    // read_profile returns `default_profile_toml()` (empty inbound
-    // ports), so the writer's read+parse+render path completes.
+    // DryRunHostMachine::read_profile returns the default profile (no inbound ports).
     let (code, stdout, stderr) = run_with(
         stub_with_tenant("dev"),
         &["inbound", "dev", "restricted", "--dry-run"],
@@ -43,7 +20,6 @@ fn inbound_restricted_dry_run_default_shows_intent() {
 
 #[test]
 fn inbound_permissive_dry_run_default_shows_intent() {
-    // Symmetric to the restricted test. Permissive InboundLevel parses too.
     let (code, stdout, stderr) = run_with(
         stub_with_tenant("dev"),
         &["inbound", "dev", "permissive", "--dry-run"],
@@ -54,8 +30,6 @@ fn inbound_permissive_dry_run_default_shows_intent() {
 
 #[test]
 fn inbound_rejects_unknown_level() {
-    // ValueEnum accepts only `restricted` and `permissive`; anything
-    // else fails parse with exit 2 before dispatch runs.
     let (code, stdout, _stderr) = run_with(stub_with_tenant("dev"), &["inbound", "dev", "bogus"]);
     assert_eq!(code, 2, "clap should reject unknown level");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -63,26 +37,20 @@ fn inbound_rejects_unknown_level() {
 
 #[test]
 fn inbound_requires_name() {
-    // `tenant inbound` with no positional → clap parse error (exit 2).
     let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["inbound"]);
     assert_eq!(code, 2, "clap should reject missing name");
 }
 
 #[test]
 fn inbound_requires_level() {
-    // `tenant inbound dev` (no level) → clap parse error (exit 2).
     let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["inbound", "dev"]);
     assert_eq!(code, 2, "clap should reject missing level");
 }
 
-// ----------------------------------------------------------------
-// Validation + eligibility refusals (representative subset)
-// ----------------------------------------------------------------
+// --- Validation + eligibility refusals ---
 
 #[test]
 fn inbound_rejects_empty_name() {
-    // Lexical validation runs before eligibility; empty name trips
-    // NameError::Empty and never consults the HostUserDirectory.
     let (code, stdout, stderr) =
         run_with(StubUserDirectory::default(), &["inbound", "", "restricted"]);
     assert_eq!(code, 64);
@@ -92,7 +60,6 @@ fn inbound_rejects_empty_name() {
 
 #[test]
 fn inbound_refuses_when_tenant_absent() {
-    // Empty StubUserDirectory → NotPresent → refuse_inbound_absent. Exit 64.
     let (code, stdout, stderr) = run_with(
         StubUserDirectory::default(),
         &["inbound", "ghost", "restricted"],
@@ -107,8 +74,6 @@ fn inbound_refuses_when_tenant_absent() {
 
 #[test]
 fn inbound_refuses_below_floor() {
-    // Tenant-floor guard: an account exists with a positive UID below
-    // TENANT_UID_FLOOR (600) → refuse.
     let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
@@ -125,7 +90,6 @@ fn inbound_refuses_below_floor() {
 
 #[test]
 fn inbound_refuses_system_account() {
-    // System-account refusal: `has_user` true, `uid_for` None.
     let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
         ..Default::default()
@@ -141,7 +105,6 @@ fn inbound_refuses_system_account() {
 
 #[test]
 fn inbound_surfaces_user_directory_error_when_eligibility_probe_fails() {
-    // `destroy_eligibility` is shared by inbound; the frame names 'inbound'.
     let stub = StubUserDirectory {
         fail_has_user: directory_fail_once(),
         ..Default::default()
@@ -154,16 +117,10 @@ fn inbound_surfaces_user_directory_error_when_eligibility_probe_fails() {
     );
 }
 
-// ----------------------------------------------------------------
-// Op-shape — restricted (egress at runtime, inbound from profile ports)
-// ----------------------------------------------------------------
+// --- Op shape: restricted ---
 
 #[test]
 fn inbound_restricted_op_shape_renders_profile_ports() {
-    // Restricted resolves the profile's declared `[inbound] ports`. The
-    // EGRESS axis renders at RUNTIME tier (steady state — inbound doesn't
-    // control egress). Two-op composition: InstallAnchor + Reload. Light
-    // scope: AddHost fires, no Grant / cowork.
     let profile = format!(
         "{}\n[inbound]\nports = [\n  3000,\n]\n",
         profile_with_hosts(&["api.example.com"], &["pypi.org"])
@@ -175,8 +132,6 @@ fn inbound_restricted_op_shape_renders_profile_ports() {
         &["inbound", "dev", "restricted"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Egress = runtime tier only (install hosts EXCLUDED); inbound =
-    // restricted with the profile's declared port.
     let expected_body = tenant::firewall::render_anchor(
         "dev",
         &common::egress(&["api.example.com"]),
@@ -197,8 +152,7 @@ fn inbound_restricted_op_shape_renders_profile_ports() {
 
 #[test]
 fn inbound_restricted_with_empty_ports_renders_locked() {
-    // Empty `[inbound] ports` (or absent section) is the LOCKED posture:
-    // no inbound pass rendered. The default profile has no declared ports.
+    // The default profile declares no inbound ports.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, stderr) = run_with_exec(
@@ -220,8 +174,6 @@ fn inbound_restricted_with_empty_ports_renders_locked() {
 
 #[test]
 fn inbound_uses_light_reapply_skipping_recursive_acl_passes() {
-    // Light reapply: acl_ops empty (no Grant), account_ops omits
-    // EnsureCoworkDir; PF + AddHost + per-share EnsureSymlinkAsUser fire.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) = run_with_exec(
@@ -263,14 +215,10 @@ fn inbound_uses_light_reapply_skipping_recursive_acl_passes() {
     );
 }
 
-// ----------------------------------------------------------------
-// Op-shape — permissive (all inbound loopback)
-// ----------------------------------------------------------------
+// --- Op shape: permissive ---
 
 #[test]
 fn inbound_permissive_op_shape_renders_permissive_section() {
-    // Permissive collapses the inbound half to a single all-ports pass,
-    // regardless of declared ports. Egress still renders at runtime tier.
     let profile = format!(
         "{}\n[inbound]\nports = [\n  3000,\n]\n",
         profile_with_hosts(&["api.example.com"], &[])
@@ -296,9 +244,7 @@ fn inbound_permissive_op_shape_renders_permissive_section() {
     }
 }
 
-// ----------------------------------------------------------------
-// Display — standard + verbose + dry-run + confirm
-// ----------------------------------------------------------------
+// --- Display: standard, verbose, dry-run, confirm ---
 
 #[test]
 fn inbound_real_standard_emits_only_post_exec_confirmation() {
@@ -408,7 +354,6 @@ fn inbound_dry_run_verbose_shows_plan_no_echo() {
 
 #[test]
 fn inbound_confirm_y_default_proceeds_on_enter() {
-    // Y-default prompt (like mode): a bare ENTER proceeds.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) = run_with_stdin(
@@ -446,15 +391,11 @@ fn inbound_dry_run_bypasses_injected_host_machine() {
     );
 }
 
-// ----------------------------------------------------------------
-// Failure paths
-// ----------------------------------------------------------------
+// --- Failure paths ---
 
 #[test]
 fn inbound_read_profile_failure_surfaces_before_prompt() {
-    // No `with_existing_profile` → read_profile returns a "not found"
-    // ProfileError. Dispatch builds the plan BEFORE the prompt, so the
-    // failure exits pre-section-divider with empty stdout.
+    // No `with_existing_profile`: read_profile fails before the prompt.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -476,8 +417,6 @@ fn inbound_read_profile_failure_surfaces_before_prompt() {
 
 #[test]
 fn inbound_install_anchor_failure_surfaces() {
-    // InstallAnchor (first firewall op) fails → inbound_failed with the
-    // FirewallError display. Reload should NOT run after a failed install.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_firewall_op(
@@ -521,7 +460,6 @@ fn inbound_install_anchor_failure_surfaces() {
 
 #[test]
 fn inbound_reload_failure_surfaces_without_recovery() {
-    // Reload fails → inbound_failed. No recovery sequence fires.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_firewall_op(

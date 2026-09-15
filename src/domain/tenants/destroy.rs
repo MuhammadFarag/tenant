@@ -1,7 +1,3 @@
-//! Destroy-verb error type, the eligibility classifier that gates
-//! destroy at dispatch, and the `Tenants::destroy` /
-//! `Tenants::destroy_orphan_group` orchestrators.
-
 use crate::allocation::TENANT_UID_FLOOR;
 use crate::domain::host_machine::WritableOp;
 use crate::domain::reporter::Reporter;
@@ -15,10 +11,8 @@ use crate::profile::ProfileError;
 
 use super::{Tenants, cowork_dir_path, tenant_share_group_name};
 
-/// Failure surface for destroy. Unlike create, destroy has
-/// no recovery path on Firewall reload failure — the symmetric "restore
-/// from backup" would re-introduce a reference to the already-removed
-/// anchor file, putting the host in a worse state.
+/// No restore-from-backup on reload failure (unlike create): it would re-reference the
+/// already-removed anchor file and leave the host worse off.
 #[derive(Debug)]
 pub(crate) enum DestroyError {
     Account(AccountError),
@@ -32,11 +26,8 @@ impl From<AccountError> for DestroyError {
     }
 }
 
-/// Destroy-side classification. `OrphanGroup` is the user-absent /
-/// suffixed-group-present residue from a prior partial failure.
-/// `SystemAccount` is the account-present / no-positive-UID case
-/// (filtered out of `uid_by_name` upstream, so the floor predicate
-/// can't bind to a value).
+/// `OrphanGroup`: user gone, share group left by a partial create. `SystemAccount`:
+/// present with no positive UID.
 #[derive(Debug)]
 pub enum Eligibility {
     Destroyable,
@@ -70,11 +61,9 @@ impl<'a> Tenants<'a> {
         host: &HostUserName,
         reporter: &mut Reporter,
     ) -> Result<(), DestroyError> {
-        // PF teardown sits after account/profile cleanup so the tenant
-        // can't open new sockets while we're tearing down their ruleset.
-        // FlushAnchor is load-bearing: without it, the previous tenant's
-        // rules persist in kernel memory under the orphaned anchor name
-        // and the next tenant getting the same UID inherits them.
+        // PF teardown runs after account/profile cleanup so the tenant can't open new sockets
+        // mid-teardown. FlushAnchor is load-bearing: pfctl doesn't GC an anchor whose
+        // `load anchor` line was removed, so the next tenant with the same UID would inherit it.
         let group = tenant_share_group_name(name.as_str());
         let delete_user = AccountOp::DeleteTenantUser { name: name.into() };
         let probe = AccountOp::LookupUserRecord { name: name.into() };
@@ -103,20 +92,8 @@ impl<'a> Tenants<'a> {
             Err(other) => return Err(DestroyError::Account(other)),
         }
 
-        // Remove the operator-side stashed password. Warn-and-
-        // continue: a tenant created before keychain bootstrap landed
-        // has no stash — `NotFound` is the convergent case (no `✓`
-        // narration, since nothing actually mutated state). Other
-        // failures are operator-side data we couldn't clean; surface
-        // a warning but don't fail the whole verb.
-        //
-        // `step()` fires unconditionally — matches the verbose-mode
-        // contract used by every other op ("`$` echo says what was
-        // attempted, regardless of outcome"). `progress()` fires only
-        // on Ok — matches `Tenants::run`'s semantics. On the
-        // convergent NotFound path, the `$` line still emits in
-        // verbose mode so operators scanning logs see the substrate
-        // command that ran.
+        // Hand-rolled instead of `self.run`: `NotFound` (nothing stashed) converges without a
+        // ✓, and any other failure warns rather than failing the verb.
         let delete_stash = KeychainOp::DeleteStashedPassword { name: name.into() };
         reporter.step(delete_stash.op_ref());
         match self.machine.execute_keychain(&delete_stash) {
@@ -160,9 +137,6 @@ impl<'a> Tenants<'a> {
         Ok(())
     }
 
-    /// Convergence path when the tenant user is already absent but the
-    /// suffixed group (and possibly anchor / pf.conf reference) remain.
-    /// Every step is substrate-idempotent so the path is single-pass.
     pub(crate) fn destroy_orphan_group(
         &self,
         name: &TenantUserName,
@@ -185,16 +159,8 @@ impl<'a> Tenants<'a> {
 
         self.run(&remove_host, reporter)?;
 
-        // Same operator-side stash cleanup as `destroy`. A tenant
-        // that landed in OrphanGroup state via a partial create may
-        // still have a stashed password; without this, the entry
-        // lingers in the operator's keychain indefinitely. Same
-        // warn-and-continue posture as the main destroy path:
-        // `step()` fires unconditionally (verbose-mode `$` echo
-        // matches every other op); `progress()` fires only on Ok.
-        // `NotFound` is the convergent legacy-tenant case (no `✓`,
-        // just the `$` line in verbose); other failures emit a
-        // warning but don't fail the whole convergence path.
+        // TODO(smell): stash cleanup + PF teardown tail duplicate `destroy`; extract a shared helper
+        // A partial create can leave a stash behind, so orphan cleanup removes it too.
         let delete_stash = KeychainOp::DeleteStashedPassword { name: name.into() };
         reporter.step(delete_stash.op_ref());
         match self.machine.execute_keychain(&delete_stash) {
@@ -238,12 +204,6 @@ impl<'a> Tenants<'a> {
     }
 }
 
-/// Probe the cowork dir at the tail of destroy. Host-side probe (no
-/// sudo, no tenant impersonation) so it's timing-independent — the
-/// tenant user has been deleted by now on the full path and was never
-/// present on the orphan path; both converge here. Absence → silent
-/// noop; `Dir | Symlink | Other` → "left intact" notice; probe error
-/// → `⚠` stderr warning and destroy completes.
 fn report_cowork_dir_if_present(
     machine: &dyn HostMachine,
     name: &TenantUserName,

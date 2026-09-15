@@ -1,17 +1,3 @@
-//! E2E coverage for the `tenant reload [<name>]` verb — the
-//! operator-facing "I edited the profile, apply it" surface. The
-//! verb composes PF reapply (InstallAnchor + Reload at runtime tier)
-//! and the share reapply substrate (AclOp::Grant + EnsureDirAsUser
-//! parent + EnsureSymlinkAsUser per `[[shares]]` entry).
-//!
-//! Locked behavior:
-//! - Always lands at runtime tier (no tier flag — `tenant mode
-//!   <name> install` keeps the tier-swap role)
-//! - No-arg form walks every tenant, continues on per-tenant failure,
-//!   reports a summary, exits 0 if all clean / 74 if any tripped
-//! - Single-tenant form refuses with EX_USAGE on absent / below-floor
-//!   / system-account names (mirrors mode + shell + doctor)
-
 use std::path::PathBuf;
 
 use tenant::domain::{
@@ -24,35 +10,24 @@ mod common;
 use adapters::*;
 use common::*;
 
-// ----------------------------------------------------------------
-// Clap parse + dry-run vertical slice
-// ----------------------------------------------------------------
+// --- Clap parse + dry-run ---
 
 #[test]
 fn reload_single_tenant_dry_run_default_emits_intent_only() {
-    // Smallest red→green. DryRunHostMachine returns default_profile_toml
-    // (no shares) from read_profile, so the substrate is a no-op
-    // share-wise; PF reapply renders empty allowlist. Standard +
-    // dry-run emits the intent line only (no plan).
     let (code, stdout, stderr) = run_with(stub_with_tenant("dev"), &["reload", "dev", "--dry-run"]);
     assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     assert_eq!(stdout, reload_dry_run_block("dev", None));
 }
 
+// TODO(smell): rename — this test runs real mode, not --dry-run.
 #[test]
 fn reload_no_arg_form_dry_run_with_no_tenants_emits_summary_only() {
-    // Empty HostUserDirectory → tenant_names() empty → no-tenant summary
-    // explicitly tells the operator "nothing to do" so the output
-    // isn't silent. Real-mode prints the line; dry-run is silent on
-    // summaries (would_done is silent).
     let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["reload"]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "No tenants on this host to reload.\n");
 }
 
-// ----------------------------------------------------------------
-// Validation + eligibility refusals
-// ----------------------------------------------------------------
+// --- Validation + eligibility refusals ---
 
 #[test]
 fn reload_rejects_empty_name() {
@@ -126,15 +101,10 @@ fn reload_refuses_system_account() {
     );
 }
 
-// ----------------------------------------------------------------
-// Real-mode happy path + share substrate
-// ----------------------------------------------------------------
+// --- Real-mode happy path + share substrate ---
 
 #[test]
 fn reload_single_tenant_runs_pf_and_share_substrate() {
-    // Tenant with one rw share. Reload should:
-    //   1. PF: InstallAnchor + Reload (at runtime tier)
-    //   2. Shares: AclOp::Grant + EnsureSymlinkAsUser
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
@@ -157,7 +127,6 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
         ),
     );
 
-    // PF: exactly InstallAnchor + Reload (no recovery / setup ops).
     let fw_ops = exec.firewall_ops();
     assert_eq!(fw_ops.len(), 2, "expected 2 firewall ops, got {fw_ops:?}");
     assert!(matches!(fw_ops[0], FirewallOp::InstallAnchor { .. }));
@@ -177,7 +146,6 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
         );
     }
 
-    // Shares: one Grant on /tmp at rw.
     let acl_ops = exec.acl_ops();
     assert_eq!(
         acl_ops,
@@ -188,7 +156,7 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
         }]
     );
 
-    // Symlink op (no EnsureDir for $HOME-direct entries).
+    // No EnsureDir for `$HOME`-direct entries.
     let symlinks: Vec<_> = exec
         .account_ops()
         .into_iter()
@@ -199,11 +167,6 @@ fn reload_single_tenant_runs_pf_and_share_substrate() {
 
 #[test]
 fn reload_renders_per_host_egress_ports_into_anchor_body() {
-    // End-to-end wiring for per-host egress ports: a mixed runtime
-    // allowlist (a bare 443 host + a `[443, 22]` host) must reach the
-    // recorded InstallAnchor body as a distinct `<allowed_443_22>` table +
-    // its own pass rule, while the bare host stays in the default
-    // `<allowed>` group. Read → parse → hosts_for_level → render_anchor.
     let toml = "schema_version = 1\n\
                 \n\
                 [allowlist.runtime]\n\
@@ -223,12 +186,10 @@ fn reload_renders_per_host_egress_ports_into_anchor_body() {
         FirewallOp::InstallAnchor { body, .. } => body,
         other => panic!("expected InstallAnchor first, got {other:?}"),
     };
-    // Bare host stays in the default group.
     assert!(
         body.contains("table <allowed> persist { \\\n  api.anthropic.com \\\n}\n"),
         "bare host must render in the default <allowed> table, got body:\n{body}"
     );
-    // The `[443, 22]` host gets its own group table + rule.
     assert!(
         body.contains("table <allowed_443_22> persist { \\\n  github.com \\\n}\n"),
         "expected an <allowed_443_22> table for the ports-declaring host, got body:\n{body}"
@@ -243,10 +204,6 @@ fn reload_renders_per_host_egress_ports_into_anchor_body() {
 
 #[test]
 fn reload_profile_read_failure_surfaces_before_prompt() {
-    // Behavior pin: dispatch builds the reapply plan BEFORE the
-    // confirm prompt, so a missing profile surfaces pre-prompt with
-    // no stdout output. Don't ask the operator to confirm an action
-    // already known to fail.
     let exec = StubHostMachine::new(); // no profile preloaded
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -265,18 +222,10 @@ fn reload_profile_read_failure_surfaces_before_prompt() {
     );
 }
 
+// TODO(smell): DryRunHostMachine::read_profile ignores the profile; --dry-run never shows shares.
 #[test]
 fn reload_verbose_plan_block_includes_share_ops() {
-    // The verbose plan block lives in the summary, rendered only
-    // when the operator is interactive OR in dry-run. Scripted
-    // real-mode drops the plan (solo-Mac scope; cleaner log trace).
-    // Dry-run can't be used here because `DryRunHostMachine::read_profile`
-    // returns the default empty-shares TOML regardless of the
-    // underlying stub's seeded profile, so the plan would render
-    // PF-only. Solve by simulating an interactive (TTY=true) operator
-    // who answers `y`; the live host machine reads the share-bearing
-    // profile, the summary renders the share ops in the intent-leads
-    // layout, the prompt is consumed, and execution proceeds.
+    // A simulated TTY operator answering `y` stands in for --dry-run.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, stdout, _stderr) = run_with_stdin(
@@ -326,8 +275,6 @@ fn reload_verbose_plan_block_includes_share_ops() {
 
 #[test]
 fn reload_single_tenant_with_existing_symlink_at_tenant_path_succeeds_idempotently() {
-    // PathKind::Symlink coverage on the reload path: the substrate
-    // proceeds (existing symlink is the idempotent re-link case).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -343,10 +290,7 @@ fn reload_single_tenant_with_existing_symlink_at_tenant_path_succeeds_idempotent
 
 #[test]
 fn reload_single_tenant_verbose_emits_per_op_echo() {
-    // Scripted-real-verbose drops the upfront plan; section divider
-    // opens, `$` echo + ✓ progress lines fire per substrate op, Done
-    // section + closing line. PF ops + per-share ops both appear in
-    // the echo block.
+    // Non-TTY real run drops the verbose plan: divider + `$` echo + ✓ only.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, stdout, _stderr) = run_with_exec(
@@ -359,7 +303,6 @@ fn reload_single_tenant_verbose_emits_per_op_echo() {
         stdout.starts_with(&format!("{}\n", section_line("Reloading tenant 'dev'"))),
         "section divider first: {stdout:?}"
     );
-    // Echo: PF ops + per-share ops (AclOp + EnsureSymlinkAsUser).
     assert!(
         stdout.contains("$ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
         "echo should show InstallAnchor: {stdout:?}"
@@ -383,8 +326,6 @@ fn reload_single_tenant_verbose_emits_per_op_echo() {
 
 #[test]
 fn reload_with_default_profile_runs_pf_only_no_share_ops() {
-    // Default profile has no shares → share substrate is a no-op.
-    // PF reapply still fires.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
@@ -406,15 +347,10 @@ fn reload_with_default_profile_runs_pf_only_no_share_ops() {
     );
 }
 
-// ----------------------------------------------------------------
-// Substrate-failure framing
-// ----------------------------------------------------------------
+// --- Substrate-failure framing ---
 
 #[test]
 fn reload_firewall_failure_surfaces_with_reload_specific_wording() {
-    // The mode-verb's `mode_failed` says "failed to apply firewall
-    // mode" — reload's framing says "failed to reload firewall"
-    // (no tier-swap implied).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -439,9 +375,6 @@ fn reload_firewall_failure_surfaces_with_reload_specific_wording() {
 
 #[test]
 fn reload_refuses_when_host_path_missing() {
-    // HostPathMissing refusal applied through reload: frame says
-    // "cannot reload" (distinct from mode-verb's "cannot apply
-    // mode").
     let toml = profile_with_shares(
         &[],
         &[],
@@ -462,7 +395,6 @@ fn reload_refuses_when_host_path_missing() {
 
 #[test]
 fn reload_refuses_when_tenant_path_occupied() {
-    // TenantPathOccupied refusal applied through reload.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -479,12 +411,7 @@ fn reload_refuses_when_tenant_path_occupied() {
     );
 }
 
-/// Symlink at the cowork path between sessions (corrupt prior op,
-/// hand-edit, leftover) silently steers a subsequent `mkdir -p` to
-/// the link target. Reload pre-flight kind-checks the cowork path
-/// inside `build_reapply_plan` and refuses BEFORE any substrate op
-/// fires — exit 74 + `mode_account_failed` frame, zero substrate
-/// invocations.
+/// A symlink at the cowork path would steer `mkdir -p` to its target; pre-flight refuses first.
 #[test]
 fn reload_refuses_when_cowork_path_is_a_symlink() {
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
@@ -508,9 +435,6 @@ fn reload_refuses_when_cowork_path_is_a_symlink() {
         stderr.contains("a symlink to /tmp/elsewhere"),
         "stderr should name the symlink target: {stderr:?}"
     );
-    // Substrate must not have been touched: pre-flight refuses inside
-    // build_reapply_plan, so neither the PF reapply nor the AddHost /
-    // EnsureCoworkDir / share ops reach the recorder.
     assert!(
         exec.firewall_ops().is_empty(),
         "no firewall ops expected on pre-flight refusal: {:?}",
@@ -528,9 +452,6 @@ fn reload_refuses_when_cowork_path_is_a_symlink() {
     );
 }
 
-/// Regular file at the cowork path (corrupt prior op, leftover from
-/// a hand-edit) trips the same pre-flight as the symlink case. Same
-/// exit code + frame; covers the `PathKind::Other` branch.
 #[test]
 fn reload_refuses_when_cowork_path_is_a_regular_file() {
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
@@ -563,11 +484,9 @@ fn reload_refuses_when_cowork_path_is_a_regular_file() {
     );
 }
 
+// TODO(smell): rename ModeError + Reporter mode_*_failed to reapply_*; reload + shell use them.
 #[test]
 fn reload_routes_acl_failure_via_reapply_arms() {
-    // Substrate failure on AclOp::Grant surfaces via the shared
-    // `mode_acl_failed` framing (no verb-specific wording for ACL
-    // arm — reuses the substrate-action phrase).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -614,20 +533,15 @@ fn reload_routes_symlink_failure_via_reapply_arms() {
     );
 }
 
-// ----------------------------------------------------------------
-// No-arg form (walk every tenant)
-// ----------------------------------------------------------------
+// --- No-arg form (walk every tenant) ---
 
 #[test]
 fn reload_no_arg_walks_all_tenants_in_alphabetical_order() {
-    // tenant_names() returns alphabetical order so output is stable
-    // across runs. Verify by exit code + summary line shape.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_existing_profile("staging", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Summary line at the tail.
     assert!(
         stdout.contains("Reloaded 2 tenant(s).\n"),
         "expected summary line: {stdout:?}"
@@ -636,21 +550,15 @@ fn reload_no_arg_walks_all_tenants_in_alphabetical_order() {
 
 #[test]
 fn reload_no_arg_continues_on_per_tenant_failure() {
-    // One tenant fails, the walk continues to the next.
-    // Inject a profile-read failure for 'dev' but leave 'staging'
-    // healthy. The walk emits per-tenant failure inline + a summary
-    // counting 1 failure.
     let exec = StubHostMachine::new()
         .with_existing_profile("staging", &tenant::profile::default_profile_toml());
     // 'dev' has no profile preloaded → read_profile fails for dev.
     let (code, stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
     assert_eq!(code, 74, "EX_IOERR expected on any per-tenant failure");
-    // Failure line for dev appears on stderr.
     assert!(
         stderr.contains("failed to read profile") && stderr.contains("'dev'"),
         "expected per-tenant failure for dev: {stderr:?}"
     );
-    // Summary: 1 succeeded, 1 failed.
     assert!(
         stdout.contains("Reloaded 1 of 2 tenant(s); 1 failed.\n"),
         "expected per-failure summary line: {stdout:?}"
@@ -659,11 +567,7 @@ fn reload_no_arg_continues_on_per_tenant_failure() {
 
 #[test]
 fn reload_all_continues_when_one_tenants_share_group_gid_read_fails() {
-    // The gid-read failure channel must also be continue-on-failure in
-    // the multi-tenant walk, not abort it. Both tenants have profiles;
-    // the one-shot `fail_next_share_group_gid` trips the FIRST tenant
-    // processed (alphabetical: 'dev'), so 'dev' fails its plan-build
-    // and 'staging' continues and succeeds.
+    // One-shot gid failure trips the first tenant alphabetically ('dev'); 'staging' still succeeds.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_existing_profile("staging", &tenant::profile::default_profile_toml())
@@ -695,16 +599,6 @@ fn reload_no_arg_emits_no_op_summary_when_no_tenants() {
 
 #[test]
 fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
-    // Catch-up posture: every reload runs `AddHostToShareGroup`
-    // regardless of whether the host is currently a member. The
-    // substrate is idempotent (`dseditgroup -o edit -a` on an existing
-    // member is a silent noop in production; the stub records every
-    // call as one entry in account_ops). Stub default is `true` for
-    // host_in_group; we explicitly set `true` here too to make the
-    // intent visible — the test pins "AddHost fires in the plan even
-    // when state says member already" so a future regression that
-    // tries to optimize the catch-up away via host_in_group pre-check
-    // trips this.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_host_in_group("operator", "dev-tenant-share", true);
@@ -718,9 +612,6 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
                 group: "dev-tenant-share".into(),
                 host: "operator".into(),
             },
-            // Tenant-side membership catch-up sits beside the host-side
-            // one: re-assert the tenant's primary group (OS-update
-            // resilience) before the filesystem fixups.
             AccountOp::EnsurePrimaryGroup {
                 name: "dev".into(),
                 gid: GroupId(600),
@@ -738,12 +629,6 @@ fn reload_fires_add_host_unconditionally_even_when_host_already_member() {
 
 #[test]
 fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
-    // Reapply ordering lock: AddHost + EnsureCoworkDir run INSIDE
-    // execute_reapply_plan AFTER the PF reapply (InstallAnchor +
-    // Reload) and BEFORE the per-share ops (Acl::Grant +
-    // EnsureSymlinkAsUser). Verify by observing the cross-domain
-    // order: firewall_ops happen first, then the account ops
-    // (AddHost + EnsureCoworkDir), then the acl op.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, _stderr) =
@@ -776,16 +661,7 @@ fn reload_account_ops_position_pins_add_host_after_pf_before_shares() {
     );
 }
 
-// ================================================================
-// Pre-exec doctor audit: reload scope
-// ================================================================
-//
-// Reload's audit considers PfDisabled host-wide + the full per-tenant
-// drift set (PfRuleDrift, AnchorBodyDrift, AclDrift, SymlinkDrift,
-// HostNotInShareGroup) — same per-tenant set as Shell because reload
-// is the verb whose job IS share convergence. EnvLeak is OUT
-// (shell-specific operator impact; reload's share substrate is
-// mkdir/ln/chmod, no ssh-agent reach).
+// --- Pre-exec doctor audit ---
 
 #[test]
 fn reload_pre_exec_doctor_silent_when_host_is_clean() {
@@ -824,7 +700,6 @@ fn reload_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
 
 #[test]
 fn reload_pre_exec_doctor_aggregates_host_not_in_share_group_warning() {
-    // HostNotInShareGroup → 1 warning aggregate. Singular noun.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_host_in_group("operator", "dev-tenant-share", false);
@@ -843,8 +718,6 @@ fn reload_pre_exec_doctor_aggregates_host_not_in_share_group_warning() {
 
 #[test]
 fn reload_pre_exec_doctor_scope_excludes_env_leak() {
-    // EnvLeak is Shell-only — reload's share substrate doesn't reach
-    // for ssh-agent socket. Audit must not aggregate any warning.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_env_policy_content("");
@@ -882,26 +755,14 @@ fn reload_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
     );
 }
 
+// TODO(smell): HostMachine probe names don't say which need sudo; tests explain the gate instead.
 #[test]
 fn reload_pre_exec_doctor_quiet_skips_sudo_probes_when_sudo_uncached() {
-    // When the operator has no cached sudo timestamp, the pre-exec
-    // audit must skip the GENUINE sudo probes
-    // and emit ZERO failure frames — even when those probes are rigged
-    // to fail. That keeps a fresh terminal free of probe-failure spam and
-    // double-printed frames structurally (uncached ⇒ zero sudo probes ⇒
-    // zero frames). The auth-free probes (host_in_group,
-    // cowork, anchor-body) are NOT suppressed by the gate — they run
-    // regardless of cache state; this test keeps the host clean on
-    // those so the only observable effect of `uncached` is the
-    // sudo-probe suppression. The auth-free-findings-still-surface
-    // contract is pinned by
-    // `reload_pre_exec_doctor_auth_free_probes_surface_when_sudo_uncached`.
+    // Host kept clean on auth-free probes so uncached's only effect is sudo-probe suppression.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_sudo_session_cached(false)
-        // Rig every sudo-gated probe to fail: if any were invoked, its
-        // failure frame would surface on stderr. The gate must skip
-        // them all before they fire.
+        // Rigged to fail: any sudo probe that ran would print a failure frame.
         .fail_next_pf_status(FirewallError::NonZero {
             code: 1,
             stderr: "sudo: a password is required".into(),
@@ -929,11 +790,7 @@ fn reload_pre_exec_doctor_quiet_skips_sudo_probes_when_sudo_uncached() {
         !stdout.contains("\u{26a0} Doctor:"),
         "clean auth-free state + suppressed sudo probes emits no aggregate; stdout={stdout:?}"
     );
-    // host_in_group (dseditgroup checkmember) is AUTH-FREE, so the
-    // tightened gate runs it regardless of cache state. The verb's own
-    // execution adds the host via AddHostToShareGroup but never CHECKS
-    // membership, so the pre-pass is the only caller — uncached means
-    // it MUST still have fired (the inverse of the pre-tightening pin).
+    // host_in_group is auth-free, so it runs even uncached.
     assert!(
         !exec.host_in_group_invocations().is_empty(),
         "auth-free host_in_group must run even when uncached; invocations={:?}",
@@ -943,22 +800,12 @@ fn reload_pre_exec_doctor_quiet_skips_sudo_probes_when_sudo_uncached() {
 
 #[test]
 fn reload_pre_exec_doctor_auth_free_probes_surface_when_sudo_uncached() {
-    // The fully auth-free per-tenant probes — host_in_group
-    // (dseditgroup checkmember, no
-    // sudo) and the cowork-dir probe (host_path_kind + read_host_acl,
-    // both host-side, no sudo) — must run REGARDLESS of sudo cache
-    // state. So on an uncached terminal their findings still surface,
-    // while the genuine sudo probes (read_pf_status,
-    // read_kernel_pf_rules) stay suppressed and emit no failure frames.
     let cowork_path = tenant::domain::tenants::cowork_dir_path("dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_sudo_session_cached(false)
-        // Auth-free drift: host not in share group + cowork dir gone.
         .with_host_in_group("operator", "dev-tenant-share", false)
         .with_host_path_kind(&cowork_path, PathKind::Absent)
-        // Rig the sudo-gated probes to fail: if the gate let them run,
-        // their failure frames would surface on stderr.
         .fail_next_pf_status(FirewallError::NonZero {
             code: 1,
             stderr: "sudo: a password is required".into(),
@@ -974,22 +821,17 @@ fn reload_pre_exec_doctor_auth_free_probes_surface_when_sudo_uncached() {
         b"",
     );
     assert_eq!(code, 0, "verb proceeds; the pre-pass is a courtesy");
-    // Auth-free probes ran: host_in_group was invoked despite uncached.
     assert!(
         !exec.host_in_group_invocations().is_empty(),
         "auth-free host_in_group must run when uncached; invocations={:?}",
         exec.host_in_group_invocations()
     );
-    // Two auth-free warnings (HostNotInShareGroup + CoworkDirAbsent)
-    // aggregate into the doctor hint — proving they surfaced.
     assert!(
         stdout.contains(
             "\u{26a0} Doctor: 2 warnings for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
         ),
         "auth-free findings must aggregate even when uncached; stdout={stdout:?}"
     );
-    // Sudo-gated probes stay suppressed: no failure frames despite the
-    // rigged failures.
     assert!(
         !stderr.contains("failed to read pf state"),
         "uncached sudo must still skip the gated pf probe; stderr={stderr:?}"
@@ -998,22 +840,10 @@ fn reload_pre_exec_doctor_auth_free_probes_surface_when_sudo_uncached() {
 
 #[test]
 fn reload_pre_exec_doctor_runs_sudo_probes_when_sudo_cached() {
-    // Regression guard for the tightened gate: when sudo IS cached
-    // (the default), the gate must NOT suppress the sudo-gated
-    // probes — the pre-pass runs them exactly as it did before the
-    // gate landed. This is the mirror of
-    // `reload_pre_exec_doctor_quiet_skips_sudo_probes_when_sudo_uncached`:
-    // there, host_in_group must NOT fire; here it MUST. A gate that
-    // accidentally skipped in the cached path would zero
-    // host_in_group_invocations and trip this pin.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
-        // Default sudo_session_cached == true; assert the cached path
-        // explicitly rather than relying on the implicit default.
         .with_sudo_session_cached(true)
-        // Rig a sudo-gated probe to fail: in the cached path its
-        // failure frame MUST surface (proving the probe ran), the
-        // inverse of the uncached test where it must be silent.
+        // Cached: this rigged failure MUST surface, proving the probe ran.
         .fail_next_pf_status(FirewallError::NonZero {
             code: 1,
             stderr: "sudo: a password is required".into(),
@@ -1029,15 +859,6 @@ fn reload_pre_exec_doctor_runs_sudo_probes_when_sudo_cached() {
         stderr.contains("failed to read pf state"),
         "cached sudo must run the gated pf probe and surface its failure; stderr={stderr:?}"
     );
-    // host_in_group (dseditgroup checkmember) is AUTH-FREE, so it fires
-    // under BOTH cache states — this is the PARALLEL of the uncached
-    // test (lines 838-846), not its inverse. The cached path's
-    // distinguishing observable is the sudo-GATED pf probe surfacing its
-    // failure frame (asserted above), which the uncached path
-    // suppresses. host_in_group firing here just confirms the verb's
-    // sole caller (the pre-pass) ran it; the pre-pass is the only
-    // membership-checker since the verb's AddHostToShareGroup never
-    // CHECKS membership.
     assert!(
         !exec.host_in_group_invocations().is_empty(),
         "auth-free host_in_group runs under both cache states; invocations={:?}",
@@ -1047,27 +868,17 @@ fn reload_pre_exec_doctor_runs_sudo_probes_when_sudo_cached() {
 
 #[test]
 fn reload_on_cold_sudo_authenticates_at_plan_build_so_pre_exec_doctor_probes_symlink_drift() {
-    // collect_share_drift is split by auth requirement: the AclDrift
-    // check reads `ls -lde` from the operator process (NO sudo); the
-    // SymlinkDrift check probes `sudo -n -u <tenant>` and is gated on a
-    // cached timestamp. A share-bearing reload authenticates at plan
-    // build (its own occupancy probe needs sudo), so by the time the
-    // pre-exec doctor runs the cache is warm and BOTH halves surface.
-    // Rig both drifts on a single share, start cold, expect two
-    // warnings and two tenant_path_kind calls (verb + doctor).
+    // AclDrift is auth-free; SymlinkDrift needs sudo. The share occupancy probe authenticates
+    // at plan build, so the cache is warm by the pre-exec doctor and both surface.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "ro", "$HOME/src")]);
     let tenant_path = PathBuf::from("/Users/dev/src");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .with_sudo_session_cached(false)
-        // AclDrift (auth-free): the share host_path's ACL listing
-        // carries no `group:dev-tenant-share` ACE.
         .with_host_acl(
             &PathBuf::from("/tmp"),
             " 0: user:operator allow list,add_file,search\n",
         )
-        // SymlinkDrift (sudo): the tenant-side path is absent, which
-        // drifts once the warm cache lets the probe run.
         .with_tenant_path_kind("dev", &tenant_path, PathKind::Absent);
     let (code, stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
@@ -1096,11 +907,6 @@ fn reload_on_cold_sudo_authenticates_at_plan_build_so_pre_exec_doctor_probes_sym
 
 #[test]
 fn reload_pre_exec_doctor_acl_and_symlink_drift_both_surface_when_cached() {
-    // Cached ⇒ no regression. The SymlinkDrift half
-    // of collect_share_drift runs alongside the always-on AclDrift
-    // half, so BOTH findings surface. tenant_path_kind on the share
-    // path fires twice — once for the verb's plan-build, once for the
-    // pre-exec doctor's SymlinkDrift probe.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "ro", "$HOME/src")]);
     let tenant_path = PathBuf::from("/Users/dev/src");
     let exec = StubHostMachine::new()
@@ -1118,15 +924,13 @@ fn reload_pre_exec_doctor_acl_and_symlink_drift_both_surface_when_cached() {
         b"",
     );
     assert_eq!(code, 0, "verb proceeds; the pre-pass is a courtesy");
-    // Both AclDrift + SymlinkDrift aggregate: two warnings.
     assert!(
         stdout.contains(
             "\u{26a0} Doctor: 2 warnings for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
         ),
         "cached: both AclDrift and SymlinkDrift aggregate (2 warnings); stdout={stdout:?}"
     );
-    // tenant_path_kind on the share path fired twice: verb plan-build
-    // + the pre-exec doctor's now-ungated SymlinkDrift probe.
+    // Two calls: verb plan-build + pre-exec doctor's SymlinkDrift probe.
     let calls: Vec<_> = exec
         .tenant_path_kind_calls()
         .into_iter()
@@ -1141,9 +945,6 @@ fn reload_pre_exec_doctor_acl_and_symlink_drift_both_surface_when_cached() {
 
 #[test]
 fn reload_surfaces_user_directory_error_when_eligibility_probe_fails() {
-    // Single-tenant reload re-uses `destroy_eligibility`; a dscl failure
-    // routes to `reload_eligibility_probe_failed` with reload-named
-    // action wording.
     let stub = StubUserDirectory {
         fail_has_user: directory_fail_once(),
         ..Default::default()
@@ -1158,9 +959,6 @@ fn reload_surfaces_user_directory_error_when_eligibility_probe_fails() {
 
 #[test]
 fn reload_all_surfaces_user_directory_error_when_tenant_enumeration_fails() {
-    // No-arg `reload` walks `directory.tenant_names()`; a dscl failure
-    // surfaces as `reload_all_enumeration_failed` and aborts the walk
-    // before any per-tenant work.
     let stub = StubUserDirectory {
         fail_tenant_names: directory_fail_once(),
         ..Default::default()
@@ -1173,21 +971,10 @@ fn reload_all_surfaces_user_directory_error_when_tenant_enumeration_fails() {
     );
 }
 
-// ================================================================
-// Reload uses Full reapply scope
-// ================================================================
-//
-// Reload is the canonical "apply everything" verb. Mode + shell use
-// Light scope; reload + create-post-provision use Full. A
-// refactor that accidentally flipped reload's `build_reapply_plan`
-// callsite to Light would silently break the convergence guarantee
-// operators depend on after editing the profile or healing drift.
+// --- Full reapply scope ---
 
 #[test]
 fn reload_uses_full_reapply_scope_emitting_grant_and_cowork() {
-    // Reload with a declared share MUST emit one AclOp::Grant per
-    // share + one EnsureCoworkDir. A Full→Light flip on reload's
-    // dispatch callsite zeroes both counts and trips this pin.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
@@ -1216,11 +1003,7 @@ fn reload_uses_full_reapply_scope_emitting_grant_and_cowork() {
 
 #[test]
 fn reload_all_uses_full_reapply_scope_per_tenant_emitting_grant_and_cowork() {
-    // No-arg reload's per-tenant `build_reapply_plan` callsite
-    // lives inside `reload_all`, INDEPENDENT of the single-tenant
-    // dispatch callsite. A Full→Light flip on that line alone would
-    // slip past the single-tenant pin above. Exercise two tenants
-    // with declared shares; assert BOTH receive Full scope.
+    // reload_all has its own build_reapply_plan callsite, independent of single-tenant dispatch.
     let dev_toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let staging_toml = profile_with_shares(&[], &[], &[("/var", "ro", "$HOME/var-mirror")]);
     let exec = StubHostMachine::new()
@@ -1250,17 +1033,11 @@ fn reload_all_uses_full_reapply_scope_per_tenant_emitting_grant_and_cowork() {
     );
 }
 
-// ================================================================
-// Primary-group reassertion (OS-update resilience)
-// ================================================================
+// --- Primary-group reassertion ---
 
 #[test]
 fn reload_ensure_primary_group_carries_resolved_share_group_gid_not_a_constant() {
-    // The gid in EnsurePrimaryGroup is READ from the live share-group
-    // record (HostMachine::read_share_group_gid), not hardcoded — the gid
-    // was allocated at create and isn't derivable from the name. Preload a
-    // non-600 gid and assert it flows through, so a regression that pins
-    // 600 / the floor is caught.
+    // Non-600 gid: it's read from the live group record, not derived from the name.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_share_group_gid("dev-tenant-share", 742);
@@ -1278,16 +1055,10 @@ fn reload_ensure_primary_group_carries_resolved_share_group_gid_not_a_constant()
 
 #[test]
 fn reload_all_reasserts_each_tenants_own_primary_group_gid() {
-    // Per-tenant gid resolution lives in reload_all's own build callsite.
-    // dev's share group is gid 600, staging's is 601; each tenant's
-    // EnsurePrimaryGroup must carry ITS OWN gid, proving the read is
-    // per-tenant, not a shared constant.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_existing_profile("staging", &tenant::profile::default_profile_toml())
-        // dev's 600 equals the stub default (illustrative); staging's 601
-        // is load-bearing — it differs from the default, so the staging
-        // assertion only holds if the read is genuinely per-tenant.
+        // staging's 601 differs from the stub default, so only a per-tenant read passes.
         .with_share_group_gid("dev-tenant-share", 600)
         .with_share_group_gid("staging-tenant-share", 601);
     let (code, _stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
@@ -1311,10 +1082,6 @@ fn reload_all_reasserts_each_tenants_own_primary_group_gid() {
 
 #[test]
 fn reload_aborts_with_io_error_when_share_group_gid_read_fails() {
-    // The gid read happens in build_reapply_plan (pre-prompt, pre-exec).
-    // A failure → ModeError::Probe → EX_IOERR, surfaced as a host-state
-    // probe frame, with NO mutation ops fired (the plan never finished
-    // building, so execute_reapply_plan never runs).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_next_share_group_gid(ProbeError::NonZero {
@@ -1344,11 +1111,6 @@ fn reload_aborts_with_io_error_when_share_group_gid_read_fails() {
 
 #[test]
 fn reload_merges_included_fragment_hosts_into_anchor_body() {
-    // Half 1 end-to-end: a profile declaring `include = ["base"]` merges
-    // the fragment's runtime hosts (fragments first) ahead of its own into
-    // the rendered InstallAnchor body. Load path: read_profile →
-    // parse_partial → read_profile_fragment → parse_partial(Fragment) →
-    // merge → hosts_for_level → render_anchor.
     let profile = "schema_version = 1\n\
                    include = [\"base\"]\n\
                    [allowlist.runtime]\n\
@@ -1382,9 +1144,6 @@ fn reload_merges_included_fragment_hosts_into_anchor_body() {
 
 #[test]
 fn reload_missing_fragment_fails_before_prompt() {
-    // A declared include with no fragment on disk surfaces through the
-    // existing pre-prompt profile-read failure path: EX_IOERR, no stdout,
-    // and the error names the missing fragment file.
     let profile = "schema_version = 1\n\
                    include = [\"base\"]\n\
                    [allowlist.runtime]\n\

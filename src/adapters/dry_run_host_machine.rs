@@ -6,9 +6,9 @@ use crate::domain::{
 };
 use crate::profile::{ProfileError, default_profile_toml};
 
-/// Carries the operator identity resolved on the real (non-dry-run) machine
-/// before construction — `MacosHostMachine` reads env vars there, and dry-run
-/// preserves that answer so plan-render names the actual invoker.
+/// Mutations no-op; reads and probes return clean-host placeholders so a preview
+/// never fires a spurious doctor finding or refusal. `host` is the invoker resolved
+/// by the real machine before construction.
 pub struct DryRunHostMachine {
     pub host: HostUserName,
 }
@@ -41,26 +41,15 @@ impl HostMachine for DryRunHostMachine {
     fn execute_profile(&self, _op: &ProfileOp) -> Result<(), ProfileError> {
         Ok(())
     }
-    /// Returns the scaffolded default so the post-`ProfileOp::Create` read
-    /// matches the operator's mental model of "the file would now exist".
     fn read_profile(&self, _name: &TenantUserName) -> Result<String, ProfileError> {
         Ok(default_profile_toml())
     }
-    /// An empty fragment is a legal partial, so this keeps the preview
-    /// honest without fabricating content. Normally unreachable: the
-    /// scaffold's `include` hint is commented, so the `read_profile`
-    /// placeholder above resolves no includes.
     fn read_profile_fragment(&self, _fragment: &str) -> Result<String, ProfileError> {
         Ok(String::new())
     }
-    /// Canonical tenant-floor gid placeholder so the `--dry-run` reload
-    /// preview renders a representative `EnsurePrimaryGroup` line without
-    /// reading real dscl state.
     fn read_share_group_gid(&self, _group: &GroupName) -> Result<GroupId, ProbeError> {
         Ok(GroupId(crate::allocation::TENANT_UID_FLOOR))
     }
-    /// Empty pf.conf so the plan focuses on what tenant adds, not what's
-    /// already there.
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
         Ok(String::new())
     }
@@ -71,8 +60,6 @@ impl HostMachine for DryRunHostMachine {
         Ok(())
     }
 
-    /// `Unknown` rather than a fabricated Allowed/Denied — defensive;
-    /// the doctor arm short-circuits before reaching this under `--dry-run`.
     fn probe_access_as_tenant(
         &self,
         _name: &TenantUserName,
@@ -82,14 +69,10 @@ impl HostMachine for DryRunHostMachine {
         Ok(AccessOutcome::Unknown)
     }
 
-    /// "No-leak" placeholder so the preview doesn't fire a spurious
-    /// `EnvLeak` finding the operator might then chase outside a real run.
     fn read_env_policy(&self) -> Result<String, HostFileError> {
         Ok("Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string())
     }
 
-    /// "No-drift" placeholder so the preview doesn't fire a spurious
-    /// `PfRuleDrift` finding.
     fn read_kernel_pf_rules(&self, _name: &TenantUserName) -> Result<String, FirewallError> {
         Ok(
             "block return inet from any to any\npass inet from 192.0.2.1 to <allowed> keep state\n"
@@ -97,28 +80,19 @@ impl HostMachine for DryRunHostMachine {
         )
     }
 
-    /// "Touch-ID-present" placeholder so the preview doesn't fire a
-    /// spurious `TouchIdMissing` finding.
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {
         Ok("auth       sufficient     pam_tid.so\n".to_string())
     }
 
-    /// "Touch-ID-present" placeholder, mirroring `read_pam_sudo`, so this
-    /// method ALONE keeps the `--dry-run` preview free of a spurious
-    /// `TouchIdMissing` finding — independent of the sibling read's value.
     fn read_pam_sudo_local(&self) -> Result<String, HostFileError> {
         Ok("auth       sufficient     pam_tid.so\n".to_string())
     }
 
-    /// "Pf enabled" placeholder so the preview doesn't fire a spurious
-    /// `PfDisabled` finding.
     fn read_pf_status(&self) -> Result<String, FirewallError> {
         Ok("Status: Enabled for 0 days 00:00:00\n".to_string())
     }
 
-    /// Empty-allowlist render matches the `default_profile_toml()` returned
-    /// by `read_profile`, so the preview never fires a spurious
-    /// `AnchorBodyDrift` finding.
+    /// Must equal the render for `read_profile`'s default, or `AnchorBodyDrift` fires.
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
         Ok(crate::firewall::render_anchor(
             name.as_str(),
@@ -135,8 +109,6 @@ impl HostMachine for DryRunHostMachine {
         Ok(())
     }
 
-    /// `Absent` so the preview shows what tenant would install rather than
-    /// a `TenantPathOccupied` refusal driven by unrelated host state.
     fn tenant_path_kind(
         &self,
         _name: &TenantUserName,
@@ -145,11 +117,6 @@ impl HostMachine for DryRunHostMachine {
         Ok(PathKind::Absent)
     }
 
-    /// `true` so a `tenant shell -d … --dry-run` preview shows the plan
-    /// instead of a fabricated refusal. The preview cannot probe, and a
-    /// dry run must never assert something about host state it doesn't
-    /// know — the inverse placeholder to `tenant_path_kind`'s `Absent`,
-    /// and exactly why this question needed its own carve-out.
     fn tenant_dir_present(
         &self,
         _name: &TenantUserName,
@@ -158,13 +125,8 @@ impl HostMachine for DryRunHostMachine {
         Ok(true)
     }
 
-    /// Synthesize `Dir` for cowork-pattern paths so doctor's
-    /// `CoworkDirAbsent` probe under dry-run sees a clean baseline
-    /// (matches the synthetic-clean `read_host_acl` listing). The
-    /// destroy verb's cowork-notice probe is dry-run-gated in the
-    /// Reporter layer, so the synthesis is invisible there. Other
-    /// paths delegate to the real machine (create's home-symlink
-    /// edge cases need accurate kind verdicts).
+    /// Cowork-pattern paths synthesize `Dir` (matching `read_host_acl`); other paths
+    /// delegate, since create's home-symlink checks need real verdicts.
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
         if path
             .strip_prefix(crate::domain::tenants::COWORK_DIR_PARENT)
@@ -177,15 +139,8 @@ impl HostMachine for DryRunHostMachine {
         MacosHostMachine.host_path_kind(path)
     }
 
-    /// Synthetic "clean" ACL listing. Dry-run has no view of real
-    /// disk state, so distinguishing intact-vs-drifted isn't
-    /// possible — return a clean listing to suppress spurious
-    /// drift findings (same posture as `host_in_group` → `true`).
-    /// A tenant with real drift won't see the warning under
-    /// `--dry-run`; rerun without it (or `tenant doctor <name>`)
-    /// to probe the real substrate. The cowork-pattern path infers
-    /// the tenant from the last segment; anything else returns a
-    /// generic catch-all.
+    /// Real ACL drift is invisible under `--dry-run`; the tenant is inferred from a
+    /// cowork path's last segment.
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
         if let Some(name) = path
             .strip_prefix(crate::domain::tenants::COWORK_DIR_PARENT)
@@ -204,8 +159,6 @@ impl HostMachine for DryRunHostMachine {
         self.host.clone()
     }
 
-    /// `true` so the preview doesn't fire a spurious `HostNotInShareGroup`
-    /// finding.
     fn host_in_group(
         &self,
         _host: &HostUserName,
@@ -214,11 +167,8 @@ impl HostMachine for DryRunHostMachine {
         Ok(true)
     }
 
-    /// `true` so the dry-run preview runs the full pre-exec audit
-    /// against the synthetic-clean placeholders rather than silently
-    /// skipping every sudo-gated probe. Dry-run never spawns sudo, so
-    /// the cache check is moot — but reporting "cached" keeps the
-    /// preview's doctor surface representative of a real run.
+    /// `true` so the preview runs the full pre-exec audit against the placeholders
+    /// instead of skipping every sudo-gated probe.
     fn sudo_session_cached(&self) -> bool {
         true
     }
@@ -243,18 +193,15 @@ impl HostMachine for DryRunHostMachine {
         Ok(())
     }
 
-    /// `true` so the preview doesn't fire a spurious
-    /// `TenantKeychainAbsent` finding.
     fn tenant_keychain_present(&self, _name: &TenantUserName) -> Result<bool, ProbeError> {
         Ok(true)
     }
 
-    /// `true` so the preview doesn't fire a spurious `StashAbsent`
-    /// finding.
     fn stash_present(&self, _name: &TenantUserName) -> Result<bool, KeychainError> {
         Ok(true)
     }
 
+    // TODO(smell): NotFound makes every `tenant shell --dry-run` exit 64 via the StashAbsent refusal — return a placeholder
     fn find_stashed_password(
         &self,
         _name: &TenantUserName,

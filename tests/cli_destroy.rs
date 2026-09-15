@@ -12,11 +12,6 @@ use common::*;
 
 #[test]
 fn destroy_removes_profile_file_from_store() {
-    // Destroy adds a 5th step: profile-rm. After a successful destroy
-    // the profile must be gone from the store. The store is pre-loaded
-    // with a profile so the test pins "present before, absent after"
-    // — defending against a regression that wires destroy without the
-    // profile step.
     let exec = StubHostMachine::new().with_existing_profile("dev", "schema_version = 1\n");
     assert!(exec.has_profile("dev"), "pre-condition: profile present");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
@@ -50,18 +45,10 @@ fn destroy_removes_profile_file_from_store() {
 
 #[test]
 fn destroy_succeeds_when_profile_already_absent() {
-    // Idempotent rm: the operator may have manually removed the profile
-    // (or a prior destroy failed mid-flight). Destroy must converge to
-    // success regardless. Mirrors `XdgProfileStore::remove`'s
-    // NotFound-as-Ok semantics — the `StubHostMachine`'s profile-state
-    // simulation enforces the same contract by silently dropping a
-    // missing-key remove.
     let exec = StubHostMachine::new(); // empty; no profile loaded
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Same wireframe as the profile-present case — the profile-rm
-    // step is `NotFound → Ok(())` (idempotent rm), so its ✓ still
-    // emits.
+    // The ✓ still emits: profile rm treats NotFound as success.
     assert_eq!(
         stdout,
         real_success_stdout(
@@ -95,33 +82,19 @@ fn destroy_dry_run_default_shows_intent() {
 
 #[test]
 fn destroy_dry_run_verbose_shows_mechanism() {
-    // Dry-run verbose lists the full pessimistic plan. The plan runs
-    // 4 lines: the trailing `sudo dseditgroup -o delete -n .
-    // <name>-tenant-share` is appended because — unlike the
-    // sysadminctl-cascade that caught implicit `<name>` groups — the
-    // renamed tenant-share group doesn't inherit that cleanup, so the
-    // explicit dseditgroup-delete
-    // is load-bearing. Shown unconditionally because the dry-run can't
-    // know what the dscl-probe will return at runtime; the operator
-    // sees the full algorithm.
+    // Dry-run can't probe, so the plan lists every step unconditionally.
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["destroy", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    // Verbose plan lives inside the summary (intent-leads-shell-
-    // follows layout).
     let plan = destroy_verbose_plan_block("dev");
     assert_eq!(stdout, destroy_dry_run_block("dev", 600, Some(&plan)));
 }
 
 #[test]
 fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
-    // StubHostMachine::new() returns Ok by default → the LookupUserRecord
-    // probe sees the DS record as still present → the conditional
-    // DeleteUserRecord cleanup runs. The DeleteShareGroup is
-    // unconditional. Four account ops in standard mode; stdout is still
-    // the single confirmation line (mechanism is suppressed without -v).
+    // Default stub answers Ok to LookupUserRecord (residue present), so DeleteUserRecord runs.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -170,16 +143,7 @@ fn destroy_real_mode_standard_emits_only_post_exec_confirmation() {
 
 #[test]
 fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
-    // Real-mode verbose has two sections: (a) the "Destroying" pre-exec
-    // intent + the 4-line pessimistic plan (same shape as dry-run
-    // verbose), then (b) per-exec echo lines prefixed with "$ " as each
-    // command actually runs. Default StubHostMachine → probe says residue
-    // → all four commands echo (dseditgroup-delete is the load-bearing
-    // 4th step the share-group cleanup adds). The trailing post-exec
-    // confirmation closes the block.
-    // Scripted-real-verbose (TTY=false) drops the plan block
-    // entirely (cleaner log trace; the section + $ echo + ✓ + Done
-    // remains the trace surface).
+    // Non-TTY verbose omits the plan block; only the `$` echoes remain.
     let exec = StubHostMachine::new();
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
@@ -220,15 +184,7 @@ fn destroy_real_mode_verbose_shows_pre_exec_mechanism_and_post_exec() {
 
 #[test]
 fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
-    // The dscl-read probe returns NonZero when the DS record is absent
-    // (typically eDSRecordNotFound, code 56). The destroy writer must
-    // treat probe-NonZero as "no cleanup needed" and skip the
-    // sudo-dscl-delete — but the unconditional dseditgroup-delete for the
-    // tenant-share group still runs after, because that group is independent
-    // of the user record. So this path has exactly three exec calls:
-    // sysadminctl + dscl-read + dseditgroup-delete (no dscl-delete).
-    // The plan-vs-echo asymmetry around dscl-delete remains the
-    // operator's signal that the dscl path was clean.
+    // A failing LookupUserRecord means "no residue", so DeleteUserRecord is skipped.
     let exec = StubHostMachine::new().fail_account_op(
         AccountOp::LookupUserRecord { name: "dev".into() },
         AccountError::NonZero {
@@ -238,8 +194,6 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
     );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // No ✓ for `LookupUserRecord` (probe Err == "no residue") and
-    // consequently no DeleteUserRecord step at all.
     assert_eq!(
         stdout,
         real_success_stdout(
@@ -279,15 +233,6 @@ fn destroy_real_mode_skips_dscl_cleanup_when_probe_finds_clean() {
 
 #[test]
 fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
-    // Load-bearing dseditgroup-delete step: if it fails after
-    // sysadminctl-deleteUser succeeded and the dscl-cleanup ran (or
-    // was skipped as a noop), the host now carries an orphan
-    // tenant-share group. The writer must surface this as EX_IOERR
-    // so the operator knows to retry — the OrphanGroup eligibility
-    // arm converges on retry. The error message reuses the existing
-    // `destroy_failed` shape; the captured dseditgroup stderr inside
-    // ExecError carries enough detail (the dseditgroup tool prints
-    // its own argv-aware context) for the operator to diagnose.
     let exec = StubHostMachine::new().fail_account_op(
         AccountOp::DeleteShareGroup {
             group: "dev-tenant-share".into(),
@@ -299,9 +244,6 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
     );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Pre-failure ✓ stream is visible (Delete user, residue probe +
-    // cleanup all succeeded). DeleteShareGroup failed — no ✓ for it,
-    // no Done section.
     assert_eq!(
         stdout,
         real_failure_stdout(
@@ -320,20 +262,12 @@ fn destroy_real_mode_dseditgroup_delete_failure_surfaces_as_destroy_failure() {
         "tenant: failed to destroy 'dev': process exited with code 78: \
          dseditgroup: cannot remove group dev-tenant-share: not authorized\n"
     );
-    // Five account ops attempted — DeleteTenantUser + LookupUserRecord
-    // + DeleteUserRecord + RemoveHostFromShareGroup + DeleteShareGroup
-    // (which failed).
+    // DeleteTenantUser, Lookup/DeleteUserRecord, RemoveHostFromShareGroup, DeleteShareGroup.
     assert_eq!(exec.account_ops().len(), 5);
 }
 
 #[test]
 fn destroy_real_mode_dscl_cleanup_failure_surfaces_as_destroy_failure() {
-    // The cleanup is best-effort but not optional: if sysadminctl claims
-    // success and the probe says residue is still there, we MUST be able
-    // to remove it — otherwise the operator's `tenant destroy` reports
-    // success while the host still carries a stale DS record. Treat a
-    // dscl-delete NonZero as a destroy failure (EX_IOERR), with the
-    // captured stderr surfaced via ExecError::Display.
     let exec = StubHostMachine::new().fail_account_op(
         AccountOp::DeleteUserRecord { name: "dev".into() },
         AccountError::NonZero {
@@ -348,19 +282,12 @@ fn destroy_real_mode_dscl_cleanup_failure_surfaces_as_destroy_failure() {
         "tenant: failed to destroy 'dev': process exited with code 78: \
          dscl: cannot remove /Users/dev: not authorized\n"
     );
-    // DeleteTenantUser + LookupUserRecord + DeleteUserRecord attempted
-    // — the failure is on the third op, not before.
+    // Stops at the third op (DeleteUserRecord).
     assert_eq!(exec.account_ops().len(), 3);
 }
 
 #[test]
 fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
-    // Verbose-mode counterpart: the upfront plan still lists all four
-    // commands (the operator sees the algorithm), but the per-exec `$`
-    // echo block skips the dscl-delete because the probe cleared the DS
-    // state. The dseditgroup-delete echo still appears — that step is
-    // unconditional. The asymmetry between plan and echo around
-    // dscl-delete is the operator's signal that the dscl path was clean.
     let exec = StubHostMachine::new().fail_account_op(
         AccountOp::LookupUserRecord { name: "dev".into() },
         AccountError::NonZero {
@@ -371,9 +298,7 @@ fn destroy_real_mode_verbose_omits_cleanup_echo_when_probe_finds_clean() {
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev", "-v"]);
     assert_eq!(code, 0);
-    // Scripted-real-verbose drops the plan block. The $ echo block
-    // still skips dscl-delete because the probe cleared the DS state;
-    // that's the operator's signal that the dscl path was clean.
+    // No plan block (non-TTY) and no dscl-delete echo (probe found no residue).
     let want = format!(
         "{}\n\
          $ sudo sysadminctl -deleteUser dev\n\
@@ -452,9 +377,6 @@ fn destroy_rejects_invalid_character() {
 
 #[test]
 fn destroy_noop_when_user_missing() {
-    // Empty StubUserDirectory — no users on the host. Destroy should be
-    // convergent-toward-absence: report the noop and exit 0 without
-    // touching the host machine (NeverHostMachine would panic if reached).
     let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(stdout, "tenant 'dev' does not exist; nothing to do.\n");
@@ -463,12 +385,7 @@ fn destroy_noop_when_user_missing() {
 
 #[test]
 fn destroy_refuses_below_floor() {
-    // Name passes validate_name (lowercase, valid charset, NOT in
-    // RESERVED_NAMES) but UID is below the tenant floor — i.e. the
-    // state-based refusal, not the lexical one. The synthetic name
-    // `legacyusr` deliberately sidesteps the blocklist so the floor
-    // guard is the actual code path under test. Refuse with EX_USAGE;
-    // never reach the host machine.
+    // `legacyusr` avoids the reserved-name blocklist so the UID floor is what refuses.
     let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
@@ -485,8 +402,6 @@ fn destroy_refuses_below_floor() {
 
 #[test]
 fn destroy_refuses_just_below_floor() {
-    // Boundary: UID 599 refuses; UID 600 (the floor itself) accepts —
-    // see `destroy_accepts_at_floor` for the matching positive case.
     let stub = StubUserDirectory {
         users: vec!["edge".to_string()],
         uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
@@ -503,10 +418,7 @@ fn destroy_refuses_just_below_floor() {
 
 #[test]
 fn destroy_accepts_at_floor() {
-    // Boundary's positive twin: UID equal to TENANT_UID_FLOOR (600)
-    // proceeds to exec. Pins the inequality direction at the floor itself
-    // so a future helper edit that bumps `stub_with_tenant`'s UID can't
-    // silently erase the boundary contract.
+    // Explicit UID 600 rather than `stub_with_tenant`, so a helper change can't move the boundary.
     let exec = StubHostMachine::new();
     let stub = StubUserDirectory {
         users: vec!["edge".to_string()],
@@ -536,9 +448,6 @@ fn destroy_accepts_at_floor() {
             "Tenant 'edge' destroyed.",
         ),
     );
-    // Five account ops: DeleteTenantUser + LookupUserRecord (probe
-    // defaults to Ok) + DeleteUserRecord cleanup + RemoveHost +
-    // DeleteShareGroup.
     assert_eq!(
         exec.account_ops().len(),
         5,
@@ -548,18 +457,9 @@ fn destroy_accepts_at_floor() {
 
 #[test]
 fn destroy_refuses_when_uid_unknown_but_user_present() {
-    // The canonical real-world case is `nobody` on macOS (UID -2 filtered
-    // by `parse_uid_line` out of `uid_by_name`), but `nobody` is now
-    // lexically reserved — the blocklist trips first. Synthetic
-    // `phantom` reproduces the same HostUserDirectory state (present in `users`,
-    // absent from `uid_by_name`) without crossing the reserved-name
-    // rail, so the test still pins the `Eligibility::SystemAccount`
-    // arm. `has_user` is true, `uid_for` returns None → refuse with
-    // EX_USAGE, NOT a noop.
+    // Models `nobody` (negative UID, absent from uid_by_name); `nobody` itself is reserved.
     let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
-        // uid_by_name deliberately empty: simulates the parse_uid_line
-        // negative-UID filter.
         ..Default::default()
     };
     let (code, stdout, stderr) = run_with(stub, &["destroy", "phantom"]);
@@ -573,10 +473,6 @@ fn destroy_refuses_when_uid_unknown_but_user_present() {
 
 #[test]
 fn destroy_refuses_below_floor_verbose() {
-    // -v on a refusal path must not emit any mechanism preview to stdout
-    // (no "Destroying …" line, no argv). The refusal is the only output,
-    // and it goes to stderr. Guards against a class of "we built the argv
-    // string before checking the guard" regressions.
     let stub = StubUserDirectory {
         users: vec!["edge".to_string()],
         uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
@@ -593,8 +489,6 @@ fn destroy_refuses_below_floor_verbose() {
 
 #[test]
 fn destroy_noop_when_user_missing_verbose() {
-    // -v on the convergent-noop path emits only the noop line — no
-    // mechanism preview, no argv — and on stdout (not stderr).
     let (code, stdout, stderr) =
         run_with(StubUserDirectory::default(), &["destroy", "ghost", "-v"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -604,8 +498,7 @@ fn destroy_noop_when_user_missing_verbose() {
 
 #[test]
 fn destroy_noop_emits_in_dry_run_too() {
-    // Same noop framing in dry-run mode — the message is tense-neutral
-    // because we'd "do nothing" either way.
+    // The noop message is tense-neutral, so dry-run prints it unchanged.
     let (code, stdout, stderr) = run_with(
         StubUserDirectory::default(),
         &["destroy", "dev", "--dry-run"],
@@ -616,14 +509,7 @@ fn destroy_noop_emits_in_dry_run_too() {
 
 #[test]
 fn destroy_rejects_reserved_names() {
-    // Validate_name is shared between create and destroy via the
-    // dispatch layer's lexical-then-state-based check order. This test
-    // pins that the blocklist applies to destroy too — important because
-    // destroy_eligibility's `NotATenant` floor guard would catch most
-    // reserved names by UID, but the lexical refusal is the cheaper
-    // first failure (no HostUserDirectory call needed) and surfaces the more
-    // operator-relevant reason ("you can't name a tenant 'wheel'" vs
-    // "UID 0 is below tenant floor 600").
+    // The lexical refusal must win over the UID-floor refusal that would also catch these.
     for name in [
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
@@ -661,8 +547,6 @@ fn destroy_real_mode_propagates_exec_failure() {
     let exec = StubHostMachine::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Section divider lands; the first substrate op (DeleteTenantUser)
-    // fails so no ✓ emits.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Destroying tenant 'dev'")),
@@ -680,7 +564,6 @@ fn destroy_real_mode_failure_surfaces_host_machine_stderr() {
         .fail_account_blanket(78, "sysadminctl: -deleteUser failed: not authorized\n");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Section + no ✓ — first substrate op failed.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Destroying tenant 'dev'")),
@@ -712,14 +595,7 @@ fn destroy_dry_run_bypasses_injected_host_machine() {
 
 #[test]
 fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_present() {
-    // The convergence path: the user was destroyed earlier (or a
-    // previous destroy failed at the dseditgroup-delete step), leaving
-    // a `<name>-tenant-share` group with no corresponding user. The
-    // destroy verb classifies this as `OrphanGroup` and converges by
-    // running just the dseditgroup-delete. Exactly ONE exec call — no
-    // sysadminctl, no dscl — and exit 0. Standard-mode stdout names
-    // the tenant (not the group) so it stays parallel with the rest
-    // of the destroy UX from the operator's perspective.
+    // Stdout names the tenant, not the group, to match the regular destroy UX.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -763,12 +639,6 @@ fn destroy_converges_orphan_group_when_user_absent_but_tenant_share_group_presen
 
 #[test]
 fn destroy_orphan_group_also_removes_profile_if_present() {
-    // Convergence contract: after `tenant destroy <name>`, the host
-    // should have no trace of `<name>` — including any leftover profile
-    // file. The OrphanGroup arm must remove the profile too, idempotent
-    // (the profile may or may not be present; either way is success).
-    // Pre-load the profile alongside the orphan group to pin the "both
-    // gone after" semantics.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -803,8 +673,6 @@ fn destroy_orphan_group_also_removes_profile_if_present() {
 
 #[test]
 fn destroy_dry_run_for_orphan_group() {
-    // Dry-run twin: same convergence framing, "Would" tense. No exec
-    // calls (dry-run bypasses the host machine — NeverHostMachine would panic).
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -816,31 +684,19 @@ fn destroy_dry_run_for_orphan_group() {
 
 #[test]
 fn destroy_dry_run_verbose_for_orphan_group() {
-    // Verbose dry-run names the group explicitly (the suffixed group is
-    // the literal resource being touched) AND shows the mechanism.
-    // Standard-mode framing is tenant-named; verbose adds the group
-    // name for grep-friendliness, matching the mechanism-exposure
-    // convention used elsewhere in the codebase.
+    // Verbose names the share group itself; standard mode names only the tenant.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
     };
     let (code, stdout, _stderr) = run_with(stub, &["destroy", "dev", "--dry-run", "-v"]);
     assert_eq!(code, 0);
-    // Verbose plan lives inside the orphan-group summary (intent-
-    // leads-shell-follows layout; 8 entries since the user is
-    // already absent).
     let plan = orphan_verbose_plan_block("dev");
     assert_eq!(stdout, destroy_orphan_dry_run_block("dev", Some(&plan)));
 }
 
 #[test]
 fn destroy_real_mode_verbose_for_orphan_group() {
-    // Real-mode verbose: same three-section shape as the regular destroy
-    // (pre-exec intent + plan, `$` echo for each command, post-exec
-    // confirmation), just with one argv in each block instead of four.
-    // Scripted-real-verbose drops the plan block. Orphan path has
-    // 8 steps — no user-removal.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -878,13 +734,7 @@ fn destroy_real_mode_verbose_for_orphan_group() {
 
 #[test]
 fn destroy_noop_when_neither_user_nor_tenant_share_group_present() {
-    // Specificity pin: a bare-name group (left over from legacy
-    // creation, or unrelated host state) does NOT classify as
-    // OrphanGroup — only the suffixed `<name>-tenant-share` does. Empty
-    // users + bare `dev` group → `NotPresent` noop, exit 0, no exec.
-    // A regression that loosened the OrphanGroup check to bare-name
-    // matching (e.g. dropping the `tenant_share_group_name` call) would
-    // trip this test.
+    // A bare `dev` group is not a tenant share group, so this is a noop, not OrphanGroup.
     let stub = StubUserDirectory {
         groups: vec!["dev".to_string()],
         ..Default::default()
@@ -896,11 +746,6 @@ fn destroy_noop_when_neither_user_nor_tenant_share_group_present() {
 
 #[test]
 fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
-    // Convergence-path failure mode: even on the simplified orphan-group
-    // path, dseditgroup-delete can still fail (auth, network OD,
-    // whatever). Surface as EX_IOERR via the same `destroy_failed` shape
-    // as the regular destroy — the operator's remediation is the same
-    // (retry; if the issue persists, manual dscl inspection).
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -908,8 +753,6 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
     let exec = StubHostMachine::new().fail_account_blanket(78, "dseditgroup: not authorized\n");
     let (code, stdout, stderr) = run_with_exec(stub, &exec, &["destroy", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Section divider lands; the orphan-group's first substrate op
-    // (DeleteShareGroup) fails — no ✓, no Done section.
     assert_eq!(
         stdout,
         format!(
@@ -927,9 +770,6 @@ fn destroy_real_mode_dseditgroup_failure_on_orphan_group_surfaces_as_failure() {
 
 #[test]
 fn destroy_real_mode_invokes_firewall_teardown_in_locked_order() {
-    // Destroy PF teardown order: BackupConfig → RemoveAnchor →
-    // UpdateConfig → Reload. No Enable on destroy. Pins
-    // `firewall_ops()` shape on a clean-host destroy.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
@@ -962,10 +802,6 @@ fn destroy_real_mode_invokes_firewall_teardown_in_locked_order() {
 
 #[test]
 fn destroy_real_mode_update_conf_drops_tenant_anchor_ref() {
-    // remove_anchor_ref must strip the tenant's anchor + load lines
-    // from pf.conf. With a pre-loaded conf that references both
-    // tenant-dev and tenant-other, the UpdateConfig content should
-    // have tenant-dev gone and tenant-other untouched.
     let initial = "anchor \"tenant-other\"\n\
                    anchor \"tenant-dev\"\n\
                    load anchor \"tenant-other\" from \"/etc/pf.anchors/tenant-other\"\n\
@@ -994,9 +830,6 @@ fn destroy_real_mode_update_conf_drops_tenant_anchor_ref() {
 
 #[test]
 fn destroy_firewall_reload_failure_surfaces_via_destroy_firewall_failed() {
-    // Reload failure during destroy: no recovery (per locked policy
-    // — symmetric restore would re-reference the just-deleted anchor
-    // file). Surface as destroy_firewall_failed at EX_IOERR.
     let exec = StubHostMachine::new().fail_firewall_op(
         tenant::domain::FirewallOp::Reload,
         FirewallError::NonZero {
@@ -1015,10 +848,6 @@ fn destroy_firewall_reload_failure_surfaces_via_destroy_firewall_failed() {
 
 #[test]
 fn destroy_orphan_group_tears_down_firewall_too() {
-    // Convergence-path: a tenant left with orphan group state may also
-    // have orphan PF state (e.g. a create that failed mid-firewall
-    // before getting to UpdateConfig+Reload). The convergence path
-    // includes the full PF teardown to clean both.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -1055,27 +884,15 @@ fn destroy_orphan_group_tears_down_firewall_too() {
 
 #[test]
 fn destroy_firewall_idempotent_when_anchor_already_absent() {
-    // The anchor file may already be gone (RemoveAnchor returns Ok
-    // from the stub regardless of prior state — `rm -f` semantics on
-    // the macOS side too). pf.conf may have no tenant ref. The
-    // teardown still runs all five ops; UpdateConfig writes the
-    // unchanged pf.conf back; FlushAnchor on an unknown anchor is a
-    // noop on the macOS side. End state: idempotent success.
     let exec = StubHostMachine::new().with_pf_conf("# host pf.conf, no tenant refs\n");
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Still issued the five ops — destroy doesn't short-circuit based
-    // on prior state; it just runs idempotent ops.
     assert_eq!(exec.firewall_ops().len(), 5);
 }
 
 #[test]
 fn destroy_invokes_flush_anchor_as_final_firewall_step() {
-    // The load-bearing post-smoke fix: pfctl -f never garbage-collects
-    // anchors after their `load anchor` directive is removed, so
-    // destroy must explicitly flush the in-kernel rules. Pin this as
-    // the LAST firewall op on the destroy path.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
@@ -1094,7 +911,6 @@ fn destroy_invokes_flush_anchor_as_final_firewall_step() {
 
 #[test]
 fn destroy_orphan_group_invokes_flush_anchor_as_final_firewall_step() {
-    // Same load-bearing flush, on the convergence path.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -1116,14 +932,6 @@ fn destroy_orphan_group_invokes_flush_anchor_as_final_firewall_step() {
 
 #[test]
 fn destroy_orphan_group_cleans_stash() {
-    // Orphan-group convergence: a tenant whose user account was manually removed
-    // (e.g. `sudo sysadminctl -deleteUser dev`) but whose share group
-    // survived still has an operator-side keychain stash from its
-    // original `tenant create`. The OrphanGroup convergence path must
-    // include the keychain delete so the stash doesn't linger after
-    // `tenant destroy <name>` reports success — otherwise the operator
-    // ends up with orphan passwords accumulating across re-creates
-    // with no surface that flags them.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -1140,15 +948,10 @@ fn destroy_orphan_group_cleans_stash() {
     );
 }
 
-// ================================================================
-// Pre-execution confirmation prompt
-// ================================================================
+// --- Pre-execution confirmation prompt ---
 
 #[test]
 fn destroy_with_tty_default_n_aborts_on_empty_input() {
-    // Destructive verb: default is N so muscle-memory ENTER never
-    // deletes. Operator hits ENTER without typing → Abort.
-    // Substrate must NOT fire. Exit 0.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["destroy", "dev"], b"\n");
@@ -1201,9 +1004,6 @@ fn destroy_with_yes_flag_skips_prompt() {
 
 #[test]
 fn destroy_surfaces_user_directory_error_when_eligibility_probe_fails() {
-    // `destroy_eligibility` calls has_user / has_group / uid_for; a dscl
-    // failure at has_user routes to `destroy_eligibility_probe_failed`
-    // and exits 74 before the convergent-noop or Destroyable branches.
     let stub = StubUserDirectory {
         fail_has_user: directory_fail_once(),
         ..Default::default()
@@ -1217,16 +1017,10 @@ fn destroy_surfaces_user_directory_error_when_eligibility_probe_fails() {
     );
 }
 
+// TODO(smell): carry the UID on `Eligibility::Destroyable` so the summary needn't re-query it.
 #[test]
 fn destroy_surfaces_user_directory_error_when_uid_lookup_fails() {
-    // The `destroy_uid_lookup_failed` frame fires on the SECOND
-    // `uid_for` call in the dispatch flow: `destroy_eligibility`
-    // already consumed the first to classify `Destroyable`, then the
-    // pre-summary path calls `uid_for` again. The queued injector's
-    // `[None, Some(err)]` shape skips the first call (snapshot) and
-    // fails the second. The re-lookup only fires when `show_summary`
-    // is true — driven by `--dry-run` here so stdin doesn't have to
-    // be a TTY.
+    // Fails the second `uid_for` (the pre-summary re-lookup, run only with `--dry-run`/TTY).
     let stub = StubUserDirectory {
         users: vec!["dev".to_string()],
         uid_by_name: [("dev".to_string(), UserId(600))].into_iter().collect(),
@@ -1241,13 +1035,8 @@ fn destroy_surfaces_user_directory_error_when_uid_lookup_fails() {
     );
 }
 
-// ============================================================
-// Keychain teardown
-// ============================================================
+// --- Keychain teardown ---
 
-/// destroy's op stream includes `DeleteStashedPassword`
-/// AFTER `DeleteUserRecord` (or its skipped probe), BEFORE the host /
-/// group / profile cleanup.
 #[test]
 fn destroy_emits_keychain_delete_after_user_cleanup() {
     let exec = StubHostMachine::new();
@@ -1269,10 +1058,6 @@ fn destroy_emits_keychain_delete_after_user_cleanup() {
     );
 }
 
-/// legacy tenant (created before keychain bootstrap landed) has no stash —
-/// substrate returns `KeychainError::NotFound` and destroy
-/// CONVERGES, exiting 0 with no warning. The keychain ✓ line is
-/// silently omitted because nothing was actually removed.
 #[test]
 fn destroy_succeeds_silently_when_stash_absent() {
     let exec = StubHostMachine::new().fail_next_keychain_delete(KeychainError::NotFound);
@@ -1288,10 +1073,6 @@ fn destroy_succeeds_silently_when_stash_absent() {
     );
 }
 
-/// a non-NotFound failure on `DeleteStashedPassword`
-/// emits a warning to stderr but destroy continues and exits 0. The
-/// rest of the teardown (host / group / profile / firewall) still
-/// runs.
 #[test]
 fn destroy_warns_and_continues_when_stash_delete_fails() {
     let exec = StubHostMachine::new().fail_next_keychain_delete(KeychainError::NonZero {
@@ -1308,21 +1089,13 @@ fn destroy_warns_and_continues_when_stash_delete_fails() {
         stderr.contains("`security delete-generic-password -a dev -s tenant-dev`"),
         "expected manual-recovery hint in warning; stderr={stderr:?}"
     );
-    // The rest of the teardown ran — firewall ops are the tail end,
-    // so their presence is the proof.
+    // Firewall ops run last, so their presence proves the rest of teardown ran.
     assert!(
         stdout.contains("Kernel rules under anchor 'tenant-dev' flushed"),
         "expected firewall teardown to complete; stdout={stdout:?}"
     );
 }
 
-/// Verbose-mode counterpart to the failure pin: when `security
-/// delete-generic-password` fails for a non-NotFound reason, the
-/// operator must still see the `$` echo for the attempted command
-/// (matches the verbose-mode contract used by every other op).
-/// The `✓` is omitted (no successful mutation) and the warning lands
-/// on stderr — but the substrate command that was warned about is
-/// visible on stdout.
 #[test]
 fn destroy_verbose_emits_step_echo_before_keychain_delete_warning() {
     let exec = StubHostMachine::new().fail_next_keychain_delete(KeychainError::NonZero {
@@ -1346,14 +1119,8 @@ fn destroy_verbose_emits_step_echo_before_keychain_delete_warning() {
     );
 }
 
-// ============================================================
-// Co-working directory left-intact notice
-// ============================================================
+// --- Co-working directory left-intact notice ---
 
-/// Cowork dir at `/Users/Shared/tenants/<name>` is intentionally
-/// preserved across destroy — the operator owns its contents. When
-/// the dir exists at destroy time, destroy emits a one-line notice
-/// naming the path so the operator knows what was left behind.
 #[test]
 fn destroy_emits_notice_when_cowork_dir_present() {
     let exec = StubHostMachine::new()
@@ -1366,23 +1133,15 @@ fn destroy_emits_notice_when_cowork_dir_present() {
         ),
         "expected cowork-intact notice; stdout={stdout:?}"
     );
-    // Notice sits between the last ✓ and the `Done` divider — the
-    // closing surface still ends with `Tenant 'dev' destroyed.`.
     assert!(
         stdout.contains("Tenant 'dev' destroyed."),
         "expected destroy_done closing; stdout={stdout:?}"
     );
 }
 
-/// Cowork dir absent at destroy time (the typical case for legacy
-/// tenants created before the primitive landed, or after the operator
-/// removed it manually) → no notice. Consistent with destroy's
-/// convergent posture: absent state is success, not error, and not
-/// worth narrating.
 #[test]
 fn destroy_omits_notice_when_cowork_dir_absent() {
-    // Default StubHostMachine returns PathKind::Absent for any
-    // unregistered path — no preload needed.
+    // The default stub reports every unregistered path as Absent.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["destroy", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
@@ -1392,10 +1151,6 @@ fn destroy_omits_notice_when_cowork_dir_absent() {
     );
 }
 
-/// Cowork dir is a symlink or a regular file (operator hand-edited
-/// state). The path is occupied by something we didn't create, but
-/// it's still "intact" from the destroy verb's perspective — we left
-/// it alone. Notice still fires so the operator sees the path naming.
 #[test]
 fn destroy_emits_notice_when_cowork_path_is_symlink_or_other() {
     for kind in [
@@ -1416,10 +1171,6 @@ fn destroy_emits_notice_when_cowork_path_is_symlink_or_other() {
     }
 }
 
-/// Probe failure on the cowork-dir kind read surfaces a stderr `⚠`
-/// warning naming the path; destroy proceeds and exits 0. Mirrors
-/// the doctor-pass posture (substrate-machinery failures warn; the
-/// verb never aborts on a courtesy read).
 #[test]
 fn destroy_warns_and_continues_when_cowork_probe_fails() {
     let exec = StubHostMachine::new().fail_next_host_path_kind(ProbeError::Spawn(
@@ -1445,13 +1196,6 @@ fn destroy_warns_and_continues_when_cowork_probe_fails() {
     );
 }
 
-/// Orphan-group convergence path fires the same notice: a partial
-/// create that left the cowork dir behind needs the operator to
-/// know it exists for cleanup, even though the tenant user is
-/// already gone. The host-side probe is the load-bearing piece —
-/// the tenant user is absent BY DEFINITION on this path, so a
-/// `sudo -n -u <name>` probe would always fail; the host-owned
-/// filesystem read works regardless.
 #[test]
 fn destroy_orphan_group_emits_notice_when_cowork_dir_present() {
     let stub = StubUserDirectory {
@@ -1474,8 +1218,6 @@ fn destroy_orphan_group_emits_notice_when_cowork_dir_present() {
     );
 }
 
-/// Symmetric coverage on the orphan-group path: absent cowork dir
-/// → no notice.
 #[test]
 fn destroy_orphan_group_omits_notice_when_cowork_dir_absent() {
     let stub = StubUserDirectory {
@@ -1491,13 +1233,6 @@ fn destroy_orphan_group_omits_notice_when_cowork_dir_absent() {
     );
 }
 
-/// Probe failure on the orphan-group path surfaces the same `⚠`
-/// warning as the full destroy path. Production-critical: under
-/// the old upfront probe via `tenant_path_kind`, this path ALWAYS
-/// hit the warning (the tenant user is absent by definition on
-/// the orphan path, and `sudo -n -u <absent-user>` always fails).
-/// The host-side probe must work uniformly — a synthesized failure
-/// surfaces the warning, an absent cowork dir stays silent.
 #[test]
 fn destroy_orphan_group_warns_and_continues_when_cowork_probe_fails() {
     let stub = StubUserDirectory {

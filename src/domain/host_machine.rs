@@ -5,28 +5,18 @@ use super::{
 };
 use crate::profile::ProfileError;
 
-/// Driven port for host-side substrate. Per-domain `describe_*` / `execute_*`
-/// pairs over the four `Op` ADTs, plus carve-out methods for operations whose
-/// return shape doesn't fit `Result<(), E>`. Each domain keeps its own error
-/// type.
 pub trait HostMachine {
     fn describe_account(&self, op: &AccountOp) -> String;
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError>;
 
-    /// Interactive login as the tenant. Returns the child's exit code; stdio
-    /// inherits from the calling process. `dir` is the already-resolved,
-    /// already-probed working directory from `tenant shell -d`; `None` keeps
-    /// the pre-flag behavior (`sudo -i` lands in the tenant's home).
+    /// Returns the child's exit code; stdio inherits. `dir` arrives resolved and probed.
     fn login(
         &self,
         name: &TenantUserName,
         dir: Option<&std::path::Path>,
     ) -> Result<i32, AccountError>;
 
-    /// Run a single command as the tenant inside a login shell. Returns the
-    /// child's exit code; stdio inherits. `argv` must be non-empty. `dir` as
-    /// for `login` — bootstrap's command loop passes `None` (its commands
-    /// embed their own `cd`/guards).
+    /// Runs in a login shell; returns the child's exit code. `argv` must be non-empty.
     fn exec_as_tenant(
         &self,
         name: &TenantUserName,
@@ -39,25 +29,11 @@ pub trait HostMachine {
 
     fn read_profile(&self, name: &TenantUserName) -> Result<String, ProfileError>;
 
-    /// Reads an `include` fragment's TOML from
-    /// `~/.config/tenant/profiles/includes/<fragment>.toml`. A content read,
-    /// so it carves out beside `read_profile` rather than becoming an `Op`
-    /// variant — ops are planned mutations; this is how the load path
-    /// *learns*. Takes `&str`: fragment names are not tenant names, and the
-    /// lexical rail already ran at parse (`validate_fragment_name`), so the
-    /// name reaching here is safe. No fragment-writing op exists — Half 1
-    /// never authors fragments.
+    /// `fragment` is safe as a path segment: `validate_fragment_name` already ran at parse.
     fn read_profile_fragment(&self, fragment: &str) -> Result<String, ProfileError>;
 
-    /// Reads the primary gid of the named share group via `dscl . -read
-    /// /Groups/<group> PrimaryGroupID`. Full reapply calls this to
-    /// resolve the gid for `AccountOp::EnsurePrimaryGroup` before
-    /// constructing the op: the tenant's primary group must match the
-    /// LIVE share-group record, whose gid was allocated at create and is
-    /// not derivable from the name (UID/GID may diverge). Unprivileged
-    /// read (group records are world-readable on macOS), so it is safe to
-    /// run pre-prompt during plan-build without tripping the uncached-sudo
-    /// path. An absent group or unparseable record surfaces as `ProbeError`.
+    /// Unprivileged (group records are world-readable), so plan-build can call it
+    /// pre-prompt without tripping the uncached-sudo path.
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError>;
 
     fn read_pf_conf(&self) -> Result<String, FirewallError>;
@@ -71,31 +47,14 @@ pub trait HostMachine {
         path: &std::path::Path,
     ) -> Result<PathKind, ProbeError>;
 
-    /// True iff `path` resolves — THROUGH symlinks — to a directory, as
-    /// the tenant sees it (`sudo -n -u <name> /bin/test -d <path>`).
-    /// Note `-d` stats; it does NOT prove the tenant may SEARCH the
-    /// directory, so a `0700` dir owned by someone else still answers
-    /// true and fails at `cd`. Deliberate: this pre-flight catches the
-    /// wrong-shape mistakes, not every permission edge. This is
-    /// `tenant shell -d`'s pre-flight, and deliberately NOT
-    /// `tenant_path_kind`: that one classifies with `test -L` FIRST, so a
-    /// dangling symlink comes back `Symlink(..)` and would pass a
-    /// "`Symlink` proceeds" check even though `cd` will fail. `cd` follows
-    /// links, so the probe must too. Collapsing to one bool also lets
-    /// `DryRunHostMachine` answer the question honestly (`true` — a preview
-    /// can't probe, and must not manufacture a refusal), which the shared
-    /// `tenant_path_kind` placeholder can't: shares need `Absent` there.
+    // TODO(smell): rename tenant_dir_present / tenant_path_kind so the names say follows-symlinks vs lstat-classifies
+    /// Follows symlinks (`test -d`): a dangling link must fail `tenant shell -d`'s pre-flight.
     fn tenant_dir_present(
         &self,
         name: &TenantUserName,
         path: &std::path::Path,
     ) -> Result<bool, ProbeError>;
 
-    /// Reads filesystem kind of a host-side path via the host's identity
-    /// (no `sudo`, no tenant impersonation). Use this for paths the host
-    /// owns by design — cowork dirs, operator-managed state. Use
-    /// `tenant_path_kind` for paths whose accessibility depends on the
-    /// tenant's perspective (declared share `tenant_path`s).
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError>;
 
     fn describe_acl(&self, op: &AclOp) -> String;
@@ -120,12 +79,8 @@ pub trait HostMachine {
 
     fn read_pam_sudo(&self) -> Result<String, HostFileError>;
 
-    /// Reads `/etc/pam.d/sudo_local` — the OS-update-safe customization
-    /// file that `/etc/pam.d/sudo` includes at the top of its stack on
-    /// modern macOS. Touch ID configured the sanctioned way lands here,
-    /// so doctor's detection must consult it alongside `read_pam_sudo`.
-    /// An absent file is non-error: returns `Ok(String::new())` (the
-    /// file is optional; absence just means "no local customizations").
+    /// Absent file ⇒ `Ok(String::new())`. Sanctioned Touch ID setup lands here, so doctor
+    /// must check it alongside `read_pam_sudo`.
     fn read_pam_sudo_local(&self) -> Result<String, HostFileError>;
 
     fn read_pf_status(&self) -> Result<String, FirewallError>;
@@ -134,52 +89,31 @@ pub trait HostMachine {
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError>;
 
-    /// Identity of the operator invoking the binary, used in plan rendering
-    /// and as the host-side member of every tenant's share group. Infallible:
-    /// adapters fall back to a placeholder rather than failing the verb.
+    /// Infallible: adapters fall back to a placeholder rather than failing the verb.
     fn current_host_user_name(&self) -> HostUserName;
 
     /// An absent group is non-error: returns `Ok(false)`.
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError>;
 
-    /// True iff the operator already holds a valid cached sudo
-    /// timestamp (`sudo -n -v` exits 0). Non-interactive by design:
-    /// this is a CHECK, never a prompt. The pre-exec doctor pass gates
-    /// every sudo-dependent probe behind it so an uncached operator
-    /// sees neither an auth prompt nor a wall of probe-failure frames
-    /// pre-consent. Infallible: any spawn/exec hiccup reads as "not
-    /// cached" (false), so the gate fails closed (skip probes) rather
-    /// than open (spam failures).
+    /// A check, never a prompt. Any spawn failure reads as `false`, so the pre-exec
+    /// doctor gate fails closed (skips sudo probes) instead of spamming failures.
     fn sudo_session_cached(&self) -> bool;
 
-    /// Prompting counterpart (`sudo -v`), for post-consent use: lets a
-    /// deferred `sudo -n` probe answer before the first mutation. A
-    /// carve-out, not an Op: like doctor's probes it is how the verb
-    /// learns, not what it does — there is no plan step to narrate.
+    /// Prompting counterpart (`sudo -v`), post-consent: lets deferred `sudo -n` probes
+    /// answer before the first mutation.
     fn authenticate_sudo(&self) -> Result<(), ProbeError>;
 
-    /// True iff `tenant_keychain_path(name)` is present on disk.
-    /// Doctor consults this to surface `Finding::TenantKeychainAbsent`.
     fn tenant_keychain_present(&self, name: &TenantUserName) -> Result<bool, ProbeError>;
 
-    /// True iff the operator's login keychain carries a
-    /// generic-password entry under (account=tenant,
-    /// service=tenant-<tenant>). Doctor consults this to surface
-    /// `Finding::StashAbsent`. Dispatches via `security`, so all the
-    /// substrate failures map to `KeychainError`.
     fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError>;
 
-    /// Retrieve the operator-stashed password via
-    /// `security find-generic-password -a <name> -s tenant-<name> -w`.
     /// Stash-absent maps to `KeychainError::NotFound`.
     fn find_stashed_password(
         &self,
         name: &TenantUserName,
     ) -> Result<KeychainPassword, KeychainError>;
 
-    /// Unlock the tenant's keychain via
-    /// `sudo -iu <name> security unlock-keychain -p <pw> tenant.keychain-db`.
-    /// Already-unlocked exits 0 on the substrate — no idempotence guard.
+    /// Already-unlocked exits 0 on the substrate, so no idempotence guard.
     fn unlock_tenant_keychain(
         &self,
         name: &TenantUserName,
@@ -187,8 +121,6 @@ pub trait HostMachine {
     ) -> Result<(), KeychainError>;
 }
 
-/// Leaf-op dispatch to the `HostMachine` with a domain-specific error type.
-/// `op_ref` projects into the `Op<'_>` umbrella for unified rendering.
 pub trait WritableOp {
     type Error;
     fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), Self::Error>;

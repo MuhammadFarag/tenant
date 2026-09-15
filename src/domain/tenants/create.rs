@@ -1,5 +1,3 @@
-//! Create-verb error type and the `Tenants::create` orchestrator.
-
 use crate::ModeLevel;
 use crate::domain::reporter::Reporter;
 use crate::domain::{
@@ -12,15 +10,8 @@ use crate::profile::{ProfileError, display_path_for};
 use super::reapply::{hosts_for_level, steady_inbound_rules};
 use super::{ModeError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
 
-/// Failure surface for create. `UserWithRollback` is the
-/// worst case where rollback itself failed and the host is left with
-/// an orphan group. `HostMembership` has no automatic rollback —
-/// the host-add step is load-bearing for tenant usability.
-///
-/// `KeychainProvision` / `KeychainStash` follow the same posture as
-/// `Profile` / `Firewall`: tenant user + group already exist, no
-/// automatic rollback, recovery is `tenant destroy <name>`. The
-/// half-provisioned state is convergent under destroy.
+/// Only `User` rolls back (deletes the group); every other failure leaves partial state
+/// that `tenant destroy <name>` converges.
 #[derive(Debug)]
 pub(crate) enum CreateError {
     Group(AccountError),
@@ -30,17 +21,11 @@ pub(crate) enum CreateError {
         rollback: AccountError,
     },
     HostMembership(AccountError),
-    /// Co-working directory provisioning failed. Same posture as
-    /// `KeychainProvision` / `Profile` / `Firewall`: tenant user +
-    /// group already exist, no automatic rollback, recovery is
-    /// `tenant destroy <name>`.
     CoworkDir(AccountError),
     KeychainProvision(KeychainError),
     KeychainStash(KeychainError),
     Profile(ProfileError),
-    /// Read/parse failures on the just-written profile also flow here
-    /// as `FirewallError::Fs` because they surface during the firewall
-    /// composition step.
+    /// Also carries a failed load of the just-written profile, as `FirewallError::Fs`.
     Firewall(FirewallError),
     PostProvision(ModeError),
 }
@@ -87,19 +72,6 @@ impl<'a> Tenants<'a> {
             .map_err(CreateError::HostMembership)?;
         match self.run(&add_user, reporter) {
             Ok(()) => {
-                // Provision the per-tenant co-working directory. The
-                // four-step substrate (mkdir → chown → chmod 2770 →
-                // chmod -R +a) is natively idempotent on macOS, so
-                // the same op fires unconditionally on every reapply
-                // as catch-up. Failures share the keychain provision's
-                // recovery posture — tenant user + group present,
-                // `tenant destroy <name>` converges.
-                //
-                // Pre-flight kind-check refuses when the path already
-                // holds a non-directory entry: mkdir -p errors on a
-                // regular file (operator typo, stray `touch`) and
-                // silently follows a symlink, leaving the subsequent
-                // chown/chmod pass mutating the target.
                 let cowork_path = cowork_dir_path(name.as_str());
                 guard_cowork_dir_kind(self.machine, &cowork_path)
                     .map_err(CreateError::CoworkDir)?;
@@ -111,14 +83,6 @@ impl<'a> Tenants<'a> {
                 };
                 self.run(&ensure_cowork, reporter)
                     .map_err(CreateError::CoworkDir)?;
-                // Provision the tenant's `tenant.keychain-db` so
-                // credential-stashing apps (Claude OAuth, etc.) don't
-                // trip the "could not find the keychain" warning, and
-                // stash the protecting secret in the operator's
-                // keychain so `shell` / `bootstrap` can unlock it
-                // non-interactively. One password covers both — the
-                // keychain is unlockable only by the same secret
-                // that's been written into the operator's keychain.
                 let keychain_password = KeychainPassword::generate();
                 let create_kc = KeychainOp::CreateTenantKeychain {
                     name: name.into(),
@@ -131,12 +95,6 @@ impl<'a> Tenants<'a> {
                     name: name.into(),
                     password: keychain_password,
                 };
-                // Partial-failure recovery: see execute_keychain
-                // comment block in src/adapters/macos/host_machine.rs.
-                // All 4 provision sub-steps share one CreateError arm
-                // (`KeychainProvision`) — operator-recovery story is
-                // `tenant destroy <name>` regardless of which step
-                // failed.
                 self.run(&create_kc, reporter)
                     .map_err(CreateError::KeychainProvision)?;
                 self.run(&set_default, reporter)
@@ -173,11 +131,8 @@ impl<'a> Tenants<'a> {
                 self.run(&update_conf, reporter)
                     .map_err(CreateError::Firewall)?;
                 if let Err(reload_err) = self.run(&reload, reporter) {
-                    // FlushAnchor is the symmetric counter to the partial
-                    // in-kernel state from the failed Reload — without
-                    // it, restoring pf.conf and removing the anchor file
-                    // still leaves the partially-loaded rules in kernel
-                    // memory under the now-orphaned anchor name.
+                    // Flush too: a failed Reload can leave partially-loaded rules in the kernel under the
+                    // orphaned anchor name.
                     if self.run(&restore, reporter).is_err() {
                         return Err(CreateError::Firewall(FirewallError::RestoreFailed {
                             path: crate::firewall::PF_CONF_BACKUP.to_string(),

@@ -1,11 +1,4 @@
-//! Combinatorial coverage on the `/etc/pf.conf` line-op free functions
-//! in `firewall`: `ensure_anchor_ref`, `remove_anchor_ref`,
-//! `is_anchor_referenced`. Each function has a matrix of input states
-//! (both lines present, neither, partial, with-other-anchors) that
-//! drives the idempotence + non-interference contracts. Same in-tree
-//! precedent as `tests/macos_host_machine.rs` / `tests/firewall_render.rs`
-//! / `tests/profile_parse.rs` — pure functions whose call sites land
-//! in 2.4 with a verb consumer, so unit tests precede the CLI tests.
+//! Unit tests: the `/etc/pf.conf` line-ops are pure over a combinatorial input matrix.
 
 use tenant::firewall::{ensure_anchor_ref, is_anchor_referenced, remove_anchor_ref};
 
@@ -51,8 +44,6 @@ fn ensure_anchor_ref_adds_only_missing_anchor_when_load_present() {
 
 #[test]
 fn ensure_anchor_ref_does_not_affect_unrelated_anchors() {
-    // A host with a `tenant-other` already installed must not have its
-    // lines touched when `dev` is ensured.
     let initial = format!("{ANCHOR_OTHER}\n{LOAD_OTHER}\n");
     let result = ensure_anchor_ref(&initial, "dev");
     assert_eq!(
@@ -95,11 +86,8 @@ fn remove_anchor_ref_preserves_unrelated_lines() {
 
 #[test]
 fn is_anchor_referenced_distinguishes_anchor_from_load_substring() {
-    // The bare `anchor "tenant-dev"` text is a substring of the
-    // `load anchor "tenant-dev" from ...` line. Substring-based checks
-    // would falsely report the anchor line as present when only the
-    // load line is there — but `pfctl -f` needs both to actually
-    // install the rules. Line-level matching is the contract.
+    // `anchor "tenant-dev"` is a substring of the load line, and pfctl needs both lines,
+    // so presence must match whole lines.
     let only_load = format!("{LOAD_DEV}\n");
     assert!(
         !is_anchor_referenced(&only_load, "dev"),

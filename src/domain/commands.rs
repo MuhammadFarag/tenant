@@ -85,9 +85,7 @@ pub(crate) fn dispatch(
                     EX_IOERR
                 }
                 Err(tenants::CreateError::UserWithRollback { user, rollback }) => {
-                    // Emit the original failure first so log-grep regexes
-                    // matching the single-failure shape keep working; the
-                    // rollback-failed line follows with its recovery hint.
+                    // Original failure first, so greps for the single-failure shape still match.
                     reporter.create_failed(&name, &user);
                     reporter.create_rollback_failed(&name, &rollback);
                     EX_IOERR
@@ -122,8 +120,7 @@ pub(crate) fn dispatch(
             name,
             mode,
             inbound,
-            // Renamed at the bind: `directory` is already the
-            // HostUserDirectory port in this scope.
+            // TODO(smell): rename the `directory` port binding (e.g. `user_directory`) so this flag needn't be renamed at the bind
             directory: shell_directory,
             argv,
         } => {
@@ -185,9 +182,7 @@ pub(crate) fn dispatch(
                         reporter,
                     ) {
                         Ok(code) => {
-                            // Closing surface is command-form-only; the
-                            // interactive form has no terminal context
-                            // left to render into after the session ends.
+                            // Command form only: an interactive session leaves nothing to close.
                             if !argv.is_empty() {
                                 reporter.shell_command_done(code, resolved_mode);
                             }
@@ -205,10 +200,7 @@ pub(crate) fn dispatch(
                             child_exit,
                             narrow_err,
                         }) => {
-                            // Child exit wins; the warning carries the
-                            // narrow-failure signal. Pass Runtime to elide
-                            // the "narrowed back" suffix — it would lie
-                            // when the narrow just failed.
+                            // TODO(smell): Runtime is passed only to suppress the "narrowed back" suffix — give shell_command_done an explicit flag
                             reporter.shell_narrow_failed(&name, &narrow_err);
                             reporter.shell_command_done(child_exit, ModeLevel::Runtime);
                             child_exit.clamp(0, 255) as u8
@@ -217,8 +209,6 @@ pub(crate) fn dispatch(
                             reporter.shell_refuse_stash_absent(&refused);
                             EX_USAGE
                         }
-                        // `-d` pre-flight refusals: EX_USAGE (operator input),
-                        // fired before anything widened or unlocked.
                         Err(tenants::ShellError::DirectoryInvalid { raw, reason }) => {
                             reporter.refuse_shell_directory_invalid(&raw, reason);
                             EX_USAGE
@@ -232,10 +222,6 @@ pub(crate) fn dispatch(
                             EX_IOERR
                         }
                         Err(tenants::ShellError::UnlockFailed(err)) => {
-                            // Substrate breakage on retrieval or unlock — surfaces
-                            // as EX_IOERR, parallel to other shell substrate
-                            // failures. StashAbsent (operator action required)
-                            // routes separately above.
                             reporter.keychain_unlock_failed(&name, &err);
                             EX_IOERR
                         }
@@ -269,10 +255,7 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 tenants::Eligibility::Destroyable => {
-                    // Build the reapply plan BEFORE the summary so
-                    // profile-read / share pre-flight failures surface
-                    // pre-prompt — don't ask the operator to confirm
-                    // something already doomed.
+                    // Plan before summary, so pre-flight failures surface before the prompt.
                     let plan = match tenants.build_reapply_plan(
                         &name,
                         host,
@@ -336,11 +319,6 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 tenants::Eligibility::Destroyable => {
-                    // Inbound renders the EGRESS axis at runtime tier
-                    // (steady state) and the inbound axis at the requested
-                    // level — the two widenings don't compose across
-                    // separate commands. Build pre-summary so profile-read
-                    // / share pre-flight failures surface pre-prompt.
                     let plan = match tenants.build_reapply_plan(
                         &name,
                         host,
@@ -450,8 +428,6 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     tenants::Eligibility::Destroyable => {
-                        // Build plan pre-summary so profile-read / share
-                        // pre-flight failures surface pre-prompt.
                         let plan = match tenants.build_reapply_plan(
                             &n,
                             host,
@@ -490,8 +466,6 @@ pub(crate) fn dispatch(
                 }
             }
             None => {
-                // Show scope before the prompt; empty host has nothing
-                // to confirm, so skip straight to the no-op summary.
                 let names = match directory.tenant_names() {
                     Ok(n) => n,
                     Err(e) => {
@@ -553,9 +527,6 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     tenants::Eligibility::Destroyable => {
-                        // Build the plan pre-summary so profile-read /
-                        // include / share pre-flight failures surface
-                        // pre-prompt (same posture as reload).
                         let plan = match tenants.build_bootstrap_plan(&n, host) {
                             Ok(p) => p,
                             Err(e) => {
@@ -567,8 +538,6 @@ pub(crate) fn dispatch(
                                 return EX_IOERR;
                             }
                         };
-                        // A tenant declaring no commands is a quiet,
-                        // convergent success — no summary, no confirm.
                         if plan.commands.is_empty() {
                             reporter.bootstrap_nothing_declared(&n);
                             return 0;
@@ -578,14 +547,7 @@ pub(crate) fn dispatch(
                         let infra_entries = plan.widen.as_plan_entries();
                         if show_summary {
                             reporter.bootstrap_summary(&n, &command_entries, &infra_entries);
-                            // Bootstrap is a mutating verb (PF widen/narrow +
-                            // commands), so it runs the per-tenant drift audit
-                            // between summary and confirm like every other
-                            // mutating verb. Reuse DoctorScope::Reload:
-                            // bootstrap Light-reapplies the same per-tenant
-                            // surfaces reload audits. Courtesy only — never an
-                            // abort gate. Single-tenant only; the no-arg walk
-                            // stays doctor-free, consistent with reload_all.
+                            // TODO(smell): DoctorScope::Reload is reused for bootstrap — name the scope after the surfaces it audits, not a verb
                             tenants.pre_exec_doctor_summary(
                                 Some(&n),
                                 host,
@@ -601,12 +563,6 @@ pub(crate) fn dispatch(
                             Ok(()) => 0,
                             Err(e) => {
                                 tenants::surface_bootstrap_error(reporter, &n, &e);
-                                // StashAbsent is operator-action-required
-                                // (EX_USAGE, mirrors shell); every other
-                                // arm — command failure, spawn failure,
-                                // narrow-after-success — is a substrate
-                                // failure at EX_IOERR (bootstrap is not
-                                // shell; no child-exit propagation).
                                 match e {
                                     tenants::BootstrapError::StashAbsent { .. } => EX_USAGE,
                                     _ => EX_IOERR,
@@ -651,19 +607,13 @@ pub(crate) fn dispatch(
                 }
             }
         },
-        Verb::Setup => {
-            // Host-wide: no name, no eligibility, no pre-exec doctor pass
-            // (setup prepares the host; its own offer is the surface).
-            // The Reporter owns the offer/decline/dry-run branching, so
-            // dispatch just routes the outcome.
-            match tenants.setup(reporter) {
-                Ok(()) => 0,
-                Err(e) => {
-                    surface_setup_error(reporter, &e);
-                    EX_IOERR
-                }
+        Verb::Setup => match tenants.setup(reporter) {
+            Ok(()) => 0,
+            Err(e) => {
+                surface_setup_error(reporter, &e);
+                EX_IOERR
             }
-        }
+        },
         Verb::Help { topic } => {
             let body = match topic {
                 Some(HelpTopic::Profile) => help_body_profile(),
@@ -690,8 +640,6 @@ pub(crate) fn dispatch(
                     0
                 }
                 tenants::Eligibility::OrphanGroup => {
-                    // Convergence path: tenant user is gone but the
-                    // suffixed group survived a prior partial failure.
                     let orphan_plan_ops = build_orphan_plan_ops(&name, host);
                     let orphan_plan = orphan_plan_entries(&orphan_plan_ops);
                     if show_summary {
@@ -785,9 +733,7 @@ fn surface_mode_error(
     }
 }
 
-/// Parallel to `surface_mode_error` with shell-entry phrasing: the
-/// operator typed `tenant shell`, so the frame names the narrow as a
-/// step within the shell verb, not a standalone mode switch.
+// TODO(smell): the surface_*_error fns repeat one ModeError match with per-verb Reporter methods — collapse
 fn surface_shell_mode_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
@@ -803,9 +749,6 @@ fn surface_shell_mode_error(
     }
 }
 
-/// Parallel to `surface_mode_error` with inbound-specific wording on
-/// Firewall + Share arms; Acl / Account / Probe arms reuse the
-/// mode-named methods whose wording is verb-agnostic.
 fn surface_inbound_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
@@ -821,9 +764,6 @@ fn surface_inbound_error(
     }
 }
 
-/// Parallel to `surface_mode_error` with reload-specific wording on
-/// Firewall + Share arms; Acl / Account / Probe arms reuse the
-/// mode-named methods whose wording is verb-agnostic.
 fn surface_reload_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
@@ -839,12 +779,7 @@ fn surface_reload_error(
     }
 }
 
-/// One display-only `ExecAsUser` op per bootstrap command, for the
-/// always-shown pre-confirm command list (the honesty backstop). Plan/echo
-/// render ONLY — `execute_account` panics on `ExecAsUser`; the real run
-/// goes through `machine.exec_as_tenant` inside `Tenants::bootstrap`,
-/// exactly like shell. Owns the ops so `bootstrap_command_entries` can
-/// borrow them into the slice the Reporter expects.
+/// Display-only ops for the pre-confirm command list; the real run goes through `exec_as_tenant`.
 fn build_bootstrap_command_ops(
     name: &super::TenantUserName,
     commands: &[String],
@@ -854,8 +789,6 @@ fn build_bootstrap_command_ops(
         .map(|command| AccountOp::ExecAsUser {
             name: name.into(),
             argv: vec!["/bin/sh".to_string(), "-c".to_string(), command.clone()],
-            // Bootstrap commands embed their own `cd`/guards — the
-            // `-d` axis is `tenant shell`'s alone.
             dir: None,
         })
         .collect()
@@ -865,11 +798,8 @@ fn bootstrap_command_entries(ops: &[AccountOp]) -> Vec<(Op<'_>, Option<&'static 
     ops.iter().map(|op| (Op::Account(op), None)).collect()
 }
 
-// Plan-slice construction for prompt-having verbs. `*_plan_ops` owns
-// the ops; `*_plan_entries` flattens them into the borrowed-slice the
-// Reporter expects. InstallAnchor / UpdateConfig placeholder bodies
-// are empty strings; `describe_via` ignores those fields, so plan +
-// echo lines match the real ops constructed later after profile-read.
+// Plan placeholder bodies are empty: `describe_*` ignores them, so plan lines match
+// the real ops built after profile-read.
 
 pub(crate) struct CreatePlanOps {
     pub(crate) create_group: AccountOp,
@@ -900,10 +830,7 @@ fn build_create_plan_ops(
     gid: super::GroupId,
 ) -> CreatePlanOps {
     let group = tenants::tenant_share_group_name(name.as_str());
-    // Plan-side placeholder password: describe_keychain always
-    // renders `<password>` regardless of the actual bytes, so the
-    // displayed plan never reveals secret material. The real
-    // password is generated inside `Tenants::create`.
+    // describe_keychain renders `<password>` regardless; the real one is generated in `Tenants::create`.
     let plan_placeholder = super::KeychainPassword::for_plan_placeholder();
     CreatePlanOps {
         create_group: AccountOp::CreateShareGroup {
@@ -1088,11 +1015,9 @@ fn orphan_plan_entries(ops: &OrphanGroupPlanOps) -> Vec<(Op<'_>, Option<&'static
     ]
 }
 
-/// Post-provision is the arm where the tenant is already provisioned
-/// but share-reapply failed; the per-arm framing names the existing
-/// state so the operator's recovery is `tenant reload`, not a fresh
-/// `tenant create` (which would refuse on name-conflict). Profile /
-/// Firewall arms are unreachable here but wired for completeness.
+// TODO(smell): Profile/Firewall arms are unreachable here — narrow the error type
+/// The tenant already exists, so the framing points recovery at `tenant reload`, not
+/// `tenant create` (which would refuse on name-conflict).
 fn surface_create_post_provision_error(
     reporter: &mut Reporter,
     name: &super::TenantUserName,
@@ -1108,13 +1033,10 @@ fn surface_create_post_provision_error(
     }
 }
 
-/// Body for `tenant help` with no topic — lists available topics.
 fn help_body_index() -> &'static str {
     include_str!("../resources/help_index.txt")
 }
 
-/// Body for `tenant help profile`. Plain text; Reporter renders
-/// verbatim (no ANSI styling).
 fn help_body_profile() -> &'static str {
     include_str!("../resources/help_profile.txt")
 }

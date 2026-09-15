@@ -56,8 +56,6 @@ pub fn dim(s: &str) -> String {
     wrap(s, "2")
 }
 
-/// `─── <title> ────────...` padded with `─` to `width` chars. If the
-/// title is longer than the width, no padding; the title prints in full.
 pub fn rule(title: &str, width: usize) -> String {
     let prefix = "─── ";
     let suffix_lead = " ";
@@ -70,19 +68,7 @@ pub fn rule(title: &str, width: usize) -> String {
     format!("{prefix}{title}{suffix_lead}{dashes}")
 }
 
-/// Rounded-corner box around a multi-line body, with the title baked
-/// into the top border:
-///
-/// ```text
-/// ╭─ TITLE ──────────╮
-/// │ body line 1      │
-/// │ body line 2      │
-/// ╰──────────────────╯
-/// ```
-///
-/// `width` is the total character width including the corners. Body
-/// lines longer than the available inner width print verbatim (overflow
-/// rather than wrap).
+/// `width` includes the corners; over-long body lines overflow, not wrap.
 pub fn panel(title: &str, body: &str, width: usize) -> String {
     let width = width.max(8);
     let title_segment = format!("─ {title} ");

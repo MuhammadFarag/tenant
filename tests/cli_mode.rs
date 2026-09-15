@@ -7,35 +7,10 @@ mod common;
 use adapters::*;
 use common::*;
 
-// ================================================================
-// Mode verb
-// ================================================================
-//
-// Locked design (see CLAUDE.md doctrine):
-// - NO defensive FlushAnchor before InstallAnchor. The parent
-//   `load anchor` directive stays in pf.conf across mode reapply,
-//   so `pfctl -f` re-reads the anchor file and replaces the
-//   in-kernel ruleset.
-// - Implicit current-mode (no state file). The on-disk anchor body
-//   is the source of truth.
-// - `tenant shell <name>` auto-narrows to runtime tier on entry;
-//   between sessions, the operator narrows manually with `tenant
-//   mode <name> runtime` if needed.
-// - ModeError { Profile, Firewall, Acl, Account, Probe, Share } —
-//   verb-isolated failure surface paralleling DestroyError's split.
-
-// ----------------------------------------------------------------
-// Clap parse + dry-run vertical slice
-// ----------------------------------------------------------------
+// --- Clap parse + dry-run ---
 
 #[test]
 fn mode_runtime_dry_run_default_shows_intent() {
-    // Smallest red→green for the verb. `stub_with_tenant("dev")`
-    // gives a tenant-range user so eligibility classifies as
-    // Destroyable; dry-run swaps in DryRunHostMachine which returns
-    // `default_profile_toml()` from read_profile, so the writer's
-    // profile-read + parse + render path completes without touching
-    // the StubHostMachine we (don't) wire here.
     let (code, stdout, stderr) = run_with(
         stub_with_tenant("dev"),
         &["mode", "dev", "runtime", "--dry-run"],
@@ -46,7 +21,6 @@ fn mode_runtime_dry_run_default_shows_intent() {
 
 #[test]
 fn mode_install_dry_run_default_shows_intent() {
-    // Symmetric to the runtime test. Install ModeLevel parses too.
     let (code, stdout, stderr) = run_with(
         stub_with_tenant("dev"),
         &["mode", "dev", "install", "--dry-run"],
@@ -57,9 +31,6 @@ fn mode_install_dry_run_default_shows_intent() {
 
 #[test]
 fn mode_rejects_unknown_level() {
-    // Clap's ValueEnum derivation accepts only `runtime` and `install`.
-    // Anything else fails parse with exit 2 (clap's standard exit code
-    // for bad arg/enum values) before dispatch runs.
     let (code, stdout, _stderr) = run_with(stub_with_tenant("dev"), &["mode", "dev", "bogus"]);
     assert_eq!(code, 2, "clap should reject unknown level");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -67,28 +38,20 @@ fn mode_rejects_unknown_level() {
 
 #[test]
 fn mode_requires_name() {
-    // `tenant mode` with no positional → clap parse error (exit 2).
     let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["mode"]);
     assert_eq!(code, 2, "clap should reject missing name");
 }
 
 #[test]
 fn mode_requires_level() {
-    // `tenant mode dev` (no level) → clap parse error (exit 2). Pins
-    // the ValueEnum being a required positional.
     let (code, _stdout, _stderr) = run_with(StubUserDirectory::default(), &["mode", "dev"]);
     assert_eq!(code, 2, "clap should reject missing level");
 }
 
-// ----------------------------------------------------------------
-// Validation + eligibility refusals
-// ----------------------------------------------------------------
+// --- Validation + eligibility refusals ---
 
 #[test]
 fn mode_rejects_empty_name() {
-    // Lexical validation runs before eligibility; empty name trips
-    // NameError::Empty and never consults the HostUserDirectory. Same shape and
-    // wording as create/destroy/shell.
     let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["mode", "", "runtime"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -97,8 +60,6 @@ fn mode_rejects_empty_name() {
 
 #[test]
 fn mode_rejects_reserved_names() {
-    // Reserved-name blocklist applies to mode too. Lexical rail
-    // trips before any state-based check.
     for name in [
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
@@ -116,7 +77,6 @@ fn mode_rejects_reserved_names() {
 
 #[test]
 fn mode_refuses_when_tenant_absent() {
-    // Empty StubUserDirectory → NotPresent → refuse_mode_absent. Exit 64.
     let (code, stdout, stderr) =
         run_with(StubUserDirectory::default(), &["mode", "ghost", "runtime"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
@@ -129,9 +89,6 @@ fn mode_refuses_when_tenant_absent() {
 
 #[test]
 fn mode_refuses_when_only_orphan_group_present() {
-    // OrphanGroup collapses to the same refusal as NotPresent for
-    // mode purposes — operator wants to apply a mode; the lingering
-    // group can't host one. Same collapse as the shell verb.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -147,10 +104,7 @@ fn mode_refuses_when_only_orphan_group_present() {
 
 #[test]
 fn mode_refuses_below_floor() {
-    // Tenant-floor guard: an account exists with a positive UID below
-    // TENANT_UID_FLOOR (600) → refuse. `legacyusr` sidesteps the
-    // reserved-name blocklist so this test exercises the state-based
-    // refusal path specifically.
+    // `legacyusr` sidesteps the reserved-name blocklist so the state-based refusal is exercised.
     let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
@@ -167,8 +121,7 @@ fn mode_refuses_below_floor() {
 
 #[test]
 fn mode_refuses_system_account() {
-    // System-account refusal: `has_user` true, `uid_for` None (negative
-    // UID was filtered by parse_id_line). Same shape as destroy/shell.
+    // Negative UID is filtered by parse_id_line: `has_user` true, `uid_for` None.
     let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
         ..Default::default()
@@ -184,8 +137,6 @@ fn mode_refuses_system_account() {
 
 #[test]
 fn mode_dry_run_refuses_missing_tenant() {
-    // Dry-run doesn't bypass eligibility — same answer real-mode
-    // would give. Mirrors shell_dry_run_refuses_missing_tenant.
     let (code, stdout, stderr) = run_with(
         StubUserDirectory::default(),
         &["mode", "ghost", "runtime", "--dry-run"],
@@ -198,17 +149,10 @@ fn mode_dry_run_refuses_missing_tenant() {
     );
 }
 
-// ----------------------------------------------------------------
-// Real-mode happy path — runtime
-// ----------------------------------------------------------------
+// --- Real-mode happy path: runtime ---
 
 #[test]
 fn mode_runtime_real_mode_op_shape() {
-    // Two-op composition: InstallAnchor (with body rendered from
-    // profile.allowlist.runtime.hosts — empty in the default profile)
-    // + Reload. No defensive FlushAnchor. Pre-load an existing
-    // profile via with_existing_profile so the writer's read_profile
-    // finds something.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) =
@@ -248,12 +192,7 @@ fn mode_runtime_real_mode_op_shape() {
 
 #[test]
 fn mode_renders_declared_inbound_ports_from_profile() {
-    // Steady-state inbound axis: `mode` does NOT control inbound, so it
-    // renders inbound at the profile's declared ports (restricted with
-    // those ports), NOT a hardcoded locked posture. A tenant whose
-    // profile declares `ports = [3000]` must keep 3000 open after a mode
-    // reapply. Mirrors how `hosts_for_level` resolves egress from the
-    // same parsed profile.
+    // `mode` doesn't control inbound: it renders the declared ports, not a locked posture.
     let profile = format!(
         "{}\n[inbound]\nports = [\n  3000,\n]\n",
         profile_with_hosts(&[], &[])
@@ -280,13 +219,6 @@ fn mode_renders_declared_inbound_ports_from_profile() {
 
 #[test]
 fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
-    // Narrowed negative pin: mode operates in the firewall domain
-    // PLUS the `AddHostToShareGroup` catch-up step. No
-    // CreateTenantUser / DeleteUserRecord, no ProfileOp::Create /
-    // Delete — those belong to create / destroy. No login — that
-    // belongs to shell. No EnsureCoworkDir — that belongs to Full
-    // reapply (reload + create-post-provision). A regression that
-    // wired mode through, say, a ProfileOp::Create would trip this.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, _stdout, _stderr) =
@@ -314,13 +246,7 @@ fn mode_only_touches_addhost_account_op_and_no_profile_or_login() {
 
 #[test]
 fn mode_light_does_not_reassert_primary_group() {
-    // Primary-group reassertion (OS-update resilience) is a
-    // Full/reload-only convergence op, NOT part of Light reapply: it sits
-    // with the cowork/recursive-grant passes Light skips, and convergence
-    // is reload's "apply everything" role. mode neither reads the gid nor
-    // emits the op. The exact-account_ops pin above already enforces this;
-    // this names the intent explicitly — preload a gid so the point is
-    // "even with a gid available, Light neither reads nor reasserts it".
+    // Preloaded gid: even with one available, Light neither reads nor reasserts it.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_share_group_gid("dev-tenant-share", 742);
@@ -339,11 +265,6 @@ fn mode_light_does_not_reassert_primary_group() {
 
 #[test]
 fn mode_does_not_emit_restore_config_op() {
-    // Negative pin: no auto-recovery on Reload failure. The
-    // create-side restore-on-reload-failure sequence
-    // (RestoreConfigFromBackup → RemoveAnchor → Reload → FlushAnchor)
-    // does NOT fire for mode. Even on success the op list should be
-    // exactly [InstallAnchor, Reload] with no other firewall ops.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (_code, _stdout, _stderr) =
@@ -366,11 +287,6 @@ fn mode_does_not_emit_restore_config_op() {
 
 #[test]
 fn mode_uses_centralized_anchor_name() {
-    // Regression guard against an inline `format!("tenant-{name}")`
-    // at the writer call site. The InstallAnchor's `name` field
-    // should be the bare tenant name; the substrate constructs the
-    // `tenant-<name>` anchor name from `tenant_anchor_name`. Verifies
-    // the centralization rail.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (_code, _stdout, _stderr) =
@@ -383,15 +299,10 @@ fn mode_uses_centralized_anchor_name() {
     }
 }
 
-// ----------------------------------------------------------------
-// Install mode + populated profile
-// ----------------------------------------------------------------
+// --- Install mode + populated profile ---
 
 #[test]
 fn mode_install_with_only_runtime_populated() {
-    // Install mode with runtime=[a,b] and install=[] should produce
-    // a body with runtime hosts only (the install tier is empty, so
-    // the union has no extra entries).
     let profile = profile_with_hosts(&["api.example.com", "deploy.example.com"], &[]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
     let (code, _stdout, _stderr) =
@@ -412,9 +323,6 @@ fn mode_install_with_only_runtime_populated() {
 
 #[test]
 fn mode_install_with_runtime_and_install_populated() {
-    // Happy-path canonical: runtime=[a] + install=[b,c] under
-    // install mode → anchor body has [a, b, c] in that order.
-    // Order matters for render_anchor's output stability.
     let profile = profile_with_hosts(
         &["api.example.com"],
         &["nodejs.org", "storage.googleapis.com"],
@@ -438,10 +346,7 @@ fn mode_install_with_runtime_and_install_populated() {
 
 #[test]
 fn mode_runtime_with_runtime_and_install_populated_excludes_install() {
-    // Narrow path: runtime=[a] + install=[b,c] under runtime mode →
-    // anchor body has [a] only. Install hosts are EXCLUDED. This is
-    // the security-relevant case — narrowing back must shrink the
-    // host set.
+    // Security-relevant: narrowing back must shrink the host set.
     let profile = profile_with_hosts(
         &["api.example.com"],
         &["nodejs.org", "storage.googleapis.com"],
@@ -465,9 +370,6 @@ fn mode_runtime_with_runtime_and_install_populated_excludes_install() {
 
 #[test]
 fn mode_install_with_empty_runtime_and_populated_install() {
-    // Edge case: runtime=[] + install=[a,b] under install mode →
-    // body has [a, b]. The order-preserving union still works when
-    // the runtime tier is empty (no awkward leading-empty handling).
     let profile = profile_with_hosts(&[], &["pypi.org", "npmjs.org"]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &profile);
     let (code, _stdout, _stderr) =
@@ -486,15 +388,10 @@ fn mode_install_with_empty_runtime_and_populated_install() {
     }
 }
 
-// ----------------------------------------------------------------
-// Display — standard + verbose + dry-run
-// ----------------------------------------------------------------
+// --- Display: standard + verbose + dry-run ---
 
 #[test]
 fn mode_real_standard_emits_only_post_exec_confirmation() {
-    // Standard real mode: silent pre-exec, one summary line post-exec.
-    // Matches create/destroy's pattern. The level appears in the
-    // confirmation so the operator sees which mode they ended up in.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) =
@@ -518,10 +415,6 @@ fn mode_real_standard_emits_only_post_exec_confirmation() {
 
 #[test]
 fn mode_real_verbose_shows_plan_and_echo() {
-    // Real+verbose: intent + 2-line plan + 2 `$` echoes + done.
-    // The plan shows the placeholder InstallAnchor + Reload (their
-    // describe lines ignore the body/content fields, so the rendered
-    // text matches the real-body ops at execution time).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) = run_with_exec(
@@ -530,9 +423,7 @@ fn mode_real_verbose_shows_plan_and_echo() {
         &["mode", "dev", "runtime", "-v"],
     );
     assert_eq!(code, 0);
-    // Scripted-real-verbose drops the verbose plan — cleaner log
-    // trace for scripted callers; the section divider + per-step
-    // echo + ✓ progress remains the trace surface.
+    // Non-TTY real run drops the verbose plan: divider + `$` echo + ✓ only.
     let want = format!(
         "{}\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
@@ -553,11 +444,6 @@ fn mode_real_verbose_shows_plan_and_echo() {
 
 #[test]
 fn mode_install_real_verbose_shows_install_level_text() {
-    // Same plan/echo shape as runtime mode (anchor body content
-    // differs but the describe text doesn't include the body).
-    // The "install" level appears in the intent + done lines. Under
-    // Light scope the cowork-dir provisioning is omitted; the
-    // recursive ACL pass belongs to `tenant reload`.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, _stderr) = run_with_exec(
@@ -566,7 +452,6 @@ fn mode_install_real_verbose_shows_install_level_text() {
         &["mode", "dev", "install", "-v"],
     );
     assert_eq!(code, 0);
-    // Scripted-real-verbose drops the verbose plan.
     let want = format!(
         "{}\n\
          $ sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n\
@@ -587,17 +472,11 @@ fn mode_install_real_verbose_shows_install_level_text() {
 
 #[test]
 fn mode_dry_run_verbose_shows_plan_no_echo() {
-    // Dry-run + verbose: "Would apply" intent + plan, but no `$`
-    // echo (echo is real+verbose only) and no "Applied" done line.
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["mode", "dev", "runtime", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    // Verbose plan lives inside the summary in intent-leads-shell-
-    // follows layout. Light scope → 3 entries (InstallAnchor, Reload,
-    // AddHostToShareGroup); default profile has no `[[shares]]` and
-    // the EnsureCoworkDir op is omitted under Light.
     let plan = verbose_plan_section(&[
         (
             "Install firewall anchor at /etc/pf.anchors/tenant-dev",
@@ -616,9 +495,6 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
 
 #[test]
 fn mode_dry_run_bypasses_injected_host_machine() {
-    // Dry-run swap-in of DryRunHostMachine means the StubHostMachine wired
-    // by the test never sees a call. Mirrors create/destroy/shell's
-    // dry-run-bypass tests.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -638,20 +514,11 @@ fn mode_dry_run_bypasses_injected_host_machine() {
     );
 }
 
-// ----------------------------------------------------------------
-// Failure paths
-// ----------------------------------------------------------------
+// --- Failure paths ---
 
 #[test]
 fn mode_read_profile_failure_surfaces() {
-    // No `with_existing_profile` → StubHostMachine::read_profile returns
-    // a "not found" ProfileError. Mode should surface this through
-    // mode_profile_failed with the profile path framed for the operator.
-    //
-    // Dispatch builds the reapply plan BEFORE mode_intent emits, so
-    // a profile-read failure exits the verb pre-section-divider.
-    // Stdout stays empty; stderr carries the failure framing —
-    // don't ask the operator to confirm something doomed to fail.
+    // The plan is built before the section divider, so stdout stays empty.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
@@ -670,10 +537,6 @@ fn mode_read_profile_failure_surfaces() {
 
 #[test]
 fn mode_parse_failure_surfaces_schema_version() {
-    // Profile loads but schema_version is unsupported → parse
-    // returns ProfileError → mode_profile_failed. The operator-readable
-    // refusal message ("schema_version N not understood") is preserved
-    // through the surface.
     let exec = StubHostMachine::new().with_existing_profile(
         "dev",
         "schema_version = 99\n[allowlist.runtime]\nhosts = []\n[allowlist.install]\nhosts = []\n",
@@ -693,9 +556,6 @@ fn mode_parse_failure_surfaces_schema_version() {
 
 #[test]
 fn mode_install_anchor_failure_surfaces() {
-    // InstallAnchor (the first firewall op) fails → mode_failed with
-    // the FirewallError display. Reload should NOT run after a failed
-    // InstallAnchor.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_firewall_op(
@@ -715,8 +575,6 @@ fn mode_install_anchor_failure_surfaces() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Section divider lands; first substrate (InstallAnchor) fails
-    // — no ✓, no Done section.
     assert_eq!(
         stdout,
         format!(
@@ -729,7 +587,6 @@ fn mode_install_anchor_failure_surfaces() {
         "tenant: failed to apply firewall mode for 'dev': \
          filesystem error at /etc/pf.anchors/tenant-dev: permission denied\n"
     );
-    // Only InstallAnchor recorded; Reload should NOT have fired.
     assert_eq!(exec.firewall_ops().len(), 1);
     assert!(matches!(
         exec.firewall_ops()[0],
@@ -739,10 +596,6 @@ fn mode_install_anchor_failure_surfaces() {
 
 #[test]
 fn mode_reload_failure_surfaces_without_recovery() {
-    // Reload fails → mode_failed. Critically, NO recovery sequence
-    // fires (no RestoreConfigFromBackup, no RemoveAnchor, no second
-    // Reload, no FlushAnchor). The verb is idempotent; the operator
-    // reruns to retry. Mirrors plugin's reapply_anchor.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .fail_firewall_op(
@@ -755,8 +608,6 @@ fn mode_reload_failure_surfaces_without_recovery() {
     let (code, stdout, stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Section + ✓ for InstallAnchor (succeeded), no ✓ for Reload
-    // (the failure), no Done section.
     assert_eq!(
         stdout,
         real_failure_stdout(
@@ -768,8 +619,6 @@ fn mode_reload_failure_surfaces_without_recovery() {
         stderr.contains("failed to apply firewall mode for 'dev'"),
         "stderr should be framed by mode_failed: {stderr:?}"
     );
-    // Exactly two firewall ops: InstallAnchor (succeeded) + Reload
-    // (failed). No recovery follow-up.
     assert_eq!(
         exec.firewall_ops().len(),
         2,
@@ -790,23 +639,10 @@ fn mode_reload_failure_surfaces_without_recovery() {
     }
 }
 
-// ================================================================
-// Share reapply integration with mode verb
-// ================================================================
-//
-// `tenant mode <name> <tier>` reapplies PF anchor AT THE TIER + per-
-// share substrate (ACL grant + parent dir ensure + symlink ensure).
-// Tests pin op sequences, refusal paths (host_path missing,
-// tenant_path occupied), profile-declared share order, and `$HOME`
-// expansion at the layer boundary.
+// --- Share reapply ---
 
 #[test]
 fn mode_profile_read_failure_surfaces_before_prompt() {
-    // Behavior pin: dispatch builds the reapply plan BEFORE the
-    // confirm prompt, so a missing profile surfaces pre-prompt with
-    // no stdout output (no section divider, no bullets, no plan).
-    // Don't ask the operator to confirm an action already known to
-    // fail. Stderr carries the framed failure.
     let exec = StubHostMachine::new(); // no profile preloaded
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -827,13 +663,6 @@ fn mode_profile_read_failure_surfaces_before_prompt() {
 
 #[test]
 fn mode_runtime_with_shares_emits_per_share_substrate_ops() {
-    // Single rw share: `/tmp` (real host_path; always exists) →
-    // `$HOME/src` (tenant-side). Mode reapply under Light scope:
-    //   PF: InstallAnchor + Reload
-    //   Shares: AccountOp::EnsureSymlinkAsUser ONLY (no AclOp::Grant,
-    //           no EnsureDir for the tenant home itself).
-    // Verifies: the symlink op records the literal expanded
-    // tenant_path; no recursive ACL grant fires (Light scope).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
@@ -881,9 +710,6 @@ fn mode_runtime_with_shares_emits_per_share_substrate_ops() {
 
 #[test]
 fn mode_runtime_uses_light_reapply_skipping_recursive_acl_passes() {
-    // Pins Light reapply: acl_ops is empty (no per-share Grant),
-    // account_ops omits EnsureCoworkDir, and PF + AddHost +
-    // per-share EnsureSymlinkAsUser still fire.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
@@ -925,8 +751,6 @@ fn mode_runtime_uses_light_reapply_skipping_recursive_acl_passes() {
 
 #[test]
 fn mode_install_uses_light_reapply_skipping_recursive_acl_passes() {
-    // Install tier widens the PF anchor only; share + cowork ACL
-    // state is tier-independent, so Light still skips them.
     let toml = profile_with_shares(
         &["api.example.com"],
         &["pypi.org"],
@@ -955,11 +779,7 @@ fn mode_install_uses_light_reapply_skipping_recursive_acl_passes() {
 
 #[test]
 fn mode_silently_succeeds_when_cowork_path_is_symlink_under_light_scope() {
-    // Inverse of `reload_refuses_when_cowork_path_is_a_symlink`:
-    // Light scope omits EnsureCoworkDir AND the
-    // `guard_cowork_dir_kind` pre-flight, so a corrupted cowork
-    // path does NOT abort mode. Negative pin — a regression
-    // re-introducing the kind-check under Light would trip it.
+    // Inverse of `reload_refuses_when_cowork_path_is_a_symlink`.
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -986,11 +806,6 @@ fn mode_silently_succeeds_when_cowork_path_is_symlink_under_light_scope() {
 
 #[test]
 fn mode_silently_succeeds_when_cowork_path_is_absent_under_light_scope() {
-    // Companion to the symlink case: PathKind::Absent (cowork dir
-    // never existed or was rm'd). Under Full scope, `mkdir -p`
-    // would provision it; under Light, mode does nothing — the
-    // operator discovers absence via `tenant doctor` and runs
-    // `tenant reload`.
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -1014,14 +829,7 @@ fn mode_silently_succeeds_when_cowork_path_is_absent_under_light_scope() {
 
 #[test]
 fn mode_runtime_with_shares_verbose_plan_excludes_grant_and_cowork() {
-    // Verbose-plan byte-exact pin against a profile WITH declared
-    // shares. `mode_dry_run_verbose_shows_plan_no_echo` uses the
-    // default profile (no shares) AND dry-run swaps in
-    // DryRunHostMachine, so it cannot exercise the share path at
-    // the summary stage. Simulate a TTY via `run_with_stdin` to
-    // trigger the real-mode pre-confirm summary on a profile with
-    // shares. Asserts no Grant, no EnsureCoworkDir, no recursive
-    // chmod in the plan; the tenant-side symlink op IS present.
+    // TTY stdin forces the real-mode pre-confirm summary; dry-run can't show shares.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, stdout, _stderr) = run_with_stdin(
@@ -1051,10 +859,6 @@ fn mode_runtime_with_shares_verbose_plan_excludes_grant_and_cowork() {
 
 #[test]
 fn mode_runtime_with_nested_tenant_path_emits_ensure_dir_for_parent() {
-    // tenant_path under a subdirectory of $HOME: `$HOME/.local/share/chezmoi`.
-    // Parent `/Users/dev/.local/share` is NOT the home itself, so
-    // EnsureDirAsUser must fire on it (substrate is responsible for
-    // mkdir -p). Symlink then points the leaf at host_path.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "ro", "$HOME/.local/share/chezmoi")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
     let (code, _stdout, stderr) =
@@ -1078,9 +882,7 @@ fn mode_runtime_with_nested_tenant_path_emits_ensure_dir_for_parent() {
 
 #[test]
 fn mode_runtime_preserves_profile_declared_share_order() {
-    // Shares apply in profile-declared order. Mode is Light scope —
-    // no AclOp::Grant fires — so the declared order pin shifts to
-    // the EnsureSymlinkAsUser sequence: zeta first, alpha second.
+    // Light emits no Grant, so declared order is pinned via the symlink sequence.
     let toml = profile_with_shares(
         &[],
         &[],
@@ -1107,10 +909,6 @@ fn mode_runtime_preserves_profile_declared_share_order() {
 
 #[test]
 fn mode_refuses_when_host_path_does_not_exist() {
-    // HostPathMissing surfaces as refuse_mode_share before any share
-    // substrate op runs. The PF reapply ops still fire (they precede
-    // the share pass) — but no AclOp / AccountOp EnsureDir /
-    // EnsureSymlink should be recorded.
     let toml = profile_with_shares(
         &[],
         &[],
@@ -1145,9 +943,6 @@ fn mode_refuses_when_host_path_does_not_exist() {
 
 #[test]
 fn mode_refuses_when_tenant_path_is_real_directory() {
-    // TenantPathOccupied surfaces as refuse_mode_share when probe
-    // returns PathKind::Other. Stub returns Other for the expanded
-    // tenant_path; no substrate op fires after refusal.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -1225,10 +1020,7 @@ fn mode_without_shares_does_not_authenticate_on_cold_sudo() {
 
 #[test]
 fn mode_declined_on_cold_sudo_authenticated_once_and_mutated_nothing() {
-    // Accepted cost of authenticating at plan build: an operator who
-    // declines at Proceed? has already answered the sudo prompt. Every
-    // path through this verb needs sudo to execute, so the prompt moved
-    // earlier rather than appearing where there was none.
+    // Accepted cost of sudo auth at plan build: a decline has already answered the prompt.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -1271,10 +1063,6 @@ fn mode_on_cold_sudo_authentication_failure_exits_74_without_mutation() {
 
 #[test]
 fn mode_runtime_skips_substrate_with_existing_symlink_at_tenant_path() {
-    // PathKind::Symlink is the idempotent re-link case: substrate
-    // proceeds (`ln -sfn` replaces an existing symlink). Mode under
-    // Light scope emits the EnsureSymlinkAsUser op but NOT the
-    // recursive grant. No refusal — symlink op fires normally.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -1308,10 +1096,6 @@ fn mode_runtime_skips_substrate_with_existing_symlink_at_tenant_path() {
 
 #[test]
 fn mode_install_tier_does_not_change_share_substrate() {
-    // Shares are tier-independent: the same host_path/mode/tenant_path
-    // applies whether the operator widened the firewall for an install
-    // step or narrowed back. Under Light scope this means BOTH tiers
-    // emit no Grant and one EnsureSymlinkAsUser per declared share.
     let toml = profile_with_shares(
         &["github.com"],
         &["nodejs.org"],
@@ -1338,14 +1122,7 @@ fn mode_install_tier_does_not_change_share_substrate() {
     );
 }
 
-// ================================================================
-// Pre-exec doctor audit: mode scope
-// ================================================================
-//
-// Mode's audit considers PfDisabled (host-wide) + PfRuleDrift +
-// AnchorBodyDrift (per-tenant). Share drift is NOT in scope (mode's
-// operator focus is the firewall tier; reload owns share-drift
-// surfacing). EnvLeak is out (shell-only).
+// --- Pre-exec doctor audit ---
 
 #[test]
 fn mode_pre_exec_doctor_silent_when_host_is_clean() {
@@ -1384,7 +1161,6 @@ fn mode_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
 
 #[test]
 fn mode_pre_exec_doctor_aggregates_pf_rule_drift_warning() {
-    // PfRuleDrift fires when kernel anchor is missing pass or block.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_kernel_pf_rules("dev", "");
@@ -1403,12 +1179,6 @@ fn mode_pre_exec_doctor_aggregates_pf_rule_drift_warning() {
 
 #[test]
 fn mode_pre_exec_doctor_scope_includes_share_drift() {
-    // Mode's pre-exec doctor scope includes the same per-tenant
-    // drift set as shell + reload (HostNotInShareGroup, AclDrift,
-    // SymlinkDrift, CoworkAclDrift, CoworkDirAbsent) — mode no
-    // longer auto-heals share/cowork state under Light reapply, so
-    // pre-exec surfaces the drift the verb would otherwise skip
-    // past silently.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_host_in_group("operator", "dev-tenant-share", false);
@@ -1448,8 +1218,6 @@ fn mode_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
 
 #[test]
 fn mode_surfaces_user_directory_error_when_eligibility_probe_fails() {
-    // `destroy_eligibility` is shared by mode; the verb's frame names
-    // 'mode' so log-grep can bind to the verb invocation.
     let stub = StubUserDirectory {
         fail_has_user: directory_fail_once(),
         ..Default::default()
@@ -1462,14 +1230,7 @@ fn mode_surfaces_user_directory_error_when_eligibility_probe_fails() {
     );
 }
 
-// ================================================================
-// Cowork-dir drift detection in mode's pre-exec doctor
-// ================================================================
-//
-// Mode uses Light reapply (no recursive ACL pass), so cowork-dir
-// ACL drift or absence is the operator's to remediate via
-// `tenant reload`. Pre-exec doctor surfaces the drift as a
-// Warning so the operator can decide.
+// --- Cowork-dir drift in pre-exec doctor ---
 
 #[test]
 fn mode_pre_exec_doctor_surfaces_cowork_acl_drift() {
@@ -1477,8 +1238,6 @@ fn mode_pre_exec_doctor_surfaces_cowork_acl_drift() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_host_acl(
-            // Listing has only operator-side ACEs, no
-            // `group:dev-tenant-share` entry.
             &cowork_path,
             " 0: user:operator allow list,add_file,search\n",
         );
@@ -1499,8 +1258,6 @@ fn mode_pre_exec_doctor_surfaces_cowork_acl_drift() {
 
 #[test]
 fn mode_pre_exec_doctor_surfaces_cowork_dir_absent() {
-    // Cowork dir absent → CoworkDirAbsent aggregates as a Warning;
-    // verb still proceeds (audit is a courtesy).
     let cowork_path = std::path::PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())

@@ -6,10 +6,7 @@ use tenant::domain::{
     KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 
-/// Default host machine for tests that should not reach the exec stage —
-/// validation failures, conflicts, and dry-run paths. Panics on any
-/// substrate call, so any accidental invocation from a path that's
-/// meant to be no-op surfaces loudly instead of being silently absorbed.
+/// Panics on any substrate call: for paths that must not reach exec.
 pub struct NeverHostMachine;
 impl HostMachine for NeverHostMachine {
     fn describe_account(&self, op: &AccountOp) -> String {
@@ -120,12 +117,7 @@ impl HostMachine for NeverHostMachine {
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
         panic!("host machine unexpectedly invoked (read_host_acl): path={path:?}");
     }
-    /// Exempt from the panic-on-call contract: `tenant::run` resolves the
-    /// operator identity unconditionally after parse for plan-render
-    /// threading, so every dispatch-reaching test path crosses this method.
-    /// Returns `"operator"` (matching `common::TEST_HOST`) — a process-
-    /// identity read, not host work; the panic guard remains on every
-    /// other trait method.
+    /// Exempt from the panic: `tenant::run` resolves the operator identity on every dispatch.
     fn current_host_user_name(&self) -> HostUserName {
         HostUserName::from("operator")
     }

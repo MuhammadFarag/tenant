@@ -1,6 +1,3 @@
-//! Per-tenant share-validation errors that fire at pre-flight before
-//! any ACL or symlink mutation.
-
 use std::fmt;
 use std::path::PathBuf;
 
@@ -11,10 +8,7 @@ use crate::profile::{Profile, ShareMode, expand_tenant_path};
 use super::reapply::{ModeError, ReapplyScope};
 use super::{Tenants, tenant_share_group_name};
 
-/// Pre-flight refusals from the share-reapply substrate.
-/// `TenantPathOccupied` fires when tenant_path exists as a real
-/// directory or file (not a symlink): the substrate would silently
-/// fail to replace it.
+/// `TenantPathOccupied`: a real file or directory the symlink substrate can't replace.
 #[derive(Debug)]
 pub(crate) enum ShareError {
     HostPathMissing { path: PathBuf },
@@ -39,9 +33,6 @@ impl fmt::Display for ShareError {
     }
 }
 
-/// One per-share entry's op triple. `ensure_dir` is `None` when the
-/// tenant_path's parent is the tenant home itself. `grant` is `None`
-/// under Light scope.
 pub(crate) struct ShareOps {
     pub(crate) grant: Option<AclOp>,
     pub(crate) ensure_dir: Option<AccountOp>,
@@ -66,12 +57,9 @@ impl<'a> Tenants<'a> {
         }
         let group = tenant_share_group_name(name.as_str());
         let home_dir = PathBuf::from(format!("/Users/{name}"));
-        // `sudo -n` exits 1 on a cold timestamp — the same code `/bin/test`
-        // uses for "no" — so the occupancy probe below can't answer until
-        // the operator has authenticated. Prompt here, pre-plan, so the
-        // refusal still lands ahead of Proceed?; the same warm cache then
-        // lets shell's pre-exec doctor summary and `-d` pre-flight run
-        // instead of skipping.
+        // `sudo -n` exits 1 on a cold timestamp, the same code `/bin/test` uses for "no", so
+        // the occupancy probe needs a warm cache. Authenticate pre-plan so refusals still land
+        // ahead of the prompt.
         if !self.machine.sudo_session_cached() {
             self.machine.authenticate_sudo().map_err(ModeError::Probe)?;
         }
@@ -104,7 +92,6 @@ impl<'a> Tenants<'a> {
                 }),
                 ReapplyScope::Light => None,
             };
-            // Skip parent-dir ensure when the parent is the tenant home itself.
             let ensure_dir = tenant_path.parent().and_then(|parent| {
                 if parent == home_dir.as_path() {
                     None
@@ -129,11 +116,7 @@ impl<'a> Tenants<'a> {
         Ok(out)
     }
 
-    /// Share-only reapply at create-time. Skips the PF reapply
-    /// already done by the create-time firewall sequence. Always
-    /// `Full` scope — create's first apply needs the recursive
-    /// grant to reach files that pre-existed at the host_path
-    /// before the inheritable ACE landed.
+    /// Shares only: create's firewall sequence already did the PF half.
     pub(crate) fn reapply_shares_post_provision(
         &self,
         name: &TenantUserName,

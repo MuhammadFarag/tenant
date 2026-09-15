@@ -41,25 +41,13 @@ fn create_accepts_single_letter_name() {
 
 #[test]
 fn verbose_shows_floor_uid_and_gid_when_neither_in_use() {
-    // The plan is three argv lines: dseditgroup-create (group-first so
-    // the user's home directory lands on the tenant-share group, not
-    // staff), sysadminctl-addUser (pointing -GID at the just-created
-    // group), and an unconditional `# on rollback` line that documents
-    // what happens if sysadminctl fails after the group was created.
-    // The rollback line is in the plan but not in the `$` echo block —
-    // that asymmetry is the operator-visible signal of whether the
-    // rollback fired (mirrors the destroy-side dscl-cleanup
-    // convention). UID and GID allocators are decoupled but both
-    // happen to bottom-out at TENANT_UID_FLOOR=600 when both spaces
-    // are empty.
+    // The `# on rollback` plan line is absent from the `$` echo block: that asymmetry is how
+    // the operator sees whether rollback fired.
     let (code, stdout, _stderr) = run_with(
         StubUserDirectory::default(),
         &["create", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    // The verbose plan section lives inside the summary (between
-    // the bullets and "Sudo needed for:"), rendered in
-    // intent-leads-shell-follows layout via `create_verbose_plan_block`.
     let plan = create_verbose_plan_block("dev", 600, 600);
     assert_eq!(stdout, create_dry_run_block("dev", 600, 600, Some(&plan)));
 }
@@ -79,11 +67,7 @@ fn stub_with_used_uids(uids: &[u32]) -> StubUserDirectory {
 
 #[test]
 fn verbose_shows_lowest_free_uid_with_gap_and_gid_at_floor() {
-    // First decoupled-allocation evidence: UID space has a gap so the
-    // allocator returns 602, but the GID space is empty (stub_with_used_uids
-    // only populates uid_by_name, leaving gid_by_name empty) so the GID
-    // allocator returns 600. The design explicitly does NOT force UID == GID
-    // — the two allocators consult their own spaces and may diverge.
+    // stub_with_used_uids leaves the GID space empty, so GID stays at 600 while UID climbs.
     let (code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[600, 601, 603]),
         &["create", "dev", "--dry-run", "-v"],
@@ -95,9 +79,6 @@ fn verbose_shows_lowest_free_uid_with_gap_and_gid_at_floor() {
 
 #[test]
 fn verbose_uid_skips_taken_floor_gid_stays_at_floor() {
-    // UID 600 taken, GID space empty → UID 601, GID 600. Pins the new
-    // decoupled-allocator semantics on the boundary: a single taken UID
-    // doesn't drag the GID allocator with it.
     let (_code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[600]),
         &["create", "dev", "--dry-run", "-v"],
@@ -110,7 +91,6 @@ fn verbose_uid_skips_taken_floor_gid_stays_at_floor() {
 
 #[test]
 fn verbose_uid_independent_of_input_order() {
-    // UIDs 600, 601, 603 taken (any input order) → UID 602; GID space empty → GID 600.
     let (_code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[603, 600, 601]),
         &["create", "dev", "--dry-run", "-v"],
@@ -123,8 +103,6 @@ fn verbose_uid_independent_of_input_order() {
 
 #[test]
 fn verbose_skips_uids_below_floor() {
-    // UIDs below the floor (500, 599) don't constrain the allocator; both
-    // allocators bottom-out at the floor.
     let (_code, stdout, _stderr) = run_with(
         stub_with_used_uids(&[500, 599]),
         &["create", "dev", "--dry-run", "-v"],
@@ -137,13 +115,7 @@ fn verbose_skips_uids_below_floor() {
 
 #[test]
 fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
-    // Mirror twin of `verbose_uid_skips_taken_floor_gid_stays_at_floor`:
-    // empty UID space + GID 600 taken (an unrelated group at the floor) →
-    // UID 600, GID 601. The dseditgroup `-i` value tracks the GID
-    // allocator, not the UID allocator — the literal argument is the
-    // load-bearing thing tenant passes to dseditgroup, so a regression
-    // that wires `-i` to `uid` would slip past UID-only tests but trips
-    // here.
+    // `-i` must track the GID allocator; wiring it to uid would slip past UID-only tests.
     let stub = StubUserDirectory {
         groups: vec!["other".to_string()],
         gid_by_name: [("other".to_string(), GroupId(600))].into_iter().collect(),
@@ -157,14 +129,7 @@ fn verbose_gid_skips_taken_floor_uid_stays_at_floor() {
 
 #[test]
 fn verbose_uid_and_gid_allocators_cross_over() {
-    // Crossover stub: UID space has the floor (600) taken; GID space has
-    // 601 taken. UID allocator climbs to 601 (lowest free above the
-    // floor); GID allocator stays at 600 (still free in its space). The
-    // resulting argv carries `-UID 601 -GID 600` — a *crossover* between
-    // the two spaces that's impossible if the two allocators are fused.
-    // The strongest single-test defense against a regression that
-    // wires `-i` and `-GID` to `lowest_free_uid` instead of
-    // `lowest_free_gid`.
+    // `-UID 601 -GID 600` is impossible if the two allocators were fused.
     let stub = StubUserDirectory {
         users: vec!["legacy".to_string()],
         uid_by_name: [("legacy".to_string(), UserId(600))].into_iter().collect(),
@@ -238,12 +203,6 @@ fn create_rejects_overlong_name() {
 
 #[test]
 fn create_rejects_reserved_names() {
-    // Lexical blocklist on top of charset rules: even though these names
-    // all pass `[a-z][a-z0-9_-]*`, they're reserved as macOS system /
-    // role names and would either alias a real account (`root`, `nobody`)
-    // or carry semantics we don't want a tenant to inherit (`wheel`,
-    // `staff`, `sudo`). Copied verbatim from the sandbox plugin's
-    // `scripts/lib/naming.py` reserved set — see CLAUDE.md cross-reference.
     for name in [
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
@@ -261,11 +220,6 @@ fn create_rejects_reserved_names() {
 
 #[test]
 fn create_accepts_name_with_reserved_prefix() {
-    // Pins exact-match semantics on the blocklist: 'rooty' / 'wheelman'
-    // contain reserved names as substrings but are not themselves
-    // reserved. A future refactor that swaps `contains` for `starts_with`
-    // or vice-versa would silently break this — the test guards the
-    // intended behavior.
     for name in ["rooty", "wheelman", "admins", "daemonic"] {
         let (code, stdout, stderr) =
             run_with(StubUserDirectory::default(), &["create", name, "--dry-run"]);
@@ -288,11 +242,6 @@ fn create_rejects_when_user_exists() {
 
 #[test]
 fn create_surfaces_user_directory_error_when_conflict_probe_fails() {
-    // A dscl-substrate failure during the conflict probe (has_user /
-    // has_group) routes to `create_conflict_probe_failed` and exits 74.
-    // The frame's Display string carries the verb-named action ("check
-    // existing accounts") and the tenant name so log-grep can bind to
-    // the verb without parsing the UserDirectoryError body.
     let stub = StubUserDirectory {
         fail_has_user: directory_fail_once(),
         ..Default::default()
@@ -308,9 +257,6 @@ fn create_surfaces_user_directory_error_when_conflict_probe_fails() {
 
 #[test]
 fn create_rejects_when_tenant_share_group_exists() {
-    // The primary group is named `<name>-tenant-share` (not bare
-    // `<name>`). The conflict check refuses when that suffixed name is
-    // already taken, regardless of what the bare-name group looks like.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -323,9 +269,6 @@ fn create_rejects_when_tenant_share_group_exists() {
 
 #[test]
 fn create_rejects_when_user_and_tenant_share_group_exist() {
-    // The `Both` arm — user named `dev` AND the suffixed group `dev-tenant-share`
-    // both present. The message names both with the literal group name so
-    // the operator can find them with `dscl` directly.
     let stub = StubUserDirectory {
         users: vec!["dev".to_string()],
         groups: vec!["dev-tenant-share".to_string()],
@@ -342,14 +285,7 @@ fn create_rejects_when_user_and_tenant_share_group_exist() {
 
 #[test]
 fn create_accepts_when_bare_name_group_exists_but_not_suffix() {
-    // Only `<name>-tenant-share` is reserved as conflict territory.
-    // A pre-existing bare-name group is not something tenant creates
-    // (sysadminctl is invoked with -GID pointing at the explicit
-    // tenant-share group's GID, not asking sysadminctl to mint a new group
-    // named after the user) so a bare `dev` group on the host is harmless.
-    // Pins the new contract's specificity — a future regression that
-    // swaps `has_group("<name>-tenant-share")` for `has_group(name)` (or
-    // checks both) would trip this test.
+    // sysadminctl gets `-GID` of the share group, so a bare `dev` group is harmless.
     let stub = StubUserDirectory {
         groups: vec!["dev".to_string()],
         ..Default::default()
@@ -372,10 +308,6 @@ fn create_succeeds_when_unrelated_user_exists() {
 
 #[test]
 fn create_writes_default_profile_to_store() {
-    // After a successful real-mode create, the substrate's profile state
-    // contains an entry keyed by the tenant name. Content-shape
-    // assertion lives in the dedicated TOML test below; this test only
-    // pins presence via `StubHostMachine::has_profile`.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -389,14 +321,6 @@ fn create_writes_default_profile_to_store() {
 
 #[test]
 fn create_writes_profile_with_correct_toml_shape() {
-    // Byte-exact pin on the default profile content. Schema-version
-    // floor at 1 (future migrations bump this); two empty allowlist
-    // sections (the operator's edit target) plus commented-out example
-    // entries, a commented-out [[shares]] block, and an [inbound] block
-    // with a commented-out example port — guidance scaffold, not active
-    // config. Re-parsing the scaffold must yield an empty-allowlists,
-    // empty-shares, empty-inbound-ports profile (covered by
-    // `tests/profile_parse.rs`).
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -465,9 +389,6 @@ fn create_writes_profile_with_correct_toml_shape() {
 
 #[test]
 fn create_dry_run_does_not_write_profile() {
-    // Dry-run swap-in of `DryRunHostMachine` means the wired `StubHostMachine`
-    // never receives an `execute_profile` call. Mirrors the
-    // `dry_run_bypasses_injected_host_machine` test for the host-machine side.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         StubUserDirectory::default(),
@@ -485,18 +406,8 @@ fn create_dry_run_does_not_write_profile() {
 
 #[test]
 fn create_real_mode_standard_emits_only_post_exec_confirmation() {
-    // Standard real mode: section divider + ✓ per substrate step
-    // + Done section + single enriched closing line naming UID +
-    // GID + anchor. The op order is load-bearing:
-    // CreateShareGroup must precede CreateTenantUser so the new
-    // user's home directory chowns to `dev-tenant-share` (sysadminctl
-    // chowns the home dir to the group named by `-GID` at creation
-    // time); this test pins both the order and the operand values via
-    // the ✓ stream + `account_ops()` assertions below. Create sets the
-    // primary group ONCE here (CreateTenantUser `-GID`); it must NOT also
-    // emit a separate `EnsurePrimaryGroup` — that is reload's Full-reapply
-    // convergence op. The exact `account_ops()` list below (which has no
-    // EnsurePrimaryGroup) enforces the no-double-set.
+    // Group before user: sysadminctl chowns the new home to the `-GID` group at creation.
+    // `-GID` sets the primary group once; no separate EnsurePrimaryGroup (reload-only).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -555,8 +466,6 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
         exec.profile_ops(),
         vec![ProfileOp::Create { name: "dev".into() }],
     );
-    // Keychain provisioning (4 sub-step ops) + stash all ran after
-    // CreateTenantUser — 5 ops total.
     let keychain_ops = exec.keychain_ops();
     assert_eq!(
         keychain_ops.len(),
@@ -567,12 +476,7 @@ fn create_real_mode_standard_emits_only_post_exec_confirmation() {
 
 #[test]
 fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
-    // Scripted-real-verbose (TTY=false) drops the verbose plan from
-    // output entirely — solo-Mac scope, cleaner log trace. The
-    // section divider opens the verb, per-substrate $ echo + ✓
-    // progress interleave, then Done section + single enriched
-    // closing line. The plan-before-prompt move lives on the TTY
-    // path; this test pins the scripted-mode shape.
+    // Non-TTY real run drops the verbose plan: divider + `$` echo + ✓ only.
     let exec = StubHostMachine::new();
     let (code, stdout, _stderr) = run_with_exec(
         StubUserDirectory::default(),
@@ -628,24 +532,13 @@ fn create_real_mode_verbose_shows_pre_exec_plan_and_post_exec_uid_gid() {
 
 #[test]
 fn create_profile_write_failure_surfaces_with_user_and_group_present() {
-    // CreateShareGroup + CreateTenantUser have both succeeded by the time
-    // the profile step fires, so a profile-write failure does NOT roll
-    // back the user or group. Operator sees an EX_IOERR with the
-    // `create_profile_failed` message that names the profile path (so
-    // they don't have to grep source). Their recovery is
-    // `tenant destroy <name>` — destroy's Destroyable arm cleans up the
-    // user+group, and the missing profile case is a successful noop for
-    // the profile-rm step.
+    // User + group already exist when the profile write fails; no rollback (destroy converges).
     let exec = StubHostMachine::new().fail_next_profile(tenant::profile::ProfileError {
         message: "disk full".into(),
     });
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
-    // Pre-failure ✓ stream is operator-visible. The two account ops
-    // succeeded; the profile-write substrate failed; no Done section
-    // closes the verb. Verb-failure signal is "no Done section +
-    // closing line, plus stderr frame".
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
@@ -665,17 +558,11 @@ fn create_profile_write_failure_surfaces_with_user_and_group_present() {
         "tenant: failed to write profile '~/.config/tenant/profiles/dev.toml' \
          for 'dev': disk full\n"
     );
-    // Four account ops (CreateShareGroup + AddHostToShareGroup +
-    // CreateTenantUser + EnsureCoworkDir) — no rollback, since the
-    // locked policy is "leave user+group present on profile failure".
     assert_eq!(
         exec.account_ops().len(),
         4,
         "expected CreateShareGroup + AddHostToShareGroup + CreateTenantUser + EnsureCoworkDir; no rollback"
     );
-    // Profile is absent from the simulated state (the write failed) —
-    // pins the fact that the failure is a real failure, not a silent
-    // success.
     assert!(
         !exec.has_profile("dev"),
         "profile should be absent after write failure"
@@ -702,20 +589,11 @@ fn dry_run_bypasses_injected_host_machine() {
 
 #[test]
 fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
-    // The create flow issues two exec calls: dseditgroup-create first,
-    // sysadminctl second. `StubHostMachine::failing(78)` fails ALL calls,
-    // so the first call (dseditgroup-create) trips. The expected behavior
-    // is: stop immediately (no sysadminctl, no rollback — there's nothing
-    // to roll back because dseditgroup-create itself failed), exit
-    // EX_IOERR, and emit the `create_group_failed` shape that names the group
-    // explicitly so the operator knows the user wasn't touched.
+    // Blanket failure trips the first call (dseditgroup), so there's nothing to roll back.
     let exec = StubHostMachine::new().fail_account_blanket(78, "");
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Section divider lands before the substrate fires; the first
-    // substrate op fails so no ✓ lines emit. Stdout carries the
-    // single section line; failure routes to stderr.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Creating tenant 'dev'")),
@@ -733,14 +611,6 @@ fn create_real_mode_dseditgroup_failure_aborts_before_sysadminctl() {
 
 #[test]
 fn create_add_host_failure_aborts_with_orphan_group_recovery_hint() {
-    // Partial-failure: CreateShareGroup succeeded, but the
-    // AddHostToShareGroup step failed. The host now carries an
-    // orphan share group with no host membership AND no tenant user
-    // (because CreateTenantUser never ran). No automatic rollback
-    // — surface as CreateError::HostMembership;
-    // operator runs `tenant destroy <name>` to converge via the
-    // OrphanGroup eligibility arm. The stderr frame names the host
-    // AND the recovery command.
     let exec = StubHostMachine::new().fail_account_op(
         AccountOp::AddHostToShareGroup {
             group: "dev-tenant-share".into(),
@@ -766,22 +636,12 @@ fn create_add_host_failure_aborts_with_orphan_group_recovery_hint() {
          process exited with code 1: dseditgroup: not authorized \
          \u{2014} host now has an orphan group; next 'tenant destroy dev' will converge\n"
     );
-    // Two account ops attempted: CreateShareGroup (ok) +
-    // AddHostToShareGroup (failed). CreateTenantUser never ran.
     assert_eq!(exec.account_ops().len(), 2);
 }
 
 #[test]
 fn create_sysadminctl_failure_rolls_back_dseditgroup() {
-    // The partial-failure case the group-first ordering was designed for:
-    // CreateShareGroup succeeded, but CreateTenantUser failed. Without
-    // rollback the host would carry an orphan `<name>-tenant-share`
-    // group with no corresponding user. The writer must invoke a
-    // DeleteShareGroup op to converge back to the pre-create state,
-    // then surface the
-    // *original* user-creation failure as the error (the rollback
-    // succeeded so it's not separately reportable). Three account ops
-    // in total.
+    // The original user-creation failure surfaces; the successful rollback isn't reported.
     let exec = StubHostMachine::new().fail_account_op(
         AccountOp::CreateTenantUser {
             name: "dev".into(),
@@ -796,13 +656,7 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
-    // Section + ✓ for the successful CreateShareGroup + ✓ for the
-    // successful AddHostToShareGroup + ✓ for the successful rollback
-    // DeleteShareGroup. The original CreateTenantUser failure is the
-    // one that routes to stderr. The rollback DeleteShareGroup also
-    // vanishes the just-added host membership implicitly (no explicit
-    // RemoveHost fires on this arm — the group's gone, the membership
-    // goes with it).
+    // The rollback DeleteShareGroup also drops the host membership; no explicit RemoveHost.
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
@@ -841,12 +695,6 @@ fn create_sysadminctl_failure_rolls_back_dseditgroup() {
 
 #[test]
 fn create_real_mode_verbose_shows_rollback_echo() {
-    // Scripted-real-verbose (TTY=false) drops the verbose plan from
-    // output. The section divider opens, the substrate's $ echo + ✓
-    // progress lines interleave through the CreateShareGroup +
-    // AddHost + CreateTenantUser steps, then the rollback fires.
-    // No Done section + closing line because create failed; stderr
-    // carries the original sysadminctl error.
     let exec = StubHostMachine::new().fail_account_op(
         AccountOp::CreateTenantUser {
             name: "dev".into(),
@@ -885,16 +733,6 @@ fn create_real_mode_verbose_shows_rollback_echo() {
 
 #[test]
 fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
-    // Worst-case partial failure: dseditgroup-create succeeded (so the
-    // group exists), sysadminctl-addUser failed (so no user), and the
-    // rollback dseditgroup-delete also failed (so the group is now an
-    // orphan with no corresponding user). The operator gets two stderr
-    // lines: the original failure (matches the single-failure shape so
-    // log-grep regexes don't break), plus a second line naming the
-    // rollback failure and pointing the operator at the recovery path.
-    // The trailing `— host now has an orphan group; next 'tenant destroy
-    // dev' will converge` is the load-bearing piece: the operator
-    // shouldn't have to read the source to find out how to clean up.
     let exec = StubHostMachine::new()
         .fail_account_op(
             AccountOp::CreateTenantUser {
@@ -919,11 +757,6 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR");
-    // Section divider + ✓ for the first two successful steps
-    // (CreateShareGroup + AddHostToShareGroup) lands on stdout. The
-    // third step (CreateTenantUser) fails — no ✓; rollback also
-    // fails — no ✓ for DeleteShareGroup either. Both failure frames
-    // go to stderr.
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
@@ -937,17 +770,11 @@ fn create_sysadminctl_failure_with_rollback_failure_surfaces_both() {
                        dseditgroup: not authorized \
                        \u{2014} host now has an orphan group; next 'tenant destroy dev' will converge\n";
     assert_eq!(stderr, want_stderr);
-    // Four account ops: CreateShareGroup (ok) + AddHostToShareGroup
-    // (ok) + CreateTenantUser (failed) + DeleteShareGroup rollback
-    // (failed).
     assert_eq!(exec.account_ops().len(), 4);
 }
 
 #[test]
 fn create_real_mode_invokes_firewall_ops_in_locked_order() {
-    // Locked PF flow: BackupConfig → InstallAnchor → UpdateConfig →
-    // Reload → Enable. Pins the order of `firewall_ops()` recorded by
-    // the stub on a clean-host (empty pf.conf) success path.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -980,11 +807,7 @@ fn create_real_mode_invokes_firewall_ops_in_locked_order() {
 
 #[test]
 fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
-    // Profile read → parse → render_anchor: the InstallAnchor body
-    // should contain the rendered anchor with the runtime allowlist.
-    // The create flow writes the default profile (empty runtime
-    // hosts) before reading, so the body's table is the empty `{ }`
-    // form. Pins the read→parse→render data flow end-to-end.
+    // Create writes the default profile (no runtime hosts) before reading, so the table is `{ }`.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -1009,15 +832,6 @@ fn create_real_mode_install_anchor_body_reflects_runtime_hosts_from_profile() {
 
 #[test]
 fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() {
-    // Closes the automated end-to-end gap on the allow path: the
-    // sibling test above pins the data flow with the empty default;
-    // this test simulates "the scaffolded profile had runtime hosts"
-    // via `with_create_profile_content` and pins that the same data
-    // flow (read_profile → parse → render_anchor) carries the hosts
-    // all the way to `InstallAnchor.body`. The manual smoke verifies
-    // the same flow against real pfctl + egress traffic; this is the
-    // unit-level counterpart that catches regressions without needing
-    // root.
     let populated = "schema_version = 1\n\
                      \n\
                      [allowlist.runtime]\n\
@@ -1037,7 +851,6 @@ fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() 
             _ => None,
         })
         .expect("InstallAnchor op must have been issued");
-    // Backslash-continued table with both hosts in input order.
     assert!(
         body.contains(
             "table <allowed> persist { \\\n  \
@@ -1047,13 +860,10 @@ fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() 
         "anchor body must include populated backslash-continued table \
          with hosts in profile order; got:\n{body}"
     );
-    // Empty-table form must NOT appear (cross-check that the populated
-    // path replaced the empty path, not appended).
     assert!(
         !body.contains("table <allowed> persist { }"),
         "anchor body must NOT include the empty-table form when hosts present; got:\n{body}"
     );
-    // Sanity: the rules + scoping are unchanged.
     assert!(
         body.contains("pass out quick on lo0 proto tcp from any to any user dev no state"),
         "anchor body must still include loopback egress pass; got:\n{body}"
@@ -1066,11 +876,6 @@ fn create_real_mode_install_anchor_body_includes_hosts_when_profile_populated() 
 
 #[test]
 fn create_real_mode_install_anchor_body_includes_declared_inbound_ports() {
-    // Steady-state inbound axis at create: the scaffolded profile's
-    // declared `[inbound] ports` must flow read_profile → parse →
-    // render_anchor into the InstallAnchor body. A tenant whose profile
-    // declares `ports = [3000]` should have 3000's inbound pass rendered,
-    // not a hardcoded locked posture. Mirrors the egress-hosts data flow.
     let populated = "schema_version = 1\n\
                      \n\
                      [allowlist.runtime]\n\
@@ -1101,10 +906,6 @@ fn create_real_mode_install_anchor_body_includes_declared_inbound_ports() {
 
 #[test]
 fn create_real_mode_update_conf_content_reflects_existing_pf_conf() {
-    // ensure_anchor_ref runs against the host's current pf.conf — if
-    // the host already has unrelated anchors, those stay intact and
-    // tenant's lines append. The stub's `with_pf_conf` simulates the
-    // existing-host state.
     let initial = "# host's existing pf.conf\nset block-policy drop\n";
     let exec = StubHostMachine::new().with_pf_conf(initial);
     let (code, _stdout, stderr) =
@@ -1134,11 +935,6 @@ fn create_real_mode_update_conf_content_reflects_existing_pf_conf() {
 
 #[test]
 fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
-    // Locked recovery posture: a firewall step failing after the
-    // account+profile ops have succeeded leaves the host with user +
-    // group + profile in place. Recovery is `tenant destroy <name>`
-    // — the Destroyable arm cleans up all of them. Operator sees a
-    // create_firewall_failed message at EX_IOERR.
     let exec = StubHostMachine::new().fail_firewall_op(
         tenant::domain::FirewallOp::InstallAnchor {
             name: "dev".into(),
@@ -1156,10 +952,6 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
-    // Section + ✓ for the successful steps before the firewall
-    // InstallAnchor failure (CreateShareGroup, CreateTenantUser,
-    // ProfileCreate, BackupConfig). No Done section — the verb
-    // failed.
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
@@ -1181,8 +973,6 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
         "tenant: failed to install firewall for 'dev': \
          filesystem error at /etc/pf.anchors/tenant-dev: permission denied\n"
     );
-    // CreateShareGroup + AddHost + CreateTenantUser + EnsureCoworkDir
-    // = 4 account ops.
     assert_eq!(
         exec.account_ops().len(),
         4,
@@ -1196,14 +986,6 @@ fn create_firewall_install_anchor_failure_leaves_user_group_profile_present() {
 
 #[test]
 fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence() {
-    // When Reload fails the writer must run the locked 4-step recovery:
-    // RestoreConfigFromBackup → RemoveAnchor → Reload → FlushAnchor
-    // (best-effort post-restore). FlushAnchor clears any in-kernel
-    // anchor state from the failed initial Reload. Total firewall_ops:
-    // BackupConfig, InstallAnchor, UpdateConfig, Reload (the failure),
-    // RestoreConfigFromBackup, RemoveAnchor, Reload (recovery),
-    // FlushAnchor (recovery). Eight ops; the original reload failure
-    // surfaces as the CreateError after recovery runs.
     let exec = StubHostMachine::new().fail_firewall_op(
         tenant::domain::FirewallOp::Reload,
         FirewallError::NonZero {
@@ -1214,9 +996,6 @@ fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stdout={stdout:?}");
-    // Stdout is non-empty under the ✓ progress narration; we just
-    // check it starts with the section divider and never emits the
-    // Done section (verb failed).
     assert!(
         stdout.starts_with(&format!("{}\n", section_line("Creating tenant 'dev'"))),
         "expected section divider opener: {stdout:?}",
@@ -1261,11 +1040,6 @@ fn create_reload_failure_triggers_restore_remove_anchor_reload_recovery_sequence
 
 #[test]
 fn create_reload_failure_with_failed_restore_surfaces_recovery_hint_naming_backup_path() {
-    // Recovery-of-recovery: if RestoreConfigFromBackup itself fails,
-    // the writer surfaces FirewallError::RestoreFailed which renders
-    // with the em-dash-suffixed manual-recovery hint naming the
-    // backup path. The host is left in a half-edited state; only the
-    // operator (with shell access) can resolve.
     let exec = StubHostMachine::new()
         .fail_firewall_op(
             tenant::domain::FirewallOp::Reload,
@@ -1296,10 +1070,6 @@ fn create_reload_failure_with_failed_restore_surfaces_recovery_hint_naming_backu
 
 #[test]
 fn create_pf_enable_failure_surfaces_via_create_firewall_failed() {
-    // Enable is the last firewall step. Failure here means rules
-    // loaded but enforcement is off — surface as create_firewall_failed
-    // at EX_IOERR. Recovery posture per locked policy: user + group +
-    // profile + anchor remain on host; `tenant destroy` converges.
     let exec = StubHostMachine::new().fail_firewall_op(
         tenant::domain::FirewallOp::Enable,
         FirewallError::NonZero {
@@ -1314,15 +1084,11 @@ fn create_pf_enable_failure_surfaces_via_create_firewall_failed() {
         stderr.starts_with("tenant: failed to install firewall for 'dev':"),
         "got: {stderr:?}"
     );
-    // All preceding firewall steps ran; Enable was the failure.
     assert_eq!(exec.firewall_ops().len(), 5, "5 firewall ops up to Enable");
 }
 
 #[test]
 fn create_dry_run_bypasses_firewall_host_machine() {
-    // Dry-run swaps in DryRunHostMachine; the wired StubHostMachine's
-    // firewall_ops list stays empty. Mirrors
-    // `create_dry_run_does_not_write_profile` for firewall.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         StubUserDirectory::default(),
@@ -1340,9 +1106,6 @@ fn create_dry_run_bypasses_firewall_host_machine() {
 
 #[test]
 fn create_real_mode_dseditgroup_failure_surfaces_host_machine_stderr() {
-    // Companion to the above — when dseditgroup-create has captured stderr,
-    // it flows through ExecError::Display unchanged. Pins the error-shape
-    // contract end-to-end.
     let exec = StubHostMachine::new().fail_account_blanket(
         78,
         "dseditgroup: cannot create group dev-tenant-share: not authorized\n",
@@ -1350,8 +1113,6 @@ fn create_real_mode_dseditgroup_failure_surfaces_host_machine_stderr() {
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    // Section divider lands; the first substrate op fails so no ✓
-    // emits; stderr carries the framing.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Creating tenant 'dev'")),
@@ -1365,12 +1126,7 @@ fn create_real_mode_dseditgroup_failure_surfaces_host_machine_stderr() {
 
 #[test]
 fn create_success_path_does_not_invoke_flush_anchor() {
-    // Negative pin: create's success path INSTALLS the anchor; there's
-    // nothing to flush. FlushAnchor only runs on the destroy paths and
-    // on create's reload-failure recovery path (covered by a separate
-    // test). Without this guard, an accidental wiring of FlushAnchor
-    // into the success path would silently wipe the rules we just
-    // installed.
+    // A FlushAnchor on the success path would wipe the rules just installed.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -1385,21 +1141,10 @@ fn create_success_path_does_not_invoke_flush_anchor() {
     );
 }
 
-// ================================================================
-// Post-provision share reapply
-// ================================================================
-//
-// On the standard production path the default profile has no
-// `[[shares]]`, so the post-provision substrate is a no-op (covered
-// implicitly by every existing create test). Tests here use
-// `with_create_profile_content` to inject a profile with shares so
-// the post-provision substrate fires.
+// --- Post-provision share reapply ---
 
 #[test]
 fn create_with_pre_populated_shares_runs_post_provision_substrate() {
-    // Operator-supplied (test-injected) profile content with a single
-    // `[[shares]]` entry. After user/group/profile/PF land, the
-    // post-provision step grants the ACL and installs the symlink.
     let with_share = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_create_profile_content("dev", &with_share);
     let (code, _stdout, stderr) =
@@ -1430,10 +1175,6 @@ fn create_with_pre_populated_shares_runs_post_provision_substrate() {
 
 #[test]
 fn create_with_default_profile_emits_no_post_provision_acl_ops() {
-    // Backward-compat: the default profile has no `[[shares]]`, so
-    // create's post-provision substrate is a no-op. Existing create
-    // tests rely on this — explicit pin so a future schema change
-    // can't silently break the contract.
     let exec = StubHostMachine::new();
     let (code, _stdout, _stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -1461,10 +1202,6 @@ fn create_with_default_profile_emits_no_post_provision_acl_ops() {
 
 #[test]
 fn create_post_provision_refusal_carries_recovery_hint() {
-    // Pre-populated profile declares a non-existent host_path; the
-    // post-provision share substrate refuses with HostPathMissing.
-    // Frame names the existing tenant state and points the operator
-    // at `tenant reload` (NOT another `tenant create`).
     let bad_share = profile_with_shares(
         &[],
         &[],
@@ -1484,18 +1221,11 @@ fn create_post_provision_refusal_carries_recovery_hint() {
     );
 }
 
-// ================================================================
-// Pre-execution confirmation prompt
-// ================================================================
+// --- Pre-execution confirmation prompt ---
 
 #[test]
 fn create_real_verbose_interactive_emits_plan_before_prompt() {
-    // Headline behavior pin: under verbose + TTY, the operator sees
-    // the plan BEFORE the confirm prompt. The plan
-    // section header "Plan (commands to execute):" must appear between
-    // the "Sudo needed for:" line and the "Proceed? [Y/n]" prompt;
-    // the section divider must only appear AFTER the operator answers
-    // (so an n-answer leaves zero verb-section state in the output).
+    // The section divider only appears after the answer, so `n` leaves no verb-section output.
     let exec = StubHostMachine::new();
     let (code, stdout, _stderr) = run_with_stdin(
         StubUserDirectory::default(),
@@ -1504,9 +1234,6 @@ fn create_real_verbose_interactive_emits_plan_before_prompt() {
         b"y\n",
     );
     assert_eq!(code, 0);
-    // Emit order inside the summary: bullets → Plan (commands) →
-    // Sudo line → blank → Proceed? prompt → section divider (after
-    // operator answers) → $ echo + ✓ progress → Done section.
     let sudo_idx = stdout
         .find("Sudo needed for: user provisioning, firewall install.")
         .expect("summary should emit Sudo line");
@@ -1535,7 +1262,6 @@ fn create_real_verbose_interactive_emits_plan_before_prompt() {
          commits to the verb after seeing the plan + prompt, not before; \
          prompt={prompt_idx} section={section_idx} in {stdout:?}"
     );
-    // Plan layout uses the intent-leads-shell-follows shape.
     assert!(
         stdout.contains("  \u{2022} Create share group 'dev-tenant-share' (GID 600)"),
         "plan should carry the intent bullet for CreateShareGroup: {stdout:?}"
@@ -1548,9 +1274,6 @@ fn create_real_verbose_interactive_emits_plan_before_prompt() {
 
 #[test]
 fn create_with_tty_proceeds_on_y() {
-    // Operator at TTY, types `y` + ENTER → confirm returns Proceed →
-    // substrate runs. Verifies the summary emits + the prompt line +
-    // the post-summary section + ✓ stream + done.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
@@ -1583,8 +1306,6 @@ fn create_with_tty_proceeds_on_y() {
 
 #[test]
 fn create_with_tty_aborts_on_n() {
-    // Operator types `n` + ENTER → confirm returns Abort → substrate
-    // does NOT run; exit 0 (user-initiated abort is not a failure).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
@@ -1606,9 +1327,6 @@ fn create_with_tty_aborts_on_n() {
 
 #[test]
 fn create_with_tty_empty_input_uses_default_yes() {
-    // Operator hits ENTER without typing — default Y for create →
-    // Proceed. The prompt hint is `[Y/n]` (Y capitalized) signaling
-    // the default.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
@@ -1626,8 +1344,6 @@ fn create_with_tty_empty_input_uses_default_yes() {
 
 #[test]
 fn create_with_yes_flag_skips_prompt_proceeds() {
-    // `--yes` (or `-y`) bypasses the prompt without reading stdin.
-    // Even with no stdin content, substrate fires.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
@@ -1645,8 +1361,6 @@ fn create_with_yes_flag_skips_prompt_proceeds() {
 
 #[test]
 fn create_with_invalid_input_reprompts_then_accepts() {
-    // Edge case: typing `maybe` (neither y nor n) triggers a reprompt
-    // with the "Please answer y or n." hint. Second line `y` proceeds.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
@@ -1662,13 +1376,7 @@ fn create_with_invalid_input_reprompts_then_accepts() {
     assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }
 
-// ================================================================
-// Pre-exec doctor audit: create scope
-// ================================================================
-//
-// Create's audit considers PfDisabled only (host-wide). No tenant
-// exists yet, so per-tenant checks are out of scope. EnvLeak is also
-// out (shell-specific operator impact).
+// --- Pre-exec doctor audit ---
 
 #[test]
 fn create_pre_exec_doctor_silent_when_host_is_clean() {
@@ -1708,10 +1416,6 @@ fn create_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
 
 #[test]
 fn create_pre_exec_doctor_scope_excludes_env_leak() {
-    // EnvLeak is Shell-only — even with `env_delete` missing,
-    // create's audit must NOT emit a warning. The leak doesn't
-    // apply to the create flow's substrate (no `sudo -u` happens
-    // in create).
     let exec = StubHostMachine::new().with_env_policy_content("");
     let (code, stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
@@ -1728,7 +1432,6 @@ fn create_pre_exec_doctor_scope_excludes_env_leak() {
 
 #[test]
 fn create_pre_exec_doctor_silent_in_scripted_mode() {
-    // No TTY, no --dry-run → no summary, no audit.
     let exec = StubHostMachine::new().with_pf_status_content("Status: Disabled\n");
     let (code, stdout, _stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
@@ -1760,9 +1463,6 @@ fn create_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
 
 #[test]
 fn create_surfaces_user_directory_error_when_uid_allocation_fails() {
-    // After the conflict probe passes, `UidAllocator::lowest_free_uid`
-    // calls `used_uids()`; a dscl failure here routes to
-    // `create_uid_allocation_failed` (verb-agnostic Display — no name).
     let stub = StubUserDirectory {
         fail_used_uids: directory_fail_once(),
         ..Default::default()
@@ -1778,8 +1478,6 @@ fn create_surfaces_user_directory_error_when_uid_allocation_fails() {
 
 #[test]
 fn create_surfaces_user_directory_error_when_gid_allocation_fails() {
-    // UID allocation succeeds (used_uids() returns empty); GID allocation
-    // fails via the parallel `fail_used_gids` injector.
     let stub = StubUserDirectory {
         fail_used_gids: directory_fail_once(),
         ..Default::default()
@@ -1793,20 +1491,10 @@ fn create_surfaces_user_directory_error_when_gid_allocation_fails() {
     );
 }
 
-// ============================================================
-// Keychain bootstrap
-//
-// `keychain_ops()` records every `execute_keychain` invocation in
-// order. The op variants carry the randomly-generated password, so
-// tests that need to assert on the password identity extract it from
-// the recorded op rather than constructing the variant for equality
-// (each invocation generates a fresh secret).
-// ============================================================
+// --- Keychain bootstrap ---
+// Each invocation generates a fresh password, so tests extract it from the recorded op.
 
-/// Two consecutive `tenant create` invocations generate distinct
-/// passwords. Defends against a regression that hard-codes the
-/// password or seeds the RNG deterministically. The password lives
-/// on the first provision sub-step (`CreateTenantKeychain`).
+/// Defends against a hard-coded password or a deterministic RNG seed.
 #[test]
 fn create_uses_fresh_keychain_password_each_invocation() {
     let exec1 = StubHostMachine::new();
@@ -1830,13 +1518,7 @@ fn create_uses_fresh_keychain_password_each_invocation() {
     );
 }
 
-/// Within a single create, the password threads through
-/// `CreateTenantKeychain` (the first provision sub-step that carries a
-/// password) and `StashPassword` — both must carry the SAME bytes so
-/// the `shell` / `bootstrap` unlock retrieves the same secret. The
-/// 3 middle provision sub-steps (`SetDefaultKeychain` /
-/// `AddKeychainToSearchList` / `DisableKeychainAutoLock`) don't carry
-/// passwords and are excluded from this pin.
+/// Stash must carry the same bytes as CreateTenantKeychain so the shell/bootstrap unlock works.
 #[test]
 fn create_provision_and_stash_share_the_same_password() {
     let exec = StubHostMachine::new();
@@ -1855,8 +1537,6 @@ fn create_provision_and_stash_share_the_same_password() {
         }
         other => panic!("expected CreateTenantKeychain first, got: {other:?}"),
     };
-    // The 3 middle provision sub-steps carry no password; pin their
-    // identity but not the password.
     assert!(
         matches!(&ops[1], KeychainOp::SetDefaultKeychain { name } if name.as_str() == "dev"),
         "expected SetDefaultKeychain second, got: {:?}",
@@ -1889,9 +1569,6 @@ fn create_provision_and_stash_share_the_same_password() {
     );
 }
 
-/// `KeychainPassword`'s Debug never leaks the raw bytes.
-/// Belt-and-suspenders against accidental `{:?}` formatting in
-/// future error trails / log lines / panics.
 #[test]
 fn keychain_password_debug_is_redacted() {
     let pw = tenant::domain::KeychainPassword::test_dummy("super-secret-value");
@@ -1906,10 +1583,6 @@ fn keychain_password_debug_is_redacted() {
     );
 }
 
-/// dry-run plan never renders the real password bytes.
-/// Even though the verbose plan section renders the keychain ops,
-/// `describe_keychain` substitutes `<password>` as a literal redaction
-/// marker.
 #[test]
 fn create_dry_run_plan_redacts_password() {
     let (code, stdout, _) = run_with(
@@ -1917,22 +1590,12 @@ fn create_dry_run_plan_redacts_password() {
         &["create", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 0);
-    // The plan body should reference the generic `<password>`
-    // placeholder used by describe_keychain — NOT any actual
-    // password bytes.
     assert!(
         stdout.contains("-p <password>"),
         "expected literal '<password>' in dry-run plan; stdout was: {stdout}"
     );
 }
 
-/// `KeychainError` on the FIRST provision sub-step
-/// (`CreateTenantKeychain`) surfaces as `EX_IOERR` + the dedicated
-/// stderr frame; tenant user + group are already on host (no
-/// automatic rollback — recovery is `tenant destroy <name>`, matching
-/// the Profile / Firewall posture). After the ADT split, failures on
-/// later sub-steps share the same `CreateError::KeychainProvision`
-/// arm; this test pins step-1 specifically.
 #[test]
 fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
     let exec = StubHostMachine::new().fail_next_keychain_create(KeychainError::NonZero {
@@ -1943,10 +1606,6 @@ fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Pre-failure ✓ stream is operator-visible: group + host + user +
-    // cowork dir all succeeded before the keychain step.
-    // CreateTenantKeychain fired (and failed) — no ✓ line for it; no
-    // later keychain ops.
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
@@ -1964,9 +1623,6 @@ fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
         stderr.contains("run `tenant destroy dev` to clean up"),
         "expected recovery hint; stderr={stderr:?}"
     );
-    // Four account ops ran (group + host-add + user + cowork dir),
-    // one keychain op attempted (the failing CreateTenantKeychain).
-    // No automatic rollback.
     assert_eq!(exec.account_ops().len(), 4, "account ops not rolled back");
     assert_eq!(exec.keychain_ops().len(), 1);
     assert!(
@@ -1979,12 +1635,6 @@ fn create_keychain_provision_failure_surfaces_with_user_and_group_present() {
     );
 }
 
-/// Partial-failure visibility unlocked by the ADT split: if the
-/// SECOND provision sub-step (`SetDefaultKeychain`) fails, the first
-/// step's ✓ already emitted. Pre-split, this state was invisible to
-/// tests because the whole 4-call sequence was bundled inside the
-/// substrate adapter; the split surfaces partial progress at the
-/// reporter / op-identity layer.
 #[test]
 fn create_partial_keychain_provision_failure_at_step_2_surfaces() {
     let exec = StubHostMachine::new().fail_next_keychain_set_default(KeychainError::NonZero {
@@ -1994,7 +1644,6 @@ fn create_partial_keychain_provision_failure_at_step_2_surfaces() {
     let (code, stdout, stderr) =
         run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // CreateTenantKeychain emitted its ✓ before the failure.
     let want_stdout = format!(
         "{}\n\
          ✓ Share group 'dev-tenant-share' created (GID 600)\n\
@@ -2009,8 +1658,6 @@ fn create_partial_keychain_provision_failure_at_step_2_surfaces() {
         stderr.starts_with("tenant: failed to provision keychain for 'dev':"),
         "expected create_keychain_provision_failed frame; stderr={stderr:?}"
     );
-    // Two keychain ops attempted: CreateTenantKeychain (ok),
-    // SetDefaultKeychain (failed). The later three didn't fire.
     let ops = exec.keychain_ops();
     assert_eq!(ops.len(), 2, "expected 2 keychain ops, got: {ops:?}");
     assert!(
@@ -2025,9 +1672,6 @@ fn create_partial_keychain_provision_failure_at_step_2_surfaces() {
     );
 }
 
-/// A Stash failure leaves the keychain fully provisioned (all 4 sub-
-/// steps succeeded) but unreachable by the `shell` / `bootstrap`
-/// unlock. Same posture — recovery is `tenant destroy <name>`.
 #[test]
 fn create_keychain_stash_failure_surfaces_with_keychain_provisioned() {
     let exec = StubHostMachine::new().fail_next_keychain_stash(KeychainError::NonZero {
@@ -2058,15 +1702,9 @@ fn create_keychain_stash_failure_surfaces_with_keychain_provisioned() {
         stderr.contains("run `tenant destroy dev` to clean up"),
         "expected recovery hint; stderr={stderr:?}"
     );
-    // All 4 provision sub-steps + the failing stash = 5 keychain ops.
     assert_eq!(exec.keychain_ops().len(), 5);
 }
 
-/// A regular file at `/Users/Shared/tenants/<name>` (operator typo,
-/// stray `touch`) trips the pre-flight before any cowork-dir mkdir
-/// fires. Exit `EX_IOERR`, stderr frame names the path + kind, and
-/// the `EnsureCoworkDir` op never runs (only group + host-add + user
-/// from earlier reach the substrate).
 #[test]
 fn create_refuses_when_cowork_path_is_a_regular_file() {
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
@@ -2089,8 +1727,6 @@ fn create_refuses_when_cowork_path_is_a_regular_file() {
         stderr.contains("a non-directory entry"),
         "stderr should name the unexpected kind: {stderr:?}"
     );
-    // CreateShareGroup + AddHostToShareGroup + CreateTenantUser ran;
-    // EnsureCoworkDir refused before execution.
     assert_eq!(
         exec.account_ops().len(),
         3,
@@ -2106,10 +1742,7 @@ fn create_refuses_when_cowork_path_is_a_regular_file() {
     );
 }
 
-/// Symlink at the cowork path silently steers mkdir/chown/chmod to
-/// the link's target — pre-flight refuses with the resolved target
-/// named in the kind half of the message so the operator can locate
-/// the offending link.
+/// A symlink would steer mkdir/chown/chmod to its target; the refusal names that target.
 #[test]
 fn create_refuses_when_cowork_path_is_a_symlink() {
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
@@ -2144,9 +1777,6 @@ fn create_refuses_when_cowork_path_is_a_symlink() {
     );
 }
 
-/// An existing directory at the cowork path is a clean restart case
-/// (mkdir -p no-ops, chown/chmod re-own and re-bit). Pre-flight
-/// accepts and the full create flow proceeds.
 #[test]
 fn create_accepts_when_cowork_path_is_already_a_directory() {
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
@@ -2165,26 +1795,10 @@ fn create_accepts_when_cowork_path_is_already_a_directory() {
     );
 }
 
-// ================================================================
-// Full reapply scope on create-post-provision
-// ================================================================
-//
-// Create's post-provision share pass calls
-// `reapply_shares_post_provision`, which hard-codes
-// `ReapplyScope::Full`. The recursive `chmod -R +a` reaches files
-// that pre-existed at the host_path before the inheritable ACE
-// landed; without it, operators with populated host_paths would
-// find their files invisible to the tenant on day one.
+// --- Full reapply scope on create-post-provision ---
 
 #[test]
 fn create_post_provision_share_pass_uses_full_reapply_scope_emitting_grant() {
-    // Pin for `reapply_shares_post_provision`'s hardcoded
-    // `ReapplyScope::Full`. A Full→Light flip on that callsite
-    // zeroes the grant count and trips this pin. Pins the share
-    // pass only; cowork-dir emission has its own pin
-    // (`create_emits_cowork_dir_during_provisioning`) because
-    // EnsureCoworkDir originates in `Tenants::create` directly,
-    // not in `reapply_shares_post_provision`.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_create_profile_content("dev", &toml);
     let (code, _stdout, stderr) =
@@ -2204,10 +1818,7 @@ fn create_post_provision_share_pass_uses_full_reapply_scope_emitting_grant() {
 
 #[test]
 fn create_emits_cowork_dir_during_provisioning() {
-    // Pin: exactly one EnsureCoworkDir emitted at create-time. The
-    // call originates in `Tenants::create` (NOT in
-    // `reapply_shares_post_provision`); kept in a separate test so
-    // a regression points at the right callsite.
+    // EnsureCoworkDir originates in Tenants::create, not reapply_shares_post_provision.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_create_profile_content("dev", &toml);
     let (code, _stdout, stderr) =
@@ -2227,10 +1838,6 @@ fn create_emits_cowork_dir_during_provisioning() {
 
 #[test]
 fn create_merges_included_fragment_hosts_into_anchor_body() {
-    // Create-side end-to-end for includes: the scaffolded profile declares
-    // `include = ["base"]`; the merged runtime host set (fragment first)
-    // must reach the InstallAnchor body. Same read_profile → load →
-    // render_anchor flow as reload, via create's post-provision firewall step.
     let profile = "schema_version = 1\n\
                    include = [\"base\"]\n\
                    [allowlist.runtime]\n\

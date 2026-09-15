@@ -1,16 +1,5 @@
-//! Per-variant byte-form pins on `Op::intent_label()` — the future-tense
-//! capability label that leads each step in the verbose pre-prompt plan
-//! block. Sibling to `Op::business_label()` (past-tense; drives the
-//! `✓ <label>` progress lines).
-//!
-//! These ARE unit tests, which crosses the project's "E2E-only"
-//! convention. Justified by the per-variant combinatorial coverage on a
-//! pure rendering function — same pattern as `tests/macos_host_machine.rs`
-//! (argv per variant). Per-variant rendering bugs are awkward to catch
-//! through the verb-level CLI surface because (a) some variants
-//! (`LookupUserRecord`, `DeleteUserRecord`, `LoginAsUser`) don't appear
-//! in every verb's plan, and (b) the verb-level assertions test the
-//! WHOLE plan block, where a single-arm regression is hard to localize.
+//! Per-variant byte pins on `Op::intent_label()` / `business_label()`. Unit tests because a
+//! single-arm regression is hard to localize in a whole-plan E2E assertion.
 
 use std::path::PathBuf;
 
@@ -27,9 +16,7 @@ fn intent_enable_touch_id_for_sudo() {
     );
 }
 
-// ============================================================
-// Account-domain variants
-// ============================================================
+// --- Account-domain variants ---
 
 #[test]
 fn intent_create_share_group() {
@@ -139,10 +126,6 @@ fn intent_exec_as_user() {
 
 #[test]
 fn business_exec_as_user_uses_basename() {
-    // business_label uses the basename of argv[0] for the ✓ progress
-    // line — argv[0] may be an absolute path, but the operator's
-    // mental model is "the command 'ls' ran", not "the command
-    // '/usr/bin/ls' ran".
     let op = AccountOp::ExecAsUser {
         name: "dev".into(),
         argv: vec!["/usr/local/bin/curl".into(), "https://x".into()],
@@ -231,15 +214,12 @@ fn intent_remove_host_from_share_group() {
     );
 }
 
-// ============================================================
-// Profile-domain variants
-// ============================================================
+// --- Profile-domain variants ---
 
 #[test]
 fn intent_profile_create() {
     let op = ProfileOp::Create { name: "dev".into() };
     let label = Op::Profile(&op).intent_label();
-    // display_path_for renders `~/.config/tenant/profiles/<name>.toml`
     assert_eq!(
         label,
         "Write profile config at ~/.config/tenant/profiles/dev.toml"
@@ -256,9 +236,7 @@ fn intent_profile_delete() {
     );
 }
 
-// ============================================================
-// Firewall-domain variants
-// ============================================================
+// --- Firewall-domain variants ---
 
 #[test]
 fn intent_firewall_install_anchor() {
@@ -301,10 +279,7 @@ fn intent_firewall_restore_config_from_backup() {
 
 #[test]
 fn intent_firewall_update_config() {
-    // Content-neutral label: UpdateConfig is used by both create
-    // (adds the anchor reference) and destroy (removes it), so the
-    // intent stays on the action (`Update /etc/pf.conf`) rather than
-    // its directional payload. Matches `business_label`'s shape.
+    // Content-neutral: create (adds the reference) and destroy (removes it) share this op.
     let op = FirewallOp::UpdateConfig {
         content: String::new(),
     };
@@ -332,9 +307,7 @@ fn intent_firewall_enable() {
     assert_eq!(Op::Firewall(&op).intent_label(), "Enable pf host-wide");
 }
 
-// ============================================================
-// ACL-domain variants
-// ============================================================
+// --- ACL-domain variants ---
 
 #[test]
 fn intent_acl_grant() {
@@ -362,16 +335,7 @@ fn intent_acl_revoke() {
     );
 }
 
-// ============================================================
-// Sharpening pin: intent_label differs from business_label for the
-// previously-weak probe variants. LookupUserRecord + DeleteUserRecord
-// are cases where the past-tense business_label (`Residual user
-// record check for 'dev'`) reads OK after success but doesn't read
-// naturally as a future-tense bullet — intent_label uses a sharper
-// future-tense headline. This test pins that they actually differ
-// so a "let's just alias intent_label to business_label" regression
-// trips.
-// ============================================================
+// --- intent_label must not alias business_label ---
 
 #[test]
 fn intent_label_differs_from_business_label_for_lookup_user_record() {
@@ -395,10 +359,6 @@ fn intent_label_differs_from_business_label_for_delete_user_record() {
 
 #[test]
 fn intent_label_differs_from_business_label_for_exec_as_user() {
-    // intent_label is the full operator-display ("Run as 'dev': ls /tmp"),
-    // business_label is the basename-only past-tense ✓ progress line
-    // ("Command 'ls' executed as 'dev'"). The alias-regression pin
-    // guards against future refactor that would collapse the two arms.
     let op = AccountOp::ExecAsUser {
         name: "dev".into(),
         argv: vec!["ls".into(), "/tmp".into()],
@@ -411,9 +371,7 @@ fn intent_label_differs_from_business_label_for_exec_as_user() {
     );
 }
 
-// ============================================================
-// KeychainOp variants
-// ============================================================
+// --- KeychainOp variants ---
 
 #[test]
 fn intent_create_tenant_keychain() {
@@ -537,7 +495,6 @@ fn business_delete_stashed_password() {
 
 #[test]
 fn intent_login_as_user_with_directory() {
-    // The plan bullet must be honest about the `cd` the real run does.
     let op = AccountOp::LoginAsUser {
         name: "dev".into(),
         dir: Some(std::path::PathBuf::from("/Users/dev/projects/foo")),

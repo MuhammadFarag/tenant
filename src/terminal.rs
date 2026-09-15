@@ -1,8 +1,3 @@
-//! Operator's terminal-I/O capability. Threaded through every construct
-//! that needs operator I/O — even those that only read one field. This
-//! struct IS the access path; do not unpack its fields into separate
-//! parameters or fields downstream.
-
 use std::io::{self, BufRead, IsTerminal, Write};
 
 use crate::ansi::Colors;
@@ -16,12 +11,7 @@ pub struct Terminal<'a> {
 }
 
 impl Terminal<'_> {
-    /// Construct a `Terminal` over OS stdio for the duration of `f`.
-    /// The closure pattern is load-bearing: `Terminal`'s borrowed
-    /// fields can't outlive the OS handles that back them.
-    ///
-    /// `StdinLock` implements `BufRead`; `Stdin` doesn't — hence the
-    /// separate `stdin_handle.lock()`.
+    /// Closure-scoped: the borrowed fields can't outlive the OS handles.
     pub fn with_stdio<F, R>(f: F) -> R
     where
         F: FnOnce(Terminal<'_>) -> R,

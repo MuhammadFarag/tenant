@@ -1,20 +1,5 @@
-//! Per-variant contract pins on `MacosHostMachine::describe_account` and
-//! `MacosHostMachine::describe_profile`. These tests are the one place
-//! where the literal shell-command shape of each op lives — the
-//! verb-level E2E tests in `cli.rs` already pin the end-to-end output
-//! via byte-exact stdout assertions, but those assertions are
-//! distributed; if dseditgroup ever moves to `dscl . -create /Groups/…`
-//! exactly one test here moves with the renderer change.
-//!
-//! These ARE unit tests, which crosses the project's "E2E-only"
-//! convention. Justified by the per-variant combinatorial coverage
-//! that's awkward via the CLI surface — every AccountOp variant has
-//! its own argv shape, and routing each through a verb (some of which
-//! aren't even reachable from a single CLI invocation, like
-//! `LoginAsUser` which doesn't share a verb with the dscl probes) means
-//! N independent E2E tests, all asserting on tiny substrings of a
-//! larger stdout block. A focused per-variant test reads cleaner and
-//! catches drift more precisely.
+//! Per-variant describe/argv pins: the one place each op's literal shell shape lives. Unit
+//! tests because per-variant argv is awkward to isolate in verb-level E2E output.
 
 use std::path::PathBuf;
 
@@ -23,12 +8,7 @@ use tenant::domain::{
     AccountOp, AclMode, AclOp, FirewallOp, GroupId, HostMachine, PamOp, ProfileOp, UserId,
 };
 
-// `pam_tid_append_payload` is the pure idempotency + newline-glue
-// decision behind `execute_pam`. Unit-pinned here because the real
-// `execute_pam` / `append_privileged` substrate path (sudo tee -a) is
-// not reachable from the stub-driven E2E tests — this is the only
-// coverage of the "no duplicate" and "don't glue onto an unterminated
-// last line" guarantees.
+// Only coverage of the no-duplicate + newline guards: `execute_pam` is unreachable from stubs.
 use tenant::adapters::macos::host_machine::pam_tid_append_payload;
 
 #[test]
@@ -57,8 +37,6 @@ fn pam_payload_for_empty_sudo_local() {
 
 #[test]
 fn pam_payload_prepends_newline_when_unterminated() {
-    // sudo_local's last line lacks a trailing '\n' — the directive must
-    // NOT glue onto it (that would malform PAM + defeat the dup guard).
     assert_eq!(
         pam_tid_append_payload("", "# a hand-written comment").as_deref(),
         Some("\nauth sufficient pam_tid.so\n")
@@ -75,11 +53,7 @@ fn pam_payload_no_extra_newline_when_terminated() {
 
 #[test]
 fn macos_describes_enable_touch_id_for_sudo() {
-    // Two-line "pretend-shell" mechanism: back up sudo_local, then
-    // append the canonical directive. The real `execute_pam` uses a
-    // stdin-fed `sudo tee -a` (no shell pipe) + an idempotency guard,
-    // but the describe renders the operator-legible shape — same
-    // honest-abstraction posture as `InstallAnchor`'s `tee < anchor.body`.
+    // Display is operator-legible; the real `execute_pam` feeds `sudo tee -a` via stdin.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_pam(&PamOp::EnableTouchIdForSudo),
@@ -178,12 +152,6 @@ fn macos_describes_login_as_user() {
 
 #[test]
 fn macos_describes_exec_as_user() {
-    // sudo -iu <name> -- <argv joined with spaces>. `-i` (login shell)
-    // sources /etc/zprofile + ~/.zprofile so PATH and tooling env match
-    // the interactive `tenant shell <name>` posture. `--` separator
-    // ensures sudo doesn't interpret argv[0] as a sudo flag. The display
-    // is operator-facing (no shell-quoting); execution argv is the
-    // already-tokenized vector so a pipe inside one element survives.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::ExecAsUser {
@@ -197,14 +165,6 @@ fn macos_describes_exec_as_user() {
 
 #[test]
 fn macos_describes_exec_as_user_preserves_quoted_argv_element() {
-    // A single argv element carrying shell metacharacters (here a pipe
-    // inside `bash -c '<...>'`) MUST survive intact through the display
-    // — operator's mental model: "the command I typed after `--` arrives
-    // at the tenant unchanged". Substrate-side, clap collected the
-    // element verbatim and `account_argv` passes it through to sudo as
-    // one argv entry; sudo's -i then -c-quotes when handing off to the
-    // login shell. Display joins with a single space; no per-element
-    // shell-escaping (the operator can read what they typed).
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::ExecAsUser {
@@ -218,12 +178,6 @@ fn macos_describes_exec_as_user_preserves_quoted_argv_element() {
 
 #[test]
 fn macos_describes_ensure_dir_as_user() {
-    // Run-as-tenant `sudo -n -u <name> /bin/mkdir -p <path>`. Mirror
-    // of the `LoginAsUser` "run as the tenant" mechanism — Account
-    // sub-domain because the substrate is sudo-u (tenant identity),
-    // not chmod-on-host (operator identity). Mode bits come from the
-    // tenant's umask (default 022 → directories at 755); no explicit
-    // mode arg until a real need surfaces.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::EnsureDirAsUser {
@@ -236,15 +190,6 @@ fn macos_describes_ensure_dir_as_user() {
 
 #[test]
 fn macos_describes_ensure_symlink_as_user() {
-    // Run-as-tenant `sudo -n -u <name> /bin/ln -sfn <target> <link>`.
-    // `-sfn`: symlink (s) + force-overwrite-existing-symlink (f) +
-    // no-follow-existing-dir-target (n). Idempotent at the substrate:
-    // an existing symlink with the same target re-links to the same
-    // place (no-op effect); an existing symlink to a different target
-    // gets replaced; an existing REAL dir or file at `link` is the
-    // `TenantPathOccupied` case the Tenants struct pre-checks for (substrate
-    // would error here without that guard; Tenants surfaces
-    // `ShareError::TenantPathOccupied` before the substrate runs).
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::EnsureSymlinkAsUser {
@@ -258,14 +203,6 @@ fn macos_describes_ensure_symlink_as_user() {
 
 #[test]
 fn macos_describes_add_host_to_share_group() {
-    // Secondary group membership for the host operator on every
-    // tenant's `<name>-tenant-share` group. Ported verbatim from
-    // sandbox's `_add_human_to_group` substrate. `-t user`
-    // disambiguates the member type for dseditgroup (the alternative
-    // is `-t group` for nested-group memberships, which tenant
-    // doesn't use). The operator-facing render names the host
-    // literally so a verbose plan line is self-documenting about
-    // WHO is being added.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::AddHostToShareGroup {
@@ -278,14 +215,7 @@ fn macos_describes_add_host_to_share_group() {
 
 #[test]
 fn macos_describes_ensure_cowork_dir_renders_four_substrate_calls() {
-    // The per-tenant co-working directory is provisioned via four
-    // substrate calls under a single op variant. `describe_account`
-    // renders them as one `\n`-separated string; the reporter's
-    // verbose plan + `$` echo iterate over `.lines()` so each call
-    // surfaces as its own operator-facing line. ACL bits match the
-    // rw share's entry so the byte-for-byte form on the inheritable
-    // grant lines up with what `chmod +a` produces for an `AclOp::
-    // Grant { mode: Rw, .. }`.
+    // One op, four substrate calls: describe joins them with `\n`; the reporter splits lines.
     let s = MacosHostMachine;
     let op = AccountOp::EnsureCoworkDir {
         path: PathBuf::from("/Users/Shared/tenants/dev"),
@@ -306,13 +236,7 @@ fn macos_describes_ensure_cowork_dir_renders_four_substrate_calls() {
 
 #[test]
 fn macos_describes_remove_host_from_share_group() {
-    // Destroy-side counter to `AddHostToShareGroup`. The substrate
-    // runs `dseditgroup -o checkmember -m <host> <group>` internally
-    // before the `-o edit -d` to make removal idempotent on (a)
-    // legacy tenants where the host was never a member and (b) the
-    // orphan-group destroy path on a partially-created tenant. The
-    // describe-side renders the edit form only — checkmember is
-    // mechanism the operator doesn't need a line for.
+    // The substrate runs `checkmember` first for idempotency; describe shows only the edit.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::RemoveHostFromShareGroup {
@@ -343,9 +267,6 @@ fn macos_describes_profile_delete() {
 
 #[test]
 fn macos_describes_install_anchor() {
-    // Body content is intentionally not in the rendered line — the
-    // pretend-shell `< anchor.body` marker says "content comes from
-    // elsewhere", matching the ProfileOp::Create convention.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_firewall(&FirewallOp::InstallAnchor {
@@ -418,28 +339,9 @@ fn macos_describes_flush_anchor() {
     );
 }
 
-// --- AclOp ------------------------------------------------------------
-//
-// ACL strings ported verbatim from the sandbox plugin's
-// `scripts/lib/acl.py` (read_exec_inherit_entry / rw_inherit_entry):
-//
-// - ro: `read,execute,file_inherit,directory_inherit`
-// - rw: `read,write,execute,delete,append,file_inherit,directory_inherit`
-//
-// No `sudo` prefix — `chmod +a` runs as the operator (host user) who
-// is expected to own (or have ACL write on) `host_path`. Mirrors the
-// plugin's posture exactly. Paths the host can't write to surface as
-// `AclError::NonZero` with the chmod stderr embedded; the operator
-// frame names the host_path so the cause is locatable.
-//
-// EntryEnsureKind (Grant/Revoke) maps to the `+a` / `-a` chmod arg.
-// Grant uses `-R` so shares declared on already-populated host
-// directories reach existing children, not just the top-level path;
-// `file_inherit,directory_inherit` only cover future children. Revoke
-// is single-pass because `chmod -R -a` fails on any tree node missing
-// the ACE (cp doesn't preserve macOS ACLs); top-level revoke is the
-// semantic operation, and inherited child ACEs become orphan-inert
-// once the share group is removed downstream in destroy.
+// --- AclOp ---
+// Grant is `-R` (inherit bits only reach future children); revoke is top-level only because
+// `chmod -R -a` fails on any node missing the ACE.
 
 #[test]
 fn macos_describes_acl_grant_ro() {
@@ -499,14 +401,7 @@ fn macos_describes_acl_revoke_rw() {
     );
 }
 
-// ============================================================
-// Keychain describe-string pins
-// ============================================================
-//
-// Provision is four ADT variants, one substrate call each (the split
-// landed when the 4-call bundle was broken up so each step is its own
-// op-identity assertion target). Each describe-string is its own pin
-// here.
+// --- KeychainOp ---
 
 #[test]
 fn macos_describes_create_tenant_keychain() {
@@ -574,14 +469,7 @@ fn macos_describes_delete_stashed_password() {
     );
 }
 
-// Argv-tail pin for the shell-entry unlock pass. `unlock_tenant_keychain`
-// is a HostMachine carve-out (non-unit-error-shaped probe-style call, no
-// `KeychainOp` variant, no `describe_*` surface) that routes through
-// `run_security_as_tenant`; the unlock-specific tail is extracted into
-// `unlock_keychain_argv` to give this test a byte-exact seam.
-// Production + test consume the same helper, so any drift fails here
-// exactly once. The `sudo -iu <name> security` prefix is pinned by
-// `run_security_as_tenant`'s own sibling coverage.
+// Unlock-specific tail only; the `sudo -iu <name> security` prefix is pinned elsewhere.
 #[test]
 fn macos_unlock_keychain_argv_tail() {
     use tenant::adapters::macos::host_machine::unlock_keychain_argv;
@@ -598,30 +486,15 @@ fn macos_unlock_keychain_argv_tail() {
     );
 }
 
-// `tenant_keychain_present` smoke. Defends against the EACCES-vs-NotFound
-// substrate bug where calling `std::fs::metadata` from the operator
-// process against `/Users/<tenant>/Library/...` returns
-// PermissionDenied — because Library is mode 0700 — and surfaces as
-// ProbeError::Spawn instead of a clean Ok(false). The fix runs the
-// existence check AS THE TENANT via `sudo -n -u <name> /bin/test -e
-// <path>`; this test exercises that path against `root`, whose
-// home (`/var/root/`) doesn't contain a `Library/Keychains/tenant.keychain-db`
-// on a default macOS install — so the probe should return Ok(false).
-// `#[ignore]` because the test requires passwordless `sudo -n -u root`,
-// which isn't configured in headless CI environments.
+// Library is 0700, so the probe must run as the tenant; an operator-side stat EACCESes.
+// Ignored: needs passwordless `sudo -n -u root`.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore]
 fn macos_tenant_keychain_present_returns_false_for_absent_path() {
     use tenant::domain::{HostMachine, TenantUserName};
     let machine = MacosHostMachine;
-    // `root` exists on every macOS host. The keychain path under
-    // `/Users/root/...` doesn't (root's home is `/var/root/`); the
-    // probe builds the `/Users/<name>/Library/Keychains/tenant.keychain-db`
-    // path literally, so this is a deterministic-absent case that the
-    // old `std::fs::metadata` impl would have surfaced as
-    // ProbeError::Spawn (EACCES traversing into `/Users/root/`'s
-    // absent parent) rather than a clean Ok(false).
+    // `/Users/root/...` never exists (root's home is `/var/root`): deterministically absent.
     let verdict = machine
         .tenant_keychain_present(&TenantUserName::from("root"))
         .expect("sudo -n -u root /bin/test should yield a kernel verdict");
@@ -684,16 +557,8 @@ fn macos_sudo_test_verdict_reads_exit_1_as_no_only_without_stderr() {
     ));
 }
 
-// Point-of-use sudo for the doctor verb. The three host-config read
-// probes (`read_pf_status`, `read_kernel_pf_rules`, `read_env_policy`)
-// shell out with BARE sudo — NO `-n`. On a fresh terminal the FIRST of
-// these probes prompts (Touch ID / password per host PAM) and populates
-// the operator's sudo timestamp; every subsequent `sudo -n -u <tenant>`
-// run-as-tenant probe then RIDES that cache. Dropping `-n` from these
-// reads is what makes a first-touch `tenant doctor` succeed instead of
-// hard-aborting with "sudo: a password is required". The argv tails are
-// extracted into pure builders so production + test consume the same
-// source and any reintroduction of `-n` fails here exactly once.
+// Doctor's host-config reads use BARE sudo (no `-n`): the first prompts and caches, so later
+// `sudo -n -u <tenant>` probes ride the cache instead of failing with "a password is required".
 #[test]
 fn macos_pf_status_argv_is_bare_sudo() {
     use tenant::adapters::macos::host_machine::pf_status_argv;
@@ -718,9 +583,6 @@ fn macos_kernel_pf_rules_argv_is_bare_sudo() {
 
 #[test]
 fn macos_privileged_cat_argv_is_bare_sudo() {
-    // `read_env_policy` reads `/etc/sudoers` (+ drop-ins) via this
-    // privileged `cat`. As a doctor host-config read it drops `-n` so
-    // the lead probe prompts-and-caches at point of use.
     use tenant::adapters::macos::host_machine::privileged_cat_argv;
     let argv = privileged_cat_argv("/etc/sudoers");
     assert_eq!(argv, vec!["sudo", "cat", "/etc/sudoers"]);
@@ -732,8 +594,6 @@ fn macos_privileged_cat_argv_is_bare_sudo() {
 
 #[test]
 fn macos_sudoers_dropins_listing_argv_is_bare_sudo() {
-    // The drop-in directory listing inside `read_env_policy` is the same
-    // privileged-read class — bare sudo, no `-n`.
     use tenant::adapters::macos::host_machine::sudoers_dropins_listing_argv;
     let argv = sudoers_dropins_listing_argv();
     assert_eq!(argv, vec!["sudo", "ls", "-1", "/etc/sudoers.d"]);
@@ -749,9 +609,6 @@ fn macos_authenticate_sudo_argv_prompts() {
     assert_eq!(authenticate_sudo_argv(), vec!["sudo", "-v"]);
 }
 
-// The non-interactive cache CHECK keeps `-n` — its whole job is to
-// answer "would the next sudo prompt?" WITHOUT itself prompting; pinning
-// it guards against an over-broad "drop -n everywhere" edit.
 #[test]
 fn macos_sudo_session_cached_argv_keeps_dash_n() {
     use tenant::adapters::macos::host_machine::sudo_session_cached_argv;
@@ -760,13 +617,7 @@ fn macos_sudo_session_cached_argv_keeps_dash_n() {
 
 #[test]
 fn macos_describes_login_as_user_with_directory() {
-    // `sudo -iu` always lands in the tenant's home (that is what `-i`
-    // means) and sudo's own `--chdir` is sudoers-policy-gated on macOS,
-    // so a requested working directory is applied by an inner
-    // `/bin/sh -c` wrapper (absolute path per the Darwin doctrine).
-    // `$SHELL` stays inside the single-quoted script so it expands
-    // tenant-side, where `sudo -i` has already set it to the tenant's
-    // login shell.
+    // `$SHELL` stays single-quoted so it expands tenant-side, after `sudo -i` has set it.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::LoginAsUser {
@@ -779,9 +630,7 @@ fn macos_describes_login_as_user_with_directory() {
 
 #[test]
 fn macos_describes_exec_as_user_with_directory() {
-    // The `"$@"` + `sh` trick preserves argv boundaries: the operator's
-    // command arrives as positional parameters of the inner shell, so
-    // nothing is re-quoted or re-split on the way to the tenant.
+    // `"$@"` + the `sh` placeholder keep the operator's argv boundaries intact.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::ExecAsUser {
@@ -795,13 +644,7 @@ fn macos_describes_exec_as_user_with_directory() {
 
 #[test]
 fn macos_describes_directory_needing_quotes() {
-    // Unlike the bare argv arms (whose display deliberately skips
-    // shell-escaping — the operator typed it, they can read it), the
-    // wrapper's script element is a string the ADAPTER composes, and a
-    // directory with a space would re-split inside it. So the dir is
-    // shell-quoted when it isn't already a bare word, and the display
-    // renders the exact argv the substrate runs. POSIX has no escape
-    // inside single quotes: `'` closes, `\'` escapes, `'` reopens.
+    // The adapter composes this script, so the dir must be shell-quoted (unlike bare argv arms).
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::LoginAsUser {
@@ -812,12 +655,10 @@ fn macos_describes_directory_needing_quotes() {
     );
 }
 
+// TODO(smell): derive `describe_account`'s dir-less display from `account_argv` so the two can't diverge.
+// Until then this is the only executed-argv coverage of the dir-less arms.
 #[test]
 fn macos_account_argv_wraps_only_when_directory_present() {
-    // The negative pin that matters: EXECUTED argv, not the display.
-    // The dir-less `describe_account` arms are hand-built strings that
-    // never call `account_argv`, so without this a regression that
-    // wrapped `dir: None` in `/bin/sh -c` would ship green.
     use tenant::adapters::macos::host_machine::account_argv;
     assert_eq!(
         account_argv(&AccountOp::LoginAsUser {
@@ -834,9 +675,6 @@ fn macos_account_argv_wraps_only_when_directory_present() {
         }),
         vec!["sudo", "-iu", "dev", "--", "ls", "/tmp"],
     );
-    // With a dir: the operator's argv lands as positional parameters
-    // AFTER the `sh` argv[0] placeholder, so `"$@"` inside the script is
-    // exactly what they typed — one element per element, no re-splitting.
     assert_eq!(
         account_argv(&AccountOp::ExecAsUser {
             name: "dev".into(),

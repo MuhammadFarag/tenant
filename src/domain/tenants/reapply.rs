@@ -1,7 +1,3 @@
-//! Mode/reload reapply error type. Used by `mode`, the `shell` command
-//! form's auto-narrow, `reload`, and the create-side post-provision
-//! share pass.
-
 use crate::domain::reporter::Reporter;
 use crate::domain::{
     AccountError, AccountOp, AclError, FirewallError, FirewallOp, HostUserDirectory, HostUserName,
@@ -14,12 +10,7 @@ use crate::{InboundLevel, ModeLevel};
 use super::shares::ShareOps;
 use super::{ShareError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
 
-/// Failure surface for `mode` and (by reuse) the `shell` auto-narrow,
-/// `reload`, and the create-side post-provision share step. ModeError
-/// does NOT carry a `UserDirectoryLookup` variant: no method on this
-/// surface queries `HostUserDirectory`, so directory failures can only
-/// reach dispatch via the dedicated `tenant_names()` call in
-/// `reload_all` (which returns `UserDirectoryError` directly).
+// TODO(smell): rename ModeError to ReapplyError; it's the error of every reapply, not just `mode`
 #[derive(Debug)]
 pub(crate) enum ModeError {
     Profile(ProfileError),
@@ -30,44 +21,18 @@ pub(crate) enum ModeError {
     Share(ShareError),
 }
 
-/// `Light` (mode + shell) omits the recursive ACL passes —
-/// `AclOp::Grant` per share AND `AccountOp::EnsureCoworkDir`.
-/// Inheritable ACE bits (`file_inherit,directory_inherit`) propagate
-/// the grant to tenant-created children, so the recursive walk on
-/// every entry is redundant in the steady state. Drift on
-/// pre-existing files / externally-stripped ACL / missing cowork
-/// dir is surfaced by doctor and remediated by `tenant reload`.
-///
-/// `Full` (reload + create's post-provision) includes both. Create's
-/// first apply needs the recursive grant to reach files that
-/// pre-existed at the host_path before the inheritable ACE landed.
+/// `Light` (mode, shell) skips the recursive ACL, cowork-dir and primary-group passes;
+/// `Full` (reload, create) runs them. Light-skipped drift surfaces via doctor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReapplyScope {
     Light,
     Full,
 }
 
-/// Pre-built op list for a profile-to-tenant reapply. Construction
-/// is separated from execution so verb methods can render the
-/// upfront plan over the same ops the substrate will run.
-///
-/// `ensure_cowork_dir` and per-share `grant` are `Option` — `None`
-/// under Light scope.
 pub(crate) struct ReapplyPlan {
     pub(crate) install_anchor: FirewallOp,
     pub(crate) reload: FirewallOp,
     pub(crate) add_host: AccountOp,
-    /// Tenant-side membership catch-up: re-assert the tenant user's
-    /// primary group to the share group (OS-update resilience). `Some`
-    /// under Full, `None` under Light — same split as `ensure_cowork_dir`:
-    /// re-asserting the primary group is a host-state CONVERGENCE repair,
-    /// and convergence is reload's "apply everything" role. mode/shell
-    /// stay Light to keep the quick paths minimal (one fewer dscl read per
-    /// entry) with `tenant reload` as the documented drift remedy. (Note:
-    /// shell's `sudo -iu` login runs AFTER the reapply, so reasserting
-    /// here WOULD reach the about-to-start session — that
-    /// self-heal-on-entry is the separate shell-entry-safety concern, not
-    /// this op's scope.)
     pub(crate) ensure_primary_group: Option<AccountOp>,
     pub(crate) ensure_cowork_dir: Option<AccountOp>,
     pub(crate) share_ops: Vec<ShareOps>,
@@ -104,30 +69,12 @@ pub(crate) struct ReloadAllOutcome {
     pub(crate) failed: u32,
 }
 
-/// The inbound posture a verb that does NOT control the inbound axis
-/// renders: steady state at the profile's declared ports. Per the
-/// implicit-current-mode doctrine (no state file), every reapply verb
-/// renders both axes; the axis it doesn't widen goes to steady state.
-/// For inbound that is `Restricted(profile.inbound.ports)` — empty ports
-/// stays the locked posture, declared ports keep their inbound pass.
-/// Mirrors how `hosts_for_level` resolves the egress axis from the same
-/// parsed profile before `render_anchor` sees it.
-///
-/// The temporary `Permissive` widen is the `tenant inbound` verb's job;
-/// it resolves `InboundLevel` against these ports at that call site.
+/// The inbound axis for verbs that don't control it; empty ports stays locked.
 pub(crate) fn steady_inbound_rules(profile: &Profile) -> InboundRules {
     InboundRules::Restricted(profile.inbound.ports.clone())
 }
 
-/// Resolve the `tenant inbound` verb's requested `InboundLevel` against
-/// the profile's declared ports into a `firewall::InboundRules`. The
-/// `cli::InboundLevel` → `firewall::InboundRules` resolution lives in the
-/// domain layer so `firewall.rs` stays free of any `cli` dependency —
-/// mirrors how `hosts_for_level` resolves the egress axis before
-/// `render_anchor` sees a `&[EgressHost]`.
-///
-/// `Permissive` opens all inbound loopback; `Restricted` keeps the
-/// profile's declared ports (empty ⇒ locked, same as steady state).
+/// Lives in the domain, not `firewall.rs`, so the renderer stays free of `cli` types.
 pub(crate) fn inbound_rules_for_level(profile: &Profile, level: InboundLevel) -> InboundRules {
     match level {
         InboundLevel::Permissive => InboundRules::Permissive,
@@ -135,13 +82,7 @@ pub(crate) fn inbound_rules_for_level(profile: &Profile, level: InboundLevel) ->
     }
 }
 
-/// Runtime: runtime hosts only. Install: runtime then install (order
-/// matters for `render_anchor`'s output stability). Each profile
-/// `HostEntry` resolves into the renderer's `EgressHost` here — the single
-/// domain-side `HostEntry → EgressHost` map, mirroring where the
-/// `InboundLevel → InboundRules` resolution lives. Both create and doctor
-/// reach the runtime-tier egress by calling this with `ModeLevel::Runtime`,
-/// so the map has exactly one home.
+/// Install appends install hosts after runtime; order keeps `render_anchor` output stable.
 pub(crate) fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<EgressHost> {
     let to_egress = |entries: &[crate::profile::HostEntry]| -> Vec<EgressHost> {
         entries
@@ -163,8 +104,6 @@ pub(crate) fn hosts_for_level(profile: &Profile, level: ModeLevel) -> Vec<Egress
 }
 
 impl<'a> Tenants<'a> {
-    /// Apply a pre-built reapply plan at the requested tier. The plan
-    /// is built upstream so profile-read failures surface pre-prompt.
     pub(crate) fn mode(
         &self,
         name: &TenantUserName,
@@ -178,10 +117,6 @@ impl<'a> Tenants<'a> {
         Ok(())
     }
 
-    /// Apply a pre-built reapply plan carrying the requested inbound
-    /// posture. Sibling of `mode` on the inbound axis: the plan is built
-    /// upstream (egress at runtime tier, inbound at the requested level)
-    /// so profile-read failures surface pre-prompt.
     pub(crate) fn inbound(
         &self,
         name: &TenantUserName,
@@ -195,16 +130,6 @@ impl<'a> Tenants<'a> {
         Ok(())
     }
 
-    /// Build the op list for a profile-to-tenant reapply at `level`
-    /// under the given `scope`. Pre-flight refusals (host_path
-    /// existence, tenant_path occupancy) surface before any op fires.
-    ///
-    /// `inbound_override` controls the INBOUND axis: `None` renders it at
-    /// steady state (profile-declared ports), which is what every verb
-    /// that doesn't control inbound (`mode`/`reload`/create) passes;
-    /// `Some(level)` is the `tenant inbound` verb resolving its requested
-    /// posture. Per the implicit-current-mode doctrine, both axes always
-    /// render — the axis the verb doesn't widen goes to steady state.
     pub(crate) fn build_reapply_plan(
         &self,
         name: &TenantUserName,
@@ -224,10 +149,6 @@ impl<'a> Tenants<'a> {
         )
     }
 
-    /// The plan-construction body, given an already-loaded profile. Split
-    /// out so `bootstrap` can read the profile ONCE (it needs the
-    /// `[bootstrap]` commands from the same parse) and still build the
-    /// widen reapply plan without a second `load_profile`.
     pub(crate) fn build_reapply_plan_from_profile(
         &self,
         name: &TenantUserName,
@@ -252,13 +173,7 @@ impl<'a> Tenants<'a> {
             group: group.clone(),
             host: host.into(),
         };
-        // Tenant-side membership catch-up (Full only): re-assert the
-        // tenant user's primary group to its share group. Resolve the gid
-        // from the LIVE share-group record (`read_share_group_gid`, an
-        // unprivileged dscl read) rather than trusting a derived value —
-        // the gid was allocated at create and isn't recoverable from the
-        // name. Borrow `&group` here so it stays available for the cowork
-        // op below to move. Light scope skips both the read and the op.
+        // gid comes from the live record: UID/GID allocators are independent, so it isn't derivable.
         let ensure_primary_group = match scope {
             ReapplyScope::Full => {
                 let gid = self
@@ -272,9 +187,6 @@ impl<'a> Tenants<'a> {
             }
             ReapplyScope::Light => None,
         };
-        // Kind-check fires only when EnsureCoworkDir will: `mkdir -p`
-        // silently follows a symlink, and the subsequent chown /
-        // chmod / chmod -R would then mutate the link target.
         let ensure_cowork_dir = match scope {
             ReapplyScope::Full => {
                 let cowork_path = cowork_dir_path(name.as_str());
@@ -299,10 +211,8 @@ impl<'a> Tenants<'a> {
         })
     }
 
-    /// PF reapply first; a Reload failure aborts before any share
-    /// mutation. `add_host` fires before the per-share ops because
-    /// the host needs the membership for the inheritable ACL grant
-    /// to flow through.
+    /// Order is load-bearing: a Reload failure aborts before any share mutation, and
+    /// `add_host` precedes the shares so the inheritable ACL grant reaches the host.
     pub(crate) fn execute_reapply_plan(
         &self,
         plan: &ReapplyPlan,
@@ -324,8 +234,6 @@ impl<'a> Tenants<'a> {
         self.execute_share_ops(&plan.share_ops, reporter)
     }
 
-    /// Runtime-tier reapply from a pre-built plan. Profile-read /
-    /// share-pre-flight failures surface at the build site upstream.
     pub(crate) fn reload(
         &self,
         name: &TenantUserName,
@@ -338,8 +246,6 @@ impl<'a> Tenants<'a> {
         Ok(())
     }
 
-    /// Walk every tenant. Continue on per-tenant failure, accumulate,
-    /// surface a single end-of-run summary.
     pub(crate) fn reload_all(
         &self,
         directory: &dyn HostUserDirectory,

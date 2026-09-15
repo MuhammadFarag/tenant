@@ -27,34 +27,18 @@ pub(crate) use shares::ShareError;
 pub(crate) use shell::ShellError;
 pub use validation::{ConflictError, NameError, check_conflict, validate_name};
 
-/// Single source of truth for the `<name>-tenant-share` suffix.
 pub fn tenant_share_group_name(name: &str) -> GroupName {
     GroupName(format!("{name}-tenant-share"))
 }
 
-/// Parent path of every per-tenant co-working directory. Shared
-/// with the test + dry-run host-machine synthesizers so a future
-/// move (e.g. to `/private/var/tenants`) updates one constant.
 pub const COWORK_DIR_PARENT: &str = "/Users/Shared/tenants";
 
-/// Single source of truth for the per-tenant co-working directory
-/// path: `/Users/Shared/tenants/<name>`. Owned by the host operator
-/// with the tenant's share group as primary, mode 2770 + an
-/// inheritable rw ACL granting collaborative access to both sides.
 pub fn cowork_dir_path(name: &str) -> PathBuf {
     PathBuf::from(format!("{COWORK_DIR_PARENT}/{name}"))
 }
 
-/// Pre-flight: `mkdir -p` against an existing regular file errors,
-/// and against a symlink silently follows the link — the subsequent
-/// chown and chmod -R then mutate whatever lives at the link's
-/// target. Probe-failure rides the existing `AccountError` shape so
-/// it flows through the caller's `CoworkDir` / `Account` arm without
-/// new plumbing. Fires on create + Full-scope reapply (the only
-/// paths that construct `EnsureCoworkDir`). Probes host-side: the
-/// cowork dir is owned by the host operator (the tenant user may
-/// not even exist yet at create-time), and its kind doesn't depend
-/// on the tenant's perspective.
+/// `mkdir -p` over a symlink silently follows it, and the later chown / chmod -R would
+/// mutate the link's target. Probes host-side: the tenant user may not exist yet.
 pub(super) fn guard_cowork_dir_kind(
     machine: &dyn HostMachine,
     path: &Path,
@@ -69,9 +53,6 @@ pub(super) fn guard_cowork_dir_kind(
     }
 }
 
-/// Wrap a fragment read/parse failure with the fragment's display path so
-/// the operator sees WHICH include broke — "which file broke" is the whole
-/// error-UX of this feature.
 fn wrap_fragment_error(fragment: &str, err: ProfileError) -> ProfileError {
     ProfileError {
         message: format!(
@@ -88,9 +69,6 @@ fn probe_to_account_err(err: ProbeError) -> AccountError {
     }
 }
 
-/// Composes ops into verb-level flows. Real-vs-dry-run is not the
-/// Tenants struct's concern: each method always invokes the substrate,
-/// and the Reporter + dry-run substrate handle mode-specific filtering.
 pub(crate) struct Tenants<'a> {
     pub(super) machine: &'a dyn HostMachine,
 }
@@ -100,16 +78,9 @@ impl<'a> Tenants<'a> {
         Self { machine }
     }
 
-    /// The one profile-load path. Reads the tenant profile, resolves its
-    /// ordered `include` fragments (depth one) from `includes/`, and merges
-    /// them (fragments first, tenant profile last) into a validated
-    /// `Profile`. All six former read+parse call sites route through here so
-    /// downstream stays include-agnostic and doctor's anchor-body drift
-    /// renders from the merged profile for free (editing a fragment without
-    /// reloading surfaces as `AnchorBodyDrift` on every includer). Fragment
-    /// read/parse errors are wrapped with the fragment's display path so the
-    /// operator knows which file broke; the tenant-profile read/parse error
-    /// flows through unwrapped, preserving each call site's posture.
+    /// The one profile-load path: fragments merge first, tenant profile last. Doctor's
+    /// anchor-body check renders from this merge, so an unreloaded fragment edit surfaces
+    /// as `AnchorBodyDrift` on every includer.
     pub(super) fn load_profile(&self, name: &TenantUserName) -> Result<Profile, ProfileError> {
         let content = self.machine.read_profile(name)?;
         let base = parse_partial(&content, ProfileRole::Tenant)?;
@@ -128,8 +99,7 @@ impl<'a> Tenants<'a> {
         merge(parts)
     }
 
-    /// Narrate, execute, narrate. Coupling the three steps means a
-    /// Tenants caller can't execute without narrating either side.
+    /// Couples narration to execution so no caller can run an op silently.
     pub(super) fn run<O: WritableOp>(
         &self,
         op: &O,

@@ -1,7 +1,4 @@
-//! Test substitute for `HostMachine`. Records op invocations for
-//! behavioral assertions and supports per-op failure injection.
-//! Describe delegates to `MacosHostMachine` so production + test
-//! render identical bytes.
+//! `HostMachine` test double: records ops, injects failures; describe delegates to `MacosHostMachine`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -21,28 +18,19 @@ type ExecCall = (String, Vec<String>, Option<PathBuf>);
 
 #[derive(Default)]
 pub struct StubHostMachine {
-    /// Operator identity returned from `current_host_user_name`. Set by
-    /// `new()` to `"operator"` (matches `common::TEST_HOST`) so the
-    /// canonical `StubHostMachine::new()` lines up with shared test
-    /// fixtures without a per-test setter; `with_host` overrides.
+    /// Defaults to `"operator"` (`common::TEST_HOST`).
     host: RefCell<String>,
 
     account_ops: RefCell<Vec<AccountOp>>,
     profile_ops: RefCell<Vec<ProfileOp>>,
     firewall_ops: RefCell<Vec<FirewallOp>>,
-    /// `(tenant, dir)` per login carve-out call — the dir is the
-    /// resolved `tenant shell -d` value, `None` when the flag is absent.
     logins: RefCell<Vec<(String, Option<PathBuf>)>>,
 
-    /// `(tenant, argv, dir)` per exec carve-out call.
     exec_calls: RefCell<Vec<ExecCall>>,
 
     exec_exit_code: Cell<i32>,
 
-    /// Per-call exit-code queue for `exec_as_tenant`. When non-empty each
-    /// call pops the next code (falling back to `exec_exit_code` once
-    /// drained), so a test can script "command 1 exits 0, command 2 exits
-    /// 3" to pin bootstrap's stop-on-first-failure ordering.
+    /// Popped per `exec_as_tenant` call; falls back to `exec_exit_code` once drained.
     exec_exit_codes: RefCell<VecDeque<i32>>,
 
     exec_failure: RefCell<Option<AccountError>>,
@@ -50,8 +38,7 @@ pub struct StubHostMachine {
     /// First match (by full equality on the op value) wins.
     account_overrides: RefCell<Vec<(AccountOp, AccountError)>>,
 
-    /// Fires on every call (not one-shot). Spawn-failure injection
-    /// isn't supported by the blanket path; use a per-op override.
+    /// Fires on every call (not one-shot); spawn failures need a per-op override.
     account_blanket_failure: RefCell<Option<(i32, String)>>,
 
     profile_failure: RefCell<Option<ProfileError>>,
@@ -66,35 +53,20 @@ pub struct StubHostMachine {
     /// Backs both `execute_profile` mutations and `read_profile` reads.
     profile_state: RefCell<HashMap<String, String>>,
 
-    /// Not mutated by `execute_firewall` — pfctl ops are modeled as
-    /// side effects on a real-host fs; tests assert via `firewall_ops()`
-    /// rather than re-reading conf state.
+    /// Not mutated by `execute_firewall`; assert via `firewall_ops()`.
     pf_conf_state: RefCell<String>,
 
-    /// Preloaded share-group gids for `read_share_group_gid`, populated by
-    /// the `with_share_group_gid` builder. Unmatched groups fall back to
-    /// the canonical tenant-floor `GroupId(600)` so Full-reapply tests
-    /// that don't assert the gid value stay stable.
+    /// Unmatched groups fall back to `GroupId(600)`.
     share_group_gids: RefCell<HashMap<String, GroupId>>,
 
-    /// One-shot failure injection for `read_share_group_gid`, populated by
-    /// the `fail_next_share_group_gid` builder.
     share_group_gid_failure: RefCell<Option<ProbeError>>,
 
-    /// Override for what `ProfileOp::Create` writes. Production always
-    /// writes `default_profile_toml()`; this lets create-flow tests
-    /// exercise the non-empty-allowlist path without rewriting the default.
+    /// Overrides what `ProfileOp::Create` writes (production always writes the default).
     create_profile_overrides: RefCell<HashMap<String, String>>,
 
-    /// Preloaded `include` fragment content, keyed by fragment name;
-    /// backs `read_profile_fragment`. Populated by `with_profile_fragment`
-    /// (mirror of `with_existing_profile`). An unpreloaded fragment reads
-    /// as `ProfileError` (mirror of a missing profile), exercising the
-    /// missing-include failure path.
+    /// Unpreloaded fragments read as `ProfileError`.
     profile_fragments: RefCell<HashMap<String, String>>,
 
-    /// Records every `read_profile_fragment` call in order, so a test can
-    /// assert which fragments the load path resolved.
     fragment_reads: RefCell<Vec<String>>,
 
     probes: RefCell<Vec<(String, PathBuf, AccessMode)>>,
@@ -108,37 +80,27 @@ pub struct StubHostMachine {
 
     env_policy_failure: RefCell<Option<HostFileError>>,
 
-    /// Missing entry falls back to a "happy" default (both `pass` +
-    /// `block` present) so tests that don't care about PF-drift don't
-    /// see spurious findings.
+    /// Missing entry defaults to a pass + block body (no spurious PF-drift findings).
     kernel_pf_rules: RefCell<HashMap<String, String>>,
 
     kernel_pf_rules_failure: RefCell<Option<FirewallError>>,
 
-    /// Defaults to a "Touch-ID-active" placeholder (see `new`) so tests
-    /// that don't care about the PAM path don't see spurious
-    /// `TouchIdMissing` findings.
+    /// Defaults to Touch-ID-active (no spurious `TouchIdMissing`).
     pam_sudo_content: RefCell<String>,
 
     pam_sudo_failure: RefCell<Option<HostFileError>>,
 
-    /// Defaults to empty (no local customizations) so doctor's
-    /// `sudo OR sudo_local` check relies on `pam_sudo_content` alone
-    /// unless a test exercises the sudo_local path explicitly.
+    /// Defaults to empty, so the sudo_local path is opt-in per test.
     pam_sudo_local_content: RefCell<String>,
 
     pam_sudo_local_failure: RefCell<Option<HostFileError>>,
 
-    /// Defaults to "Status: Enabled" so tests that don't care about
-    /// pf-enabled don't see spurious `PfDisabled` findings.
+    /// Defaults to "Status: Enabled" (no spurious `PfDisabled`).
     pf_status_content: RefCell<String>,
 
     pf_status_failure: RefCell<Option<FirewallError>>,
 
-    /// Missing entry falls back to the runtime-tier render of the
-    /// profile in `profile_state` for the same name (or empty-allowlist
-    /// render) — matches what doctor computes as "expected" so tests
-    /// that don't care about drift don't see spurious findings.
+    /// Missing entry defaults to the runtime render of `profile_state` (no spurious drift).
     anchor_body_state: RefCell<HashMap<String, String>>,
 
     anchor_body_failure: RefCell<Option<HostFileError>>,
@@ -150,113 +112,74 @@ pub struct StubHostMachine {
 
     acl_failure: RefCell<Option<AclError>>,
 
-    /// Unmatched lookups consult `profile_state[name]` and return
-    /// `Symlink(host_path)` when the queried path matches a declared
-    /// share's expanded tenant_path (the "shares already reapplied"
-    /// state); otherwise `Absent`.
+    /// Unmatched: `Symlink(host_path)` for a declared share's tenant_path, else `Absent`.
     tenant_path_kinds: RefCell<HashMap<(String, PathBuf), PathKind>>,
 
     tenant_path_kind_failure: RefCell<Option<ProbeError>>,
 
-    /// Records every `(name, path)` looked up via `tenant_path_kind`,
-    /// in call order. Lets tests pin which calls the sudo-bearing
-    /// tenant-side probe touched — load-bearing for the pre-exec
-    /// doctor's "SymlinkDrift check skipped when sudo uncached" pin.
+    /// Call log; pins which sudo-bearing probes ran (e.g. skipped while sudo is uncached).
     tenant_path_kind_calls: RefCell<Vec<(String, PathBuf)>>,
 
-    /// Pre-loaded answers for `tenant_dir_present` (the `tenant shell -d`
-    /// pre-flight). Unmatched paths default to `false` — an untouched
-    /// host has no such directory.
+    /// Unmatched paths default to `false`.
     tenant_dirs_present: RefCell<HashMap<(String, PathBuf), bool>>,
 
     tenant_dir_present_failure: RefCell<Option<ProbeError>>,
 
-    /// Records every `(name, path)` the pre-flight probed, in order.
     tenant_dir_present_calls: RefCell<Vec<(String, PathBuf)>>,
 
-    /// Pre-loaded kinds for `host_path_kind`. Unmatched paths default
-    /// to `PathKind::Absent` — matches what an untouched host looks
-    /// like to the cowork-dir probe.
+    // TODO(smell): the cowork `Dir`/ACE defaults silently key off `profile_state`; make them explicit builders.
+    /// Unmatched paths default to `Absent`, except cowork dirs of tenants with a loaded profile (`Dir`).
     host_path_kinds: RefCell<HashMap<PathBuf, PathKind>>,
 
-    /// One-shot failure injection for `host_path_kind`. Consumed by
-    /// the next call.
     host_path_kind_failure: RefCell<Option<ProbeError>>,
 
-    /// Records every path looked up via `host_path_kind`, in call
-    /// order. Lets tests pin which paths the host-side probe touched.
     host_path_kind_calls: RefCell<Vec<PathBuf>>,
 
-    /// Unmatched lookups default to a synthesized listing satisfying
-    /// `doctor::has_group_acl_entry` for every plausibly-named tenant
-    /// group, so tests that don't exercise AclDrift don't see spurious
-    /// findings.
+    /// Unmatched lookups synthesize a matching share-group ACE (no spurious AclDrift).
     host_acl_state: RefCell<HashMap<PathBuf, String>>,
 
     host_acl_failures: RefCell<HashMap<PathBuf, ProbeError>>,
 
-    /// Unmatched lookups default to `true` so tests that don't exercise
-    /// `HostNotInShareGroup` don't see a spurious warning.
+    /// Unmatched lookups default to `true` (no spurious `HostNotInShareGroup`).
     host_in_group_state: RefCell<HashMap<(String, String), bool>>,
 
     host_in_group_invocations: RefCell<Vec<(String, String)>>,
 
     host_in_group_failure: RefCell<Option<AccountError>>,
 
-    /// Operator's cached-sudo-timestamp verdict for
-    /// `sudo_session_cached`. Defaults to `true` (set in `new`) so the
-    /// pre-exec doctor pass runs its full probe set in existing tests;
-    /// `with_sudo_session_cached(false)` exercises the quiet-skip gate.
-    /// While `false`, `tenant_path_kind` fails like a real `sudo -n`;
-    /// `authenticate_sudo` or the first firewall op (bare sudo) caches
-    /// the timestamp.
+    /// Defaults to `true`. While `false`, `tenant_path_kind` fails like a real `sudo -n`;
+    /// `authenticate_sudo` or the first firewall op (bare sudo) caches it.
     sudo_session_cached: Cell<bool>,
 
     authenticate_sudo_calls: Cell<usize>,
     authenticate_sudo_failure: RefCell<Option<ProbeError>>,
 
-    /// Records every `PamOp` passed to `execute_pam`, in call order.
-    /// Setup tests assert the Touch-ID op fired (or didn't) via `pam_ops()`.
     pam_ops: RefCell<Vec<PamOp>>,
 
-    /// One-shot failure injection for `execute_pam`.
     pam_failure: RefCell<Option<HostFileError>>,
 
     keychain_ops: RefCell<Vec<KeychainOp>>,
 
-    /// Unmatched lookups default to `true` so tests that don't
-    /// exercise `TenantKeychainAbsent` don't see a spurious warning.
+    /// Unmatched lookups default to `true`.
     tenant_keychain_state: RefCell<HashMap<String, bool>>,
 
     tenant_keychain_probe_failure: RefCell<Option<ProbeError>>,
 
-    /// Unmatched lookups default to `true` so tests that don't
-    /// exercise `StashAbsent` don't see a spurious warning.
+    // TODO(smell): rename `stash_state`/`with_stash_present` (probe verdict) apart from `stash_passwords`/`with_stash` (secret).
+    /// Unmatched lookups default to `true`.
     stash_state: RefCell<HashMap<String, bool>>,
 
     stash_probe_failure: RefCell<Option<KeychainError>>,
 
-    /// Retrievable stashed passwords for `find_stashed_password`.
-    /// Distinct from `stash_state` (bool-valued, doctor probe). An
-    /// entry present here lets the unlock pass retrieve the password;
-    /// absent ⇒ `KeychainError::NotFound`.
+    /// Absent ⇒ `KeychainError::NotFound`, i.e. the shell unlock pass refuses.
     stash_passwords: RefCell<HashMap<String, KeychainPassword>>,
 
-    /// Per-method failure injection for the unlock pass. Both are
-    /// one-shot (consumed by `.take()`) so a single test can pin
-    /// "stash retrieval fails" vs "unlock substrate fails" cleanly.
     find_stashed_password_failure: RefCell<Option<KeychainError>>,
     unlock_tenant_keychain_failure: RefCell<Option<KeychainError>>,
 
-    /// Recorder for `unlock_tenant_keychain` invocations — tests pin
-    /// "the unlock fired for tenant X exactly once" via `unlock_calls()`.
     unlock_calls: RefCell<Vec<String>>,
 
-    /// Per-variant one-shot failure injection. KeychainOp variants
-    /// carry the randomly-generated password so equality-based
-    /// overrides can't be authored by tests; per-variant queues
-    /// sidestep that. Provision is split into four sub-step queues
-    /// so partial-failure tests can pin exactly which leg failed.
+    /// Per-variant queues: KeychainOps carry a random password, so equality overrides can't match.
     keychain_create_failure: RefCell<Option<KeychainError>>,
     keychain_set_default_failure: RefCell<Option<KeychainError>>,
     keychain_add_to_search_failure: RefCell<Option<KeychainError>>,
@@ -317,9 +240,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Script per-call exit codes for `exec_as_tenant` (drains in order,
-    /// then falls back to `exec_exit_code`). Lets a bootstrap test pin
-    /// "first command succeeds, second fails, third never runs".
     pub fn with_exec_exit_codes(self, codes: &[i32]) -> Self {
         *self.exec_exit_codes.borrow_mut() = codes.iter().copied().collect();
         self
@@ -342,7 +262,7 @@ impl StubHostMachine {
         self.firewall_ops.borrow().clone()
     }
 
-    /// Tenant names passed to the login carve-out, in call order.
+    // TODO(smell): rename `login_calls` → `logins_with_dir` to pair with `exec_calls_with_dir`.
     pub fn logins(&self) -> Vec<String> {
         self.logins
             .borrow()
@@ -351,8 +271,6 @@ impl StubHostMachine {
             .collect()
     }
 
-    /// Login calls with the `tenant shell -d` working directory the
-    /// carve-out received (`None` for every dir-less invocation).
     pub fn login_calls(&self) -> Vec<(String, Option<PathBuf>)> {
         self.logins.borrow().clone()
     }
@@ -365,7 +283,6 @@ impl StubHostMachine {
             .collect()
     }
 
-    /// Exec calls with the `tenant shell -d` working directory.
     pub fn exec_calls_with_dir(&self) -> Vec<ExecCall> {
         self.exec_calls.borrow().clone()
     }
@@ -377,11 +294,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Preload the gid `read_share_group_gid` returns for `group` (the
-    /// `<name>-tenant-share` group). Lets a reload test assert that the
-    /// resolved gid — not a hardcoded constant — flows into
-    /// `EnsurePrimaryGroup`, and that multi-tenant reload uses each
-    /// tenant's own gid.
     pub fn with_share_group_gid(self, group: &str, gid: u32) -> Self {
         self.share_group_gids
             .borrow_mut()
@@ -389,8 +301,6 @@ impl StubHostMachine {
         self
     }
 
-    /// One-shot failure for the next `read_share_group_gid` call —
-    /// exercises the Full-reapply gid-read failure path.
     pub fn fail_next_share_group_gid(self, err: ProbeError) -> Self {
         *self.share_group_gid_failure.borrow_mut() = Some(err);
         self
@@ -401,10 +311,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Override what `ProfileOp::Create` writes. Production always
-    /// writes `default_profile_toml()` (empty allowlists); this lets
-    /// create-flow tests exercise the non-empty-allowlist path via
-    /// the downstream `read_profile` + `parse` + `render_anchor` chain.
     pub fn with_create_profile_content(self, name: &str, content: &str) -> Self {
         self.create_profile_overrides
             .borrow_mut()
@@ -412,9 +318,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Preload an `include` fragment's content, keyed by fragment name.
-    /// Mirror of `with_existing_profile` for the `includes/` subdirectory;
-    /// an unpreloaded fragment reads as a `ProfileError`.
     pub fn with_profile_fragment(self, fragment: &str, content: &str) -> Self {
         self.profile_fragments
             .borrow_mut()
@@ -422,7 +325,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Fragment names read via `read_profile_fragment`, in call order.
     pub fn fragment_reads(&self) -> Vec<String> {
         self.fragment_reads.borrow().clone()
     }
@@ -554,7 +456,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Snapshot of every `tenant_dir_present` call, in invocation order.
     pub fn tenant_dir_present_calls(&self) -> Vec<(String, PathBuf)> {
         self.tenant_dir_present_calls.borrow().clone()
     }
@@ -573,9 +474,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Pre-load the kind `host_path_kind` returns for a given path.
-    /// Mirrors `with_tenant_path_kind`'s shape but keyed on path alone
-    /// — the host-side probe doesn't carry a tenant identity.
     pub fn with_host_path_kind(self, path: &std::path::Path, kind: PathKind) -> Self {
         self.host_path_kinds
             .borrow_mut()
@@ -588,11 +486,7 @@ impl StubHostMachine {
         self
     }
 
-    /// Cowork dir healthy: pre-load `host_path_kind` → `Dir` AND a
-    /// listing carrying the share-group ACE. Use when a test
-    /// doesn't load a profile (the gated synthesizers wouldn't kick
-    /// in) but still wants neither `CoworkDirAbsent` nor
-    /// `CoworkAclDrift` to fire.
+    /// For profile-less tests, where the profile-gated cowork defaults don't apply.
     pub fn with_present_cowork_dir(self, name: &str) -> Self {
         let path = tenant::domain::tenants::cowork_dir_path(name);
         self.host_path_kinds
@@ -607,12 +501,10 @@ impl StubHostMachine {
         self
     }
 
-    /// Snapshot of every `host_path_kind` call, in invocation order.
     pub fn host_path_kind_calls(&self) -> Vec<PathBuf> {
         self.host_path_kind_calls.borrow().clone()
     }
 
-    /// Snapshot of every `tenant_path_kind` call, in invocation order.
     pub fn tenant_path_kind_calls(&self) -> Vec<(String, PathBuf)> {
         self.tenant_path_kind_calls.borrow().clone()
     }
@@ -647,9 +539,6 @@ impl StubHostMachine {
         self.host_in_group_invocations.borrow().clone()
     }
 
-    /// Override the cached-sudo verdict. `false` exercises the
-    /// pre-exec doctor pass's quiet-skip gate (no sudo probes, no
-    /// failure frames pre-consent).
     pub fn with_sudo_session_cached(self, cached: bool) -> Self {
         self.sudo_session_cached.set(cached);
         self
@@ -722,10 +611,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Pre-load a retrievable stash entry for `find_stashed_password`.
-    /// Companion to `with_stash_present` (which only sets the
-    /// bool-valued doctor flag); this one stores the actual password
-    /// value the unlock pass retrieves.
     pub fn with_stash(self, name: &str, password: KeychainPassword) -> Self {
         self.stash_passwords
             .borrow_mut()
@@ -733,10 +618,6 @@ impl StubHostMachine {
         self
     }
 
-    /// Convenience: pre-load a stash with a fixed test-dummy password.
-    /// Most shell happy-path tests don't care about the password value
-    /// (Stub's `unlock_tenant_keychain` ignores it); this shorthand
-    /// keeps the call sites focused on what the test IS exercising.
     pub fn with_default_stash(self, name: &str) -> Self {
         self.with_stash(name, KeychainPassword::test_dummy("test-stashed-pw"))
     }
@@ -854,10 +735,6 @@ impl HostMachine for StubHostMachine {
     }
 
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
-        // One-shot failure injection first, then a preloaded gid
-        // (`with_share_group_gid`), else the canonical tenant-floor default
-        // so existing Full-reapply tests that don't care about the gid
-        // value see a stable `EnsurePrimaryGroup`.
         if let Some(err) = self.share_group_gid_failure.borrow_mut().take() {
             return Err(err);
         }
@@ -1070,11 +947,7 @@ impl HostMachine for StubHostMachine {
         if let Some(kind) = self.host_path_kinds.borrow().get(path) {
             return Ok(kind.clone());
         }
-        // Cowork paths default to `Dir` only when the tenant has a
-        // profile loaded — same gate as the host-ACL synthesizer
-        // below. Tests that don't pre-load a profile still see the
-        // legacy "missing pre-load = Absent" default (destroy's
-        // cowork-notice probe relies on this).
+        // Profile-gated: destroy's cowork-notice probe relies on `Absent` without a profile.
         if let Some(name) = path
             .strip_prefix(tenant::domain::tenants::COWORK_DIR_PARENT)
             .ok()
@@ -1094,11 +967,7 @@ impl HostMachine for StubHostMachine {
         if let Some(listing) = self.host_acl_state.borrow().get(path) {
             return Ok(listing.clone());
         }
-        // Synthesize one share-group ACE per known tenant so tests
-        // that don't exercise AclDrift see a matching entry. Add a
-        // cowork-dir ACE on the canonical path when the tenant has
-        // a profile loaded — same gate as `host_path_kind`. Drift
-        // tests override via `with_host_acl(cowork_path, …)`.
+        // One share-group ACE per known tenant, plus the cowork ACE when a profile is loaded.
         let mut listing = String::new();
         let profiles = self.profile_state.borrow();
         for name in profiles.keys() {

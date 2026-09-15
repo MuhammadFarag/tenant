@@ -6,10 +6,6 @@ mod common;
 use adapters::*;
 use common::*;
 
-// Anchor bodies bootstrap renders: the widen at install tier (runtime +
-// install hosts), the narrow back at runtime tier (runtime hosts only).
-// Inbound stays at steady state (Restricted, profile ports) — bootstrap
-// controls only the egress axis.
 fn install_tier_body(name: &str, runtime: &[&str], install: &[&str]) -> String {
     let mut hosts = egress(runtime);
     hosts.extend(egress(install));
@@ -26,9 +22,6 @@ fn sh_c(command: &str) -> Vec<String> {
 
 #[test]
 fn bootstrap_runs_merged_fragment_and_profile_commands_in_order() {
-    // The merged profile's commands (fragment first, then the profile's
-    // own) run AS the tenant via `/bin/sh -c <entry>`, in declared order.
-    // Op-identity on the recorded exec argv is the behavioral pin.
     let fragment = "[bootstrap]\ncommands = [\"frag-cmd\"]\n[allowlist.runtime]\nhosts = []\n";
     let profile = "schema_version = 1\n\
                    include = [\"base\"]\n\
@@ -57,10 +50,6 @@ fn bootstrap_runs_merged_fragment_and_profile_commands_in_order() {
 
 #[test]
 fn bootstrap_widens_to_install_then_narrows_to_runtime_around_commands() {
-    // The commands run inside an install-tier egress widen; egress
-    // narrows back to runtime on completion. firewall_ops pins the
-    // bracket: [InstallAnchor(install body), Reload] before, and
-    // [InstallAnchor(runtime body), Reload] after the exec.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
@@ -93,10 +82,6 @@ fn bootstrap_widens_to_install_then_narrows_to_runtime_around_commands() {
 
 #[test]
 fn bootstrap_stops_on_first_failing_command_but_still_narrows() {
-    // Stop-on-first-failure: command 1 exits 0, command 2 exits 3, so
-    // command 3 never runs. The narrow-on-finally STILL fires (egress must
-    // return to runtime even when a command fails), and the verb exits
-    // EX_IOERR (74) — bootstrap is not shell, no child-exit propagation.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["ok1", "boom", "never"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
@@ -113,7 +98,6 @@ fn bootstrap_stops_on_first_failing_command_but_still_narrows() {
         ],
         "the loop must stop after the first non-zero exit (third command never runs)"
     );
-    // Narrow still fired: the last two firewall ops are the runtime narrow.
     let fw = exec.firewall_ops();
     assert_eq!(
         &fw[fw.len() - 2..],
@@ -134,8 +118,6 @@ fn bootstrap_stops_on_first_failing_command_but_still_narrows() {
 
 #[test]
 fn bootstrap_no_commands_is_quiet_success_with_zero_exec() {
-    // A tenant whose merged profile declares no commands is a convergent
-    // no-op: one line, exit 0, no widen/narrow, no exec.
     let profile = profile_with_bootstrap(&["r.example"], &[], &[]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
@@ -157,9 +139,7 @@ fn bootstrap_no_commands_is_quiet_success_with_zero_exec() {
 
 #[test]
 fn bootstrap_summary_lists_commands_verbatim_and_abort_skips_exec() {
-    // The honesty backstop: every command renders verbatim in the
-    // pre-confirm summary (unconditionally, not verbose-gated). Answering
-    // 'n' aborts — zero exec, zero firewall, exit 0.
+    // Commands render verbatim in the summary even without `-v`.
     let profile = profile_with_bootstrap(
         &[],
         &[],
@@ -197,13 +177,6 @@ fn bootstrap_summary_lists_commands_verbatim_and_abort_skips_exec() {
 
 #[test]
 fn bootstrap_pre_exec_doctor_aggregates_warning_and_never_aborts() {
-    // Bootstrap is a mutating verb, so it runs the per-tenant drift audit
-    // between the summary and the confirm (DoctorScope::Reload — same
-    // per-tenant surfaces bootstrap Light-reapplies). A HostNotInShareGroup
-    // drift → the aggregate `⚠ Doctor:` line, emitted AFTER the summary and
-    // BEFORE execution. The audit is a courtesy, NEVER an abort gate: the
-    // verb still runs the command and exits 0. Mirrors reload's
-    // `reload_pre_exec_doctor_aggregates_host_not_in_share_group_warning`.
     let profile = profile_with_bootstrap(&[], &[], &["echo hi"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
@@ -221,7 +194,6 @@ fn bootstrap_pre_exec_doctor_aggregates_warning_and_never_aborts() {
         stdout.contains(doctor_line),
         "drift must surface the aggregate doctor line: {stdout:?}"
     );
-    // Ordering: summary → doctor aggregate → execution section.
     let summary_at = stdout.find("About to run 1 bootstrap command(s)");
     let doctor_at = stdout.find(doctor_line);
     let exec_at = stdout.find("Bootstrapping tenant 'alice'");
@@ -229,7 +201,6 @@ fn bootstrap_pre_exec_doctor_aggregates_warning_and_never_aborts() {
         summary_at < doctor_at && doctor_at < exec_at,
         "doctor line must sit between summary and execution: {stdout:?}"
     );
-    // Never an abort gate: the command still ran.
     assert_eq!(
         exec.exec_calls(),
         vec![("alice".to_string(), sh_c("echo hi"))],
@@ -237,12 +208,9 @@ fn bootstrap_pre_exec_doctor_aggregates_warning_and_never_aborts() {
     );
 }
 
+// TODO(smell): DryRunHostMachine::read_profile returns the default profile, so `bootstrap --dry-run` previews nothing even when commands are declared.
 #[test]
 fn bootstrap_dry_run_bypasses_injected_host_machine() {
-    // --dry-run swaps in DryRunHostMachine, so the injected stub is never
-    // touched (no exec, no firewall, no login). The dry-run profile read
-    // returns the synthetic default (no [bootstrap]), so the preview is a
-    // quiet nothing-declared, exit 0. Mirrors shell/create dry-run bypass.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
@@ -264,11 +232,6 @@ fn bootstrap_dry_run_bypasses_injected_host_machine() {
 
 #[test]
 fn bootstrap_refuses_when_stash_absent_and_narrows_back() {
-    // Legacy-tenant pin: no operator-side keychain stash means the
-    // pre-command unlock can't run. Same refusal shape as shell —
-    // EX_USAGE, names destroy/recreate — NO command runs, AND the
-    // unconditional install-tier widen is narrowed back (not stranded):
-    // firewall_ops shows the widen then the runtime narrow.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
     // NO with_default_stash: find_stashed_password returns NotFound.
     let exec = StubHostMachine::new().with_existing_profile("alice", &profile);
@@ -308,9 +271,6 @@ fn bootstrap_refuses_when_stash_absent_and_narrows_back() {
 
 #[test]
 fn bootstrap_exec_spawn_failure_exits_74_and_narrows() {
-    // A spawn failure (not a non-zero exit) on the first command routes
-    // through BootstrapError::Account → EX_IOERR, and the narrow still
-    // fires (best-effort) so egress returns to runtime.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
@@ -339,9 +299,6 @@ fn bootstrap_exec_spawn_failure_exits_74_and_narrows() {
 
 #[test]
 fn bootstrap_widen_execute_failure_exits_74_no_exec() {
-    // If the widen reapply itself fails (Reload/anchor errors), no command
-    // runs and the verb exits EX_IOERR. A best-effort narrow is attempted;
-    // the primary signal is the widen failure.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
@@ -484,10 +441,7 @@ fn bootstrap_on_cold_sudo_authentication_failure_exits_74_without_mutation() {
 
 #[test]
 fn bootstrap_unlock_failure_exits_74() {
-    // Keychain errors OTHER than a missing stash (the find/unlock
-    // substrate itself breaking) map to EX_IOERR, distinct from
-    // StashAbsent's EX_USAGE. Here the stash is present (find
-    // succeeds) but the in-tenant `security unlock-keychain` fails.
+    // Stash present (find succeeds); the in-tenant unlock itself fails.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
@@ -512,16 +466,11 @@ fn bootstrap_unlock_failure_exits_74() {
 
 #[test]
 fn bootstrap_narrow_failure_after_success_warns_and_exits_74() {
-    // Commands all succeed, but the narrow-on-finally reapply fails. The
-    // ⚠ names the recovery verb and does NOT claim the commands failed;
-    // the verb exits EX_IOERR (a substrate op failed — bootstrap is not
-    // shell, so there's no success code to propagate past it).
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("alice", &profile)
         .with_default_stash("alice")
-        // Fail only the narrow's InstallAnchor (runtime body); the widen's
-        // (install body) differs, so it lands fine.
+        // Matches only the narrow's runtime body; the widen's install body differs.
         .fail_firewall_op(
             FirewallOp::InstallAnchor {
                 name: "alice".into(),
@@ -581,8 +530,6 @@ fn bootstrap_refuses_below_floor_uid() {
 
 #[test]
 fn bootstrap_missing_fragment_surfaces_pre_prompt() {
-    // A broken include surfaces at plan-build (pre-prompt), exactly like
-    // reload: EX_IOERR, the fragment path named, and NO command runs.
     let profile = "schema_version = 1\n\
                    include = [\"ghostfrag\"]\n\
                    [allowlist.runtime]\n\
@@ -613,15 +560,10 @@ fn bootstrap_missing_fragment_surfaces_pre_prompt() {
     );
 }
 
-// ----------------------------------------------------------------
-// No-arg fleet walk (`tenant bootstrap`)
-// ----------------------------------------------------------------
+// --- No-arg fleet walk ---
 
 #[test]
 fn bootstrap_no_arg_walks_every_tenant() {
-    // The fleet-converge story: each tenant runs its declared commands.
-    // Both tenants have a command + a stash; the walk runs both and the
-    // summary counts two.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile_with_bootstrap(&[], &[], &["echo dev"]))
         .with_existing_profile(
@@ -650,9 +592,7 @@ fn bootstrap_no_arg_walks_every_tenant() {
 
 #[test]
 fn bootstrap_no_arg_continues_past_a_failing_tenant() {
-    // 'dev' has no profile preloaded → its plan-build fails; the walk
-    // records the failure and CONTINUES to 'staging', which succeeds.
-    // Any per-tenant failure → exit 74.
+    // dev has no profile preloaded, so its plan-build fails.
     let exec = StubHostMachine::new()
         .with_existing_profile(
             "staging",
@@ -666,7 +606,6 @@ fn bootstrap_no_arg_continues_past_a_failing_tenant() {
         stderr.contains("'dev'"),
         "dev's failure must surface: {stderr:?}"
     );
-    // The walk reached staging despite dev failing first.
     assert_eq!(
         exec.exec_calls(),
         vec![("staging".to_string(), sh_c("echo staging"))],
@@ -680,11 +619,7 @@ fn bootstrap_no_arg_continues_past_a_failing_tenant() {
 
 #[test]
 fn bootstrap_no_arg_continues_past_a_stash_absent_tenant() {
-    // Legacy-tenant case: 'dev' declares commands but has no operator-side
-    // stash, so it refuses mid-walk (StashAbsent inside bootstrap(), not a
-    // plan-build failure); 'staging' still runs. Distinguishes
-    // walk-continuation on a bootstrap()-level failure from the plan-build
-    // failure the sibling test covers.
+    // A bootstrap()-level refusal, unlike the sibling test's plan-build failure.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile_with_bootstrap(&[], &[], &["echo dev"]))
         .with_existing_profile(
@@ -713,8 +648,6 @@ fn bootstrap_no_arg_continues_past_a_stash_absent_tenant() {
 
 #[test]
 fn bootstrap_no_arg_skips_no_command_tenants() {
-    // 'staging' declares no commands → quietly skipped (not a failure);
-    // 'dev' runs. Exit 0, summary distinguishes skipped from ran.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile_with_bootstrap(&[], &[], &["echo dev"]))
         .with_existing_profile("staging", &profile_with_bootstrap(&[], &[], &[]))

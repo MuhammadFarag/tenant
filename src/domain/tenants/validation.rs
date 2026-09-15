@@ -1,15 +1,9 @@
-//! Pre-verb-gate validation: charset rules and state-existence checks
-//! that fire before any verb logic touches the substrate.
-
 use crate::domain::{HostUserDirectory, TenantUserName, UserDirectoryError};
 
 use super::tenant_share_group_name;
 
 const MAX_NAME_LEN: usize = 31;
 
-/// Names that pass the lexical charset rules but alias real accounts
-/// or carry privileged semantics. The `_*` service-account namespace
-/// is already excluded by the leading-letter rule.
 const RESERVED_NAMES: &[&str] = &[
     "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
 ];
@@ -30,9 +24,8 @@ pub enum ConflictError {
     Both,
 }
 
-/// Lexical name guard: `[a-z][a-z0-9_-]{0,30}`. The leading-letter rule
-/// is load-bearing — it excludes the macOS service-account namespace and
-/// any `-…` argv that the substrate would interpret as a flag.
+/// The leading-letter rule is load-bearing: it excludes the macOS `_*` service-account
+/// namespace and any `-…` name the substrate would parse as a flag.
 pub fn validate_name(name: &TenantUserName) -> Result<(), NameError> {
     let name = name.as_str();
     let len = name.len();
@@ -63,11 +56,6 @@ pub fn validate_name(name: &TenantUserName) -> Result<(), NameError> {
     Ok(())
 }
 
-/// Returns `Ok(None)` when the name is free, `Ok(Some(_))` when an
-/// existing user / group / both already occupies the namespace, and
-/// `Err(_)` when the directory query itself failed. Splitting the
-/// outcomes lets dispatch route lookup failure to a substep-named
-/// frame distinct from the conflict-refusal frame.
 pub fn check_conflict(
     directory: &dyn HostUserDirectory,
     name: &TenantUserName,

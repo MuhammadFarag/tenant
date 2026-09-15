@@ -10,16 +10,9 @@ mod common;
 use adapters::*;
 use common::*;
 
+// TODO(smell): DryRunHostMachine::find_stashed_password returns NotFound, so every `shell --dry-run` ends in the StashAbsent refusal (exit 64).
 #[test]
 fn shell_dry_run_default_shows_intent() {
-    // Smallest red→green for the new verb. `stub_with_tenant("dev")` gives
-    // us a tenant-range user (UID 600) so eligibility classifies as
-    // shellable; dry-run swaps in `DryRunHostMachine` so we don't
-    // actually shell out. `DryRunHostMachine::find_stashed_password`
-    // returns `NotFound` defensively (dry-run shouldn't need real
-    // passwords), so the pre-spawn keychain pass routes through the
-    // `StashAbsent` refusal arm — the dry-run preview mirrors what a
-    // legacy tenant (no operator-side stash) would see in real mode.
     let (code, stdout, stderr) = run_with(stub_with_tenant("dev"), &["shell", "dev", "--dry-run"]);
     assert_eq!(code, 64, "exit code = {code}; stderr={stderr:?}");
     let want = format!("{}Would shell into 'dev'.\n", shell_summary_block("dev"));
@@ -32,25 +25,12 @@ fn shell_dry_run_default_shows_intent() {
 
 #[test]
 fn shell_dry_run_verbose_shows_mechanism() {
-    // Dry-run verbose: intent + plan. The auto-narrow's InstallAnchor
-    // + Reload precede the LoginAsUser in the plan. Dry-run doesn't
-    // emit `$` echoes (echo is real+verbose only). The plan's
-    // InstallAnchor describe line uses the placeholder body — its
-    // describe ignores the body field, so the line is stable across
-    // the empty-body plan placeholder and the real-body op at execute
-    // time. Exit 64 because `DryRunHostMachine::find_stashed_password`
-    // returns `NotFound` and the pre-spawn keychain pass routes
-    // through the `StashAbsent` refusal arm; the plan still renders
-    // because it's built and emitted before the unlock pass.
+    // Exit 64 is the dry-run stash refusal (see the TODO(smell) at the top of this file).
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["shell", "dev", "--dry-run", "-v"],
     );
     assert_eq!(code, 64);
-    // Shell's verbose plan uses the intent-leads-shell-follows layout
-    // (shell has no prompt, so the plan stays in the verb rather than
-    // moving into a summary). 4 entries: Install + Reload + AddHost
-    // (catch-up) + LoginAsUser.
     let want = format!(
         "{}Would shell into 'dev'.\n\
          {}",
@@ -75,20 +55,12 @@ fn shell_dry_run_verbose_shows_mechanism() {
 
 #[test]
 fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
-    // Standard real mode: one pre-exec intent line, then narrow + login.
-    // Unlike create/destroy, no post-exec confirmation — the operator IS
-    // the shell after login returns. The narrow runs silently in standard
-    // mode (no `$` echo); only the intent line emits.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Section + ✓ for each substrate step before login. No closing
-    // line — login transfers control to the shell. The keychain
-    // unlock pass emits its own ✓ between the reapply and login (the
-    // tenant's `tenant.keychain-db` is unlocked from the
-    // operator-stashed password before the child shell starts).
+    // No closing line: login hands control to the shell.
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
@@ -112,20 +84,8 @@ fn shell_real_mode_standard_emits_intent_and_invokes_exec_into() {
 
 #[test]
 fn shell_refuses_when_stash_absent() {
-    // Legacy-tenant pin: a tenant created before the bootstrap-stash
-    // landed has no entry in the operator's keychain, so the pre-spawn
-    // unlock pass routes through `ShellError::StashAbsent`. The dispatch
-    // arm surfaces `Reporter::shell_refuse_stash_absent` and exits 64
-    // (EX_USAGE, not EX_IOERR — operator needs to re-bootstrap, not the
-    // substrate is broken). NO `with_default_stash` call here: the
-    // default `StubHostMachine::find_stashed_password` returns
-    // `KeychainError::NotFound`, which is the exact condition that
-    // triggers the refusal. Refusal fires AFTER `execute_reapply_plan`,
-    // so stdout carries the section header + reapply ✓ stream that
-    // landed before the unlock pass; the keychain ✓ line does NOT
-    // appear (unlock never succeeded). Login + exec carve-outs MUST
-    // NOT fire — the refusal is the explicit contract that we don't
-    // hand control to a tenant whose keychain we can't unlock.
+    // No `with_default_stash`: the stub's find_stashed_password returns NotFound.
+    // The refusal lands after the reapply, so its ✓ lines still print.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
@@ -157,18 +117,6 @@ fn shell_refuses_when_stash_absent() {
 
 #[test]
 fn shell_surfaces_substrate_failure_on_unlock_call() {
-    // Stash present + `security unlock-keychain` failed at the substrate.
-    // Distinct from `shell_refuses_when_stash_absent`: there's no
-    // operator action to take (the stash is present; the substrate
-    // itself broke), so the dispatch routes through `EX_IOERR` not
-    // `EX_USAGE`. The Reporter frame integrates `KeychainError::Display`
-    // verbatim — no recovery hint, parallel to other shell substrate
-    // failures (`shell_failed`, `shell_narrow_firewall_failed`).
-    // Stdout carries the reapply ✓ stream (which landed before the
-    // unlock attempt) but NOT the keychain ✓ (the unlock substrate
-    // call failed before the success line could emit). Login + exec
-    // carve-outs MUST NOT fire — substrate failure short-circuits
-    // before we hand control to the tenant.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -206,18 +154,12 @@ fn shell_surfaces_substrate_failure_on_unlock_call() {
 
 #[test]
 fn shell_real_mode_verbose_shows_plan_and_echo() {
-    // Real+verbose: intent + plan + `$` echoes (narrow's InstallAnchor
-    // + Reload precede the LoginAsUser). No post-exec line.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
     let (code, stdout, _stderr) =
         run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"]);
     assert_eq!(code, 0);
-    // Shell's verbose plan uses the intent-leads-shell-follows
-    // layout (shell has no prompt, so the plan stays in the verb
-    // rather than moving into a summary). Light scope OMITS the
-    // cowork-dir provisioning lines.
     let plan = verbose_plan_section(&[
         (
             "Install firewall anchor at /etc/pf.anchors/tenant-dev",
@@ -250,10 +192,6 @@ fn shell_real_mode_verbose_shows_plan_and_echo() {
 
 #[test]
 fn shell_refuses_when_tenant_absent() {
-    // Empty StubUserDirectory — no user, no group. Shell must refuse: there's
-    // no account to log into. Exit 64 (EX_USAGE; the operator gave us a
-    // name we can't resolve). Never reaches the host machine (NeverHostMachine
-    // would panic), so stdout stays empty and the refusal lands on stderr.
     let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["shell", "ghost"]);
     assert_eq!(code, 64, "stderr={stderr:?}");
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -265,11 +203,6 @@ fn shell_refuses_when_tenant_absent() {
 
 #[test]
 fn shell_refuses_when_only_orphan_group_present() {
-    // OrphanGroup collapses to NotPresent for shell purposes — the
-    // operator wants a shell, and the lingering group doesn't provide
-    // one. Same refusal text and exit code as the bare NotPresent case. A
-    // regression that special-cased OrphanGroup (e.g. mentioning the
-    // group, or routing to a different message) would trip this test.
     let stub = StubUserDirectory {
         groups: vec!["dev-tenant-share".to_string()],
         ..Default::default()
@@ -282,10 +215,7 @@ fn shell_refuses_when_only_orphan_group_present() {
 
 #[test]
 fn shell_refuses_below_floor() {
-    // Tenant-floor guard mirrors destroy: an account exists with a
-    // positive UID below TENANT_UID_FLOOR (600) → refuse. `legacyusr`
-    // sidesteps the reserved-name blocklist so this test exercises
-    // the state-based refusal path specifically.
+    // `legacyusr` sidesteps the reserved-name blocklist, isolating the floor check.
     let stub = StubUserDirectory {
         users: vec!["legacyusr".to_string()],
         uid_by_name: [("legacyusr".to_string(), UserId(0))].into_iter().collect(),
@@ -302,9 +232,7 @@ fn shell_refuses_below_floor() {
 
 #[test]
 fn shell_refuses_system_account() {
-    // System-account refusal (`has_user` true, `uid_for` None — service
-    // accounts whose negative UIDs were filtered by `parse_id_line`).
-    // Same shape as destroy's `system_account_refusal`.
+    // `uid_for` None models a service account (negative UIDs are filtered at parse).
     let stub = StubUserDirectory {
         users: vec!["phantom".to_string()],
         ..Default::default()
@@ -320,10 +248,6 @@ fn shell_refuses_system_account() {
 
 #[test]
 fn shell_refuses_below_floor_verbose() {
-    // -v on a refusal path emits nothing on stdout — no "Shelling into"
-    // line, no mechanism preview. Mirrors `destroy_refuses_below_floor_verbose`;
-    // guards against "we built the argv before the eligibility match"
-    // regressions.
     let stub = StubUserDirectory {
         users: vec!["edge".to_string()],
         uid_by_name: [("edge".to_string(), UserId(599))].into_iter().collect(),
@@ -340,9 +264,6 @@ fn shell_refuses_below_floor_verbose() {
 
 #[test]
 fn shell_rejects_empty_name() {
-    // Lexical validation runs before eligibility; an empty name trips
-    // `NameError::Empty` and never consults the HostUserDirectory. Same shape and
-    // wording as create/destroy.
     let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["shell", ""]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -351,9 +272,6 @@ fn shell_rejects_empty_name() {
 
 #[test]
 fn shell_rejects_invalid_start() {
-    // Pins the leading-letter rule for shell. One representative case
-    // (a digit) — the full parametric matrix lives on
-    // `create_rejects_non_letter_start` / `destroy_rejects_non_letter_start`.
     let (code, stdout, stderr) = run_with(StubUserDirectory::default(), &["shell", "1dev"]);
     assert_eq!(code, 64);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
@@ -365,10 +283,7 @@ fn shell_rejects_invalid_start() {
 
 #[test]
 fn shell_rejects_reserved_names() {
-    // Reserved-name blocklist applies to shell too. Lexical rail trips
-    // before any state-based check — important because `root` (UID 0) on
-    // a real host would also fail the below-floor guard, but the
-    // operator-relevant reason is the reserved name, not the floor.
+    // Lexical rail first: `root` would also fail the floor guard, but the reserved name is the useful reason.
     for name in [
         "root", "admin", "staff", "wheel", "daemon", "nobody", "sudo",
     ] {
@@ -385,10 +300,6 @@ fn shell_rejects_reserved_names() {
 
 #[test]
 fn shell_dry_run_refuses_missing_tenant() {
-    // Dry-run doesn't bypass eligibility — the operator asking "what
-    // would happen if I shelled into 'ghost'?" deserves the same answer
-    // they'd get in real mode. Refusal lands on stderr; stdout stays
-    // empty; no host-machine invocation.
     let (code, stdout, stderr) = run_with(
         StubUserDirectory::default(),
         &["shell", "ghost", "--dry-run"],
@@ -403,20 +314,12 @@ fn shell_dry_run_refuses_missing_tenant() {
 
 #[test]
 fn shell_propagates_child_exit_code() {
-    // Tenant forwards the child shell's exit code as its own. Stub
-    // the host machine's login to return 5; tenant exits 5. The
-    // "Shelling into" intent line still emits — pre-exec emission
-    // happens before login is consulted. Profile must be pre-loaded
-    // so the auto-narrow succeeds before login fires.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
         .login_exit_code(5);
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 5, "stderr={stderr:?}");
-    // Section + ✓ stream from the narrow reapply land before login
-    // fires. The keychain unlock pass adds its own ✓ between the
-    // reapply and login.
     let want = format!(
         "{}\n\
          ✓ Firewall anchor installed at /etc/pf.anchors/tenant-dev\n\
@@ -432,13 +335,7 @@ fn shell_propagates_child_exit_code() {
 
 #[test]
 fn shell_dry_run_bypasses_injected_host_machine() {
-    // Dry-run swap-in of DryRunHostMachine means the StubHostMachine wired by
-    // the test never sees a call. Mirrors `dry_run_bypasses_injected_host_machine`
-    // and `destroy_dry_run_bypasses_injected_host_machine` for create/destroy.
-    // Exit 64 because `DryRunHostMachine::find_stashed_password` returns
-    // `NotFound` (the dry-run preview mirrors the legacy-tenant refusal
-    // shape from real mode); the swap-in pin is unchanged — the injected
-    // host machine still sees zero calls.
+    // Exit 64 is the dry-run stash refusal (see the TODO(smell) at the top of this file).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -457,36 +354,10 @@ fn shell_dry_run_bypasses_injected_host_machine() {
     );
 }
 
-// ================================================================
-// Auto-narrow on shell entry
-// ================================================================
-//
-// Locked design (extends CLAUDE.md doctrine):
-// - Unconditional reapply on every `tenant shell <name>`. The
-//   on-disk anchor is the source of truth; reapply is idempotent
-//   at the substrate.
-// - Abort-on-narrow-failure with verb-contextual framing.
-//   `ShellError { Account, Mode }` surfaces narrow failures through
-//   `shell_narrow_failed` (firewall) and `shell_narrow_profile_failed`
-//   (profile read/parse). The shell is NOT launched on narrow
-//   failure.
-// - No annotation on the narrow steps. Annotations mark
-//   conditional/contingent steps (`# on rollback`, `# on reload
-//   failure`); the narrow is unconditional.
-// - Reboot bypass acknowledged in CLAUDE.md doctrine; `tenant shell`
-//   is the canonical entry point. Operator using `sudo -iu` directly
-//   bypasses the narrow.
+// --- Auto-narrow on shell entry ---
 
 #[test]
 fn shell_narrows_to_runtime_before_login() {
-    // Every `tenant shell <name>` reapplies the runtime-tier anchor
-    // body before launching the login shell. Unconditional narrow —
-    // even if the tenant is already in runtime, the two-op
-    // [InstallAnchor, Reload] sequence runs. Idempotent at the
-    // substrate.
-    //
-    // Pin: firewall_ops = [InstallAnchor(runtime body), Reload];
-    // login fires after the narrow; ordering matters.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -517,12 +388,6 @@ fn shell_narrows_to_runtime_before_login() {
 
 #[test]
 fn shell_refusal_does_not_invoke_narrow() {
-    // Eligibility classification fires BEFORE the writer is called, so
-    // refused tenants don't trigger the auto-narrow. The existing
-    // refusal tests use NeverHostMachine (which panics on any substrate
-    // call) so they already implicitly assert this — this test makes
-    // it explicit with a StubHostMachine whose firewall_ops + logins are
-    // observable, pinning the contract at the verb level.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -551,14 +416,7 @@ fn shell_refusal_does_not_invoke_narrow() {
 
 #[test]
 fn shell_does_not_invoke_flush_anchor() {
-    // Negative pin paralleling `mode_does_not_emit_restore_config_op`:
-    // the parent `load anchor` directive in /etc/pf.conf stays in
-    // place across shell entry, so `pfctl -f` re-reads the anchor
-    // file and replaces the in-kernel ruleset on every reload —
-    // structurally different from the destroy orphan-anchor case
-    // where the parent directive is removed and FlushAnchor IS
-    // load-bearing. A defensive FlushAnchor here would wipe rules
-    // we're simultaneously installing.
+    // A FlushAnchor here would wipe the rules being installed.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -582,11 +440,7 @@ fn shell_does_not_invoke_flush_anchor() {
 
 #[test]
 fn shell_aborts_when_read_profile_fails() {
-    // No `with_existing_profile` → StubHostMachine::read_profile returns
-    // a "not found" ProfileError. The auto-narrow aborts before login.
-    // Operator sees the shell-contextual frame ("before shell entry")
-    // — distinct from `mode_profile_failed` so they know the failure
-    // came from a verb they typed. Login is NOT launched.
+    // No `with_existing_profile`: read_profile fails.
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
@@ -613,8 +467,6 @@ fn shell_aborts_when_read_profile_fails() {
 
 #[test]
 fn shell_aborts_when_parse_fails() {
-    // Profile loads but schema_version is unsupported → parse returns
-    // ProfileError → shell_narrow_profile_failed. Login NOT launched.
     let exec = StubHostMachine::new().with_existing_profile(
         "dev",
         "schema_version = 99\n[allowlist.runtime]\nhosts = []\n[allowlist.install]\nhosts = []\n",
@@ -638,10 +490,6 @@ fn shell_aborts_when_parse_fails() {
 
 #[test]
 fn shell_aborts_when_install_anchor_fails() {
-    // InstallAnchor tripping (e.g. permission denied writing the anchor
-    // file) → shell_narrow_failed → exit 74 → login NOT launched. Only
-    // InstallAnchor in firewall_ops; Reload should NOT have run after
-    // a failed InstallAnchor.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -661,8 +509,6 @@ fn shell_aborts_when_install_anchor_fails() {
         );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Section divider lands; InstallAnchor (first substrate) fails —
-    // no ✓.
     assert_eq!(
         stdout,
         format!("{}\n", section_line("Entering tenant 'dev'")),
@@ -686,11 +532,6 @@ fn shell_aborts_when_install_anchor_fails() {
 
 #[test]
 fn shell_aborts_when_reload_fails() {
-    // Reload tripping (e.g. pfctl syntax error in anchor body) →
-    // shell_narrow_failed → exit 74 → login NOT launched. Critically,
-    // NO recovery sequence fires (the shell narrow shares the same
-    // no-auto-recovery posture as the mode verb, per
-    // `mode_reload_failure_surfaces_without_recovery`).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -703,8 +544,6 @@ fn shell_aborts_when_reload_fails() {
         );
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stdout={stdout:?}");
-    // Section + ✓ for InstallAnchor (succeeded), no ✓ for Reload
-    // (failed).
     assert_eq!(
         stdout,
         real_failure_stdout(
@@ -717,7 +556,6 @@ fn shell_aborts_when_reload_fails() {
         "stderr should be framed by shell_narrow_failed: {stderr:?}"
     );
     assert!(exec.logins().is_empty(), "login must NOT fire");
-    // Exactly two firewall ops: InstallAnchor (succeeded) + Reload (failed).
     assert_eq!(
         exec.firewall_ops().len(),
         2,
@@ -740,13 +578,6 @@ fn shell_aborts_when_reload_fails() {
 
 #[test]
 fn shell_install_anchor_body_excludes_install_hosts() {
-    // Security-load-bearing invariant: even if the tenant's profile
-    // declares install-tier hosts, the auto-narrow body must include
-    // ONLY runtime-tier hosts. Mirrors
-    // `mode_runtime_with_runtime_and_install_populated_excludes_install`
-    // — same data flow through a different verb. A regression that
-    // passed `ModeLevel::Install` to the helper (e.g. typo) would
-    // produce a body containing install-tier hosts and trip this pin.
     let profile = profile_with_hosts(
         &["api.example.com"],
         &["nodejs.org", "storage.googleapis.com"],
@@ -772,21 +603,10 @@ fn shell_install_anchor_body_excludes_install_hosts() {
     }
 }
 
-// ================================================================
-// Shell auto-reapply includes shares
-// ================================================================
-//
-// `tenant shell <name>` extends the PF narrow to also reapply shares
-// before handing off to login. Tests pin the substrate fires in the
-// right order, that share refusals abort login, and that substrate
-// failures on the share pass route through the
-// `shell_narrow_*_failed` family (distinct from `mode_*_failed`).
+// --- Auto-reapply includes shares ---
 
 #[test]
 fn shell_auto_reapply_emits_tenant_side_symlink_only() {
-    // Shell parallel to the mode-share happy-path: no Grant under
-    // Light, only the tenant-side EnsureSymlinkAsUser fires. Login
-    // launches after.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -822,9 +642,8 @@ fn shell_on_cold_sudo_authenticates_then_probes_tenant_path() {
         .with_sudo_session_cached(false);
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // The stub's `tenant_path_kind` fails like a real `sudo -n` while the
-    // timestamp is cold, so a recorded probe + exit 0 pins the order:
-    // authenticate first, then probe.
+    // The stub's tenant_path_kind fails while sudo is uncached (like `sudo -n`),
+    // so a recorded probe plus exit 0 proves authenticate ran first.
     assert_eq!(exec.authenticate_sudo_calls(), 1);
     assert_eq!(
         exec.tenant_path_kind_calls(),
@@ -902,9 +721,6 @@ fn shell_command_on_cold_sudo_authentication_failure_exits_74_without_mutation()
 
 #[test]
 fn shell_refuses_when_host_path_missing_does_not_launch_login() {
-    // HostPathMissing refusal aborts BEFORE login launches. Frame
-    // names "before shell entry" so the operator sees the shell-verb
-    // context.
     let toml = profile_with_shares(
         &[],
         &[],
@@ -931,11 +747,7 @@ fn shell_refuses_when_host_path_missing_does_not_launch_login() {
 
 #[test]
 fn shell_ignores_acl_grant_failure_injection_under_light_scope() {
-    // Negative pin: shell under Light never emits Grant, so the
-    // injected ACL failure is unreachable. A regression that
-    // re-introduced Grant on shell would trip on this injection;
-    // the ACL-failure-routing contract still applies on reload
-    // (see cli_reload.rs).
+    // Light never emits Grant, so the injected ACL failure is unreachable.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -970,9 +782,6 @@ fn shell_ignores_acl_grant_failure_injection_under_light_scope() {
 
 #[test]
 fn shell_routes_sudo_u_substrate_failure_via_shell_narrow_account_frame() {
-    // Substrate failure on the tenant-side `sudo -u <name> ln -sfn`
-    // step during shell auto-reapply surfaces with shell-contextual
-    // framing (distinct from mode_account_failed). Login MUST NOT launch.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -1004,10 +813,6 @@ fn shell_routes_sudo_u_substrate_failure_via_shell_narrow_account_frame() {
 
 #[test]
 fn shell_verbose_plan_block_lists_light_ops_alongside_login() {
-    // Upfront plan must list every op that will fire (PF + AddHost
-    // + per-share EnsureSymlinkAsUser + LoginAsUser) and explicitly
-    // NOT the recursive `chmod -R +a` or cowork-dir provisioning
-    // lines — those are Full-scope only.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -1019,8 +824,6 @@ fn shell_verbose_plan_block_lists_light_ops_alongside_login() {
         &["shell", "dev", "--verbose"],
     );
     assert_eq!(code, 0);
-    // Plan block must contain InstallAnchor, Reload, AddHost,
-    // EnsureSymlinkAsUser, and LoginAsUser. NO Grant. NO cowork.
     assert!(
         stdout.contains("  sudo tee /etc/pf.anchors/tenant-dev < anchor.body\n"),
         "plan must list InstallAnchor: {stdout:?}"
@@ -1049,10 +852,6 @@ fn shell_verbose_plan_block_lists_light_ops_alongside_login() {
 
 #[test]
 fn shell_negative_pin_share_substrate_does_not_emit_firewall_recovery_ops() {
-    // The negative pin holds with shares wired in: shell never emits
-    // FlushAnchor / BackupConfig / RestoreConfigFromBackup /
-    // RemoveAnchor / UpdateConfig / Enable even when the share
-    // substrate is exercising.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -1076,33 +875,11 @@ fn shell_negative_pin_share_substrate_does_not_emit_firewall_recovery_ops() {
     }
 }
 
-// ================================================================
-// Pre-exec doctor audit: shell scope
-// ================================================================
-//
-// Shell's audit considers PfDisabled + EnvLeak (host-wide) plus
-// per-tenant PfRuleDrift, AnchorBodyDrift, AclDrift, SymlinkDrift,
-// HostNotInShareGroup. Critical findings inline (full one-liner);
-// warning/info findings aggregate into a single
-// `⚠ Doctor: N warning(s) for tenant 'X' — run `tenant doctor X` for details` line.
-// Healthy host emits nothing extra. Audit fires between summary and
-// confirm (shell has no confirm; the audit lands between summary and
-// the shell intent / login). The `show_summary` gate (dry-run OR TTY)
-// controls audit emission too — scripted real-mode callers stay silent.
+// --- Pre-exec doctor audit ---
 
 #[test]
 fn shell_pre_exec_doctor_silent_when_host_is_clean() {
-    // Default stub state is the doctor-passing baseline: PF enabled,
-    // env_delete includes SSH_AUTH_SOCK, kernel anchor has pass + block,
-    // anchor body matches profile render, host is in share group.
-    // Real-mode TTY emits summary + section + ✓ progress; no ⚠ Doctor:
-    // line, no inline critical.
-    //
-    // Uses `run_with_stdin` to simulate a TTY so the audit gating
-    // fires (show_summary = TTY OR dry-run; dry-run swaps to
-    // DryRunHostMachine whose mocks return clean defaults regardless of
-    // stub injection — the audit tests pin behavior through real
-    // mode + TTY which exercises the actual StubHostMachine reads).
+    // `run_with_stdin` (TTY) turns the audit on; dry-run would bypass the stub's reads.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -1121,9 +898,6 @@ fn shell_pre_exec_doctor_silent_when_host_is_clean() {
 
 #[test]
 fn shell_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
-    // PfDisabled is the only Critical-tier finding today (host-wide).
-    // The audit emits it inline as the full one-liner via the existing
-    // `doctor_finding` framing — critical: prefix + the finding text.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1139,10 +913,6 @@ fn shell_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
 
 #[test]
 fn shell_pre_exec_doctor_aggregates_warnings_into_single_line() {
-    // EnvLeak (shell scope; warning) → one warning. Aggregate line
-    // names the count + the per-tenant `tenant doctor dev` command.
-    // Inline finding one-liner is NOT emitted for warnings — the
-    // operator runs doctor for detail.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1162,9 +932,6 @@ fn shell_pre_exec_doctor_aggregates_warnings_into_single_line() {
 
 #[test]
 fn shell_pre_exec_doctor_critical_plus_warnings_emits_both_lines() {
-    // PfDisabled (critical) AND EnvLeak (warning) AND
-    // HostNotInShareGroup (warning) — expect 1 inline critical + 1
-    // aggregate line counting 2 warnings (plural).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1186,10 +953,6 @@ fn shell_pre_exec_doctor_critical_plus_warnings_emits_both_lines() {
 
 #[test]
 fn shell_pre_exec_doctor_verbose_does_not_emit_guidance_for_inline_critical() {
-    // Verb-verbose does NOT enable the doctor-verbose guidance body
-    // for inline critical findings. The aggregate line already points
-    // the operator at `tenant doctor` for detail; the inline critical
-    // stays a one-liner.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1209,9 +972,6 @@ fn shell_pre_exec_doctor_verbose_does_not_emit_guidance_for_inline_critical() {
 
 #[test]
 fn shell_pre_exec_doctor_silent_in_scripted_mode_no_summary() {
-    // Scripted callers (non-TTY, no --dry-run) skip the summary AND
-    // the audit. Real-mode-no-TTY emits only the section divider + ✓
-    // progress + nothing extra above.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1234,9 +994,6 @@ fn shell_pre_exec_doctor_silent_in_scripted_mode_no_summary() {
 
 #[test]
 fn shell_pre_exec_doctor_exit_code_unaffected_by_findings() {
-    // Mutating verbs' exit codes don't depend on whether doctor
-    // findings emit. PfDisabled is critical — but shell still exits 0
-    // on successful login. `--strict` stays doctor-only.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1253,10 +1010,6 @@ fn shell_pre_exec_doctor_exit_code_unaffected_by_findings() {
 
 #[test]
 fn shell_pre_exec_inbound_posture_quiet_when_locked() {
-    // Locked (default profile, empty [inbound]) emits NO inbound posture
-    // line on shell entry — a locked tenant accepts no loopback inbound,
-    // so there's nothing to calibrate. Negative pin against a posture
-    // line that nags on the secure-by-default migration state.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -1271,9 +1024,7 @@ fn shell_pre_exec_inbound_posture_quiet_when_locked() {
 
 #[test]
 fn shell_pre_exec_inbound_posture_restricted_with_ports_shows_calibrated_line() {
-    // restricted + declared ports → a calibrated posture line naming the
-    // ports and the host + peer-tenant reachability caveat. Info-flavored
-    // (not a ⚠ warning aggregate) — the exposure is intended.
+    // Info, not a ⚠ warning: declared ports are intended exposure.
     let profile = format!(
         "{}\n[inbound]\nports = [\n  3000,\n]\n",
         profile_with_hosts(&[], &[])
@@ -1298,10 +1049,7 @@ fn shell_pre_exec_inbound_posture_restricted_with_ports_shows_calibrated_line() 
 
 #[test]
 fn shell_pre_exec_inbound_posture_permissive_warns_with_narrow_hint() {
-    // A permissive anchor on entry (a prior widen left behind) → a loud
-    // posture warning naming the all-ports exposure + a narrow hint.
-    // Shell auto-narrows inbound on entry anyway, so this is a heads-up,
-    // not a blocker. The interactive-entry reapply re-renders restricted.
+    // A heads-up, not a blocker: interactive entry re-renders restricted anyway.
     let permissive_body =
         tenant::firewall::render_anchor("dev", &[], tenant::firewall::InboundRules::Permissive);
     let exec = StubHostMachine::new()
@@ -1319,9 +1067,6 @@ fn shell_pre_exec_inbound_posture_permissive_warns_with_narrow_hint() {
 
 #[test]
 fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
-    // read_pf_status fails → frame the failure on stderr, continue
-    // with the verb. The shell verb still proceeds to shell_intent +
-    // login.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1338,35 +1083,10 @@ fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
     );
 }
 
-// ================================================================
-// Command form (`tenant shell <name> [--mode install|runtime] -- <cmd>`)
-//
-// Argv presence after `--` flips the verb between today's interactive
-// login flow (empty argv) and the new command form (non-empty argv).
-// Command form invokes `HostMachine::exec_as_tenant` (sibling carve-out
-// to `login`); on the success path it ALWAYS runs a runtime-tier
-// reapply on completion (idempotent if entry was Runtime; narrows
-// back to runtime if --mode install widened).
-//
-// Design locks:
-// - `--` separator (clap `last = true`).
-// - `--mode` rejected without argv (clap `requires = "argv"`).
-// - No confirm prompt on either form.
-// - Narrow-on-finally gated on widen-execution. If widen failed at
-//   `build_reapply_plan` (no substrate fired), no narrow attempt; if
-//   widen-execute fired any substrate, best-effort narrow runs inline
-//   before the Mode error surfaces.
-// - Child exit code propagates; narrow-failure stderr warning does
-//   NOT override it.
-// ================================================================
+// --- Command form (`shell <name> [--mode] -- <cmd>`) ---
 
 #[test]
 fn shell_command_form_default_runtime_invokes_exec_as_tenant() {
-    // `tenant shell dev -- ls /tmp`: no --mode (defaults to Runtime).
-    // Entry reapply at Runtime; child runs via exec_as_tenant; NO
-    // post-child narrow (mode == Runtime → entry reapply IS the
-    // runtime posture; the redundant second reapply is gated off
-    // per smoke verification).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -1409,12 +1129,7 @@ fn shell_command_form_default_runtime_invokes_exec_as_tenant() {
 
 #[test]
 fn shell_command_form_install_mode_widens_then_narrows() {
-    // `tenant shell dev --mode install -- bash -c 'echo hi'`. Entry
-    // widens to install tier (install body includes both runtime +
-    // install hosts); child runs; finally narrows to runtime tier.
-    // The install-tier and runtime-tier InstallAnchor bodies differ
-    // when the profile carries install hosts, so the firewall_ops
-    // pin captures the asymmetric pair shape.
+    // Install hosts make the widen and narrow bodies differ.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
@@ -1464,9 +1179,6 @@ fn shell_command_form_install_mode_widens_then_narrows() {
 
 #[test]
 fn shell_command_form_propagates_child_exit_code() {
-    // Option (a) lock: child exit code propagates to the verb's exit.
-    // exec_exit_code(7) → verb exits 7. Mirrors today's
-    // shell_propagates_child_exit_code (which targets login).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1483,9 +1195,6 @@ fn shell_command_form_propagates_child_exit_code() {
 
 #[test]
 fn shell_command_form_does_not_invoke_login_carveout() {
-    // Negative pin: command form must NOT reach `HostMachine::login`.
-    // The two carve-outs serve different forms; routing must split
-    // cleanly at the empty-argv check.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -1509,11 +1218,6 @@ fn shell_command_form_does_not_invoke_login_carveout() {
 
 #[test]
 fn shell_interactive_form_unchanged_when_argv_empty() {
-    // Regression pin: the verb signature change must not disturb
-    // today's interactive flow. Empty argv routes to shell_interactive
-    // which calls HostMachine::login (NOT exec_as_tenant); only the
-    // entry reapply fires (no narrow-on-finally for the interactive
-    // form).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1549,12 +1253,7 @@ fn shell_interactive_form_unchanged_when_argv_empty() {
 
 #[test]
 fn shell_command_form_install_mode_narrow_on_finally_runs_when_child_fails() {
-    // When --mode install widened the entry, narrow-on-finally is
-    // mandatory regardless of child outcome — otherwise on-disk anchor
-    // stays at install tier after a non-zero exit (silent persistent
-    // widening, the very thing the verb exists to prevent). Verb returns
-    // child's exit code. The narrow installs the runtime-tier body, not a
-    // re-widen.
+    // Otherwise a failing child would leave the anchor widened.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
@@ -1593,11 +1292,7 @@ fn shell_command_form_install_mode_narrow_on_finally_runs_when_child_fails() {
 
 #[test]
 fn shell_command_form_runtime_mode_no_post_child_narrow() {
-    // Negative pin: runtime-mode command form must NOT fire a redundant
-    // post-child reapply. The entry reapply IS the runtime posture; a
-    // second reapply would write the same bytes + reload pf to the same
-    // ruleset for zero on-disk delta. Pin: exactly ONE Reload op on the
-    // runtime-mode path.
+    // The entry reapply already lands at runtime tier.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -1620,18 +1315,7 @@ fn shell_command_form_runtime_mode_no_post_child_narrow() {
 
 #[test]
 fn shell_command_form_narrow_failure_surfaces_warning_and_child_exit_wins() {
-    // NarrowFailed arm: child runs cleanly (exit 0); narrow-on-finally
-    // fails. The verb returns child's exit code (0); stderr carries
-    // the yellow ⚠ warning naming `tenant mode dev runtime` for
-    // recovery. Without this pin, a future change that returned
-    // EX_IOERR on narrow-failure would surface as a silent regression
-    // in the operator's $?.
-    //
-    // Stub setup: with --mode install, entry InstallAnchor body
-    // contains runtime + install hosts; finally InstallAnchor body
-    // contains only runtime hosts. The two InstallAnchor ops have
-    // distinct `body` fields, so `fail_firewall_op` matching on the
-    // runtime-body op tags ONLY the finally narrow.
+    // fail_firewall_op matches the runtime body, so only the finally narrow fails.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let runtime_body = tenant::firewall::render_anchor(
         "dev",
@@ -1673,9 +1357,6 @@ fn shell_command_form_narrow_failure_surfaces_warning_and_child_exit_wins() {
 
 #[test]
 fn shell_command_form_widen_failure_at_build_skips_narrow() {
-    // Widen-build-failure (profile-read fails BEFORE any substrate
-    // fires) → no narrow attempt. The Mode error surfaces;
-    // firewall_ops stays empty; exec_calls stays empty.
     let exec = StubHostMachine::new(); // no profile pre-loaded → read_profile fails
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1697,11 +1378,6 @@ fn shell_command_form_widen_failure_at_build_skips_narrow() {
 
 #[test]
 fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
-    // InstallAnchor succeeded (on-disk body now diverged); Reload
-    // failed. The best-effort narrow runs inline so on-disk state
-    // returns to runtime, then ModeError surfaces. We pin that a
-    // SECOND InstallAnchor (runtime body) attempt followed the failed
-    // entry Reload.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
@@ -1716,10 +1392,7 @@ fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
         &["shell", "dev", "--mode", "install", "--", "ls"],
     );
     assert_eq!(code, 74, "EX_IOERR on widen-Mode error; stderr={stderr:?}");
-    // After the entry Reload failed (op #2), the best-effort narrow
-    // builds + executes a runtime-tier reapply. fail_next_firewall is
-    // one-shot, so the narrow's ops should land cleanly. Pin: a
-    // runtime-body InstallAnchor appears after the failed Reload.
+    // fail_next_firewall is one-shot, so the narrow's ops land.
     let runtime_body = tenant::firewall::render_anchor(
         "dev",
         &common::egress(&["runtime.example"]),
@@ -1743,12 +1416,6 @@ fn shell_command_form_widen_failure_at_substrate_runs_narrow() {
 
 #[test]
 fn shell_command_form_negative_pin_no_flush_anchor() {
-    // Doctrine pin (mirrors the interactive shell negative pin): the
-    // command form is convergent like the interactive form; no
-    // FlushAnchor ever fires. FlushAnchor is destroy-side load-bearing
-    // because the parent `load anchor` directive gets removed there;
-    // the command form preserves the parent directive across widen +
-    // narrow.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
@@ -1770,10 +1437,6 @@ fn shell_command_form_negative_pin_no_flush_anchor() {
 
 #[test]
 fn shell_command_form_share_substrate_reapplies_before_exec() {
-    // Share substrate (AddHostToShareGroup + AclOp::Grant +
-    // EnsureDirAsUser + EnsureSymlinkAsUser) runs as part of the entry
-    // reapply BEFORE exec_as_tenant. Pin: account ops include AddHost;
-    // profile is read.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -1787,8 +1450,6 @@ fn shell_command_form_share_substrate_reapplies_before_exec() {
         group: "dev-tenant-share".into(),
         host: "operator".into(),
     };
-    // AddHost fires twice (entry + finally narrow), and BEFORE exec.
-    // Pin: AddHost is in account_ops at least once.
     assert!(
         exec.account_ops().contains(&add_host),
         "AddHostToShareGroup fires as part of the entry reapply: {:?}",
@@ -1797,18 +1458,11 @@ fn shell_command_form_share_substrate_reapplies_before_exec() {
     assert_eq!(exec.exec_calls().len(), 1);
 }
 
-// ================================================================
-// Reporter byte-form pins for the command form
-// ================================================================
+// --- Reporter byte-form pins: command form ---
 
 #[test]
 fn shell_command_dry_run_default_shows_intent() {
-    // Default-runtime command form, standard mode: summary block + dry-run
-    // preamble line (`Would run command as tenant 'dev' (runtime tier).`).
-    // No plan in standard dry-run. Exit 64 because
-    // `DryRunHostMachine::find_stashed_password` returns `NotFound` and the
-    // pre-spawn keychain pass routes through the `StashAbsent` refusal arm
-    // — the dry-run preview mirrors the legacy-tenant refusal shape.
+    // Exit 64 is the dry-run stash refusal (see the TODO(smell) at the top of this file).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1825,12 +1479,7 @@ fn shell_command_dry_run_default_shows_intent() {
 
 #[test]
 fn shell_command_dry_run_install_mode_includes_widen_and_narrow_bullets() {
-    // Install-mode command form, standard mode: headline carries
-    // `(mode: install)`; entry bullet says "widen", extra finally-narrow
-    // bullet; sudo line names firewall narrow. Exit 64 because
-    // `DryRunHostMachine::find_stashed_password` returns `NotFound` and
-    // the pre-spawn keychain pass routes through the `StashAbsent`
-    // refusal arm.
+    // Exit 64 is the dry-run stash refusal (see the TODO(smell) at the top of this file).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1857,10 +1506,6 @@ fn shell_command_dry_run_install_mode_includes_widen_and_narrow_bullets() {
 
 #[test]
 fn shell_command_real_mode_section_divider_includes_tier_when_install() {
-    // Real-mode section header: runtime → "Running command as tenant 'dev'";
-    // install → "Running command as tenant 'dev' (install tier)". Pin the
-    // exact header bytes for both via section_line so a future width
-    // tweak moves both sides together.
     let runtime_profile = tenant::profile::default_profile_toml();
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &runtime_profile)
@@ -1898,12 +1543,7 @@ fn shell_command_real_mode_section_divider_includes_tier_when_install() {
 
 #[test]
 fn shell_command_no_confirm_prompt() {
-    // Command form does NOT prompt, even on TTY. We simulate
-    // a TTY via run_with_stdin with empty stdin content; if the verb
-    // ever started prompting, the empty stdin would cause it to abort
-    // (default-N for destroy; default-Y elsewhere). Either way, the
-    // shape would change. Pin: clean execution + no "Proceed?" in
-    // stdout.
+    // Empty stdin on a TTY: a prompt, if one were added, would change the output.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -1923,10 +1563,6 @@ fn shell_command_no_confirm_prompt() {
 
 #[test]
 fn shell_command_narrow_failure_warning_uses_warning_glyph() {
-    // Byte-form pin for the yellow ⚠ stderr warning. Default Colors (off)
-    // renders the glyph plain; the colored shape is verified at the
-    // Reporter level. The warning line names the tenant, the failure
-    // summary, and the recovery command.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let runtime_body = tenant::firewall::render_anchor(
         "dev",
@@ -1957,9 +1593,6 @@ fn shell_command_narrow_failure_warning_uses_warning_glyph() {
 
 #[test]
 fn shell_command_closing_runtime_mode_bare_exit_line() {
-    // Runtime-mode command form ends with `─── Done ───` + bare
-    // `Command exited with code N.` line — no narrow-back suffix because
-    // runtime mode doesn't widen and doesn't narrow on finally.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -1986,10 +1619,6 @@ fn shell_command_closing_runtime_mode_bare_exit_line() {
 
 #[test]
 fn shell_command_closing_install_mode_includes_narrow_back_suffix() {
-    // Install-mode command form ends with `─── Done ───` +
-    // `Command exited with code N (firewall narrowed back to runtime tier).`
-    // — the suffix names the narrow as the load-bearing operator-visible
-    // cue that on-disk state returned to runtime.
     let profile = profile_with_hosts(&["runtime.example"], &["install.example"]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &profile)
@@ -2013,11 +1642,6 @@ fn shell_command_closing_install_mode_includes_narrow_back_suffix() {
 
 #[test]
 fn shell_command_closing_does_not_emit_on_interactive_form() {
-    // Doctrine pin: closing surface fires for the command form only.
-    // Interactive form returns from `HostMachine::login` after operator
-    // typed exit; the parent shell's terminal context is gone (or
-    // already showed the closing). No "Shelled into …" line afterwards.
-    // Empty argv is the discriminator in dispatch.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -2035,11 +1659,6 @@ fn shell_command_closing_does_not_emit_on_interactive_form() {
 
 #[test]
 fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
-    // DoctorScope::Shell covers both forms. Same stub (PfDisabled
-    // host-wide) → same critical-finding inline emission for both
-    // interactive and command forms. The Reporter wiring is shared;
-    // dispatch routes through `pre_exec_doctor_summary` with
-    // DoctorScope::Shell regardless of argv presence.
     let make_exec = || {
         StubHostMachine::new()
             .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2061,10 +1680,6 @@ fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
         b"",
     );
 
-    // Both forms surface the same PfDisabled critical via the doctor
-    // pre-exec aggregator's inline `doctor_finding_one_liner` emission
-    // ("critical: pf is globally disabled" — same byte form across
-    // both verb shapes).
     assert!(
         stdout_a.contains("critical: pf is globally disabled"),
         "interactive form's pre-exec audit surfaces PfDisabled: {stdout_a:?}"
@@ -2077,9 +1692,6 @@ fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
 
 #[test]
 fn shell_clap_rejects_mode_without_argv() {
-    // --mode requires argv. `tenant shell dev --mode install` (no `--`
-    // separator, no command) → clap parse error at dispatch. Exit code
-    // is clap's default (2); no substrate fires.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -2096,24 +1708,10 @@ fn shell_clap_rejects_mode_without_argv() {
     );
 }
 
-// ================================================================
-// Keychain shell-entry unlock pass
-// ================================================================
-//
-// `tenant shell <name>` retrieves the operator-stashed password and
-// unlocks the tenant's `tenant.keychain-db` BEFORE handing off to
-// login / exec_as_tenant. The unlock pass is the LAST step before
-// exec (after `execute_reapply_plan`). Already-unlocked is a no-op
-// at the substrate; the operator sees `✓ Tenant 'X' keychain
-// unlocked` either way so a silent regression is visible.
+// --- Keychain unlock on shell entry ---
 
 #[test]
 fn shell_unlocks_keychain_before_login() {
-    // Stash pre-loaded via `with_stash`. Shell runs the happy path;
-    // assert the byte-exact stdout includes the unlock ✓ between the
-    // reapply ✓ stream and login. Substrate ordering is enforced by
-    // `Tenants::shell` placing the unlock between reapply and login;
-    // the unlock_calls() recording pins that the substrate fired.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_stash("dev", tenant::domain::KeychainPassword::test_dummy("hexpw"));
@@ -2138,16 +1736,6 @@ fn shell_unlocks_keychain_before_login() {
 
 #[test]
 fn shell_command_form_also_unlocks() {
-    // The unlock pass plugs in at the SHARED pre-spawn point
-    // (`Tenants::unlock_tenant_keychain`) used by both branches of
-    // `Tenants::shell`, so the command form gets the same unlock pass as the
-    // interactive form. Sibling to `shell_unlocks_keychain_before_login`
-    // (interactive) — the byte-exact stdout pins ordering: the keychain ✓
-    // sits between the reapply ✓ stream and the closing `Done` section
-    // (which only emits AFTER `exec_as_tenant` returns), so the unlock
-    // substrate fired BEFORE the child command. `logins()` must be empty:
-    // command form uses `exec_as_tenant`, not the `login` carve-out — pin
-    // that to differentiate from the interactive analog.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -2191,9 +1779,6 @@ fn shell_command_form_also_unlocks() {
 
 #[test]
 fn shell_surfaces_user_directory_error_when_eligibility_probe_fails() {
-    // Same eligibility probe as destroy — a dscl failure on `has_user`
-    // routes to `shell_eligibility_probe_failed` with shell-named
-    // action wording.
     let stub = StubUserDirectory {
         fail_has_user: directory_fail_once(),
         ..Default::default()
@@ -2206,21 +1791,10 @@ fn shell_surfaces_user_directory_error_when_eligibility_probe_fails() {
     );
 }
 
-// ================================================================
-// Light reapply on shell (all three forms)
-// ================================================================
-//
-// `tenant shell` uses Light reapply scope: per-share `AclOp::Grant`
-// and `AccountOp::EnsureCoworkDir` (both recursive `chmod -R +a`
-// passes) are skipped. Inheritable ACE bits propagate the grant to
-// tenant-created children; drift cases surface via `tenant doctor`
-// and are remediated by `tenant reload`.
+// --- Light reapply (all three forms) ---
 
 #[test]
 fn shell_interactive_uses_light_reapply_skipping_recursive_acl_passes() {
-    // Interactive shell auto-narrow: acl_ops is empty, account_ops
-    // contains no EnsureCoworkDir; PF narrow + AddHost + per-share
-    // EnsureSymlinkAsUser fire; login follows.
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -2251,8 +1825,6 @@ fn shell_interactive_uses_light_reapply_skipping_recursive_acl_passes() {
 
 #[test]
 fn shell_command_runtime_uses_light_reapply_skipping_recursive_acl_passes() {
-    // Command form, runtime tier: single Light entry reapply (no
-    // post-child narrow — tier is already runtime).
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
@@ -2294,9 +1866,6 @@ fn shell_command_runtime_uses_light_reapply_skipping_recursive_acl_passes() {
 
 #[test]
 fn shell_command_install_uses_light_reapply_on_both_entry_and_narrow() {
-    // Command form, install tier: entry widen + post-child narrow
-    // both use Light scope. Two PF reapplies = 4 firewall ops; no
-    // Grant + no EnsureCoworkDir on either pass.
     let toml = profile_with_shares(
         &["github.com"],
         &["pypi.org"],
@@ -2342,10 +1911,6 @@ fn shell_command_install_uses_light_reapply_on_both_entry_and_narrow() {
 
 #[test]
 fn shell_interactive_silently_succeeds_when_cowork_path_is_symlink_under_light_scope() {
-    // Inverse of `reload_refuses_when_cowork_path_is_a_symlink`. Under
-    // Light scope omits the kind-check, so a symlinked cowork
-    // path does NOT abort shell entry. Negative pin paralleling
-    // `mode_silently_succeeds_when_cowork_path_is_symlink_under_light_scope`.
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2377,9 +1942,6 @@ fn shell_interactive_silently_succeeds_when_cowork_path_is_symlink_under_light_s
 
 #[test]
 fn shell_command_runtime_silently_succeeds_when_cowork_path_is_absent_under_light_scope() {
-    // Command-form parallel to the symlink test, for absent cowork
-    // path. Light scope skips both provisioning and the kind-check;
-    // the child command runs.
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2413,9 +1975,6 @@ fn shell_command_runtime_silently_succeeds_when_cowork_path_is_absent_under_ligh
 
 #[test]
 fn shell_command_install_silently_succeeds_when_cowork_path_is_symlink_under_light_scope() {
-    // Command-form (install) — both PF passes (entry widen +
-    // post-child narrow) build under Light scope, so neither trips
-    // the kind-check on a symlinked cowork path.
     let cowork_path = PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2444,13 +2003,7 @@ fn shell_command_install_silently_succeeds_when_cowork_path_is_symlink_under_lig
     );
 }
 
-// ================================================================
-// Cowork-dir drift detection in shell's pre-exec doctor
-// ================================================================
-//
-// Companion to mode's drift surface. Shell doesn't auto-heal
-// cowork-dir drift under Light scope; pre-exec doctor surfaces it
-// so the operator can exit + reload.
+// --- Cowork-dir drift in pre-exec doctor ---
 
 #[test]
 fn shell_pre_exec_doctor_surfaces_cowork_acl_drift() {
@@ -2476,11 +2029,7 @@ fn shell_pre_exec_doctor_surfaces_cowork_acl_drift() {
 
 #[test]
 fn shell_after_reload_heals_cowork_drift_emits_no_doctor_aggregate() {
-    // Round-trip pin: with the stub's default-clean cowork ACL
-    // listing (the state a successful Full reload would leave),
-    // shell entry's pre-exec doctor emits no aggregate. Catches a
-    // regression where `has_group_acl_entry` / `read_host_acl`
-    // accidentally trips CoworkAclDrift on a healed host.
+    // The stub's default ACL listing is the state a Full reload leaves.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -2495,8 +2044,6 @@ fn shell_after_reload_heals_cowork_drift_emits_no_doctor_aggregate() {
 
 #[test]
 fn shell_pre_exec_doctor_surfaces_cowork_dir_absent() {
-    // Cowork dir absent → CoworkDirAbsent aggregates; shell still
-    // enters (audit is a courtesy).
     let cowork_path = std::path::PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2513,25 +2060,11 @@ fn shell_pre_exec_doctor_surfaces_cowork_dir_absent() {
     );
 }
 
-// ================================================================
-// Command form `--inbound` flag (sibling of `--mode`)
-//
-// `--inbound permissive` widens the INBOUND loopback axis for the
-// command's duration and narrows back to restricted on completion —
-// mirroring `--mode install`'s egress widen + narrow-on-finally. The
-// two axes are orthogonal: `--inbound permissive` leaves egress at its
-// default runtime tier, and `--mode install` leaves inbound at steady
-// restricted. Interactive entry auto-narrows inbound to restricted
-// (the `requires = "argv"` rail rejects `--inbound` without `--`).
-// ================================================================
+// --- Command form `--inbound` ---
 
 #[test]
 fn shell_command_inbound_permissive_renders_permissive_entry_then_narrows() {
-    // `tenant shell dev --inbound permissive -- ls`. Entry reapply
-    // widens inbound to permissive (egress stays runtime tier); child
-    // runs; finally narrows inbound back to restricted. The profile
-    // declares a port so the restricted-narrow body is distinct from a
-    // locked one — the narrow installs the profile-port restricted body.
+    // A declared port makes the restricted narrow body distinct from locked.
     let profile = format!(
         "{}\n[inbound]\nports = [\n  3000,\n]\n",
         profile_with_hosts(&["api.example.com"], &["pypi.org"])
@@ -2545,9 +2078,6 @@ fn shell_command_inbound_permissive_renders_permissive_entry_then_narrows() {
         &["shell", "dev", "--inbound", "permissive", "--", "ls"],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Egress = runtime tier throughout (inbound widen doesn't touch the
-    // egress axis). Entry inbound = permissive; finally inbound =
-    // restricted with the profile's declared port.
     let permissive_body = tenant::firewall::render_anchor(
         "dev",
         &common::egress(&["api.example.com"]),
@@ -2582,10 +2112,6 @@ fn shell_command_inbound_permissive_renders_permissive_entry_then_narrows() {
 
 #[test]
 fn shell_command_inbound_permissive_narrow_on_finally_runs_when_child_fails() {
-    // Narrow-on-finally is mandatory regardless of child outcome — same
-    // posture as `--mode install` (`shell_command_form_install_mode_narrow_on_finally_runs_when_child_fails`).
-    // Otherwise the on-disk anchor stays permissive after a non-zero
-    // exit (silent persistent widening). Verb returns the child's exit.
     let profile = format!(
         "{}\n[inbound]\nports = [\n  3000,\n]\n",
         profile_with_hosts(&["api.example.com"], &[])
@@ -2627,10 +2153,6 @@ fn shell_command_inbound_permissive_narrow_on_finally_runs_when_child_fails() {
 
 #[test]
 fn shell_command_default_inbound_stays_restricted_no_extra_narrow() {
-    // Negative pin (inbound axis): no `--inbound` flag → entry renders
-    // inbound at steady restricted; the runtime-mode command form fires
-    // exactly ONE Reload (no redundant post-child narrow). Mirrors
-    // `shell_command_form_runtime_mode_no_post_child_narrow`.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -2653,10 +2175,7 @@ fn shell_command_default_inbound_stays_restricted_no_extra_narrow() {
 
 #[test]
 fn shell_command_inbound_restricted_explicit_no_extra_narrow() {
-    // `--inbound restricted` is the default posture made explicit —
-    // it widens nothing, so no narrow-on-finally fires. Exactly ONE
-    // Reload. Pins that the narrow gate keys on the WIDENED level
-    // (Permissive), not merely on the flag's presence.
+    // The narrow gate keys on a widened level, not on the flag's presence.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -2679,12 +2198,6 @@ fn shell_command_inbound_restricted_explicit_no_extra_narrow() {
 
 #[test]
 fn shell_clap_rejects_inbound_without_argv() {
-    // `--inbound` requires argv (parallel to `--mode`). `tenant shell
-    // dev --inbound permissive` (no `--` separator, no command) → clap
-    // parse error (exit 2); no substrate fires. Interactive entry
-    // auto-narrows inbound to restricted, so widening it for an
-    // interactive session is rejected at parse — the operator would
-    // otherwise be left at permissive silently.
     let exec = StubHostMachine::new();
     let (code, _stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -2703,10 +2216,7 @@ fn shell_clap_rejects_inbound_without_argv() {
 
 #[test]
 fn shell_command_inbound_and_mode_compose_within_one_call() {
-    // The two axes are orthogonal WITHIN a single command: `--mode
-    // install --inbound permissive` widens BOTH on entry and narrows
-    // BOTH on finally (egress→runtime, inbound→restricted). The doctrine
-    // forbids composition ACROSS separate commands, not within one.
+    // Widenings compose within one call; the doctrine forbids it only across commands.
     let profile = format!(
         "{}\n[inbound]\nports = [\n  3000,\n]\n",
         profile_with_hosts(&["runtime.example"], &["install.example"])
@@ -2729,14 +2239,11 @@ fn shell_command_inbound_and_mode_compose_within_one_call() {
         ],
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
-    // Entry: egress install tier (both hosts) + inbound permissive.
     let entry_body = tenant::firewall::render_anchor(
         "dev",
         &common::egress(&["runtime.example", "install.example"]),
         tenant::firewall::InboundRules::Permissive,
     );
-    // Finally: egress runtime tier (runtime host only) + inbound
-    // restricted (profile port).
     let narrow_body = tenant::firewall::render_anchor(
         "dev",
         &common::egress(&["runtime.example"]),
@@ -2760,14 +2267,10 @@ fn shell_command_inbound_and_mode_compose_within_one_call() {
     );
 }
 
-// ── `-d/--directory` ────────────────────────────────────────────────
+// --- `-d/--directory` ---
 
 #[test]
 fn shell_command_form_absolute_directory_reaches_exec_carve_out() {
-    // `-d <absolute>` is taken literally and threaded to the
-    // `exec_as_tenant` carve-out, which wraps it into the `sh -c 'cd …'`
-    // form at the adapter (argv shape pinned in
-    // tests/macos_host_machine.rs). The pre-flight probe accepts `Dir`.
     let dir = PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2794,8 +2297,6 @@ fn shell_command_form_absolute_directory_reaches_exec_carve_out() {
 
 #[test]
 fn shell_interactive_absolute_directory_reaches_login_carve_out() {
-    // The flag is valid on the interactive form too (no
-    // `requires = "argv"` — unlike `--mode`/`--inbound`).
     let dir = PathBuf::from("/Users/Shared/tenants/dev");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2816,9 +2317,6 @@ fn shell_interactive_absolute_directory_reaches_login_carve_out() {
 
 #[test]
 fn shell_without_directory_flag_passes_none_to_both_carve_outs() {
-    // Negative pin: dir-less invocations are byte-identical to
-    // pre-feature behavior — `None` reaches both carve-outs, and the
-    // pre-flight probe never runs (no `tenant_path_kind` call).
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -2849,10 +2347,6 @@ fn shell_without_directory_flag_passes_none_to_both_carve_outs() {
 
 #[test]
 fn shell_relative_directory_resolves_under_tenant_home() {
-    // The primary UX. A bare relative path is resolved against the
-    // TENANT's home, which is what sidesteps the quoting footgun:
-    // an unquoted `$HOME` would have expanded to the OPERATOR's home
-    // in their shell before clap ever saw it.
     let dir = PathBuf::from("/Users/dev/projects/foo");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2877,8 +2371,6 @@ fn shell_relative_directory_resolves_under_tenant_home() {
 
 #[test]
 fn shell_home_prefixed_directory_resolves_to_tenant_home() {
-    // Quoted `$HOME` prefix — the same prefix-only contract a share's
-    // `tenant_path` gets, via the same `expand_tenant_path` helper.
     let dir = PathBuf::from("/Users/dev/projects/foo");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2898,10 +2390,7 @@ fn shell_home_prefixed_directory_resolves_to_tenant_home() {
 
 #[test]
 fn shell_refuses_mid_string_home_in_directory() {
-    // Mid-string `$HOME` is a likely authoring mistake, refused rather
-    // than passed through as a surprising literal — same rule as the
-    // shares template validation, but the copy names `--directory`, not
-    // `tenant_path`. Refusal is lexical: it beats even the probe.
+    // Lexical refusal: it beats the probe.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -2927,10 +2416,7 @@ fn shell_refuses_mid_string_home_in_directory() {
 
 #[test]
 fn shell_refuses_absent_directory_before_any_firewall_op() {
-    // The pre-flight doctrine: fail before any substrate mutation.
-    // ZERO firewall ops proves the refusal beat the entry reapply, and
-    // no exec/login proves nothing was handed to the tenant. The copy
-    // names the RESOLVED path — the operator typed `projects/foo`.
+    // The message names the resolved path, not the typed `projects/foo`.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -2957,10 +2443,7 @@ fn shell_refuses_absent_directory_before_any_firewall_op() {
 
 #[test]
 fn shell_refuses_directory_the_tenant_cannot_enter() {
-    // One question, one refusal: `test -d` as the tenant. A regular
-    // file, a path the tenant can't stat, and an absent path all answer
-    // false — and all mean the same thing to the operator ("you can't
-    // cd there"), so they share one honest message.
+    // `test -d` answers false for files, unstat-able and absent paths alike: one message.
     let dir = PathBuf::from("/Users/dev/notes.md");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2989,14 +2472,10 @@ fn shell_refuses_directory_the_tenant_cannot_enter() {
     assert!(exec.logins().is_empty());
 }
 
+// TODO(smell): rename tenant_dir_present / tenant_path_kind so the names say which one follows symlinks.
 #[test]
 fn shell_refuses_dangling_symlink_directory() {
-    // A symlink whose target is gone (a removed share's leftover link)
-    // reads as `PathKind::Symlink(..)` to `tenant_path_kind` — which is
-    // why `-d` doesn't use it. `test -d` follows the link and answers
-    // false, so the refusal lands BEFORE the widen instead of surfacing
-    // as a raw `cd` failure after the firewall opened and the child was
-    // spawned.
+    // A dangling link reads as Symlink(..) to tenant_path_kind; `test -d` follows it and answers false.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -3027,11 +2506,7 @@ fn shell_refuses_dangling_symlink_directory() {
 
 #[test]
 fn shell_accepts_symlinked_directory() {
-    // `cd` follows links, and a symlinked projects dir is exactly what
-    // a declared `[[shares]]` entry installs — refusing it would refuse
-    // the most common target on the box. `test -d` resolves through the
-    // link, so a LIVE symlink answers true (a dangling one answers
-    // false — see the sibling test).
+    // Shares install symlinks, so a live link must be accepted.
     let dir = PathBuf::from("/Users/dev/src");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -3048,8 +2523,6 @@ fn shell_accepts_symlinked_directory() {
 
 #[test]
 fn shell_directory_probe_failure_is_substrate_error() {
-    // A probe that can't RUN is substrate breakage, not operator input
-    // — EX_IOERR, distinct from the EX_USAGE refusals.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -3073,10 +2546,7 @@ fn shell_directory_probe_failure_is_substrate_error() {
 
 #[test]
 fn shell_directory_pre_flight_skipped_when_sudo_uncached() {
-    // On a cold timestamp `sudo -n` can't authenticate, so the probe
-    // would fail the operator's first command in every fresh terminal.
-    // Uncached ⇒ no probe, no refusal; the dir still reaches the child
-    // and the entry reapply prompts for sudo as it always has.
+    // `sudo -n` fails uncached, so probing would fail every fresh terminal's first command.
     let dir = PathBuf::from("/Users/dev/projects/foo");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -3104,12 +2574,6 @@ fn shell_directory_pre_flight_skipped_when_sudo_uncached() {
 
 #[test]
 fn shell_refuses_directory_containing_a_dollar_sign() {
-    // `sudo -i` escapes its command "except alphanumerics, underscores,
-    // hyphens, and dollar signs", so a `$` survives sudo's re-parse and
-    // expands in the TENANT's login shell — inside quoting that sudo has
-    // already neutralized. An unset variable would truncate the path and
-    // run the command in a DIFFERENT directory, silently, at exit 0.
-    // Quoting can't fix that, so the shape is refused.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
@@ -3130,12 +2594,6 @@ fn shell_refuses_directory_containing_a_dollar_sign() {
 
 #[test]
 fn shell_refuses_dollar_after_a_legal_home_prefix() {
-    // Regression pin: the `$` guard checks the RESOLVED path, not the
-    // raw input. An input-side check returns early on the legal
-    // `$HOME/` prefix and never sees a `$` further along — so
-    // `$HOME/projects/$scratch` was accepted, the probe (argv-level, no
-    // shell) answered true for the literal path, and the child ran in
-    // `/Users/dev/projects` at exit 0. Silently, in the wrong directory.
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
@@ -3156,8 +2614,6 @@ fn shell_refuses_dollar_after_a_legal_home_prefix() {
 
 #[test]
 fn shell_directory_composes_with_permissive_inbound() {
-    // `-d` is orthogonal to BOTH posture axes: the inbound widen still
-    // fires and narrows back, and the dir still reaches the child.
     let dir = PathBuf::from("/Users/dev/projects/foo");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -3198,9 +2654,6 @@ fn shell_directory_composes_with_permissive_inbound() {
 
 #[test]
 fn shell_interactive_plan_line_renders_the_cd() {
-    // The pre-confirm plan must show the `cd` the real run will do, not
-    // just the login. Verbose dry-run is where the operator reads the
-    // mechanism.
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["shell", "dev", "-d", "projects/foo", "--dry-run", "-v"],
@@ -3244,9 +2697,6 @@ fn shell_command_summary_names_the_directory() {
 
 #[test]
 fn shell_directory_composes_with_install_mode() {
-    // `-d` is orthogonal to the tier axis: the install widen still
-    // fires, the child still gets the dir, and the runtime narrow
-    // still lands on completion.
     let dir = PathBuf::from("/Users/dev/projects/foo");
     let exec = StubHostMachine::new()
         .with_existing_profile(

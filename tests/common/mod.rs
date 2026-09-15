@@ -1,9 +1,4 @@
-// Shared helpers for per-verb integration-test files. Each `tests/cli_*.rs`
-// declares `mod common;` and pulls these in via `use common::*;`. Cargo
-// treats this `mod.rs` under a directory as a non-binary module (it doesn't
-// try to run it as its own test binary). Because individual cli_*.rs files
-// only use a subset of these helpers, `#![allow(dead_code)]` keeps the
-// per-binary unused-item warnings quiet.
+// Shared helpers for tests/cli_*.rs; each binary uses a subset, hence `allow(dead_code)`.
 
 #![allow(dead_code)]
 
@@ -21,14 +16,7 @@ use crate::adapters::{StubHostMachine, StubUserDirectory};
 use tenant::Cli;
 use tenant::domain::{GroupId, UserDirectoryError, UserId};
 
-/// Parse `&[&str]` test args into a `Cli` value, mirroring how clap
-/// would render parse errors in production: errors via `use_stderr()`
-/// go to captured stderr; help/version goes to captured stdout. Exit
-/// code is taken from `clap::Error::exit_code()` — 0 for help/version,
-/// 2 for parse errors (missing args / bad enum / unknown subcommand),
-/// 1 only for the rare `DisplayHelpOnMissingArgumentOrSubcommand`
-/// fallback. Test helpers absorb the parse step so callers keep the
-/// `run_with(stub, &["create", "foo"])` shape.
+/// Mirrors clap's routing: help/version → stdout (exit 0), parse errors → stderr (exit 2).
 fn parse_cli(args: &[&str], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<Cli, u8> {
     let argv = std::iter::once(OsString::from("tenant")).chain(args.iter().map(OsString::from));
     Cli::try_parse_from(argv).map_err(|e| {
@@ -39,55 +27,32 @@ fn parse_cli(args: &[&str], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Resul
     })
 }
 
-/// Single-failure queue: returns Err on the first call to the matching
-/// `HostUserDirectory` method, snapshots thereafter. The default fixture for
-/// tests that drive Reporter's `*_eligibility_probe_failed` /
-/// `*_allocation_failed` / `*_enumeration_failed` / `*_conflict_probe_failed`
-/// frames — one call site, one failure.
+/// First call fails; later calls use the snapshot.
 pub fn directory_fail_once() -> RefCell<VecDeque<Option<UserDirectoryError>>> {
     let err = UserDirectoryError::Spawn(io::Error::other("synthetic"));
     RefCell::new(VecDeque::from([Some(err)]))
 }
 
-/// Pass-then-fail queue: first call succeeds (uses the snapshot), second
-/// fails. The fixture for `destroy_uid_lookup_failed` — the dispatch
-/// surface where `directory.uid_for` is called AFTER `destroy_eligibility`
-/// already consumed its own `uid_for` call. Without skipping the first
-/// call, the failure routes to `destroy_eligibility_probe_failed`.
+/// First call uses the snapshot, second fails: reaches `destroy_uid_lookup_failed` past
+/// `destroy_eligibility`'s own `uid_for` call.
 pub fn directory_fail_on_second_call() -> RefCell<VecDeque<Option<UserDirectoryError>>> {
     let err = UserDirectoryError::Spawn(io::Error::other("synthetic"));
     RefCell::new(VecDeque::from([None, Some(err)]))
 }
 
-/// Host identity surfaced by `HostMachine::current_host_user_name` in
-/// tests. Production reads `$USER`; tests pin a fixed placeholder so the
-/// doctor-verb's curated path expansion (`/Users/<host>/...`) and the
-/// per-verb plan rendering are deterministic across test runs.
-/// `StubHostMachine::new()` and `NeverHostMachine::current_host_user_name`
-/// both return this same string literal.
+/// Returned by `StubHostMachine::new()` and `NeverHostMachine`; keeps host-derived paths deterministic.
 pub const TEST_HOST: &str = "operator";
 
-/// Expected `─── <title> ───...` section divider line emitted by
-/// `Reporter::section` under colors=off, width 80. Centralized so tests
-/// pin the wireframe without re-encoding the padding math at every
-/// call site; if Reporter's section width or dash count ever changes,
-/// both sides move together via `tenant::ansi::rule`.
+/// `Reporter::section` divider at colors-off, width 80.
 pub fn section_line(title: &str) -> String {
     tenant::ansi::rule(title, 80)
 }
 
-/// Build the full real-mode-success stdout block: section divider
-/// opening, `✓ <label>` for each step, `─── Done ───` section,
-/// closing line. Tests pass the ordered list of business labels they
-/// expect to see; the helper handles framing. Trailing newline included.
+/// Section opening, `✓ <label>` per check, `─── Done ───`, closing line.
 pub fn real_success_stdout(opening_title: &str, checks: &[&str], closing: &str) -> String {
     real_success_stdout_with_breadcrumb(opening_title, checks, closing, None)
 }
 
-/// Same as `real_success_stdout` plus an optional "Next: ..." breadcrumb
-/// emitted by the `*_done` Reporter methods. Pass `None` for verbs
-/// whose `_done` has no breadcrumb (destroy); pass `Some(line)` to
-/// append the dim-styled (colors-off shape) post-success hint.
 pub fn real_success_stdout_with_breadcrumb(
     opening_title: &str,
     checks: &[&str],
@@ -112,37 +77,29 @@ pub fn real_success_stdout_with_breadcrumb(
     out
 }
 
-/// Post-success breadcrumb emitted by `Reporter::create_done`. Colors-off
-/// byte form (test runners pin against this; the dim ANSI wrapping is a
-/// separate Reporter concern not exercised by E2E).
 pub fn create_breadcrumb(name: &str) -> String {
     format!(
         "Next: edit ~/.config/tenant/profiles/{name}.toml and run `tenant reload {name}` to apply changes."
     )
 }
 
-/// Post-success breadcrumb emitted by `Reporter::mode_done`.
 pub fn mode_breadcrumb(name: &str) -> String {
     format!(
         "Next: enter the tenant with `tenant shell {name}` \u{2014} the firewall auto-narrows back to runtime tier on entry."
     )
 }
 
-/// Post-success breadcrumb emitted by `Reporter::inbound_done`.
 pub fn inbound_breadcrumb(name: &str) -> String {
     format!(
         "Next: enter the tenant with `tenant shell {name}` \u{2014} inbound loopback auto-narrows back to restricted on entry."
     )
 }
 
-/// Post-success breadcrumb emitted by `Reporter::reload_done` (single-tenant form).
 pub fn reload_breadcrumb(name: &str) -> String {
     format!("Next: audit with `tenant doctor {name}`.")
 }
 
-/// Real-mode-failure stdout block (no Done section, no closing line
-/// — the verb didn't complete). Only the section opening + ✓ lines
-/// for steps that actually succeeded before the failure.
+/// No Done section or closing line: only the ✓ lines that succeeded before the failure.
 pub fn real_failure_stdout(opening_title: &str, checks: &[&str]) -> String {
     let mut out = section_line(opening_title);
     out.push('\n');
@@ -154,22 +111,7 @@ pub fn real_failure_stdout(opening_title: &str, checks: &[&str]) -> String {
     out
 }
 
-/// Render the verbose plan section as it appears inside a summary
-/// (after the bullets, before "Sudo needed for:"). Each
-/// `(intent, shell, annotation)` entry becomes:
-///
-/// ```text
-///   • <intent>[  # <annotation>]
-///       <shell>
-/// ```
-///
-/// with no blank line between entries (the column-2 `•` + column-6
-/// shell indent give enough visual contrast). The block is wrapped in
-/// `Plan (commands to execute):\n\n<entries>\n` and a trailing newline
-/// so the caller can splice it directly between the summary bullets
-/// and the "Sudo needed for:" line. Tests pass `Colors::default()` so
-/// the privilege-aware dim escapes don't enter the byte form — this
-/// helper renders only the colors-off shape.
+/// Colors-off `Plan (commands to execute):` block, spliced before "Sudo needed for:".
 pub fn verbose_plan_section(entries: &[(&str, &str, Option<&str>)]) -> String {
     let mut out = String::from("Plan (commands to execute):\n\n");
     for (intent, shell, annotation) in entries {
@@ -183,10 +125,7 @@ pub fn verbose_plan_section(entries: &[(&str, &str, Option<&str>)]) -> String {
     out
 }
 
-/// Plan-side rendering of the `EnsureCoworkDir` op's four-call
-/// sequence. The variant carries a multi-line describe string; the
-/// plan helper splices each substrate line under the same intent
-/// bullet with the six-space indent shared by single-line entries.
+/// `EnsureCoworkDir`'s four substrate lines, indented under one plan bullet.
 pub fn cowork_dir_shell_lines(name: &str) -> String {
     let path = format!("/Users/Shared/tenants/{name}");
     let group = format!("{name}-tenant-share");
@@ -199,10 +138,7 @@ pub fn cowork_dir_shell_lines(name: &str) -> String {
     )
 }
 
-/// Pre-built plan entries for the `create` verb in the
-/// intent-leads-shell-follows layout. Returns the 14-entry list every
-/// `tenant create <name> -v` invocation expects (UID/GID substituted),
-/// for splicing into a verbose summary via `verbose_plan_section`.
+/// The 14 `tenant create <name> -v` plan entries.
 pub fn create_verbose_plan_entries(
     name: &str,
     uid: u32,
@@ -314,10 +250,6 @@ pub fn create_verbose_plan_entries(
     ]
 }
 
-/// Borrow-shape adapter: `verbose_plan_section` takes `&[(&str, &str, Option<&str>)]`
-/// for shared use across owned (above) and literal-borrowed call sites.
-/// Helper that converts the owned vec from `create_verbose_plan_entries`
-/// into the borrowed-slice shape `verbose_plan_section` accepts.
 pub fn verbose_plan_section_owned(entries: &[(String, String, Option<&'static str>)]) -> String {
     let borrowed: Vec<(&str, &str, Option<&str>)> = entries
         .iter()
@@ -326,14 +258,10 @@ pub fn verbose_plan_section_owned(entries: &[(String, String, Option<&'static st
     verbose_plan_section(&borrowed)
 }
 
-/// Pre-built `create_verbose_plan_entries` already spliced into a
-/// `verbose_plan_section` block — convenience for the common case.
 pub fn create_verbose_plan_block(name: &str, uid: u32, gid: u32) -> String {
     verbose_plan_section_owned(&create_verbose_plan_entries(name, uid, gid))
 }
 
-/// Pre-built plan entries for the `destroy` verb in the
-/// intent-leads-shell-follows layout (11 entries).
 pub fn destroy_verbose_plan_entries(name: &str) -> Vec<(String, String, Option<&'static str>)> {
     vec![
         (
@@ -403,9 +331,7 @@ pub fn destroy_verbose_plan_block(name: &str) -> String {
     verbose_plan_section_owned(&destroy_verbose_plan_entries(name))
 }
 
-/// Pre-built plan entries for the orphan-group convergence path (9
-/// entries; no user-removal steps, but the operator-side keychain
-/// stash still gets cleaned).
+/// Orphan-group path: no user-removal steps, but the keychain stash is still cleaned.
 pub fn orphan_verbose_plan_entries(name: &str) -> Vec<(String, String, Option<&'static str>)> {
     vec![
         (
@@ -460,15 +386,8 @@ pub fn orphan_verbose_plan_block(name: &str) -> String {
     verbose_plan_section_owned(&orphan_verbose_plan_entries(name))
 }
 
-/// Dry-run summary block for `tenant create <name> --dry-run`.
-/// Matches `Reporter::create_summary` byte-for-byte, then appends the
-/// "(Real run would prompt: Proceed? [Y/n])" preview line that
-/// `Reporter::confirm` emits in dry-run mode.
-///
-/// `plan_section` splices the verbose "Plan (commands to execute):"
-/// block in BEFORE the "Sudo needed for:" line. Pass `None` for the
-/// standard-mode dry-run (no plan); pass
-/// `Some(verbose_plan_section(&entries))` for the verbose-mode shape.
+/// `Reporter::create_summary` plus the dry-run confirm preview; `plan_section` splices in
+/// before "Sudo needed for:".
 pub fn create_dry_run_block(name: &str, uid: u32, gid: u32, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     format!(
@@ -488,9 +407,6 @@ pub fn create_dry_run_block(name: &str, uid: u32, gid: u32, plan_section: Option
     )
 }
 
-/// Dry-run summary block for `tenant destroy <name> --dry-run` (full
-/// destroy path, default-N prompt preview). `plan_section` optionally
-/// splices the verbose plan block.
 pub fn destroy_dry_run_block(name: &str, uid: u32, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     format!(
@@ -511,8 +427,6 @@ pub fn destroy_dry_run_block(name: &str, uid: u32, plan_section: Option<&str>) -
     )
 }
 
-/// Dry-run summary block for the orphan-group convergence path.
-/// `plan_section` optionally splices the verbose plan block.
 pub fn destroy_orphan_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     format!(
@@ -531,8 +445,6 @@ pub fn destroy_orphan_dry_run_block(name: &str, plan_section: Option<&str>) -> S
     )
 }
 
-/// Dry-run summary block for `tenant mode <name> <level> --dry-run`.
-/// `plan_section` optionally splices the verbose plan block.
 pub fn mode_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     let re_render = if level == "install" {
@@ -563,8 +475,6 @@ pub fn mode_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -
     )
 }
 
-/// Dry-run summary block for `tenant inbound <name> <level> --dry-run`.
-/// `plan_section` optionally splices the verbose plan block.
 pub fn inbound_dry_run_block(name: &str, level: &str, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     let re_render = if level == "permissive" {
@@ -595,12 +505,7 @@ pub fn inbound_dry_run_block(name: &str, level: &str, plan_section: Option<&str>
     )
 }
 
-/// Pre-exec summary block for `tenant shell <name>`. Emitted whenever
-/// `show_summary` is true (dry-run OR TTY). Unlike the other verbs'
-/// summaries, shell has no prompt, so there's no
-/// `(Real run would prompt: …)` parenthetical to append. Tests splice
-/// this block in BEFORE the shell-intent line (`Would shell into 'X'.`
-/// in dry-run, or the section divider in real mode).
+/// Shell has no prompt, so no `(Real run would prompt: …)` line.
 pub fn shell_summary_block(name: &str) -> String {
     format!(
         "About to enter tenant '{name}'.\n\
@@ -616,16 +521,7 @@ pub fn shell_summary_block(name: &str) -> String {
     )
 }
 
-/// Pre-exec summary block for `tenant shell <name> [--mode <m>] -- <argv>`
-/// (command form). Same `show_summary` gating as the interactive
-/// form's `shell_summary_block`; no confirm prompt parenthetical
-/// (command form is uniform with interactive shell on prompting).
-///
-/// `mode` is "runtime" or "install"; `argv` is the joined argv string
-/// the operator typed after `--`. Runtime tier collapses the entry
-/// bullet to the auto-narrow phrasing; install tier expands to the
-/// widen + narrow-on-finally pair. Sudo footer expands one phrase on
-/// install.
+/// `mode` is "runtime" or "install" (install adds the widen + narrow-on-finally bullets).
 pub fn shell_command_summary_block(name: &str, mode: &str, argv: &str) -> String {
     let (headline_suffix, entry_bullet, finally_bullet, sudo_line) = if mode == "install" {
         (
@@ -658,8 +554,6 @@ pub fn shell_command_summary_block(name: &str, mode: &str, argv: &str) -> String
     s
 }
 
-/// Dry-run summary block for single-tenant `tenant reload <name>`.
-/// `plan_section` optionally splices the verbose plan block.
 pub fn reload_dry_run_block(name: &str, plan_section: Option<&str>) -> String {
     let plan = plan_section.unwrap_or("");
     format!(
@@ -740,13 +634,7 @@ pub fn run_with_exec(
     )
 }
 
-/// Confirm-aware test runner. Simulates a TTY stdin so the
-/// confirmation prompt fires, with `stdin_content` as the operator's
-/// keystrokes (one or more lines, `\n`-terminated). Use for tests that
-/// exercise y/N parsing, default-Y vs default-N, and reprompt-on-bad-
-/// input behavior. `run_with` / `run_with_exec` keep their auto-proceed
-/// posture (stdin=empty, tty=false) so the existing test bank is
-/// unaffected.
+/// Simulates a TTY so the confirm prompt fires; `stdin_content` is the operator's keystrokes.
 pub fn run_with_stdin(
     stub: StubUserDirectory,
     exec: &StubHostMachine,
@@ -781,10 +669,8 @@ pub fn run_with_stdin(
     )
 }
 
-/// Stub representing a tenant that exists on the host with a tenant-range
-/// UID (for tests that drive the destroy verb's actual-destroy path rather
-/// than its noop / refusal paths). UID 600 is the canonical floor; any
-/// floor-or-above UID would do.
+// TODO(smell): rename `stub_with_tenant` (user only) / `make_tenant_stub_reader` (user + share group) so names say what differs.
+/// Tenant user at UID 600, no share group.
 pub fn stub_with_tenant(name: &str) -> StubUserDirectory {
     StubUserDirectory {
         users: vec![name.to_string()],
@@ -793,12 +679,7 @@ pub fn stub_with_tenant(name: &str) -> StubUserDirectory {
     }
 }
 
-/// Helper: profile TOML with the given runtime + install host lists
-/// AND a `[[shares]]` block for share-reapply tests. Each share triple
-/// is `(host_path, mode, tenant_path)`; mode is "ro" or "rw" verbatim
-/// from the schema. Empty `shares` slice produces no `[[shares]]`
-/// blocks (backward-compat for profiles authored before shares were
-/// added to the schema).
+/// `shares` triples are `(host_path, mode, tenant_path)`; empty emits no `[[shares]]`.
 pub fn profile_with_shares(
     runtime: &[&str],
     install: &[&str],
@@ -819,10 +700,7 @@ pub fn profile_with_shares(
     format!("{base}{share_blocks}")
 }
 
-/// Helper: profile TOML with the given runtime + install host lists AND a
-/// `[bootstrap]` block. Each command is a verbatim shell string. Empty
-/// `commands` produces no `[bootstrap]` block (backward-compat). Used by
-/// the bootstrap E2E suite to drive the read_profile + merge + verb path.
+/// Empty `commands` emits no `[bootstrap]` block.
 pub fn profile_with_bootstrap(runtime: &[&str], install: &[&str], commands: &[&str]) -> String {
     let base = profile_with_hosts(runtime, install);
     if commands.is_empty() {
@@ -836,10 +714,6 @@ pub fn profile_with_bootstrap(runtime: &[&str], install: &[&str], commands: &[&s
     format!("{base}\n[bootstrap]\ncommands = [\n{lines}\n]\n")
 }
 
-/// Build `EgressHost`s from bare host names, each defaulting to TCP 443 —
-/// the pre-ports meaning a bare profile entry resolves to. Lets a
-/// `render_anchor` expectation mirror a bare-only profile without spelling
-/// out `EgressHost { host, ports: vec![443] }` at every call site.
 pub fn egress(hosts: &[&str]) -> Vec<tenant::firewall::EgressHost> {
     hosts
         .iter()
@@ -850,10 +724,6 @@ pub fn egress(hosts: &[&str]) -> Vec<tenant::firewall::EgressHost> {
         .collect()
 }
 
-/// Helper: profile TOML with the given runtime + install host lists.
-/// Tests use this to populate `with_existing_profile` content so the
-/// writer's read_profile + parse + render path exercises non-empty
-/// allowlist tiers without touching real fs state.
 pub fn profile_with_hosts(runtime: &[&str], install: &[&str]) -> String {
     let runtime_lines = runtime
         .iter()
@@ -882,8 +752,7 @@ pub fn profile_with_hosts(runtime: &[&str], install: &[&str]) -> String {
     )
 }
 
-/// A reader where `name` is present as a Destroyable tenant (UID at floor,
-/// group present). Lets dispatch reach `doctor_tenant`.
+/// Tenant user + share group at the floor (Destroyable).
 pub fn make_tenant_stub_reader(name: &str) -> StubUserDirectory {
     StubUserDirectory {
         users: vec![name.to_string()],

@@ -1,10 +1,4 @@
-//! Combinatorial unit tests for `doctor` module pure functions.
-//!
-//! Justification (per CLAUDE.md test discipline): `curated_paths`,
-//! `classify`, and `Finding::Display` have small combinatorial state
-//! spaces (categories × access modes × outcomes) that would require
-//! many overlapping E2E tests to cover; per-cell unit testing is the
-//! right tool. CLI verb behavior continues to live in `tests/cli.rs`.
+//! Unit tests: `doctor`'s pure functions have small combinatorial state spaces.
 
 use std::path::PathBuf;
 
@@ -14,9 +8,7 @@ use tenant::doctor::{
 };
 use tenant::domain::{AccessMode, AccessOutcome, HostUserName, TenantUserName};
 
-// ============================================================
-// Finding display — byte-exact per combination
-// ============================================================
+// --- Finding display ---
 
 #[test]
 fn finding_display_critical_read() {
@@ -60,15 +52,7 @@ fn finding_display_info_read() {
     );
 }
 
-// ============================================================
-// classify — (category × outcome) -> Option<Severity>
-// ============================================================
-//
-// Only the `Allowed` column ever fires a finding. `Denied` and
-// `Unknown` collapse to None for every category — the kernel's "no
-// access" answer is exactly what we expect on a hardened host and
-// should not pollute the operator's output. Negative pins on
-// Denied/Unknown live below.
+// --- classify: only `Allowed` ever produces a finding ---
 
 #[test]
 fn classify_host_secret_allowed_is_critical() {
@@ -96,10 +80,7 @@ fn classify_cross_tenant_allowed_is_warning() {
 
 #[test]
 fn classify_tenant_artifact_allowed_is_info() {
-    // `/etc/pf.anchors/tenant-<other>` is mode 0644 by design (the
-    // install flow sets it) — the read IS allowed, and we report it
-    // as `info` rather than `critical` because the exposure is
-    // intentional and the operator should know without being alarmed.
+    // Anchors are 0644 by design: the exposure is intentional, so info rather than critical.
     assert_eq!(
         classify(Category::TenantArtifact, AccessOutcome::Allowed),
         Some(Severity::Info)
@@ -138,16 +119,10 @@ fn classify_every_category_unknown_is_no_finding() {
     }
 }
 
-// ============================================================
-// curated_paths — coverage of every category
-// ============================================================
+// --- curated_paths ---
 
 #[test]
 fn curated_paths_covers_host_secret_paths() {
-    // For a host with no other tenants, the curated list still includes
-    // host-side secret targets. `.ssh/id_rsa` is the canonical Read
-    // target; presence pins the category covers the SSH private-key
-    // case at minimum.
     let paths = curated_paths("alice", "dev", &[]);
     assert!(
         paths
@@ -161,8 +136,6 @@ fn curated_paths_covers_host_secret_paths() {
 
 #[test]
 fn curated_paths_covers_host_home_listing() {
-    // The top-level read of `/Users/<host>/` is the listability check
-    // that detects whether a tenant can enumerate the operator's home.
     let paths = curated_paths("alice", "dev", &[]);
     assert!(
         paths
@@ -176,9 +149,6 @@ fn curated_paths_covers_host_home_listing() {
 
 #[test]
 fn curated_paths_covers_cross_tenant_when_others_present() {
-    // Cross-tenant entries are gated on the `others` list — with no
-    // others, no cross-tenant probes; with one other tenant, the
-    // other's home + .ssh dir are probed for listability.
     let paths = curated_paths("alice", "dev", &["staging"]);
     assert!(
         paths
@@ -200,9 +170,6 @@ fn curated_paths_covers_cross_tenant_when_others_present() {
 
 #[test]
 fn curated_paths_omits_cross_tenant_when_no_others() {
-    // Negative pin: a single-tenant host (`others` is empty) emits no
-    // cross-tenant entries. Guards against a regression that always
-    // appended `/Users/<self>` to the cross-tenant block.
     let paths = curated_paths("alice", "dev", &[]);
     assert!(
         !paths
@@ -214,10 +181,6 @@ fn curated_paths_omits_cross_tenant_when_no_others() {
 
 #[test]
 fn curated_paths_covers_tenant_artifacts_when_others_present() {
-    // Tenant-project artifacts (~/.config/tenant/profiles/<other>.toml,
-    // /etc/pf.anchors/tenant-<other>) are info-tier leaks that doctor
-    // surfaces so the operator knows other tenants' configs are not
-    // strictly private.
     let paths = curated_paths("alice", "dev", &["staging"]);
     assert!(
         paths
@@ -239,11 +202,6 @@ fn curated_paths_covers_tenant_artifacts_when_others_present() {
 
 #[test]
 fn curated_paths_omits_self_from_other_lists() {
-    // When `tenant` == `dev` and `others` accidentally includes `dev`,
-    // we should not generate cross-tenant or tenant-artifact entries
-    // pointing at our own home / config. Pins the contract that
-    // callers can pass a tenant list without pre-filtering and doctor
-    // does the right thing.
     let paths = curated_paths("alice", "dev", &["dev", "staging"]);
     let self_referential = paths.iter().any(|(_, _, p)| {
         p == &PathBuf::from("/Users/dev")
@@ -257,19 +215,7 @@ fn curated_paths_omits_self_from_other_lists() {
     );
 }
 
-// ============================================================
-// Severity ordering — load-bearing for --strict
-// ============================================================
-
-// ============================================================
-// anchor_body_matches — byte-exact equality
-// ============================================================
-//
-// Pure-function comparator for doctor's anchor-body drift check.
-// Compares the on-disk anchor body against the profile-derived
-// `render_anchor` output. Locked at byte-exact: the render path is
-// deterministic, so any difference is real drift. Soften later
-// (e.g. trim trailing whitespace) only if false positives surface.
+// --- anchor_body_matches (byte-exact: the render is deterministic) ---
 
 #[test]
 fn anchor_body_matches_equal_strings_true() {
@@ -279,9 +225,6 @@ fn anchor_body_matches_equal_strings_true() {
 
 #[test]
 fn anchor_body_matches_extra_trailing_newline_false() {
-    // Byte-exact: trailing newline DOES count. Negative pin against
-    // a future "normalize trailing whitespace" softening that would
-    // also need to update this test deliberately.
     let actual = "block return inet from any to any\n";
     let expected = "block return inet from any to any\n\n";
     assert!(!anchor_body_matches(actual, expected));
@@ -289,14 +232,10 @@ fn anchor_body_matches_extra_trailing_newline_false() {
 
 #[test]
 fn anchor_body_matches_empty_strings_true() {
-    // Edge case: both empty (e.g. file truncated to zero AND render
-    // produced empty — implausible but the function shouldn't choke).
     assert!(anchor_body_matches("", ""));
 }
 
-// ============================================================
-// Finding::AnchorBodyDrift — Display + severity
-// ============================================================
+// --- Finding::AnchorBodyDrift ---
 
 #[test]
 fn finding_display_anchor_body_drift() {
@@ -318,15 +257,7 @@ fn finding_anchor_body_drift_severity_is_warning() {
     assert_eq!(f.severity(), Severity::Warning);
 }
 
-// ============================================================
-// Finding::InboundExposure / InboundPermissive — Display + severity
-// ============================================================
-//
-// The inbound loopback axis. `InboundExposure` is the steady
-// restricted-with-ports posture (Info: the declared ports are open by
-// intent, but reachable by host AND peer tenants — pf can't see the
-// initiator on shared 127.0.0.1). `InboundPermissive` is the temporary
-// all-ports widen (Warning: every loopback port is open).
+// --- Finding::InboundExposure / InboundPermissive ---
 
 #[test]
 fn finding_display_inbound_exposure_single_port() {
@@ -384,11 +315,7 @@ fn finding_inbound_permissive_severity_is_warning() {
     assert_eq!(f.severity(), Severity::Warning);
 }
 
-// ── classify_inbound_exposure — posture → finding ─────────────────────
-//
-// Detection composes the profile's declared ports with the observed
-// anchor's permissive flag. Permissive (widened) wins regardless of
-// declared ports; else declared ports → Info; else locked → None.
+// --- classify_inbound_exposure: permissive wins, else declared ports → Info, else None ---
 
 #[test]
 fn classify_inbound_permissive_wins_over_declared_ports() {
@@ -426,29 +353,14 @@ fn classify_inbound_restricted_with_ports_is_info() {
 
 #[test]
 fn classify_inbound_locked_is_no_finding() {
-    // Restricted + empty ports = locked = quiet. Nothing reachable, so
-    // nothing to surface.
     let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[], false);
     assert_eq!(f, None);
 }
 
-// ============================================================
-// Finding::guidance — per-variant multi-section text
-// ============================================================
-//
-// Byte-exact pins on the structured-guidance block each variant emits
-// for verbose-mode rendering. Tests both that the locked section
-// headers appear in the locked order and that tenant-name / var-name
-// substitution lands in every place the text references them. Sentence
-// case for headers, imperative voice for fixes, literal tenant name in
-// per-tenant variants.
+// --- Finding::guidance ---
 
 #[test]
 fn guidance_filesystem_exposure_returns_none() {
-    // FilesystemExposure intentionally has no guidance body — per-path-
-    // category text belongs with the future remediation surface, not
-    // the detection surface. `guidance()` returns None; Reporter
-    // renders the one-liner alone even in verbose mode.
     let f = Finding::FilesystemExposure {
         severity: Severity::Critical,
         tenant: TenantUserName::from("dev"),
@@ -610,9 +522,6 @@ Alternative
 
 #[test]
 fn guidance_pf_disabled_byte_form() {
-    // PfDisabled is host-wide; no tenant interpolation. "Why this
-    // matters" emphasizes the zero-isolation stake. No Alternative
-    // section (binary state — pf is either on or off).
     let f = Finding::PfDisabled;
     let expected = "Why this matters
   pf is globally disabled on this host. Every tenant has an anchor
@@ -644,10 +553,6 @@ Side-effects to know about
 
 #[test]
 fn guidance_env_leak_byte_form() {
-    // Alternative names the qualified-Defaults case (operators who
-    // already have a runas-qualified directive and are confused why
-    // doctor still nags). The Recommended fix is the unqualified
-    // form per the CLAUDE.md doctrine.
     let f = Finding::EnvLeak {
         var: "SSH_AUTH_SOCK".to_string(),
     };
@@ -695,10 +600,6 @@ Alternative
 
 #[test]
 fn guidance_touch_id_missing_byte_form() {
-    // Info-toned "why" framed as an OFFER (opt-in host prep), not a
-    // defect-fix: Recommended fix points at the `tenant setup` verb,
-    // and a distinct Alternative legitimizes declining. Dual-file copy
-    // names both /etc/pam.d/sudo and /etc/pam.d/sudo_local.
     let f = Finding::TouchIdMissing;
     let expected = "Why this matters
   Neither /etc/pam.d/sudo nor /etc/pam.d/sudo_local enables Touch ID for
@@ -735,16 +636,10 @@ Alternative
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
-// ============================================================
-// Severity ordering — load-bearing for --strict
-// ============================================================
+// --- Severity ordering (load-bearing for --strict) ---
 
 #[test]
 fn severity_ordering_critical_max() {
-    // --strict's exit-code logic uses `max()` across findings. Ord
-    // must place Critical at the top so a single critical in a list
-    // of warnings produces the exit-2 verdict. Info < Warning <
-    // Critical.
     assert!(Severity::Info < Severity::Warning);
     assert!(Severity::Warning < Severity::Critical);
     assert_eq!(
@@ -759,9 +654,7 @@ fn severity_ordering_critical_max() {
     );
 }
 
-// ============================================================
-// Finding::AclDrift — Display + severity
-// ============================================================
+// --- Finding::AclDrift ---
 
 #[test]
 fn finding_display_acl_drift() {
@@ -831,12 +724,7 @@ Alternative
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
-// ============================================================
-// Finding::CoworkAclDrift — Display + severity + guidance
-// ============================================================
-//
-// Distinct variant from AclDrift: the cowork dir is host-managed,
-// not share-declared, so the guidance narrative differs.
+// --- Finding::CoworkAclDrift ---
 
 #[test]
 fn finding_display_cowork_acl_drift() {
@@ -908,14 +796,7 @@ Alternative
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
-// ============================================================
-// Finding::CoworkDirAbsent — Display + severity + guidance
-// ============================================================
-//
-// Sibling variant to CoworkAclDrift covering the dir-doesn't-exist
-// case (rm'd externally, never provisioned for an older tenant).
-// Distinct variant because there's no ACL to grant if there's no
-// directory.
+// --- Finding::CoworkDirAbsent ---
 
 #[test]
 fn finding_display_cowork_dir_absent() {
@@ -978,12 +859,7 @@ Alternative
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
-// ============================================================
-// Finding::SymlinkDrift — Display + severity + guidance
-// ============================================================
-//
-// Three SymlinkActual sub-cases (Absent / WrongTarget / NotSymlink)
-// each get their own byte-form pin for Display + guidance.
+// --- Finding::SymlinkDrift ---
 
 #[test]
 fn finding_display_symlink_drift_absent() {
@@ -1159,9 +1035,7 @@ Alternative
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
-// ============================================================
-// Finding::HostNotInShareGroup — Display + severity + guidance
-// ============================================================
+// --- Finding::HostNotInShareGroup ---
 
 #[test]
 fn finding_display_host_not_in_share_group() {
@@ -1188,13 +1062,7 @@ fn finding_host_not_in_share_group_severity_is_warning() {
     assert_eq!(f.severity(), Severity::Warning);
 }
 
-// ============================================================
-// Finding::TenantKeychainAbsent — Display + severity + guidance
-// ============================================================
-//
-// Tenant's `tenant.keychain-db` is absent on disk. Warning-tier
-// because the tenant can still function for non-keychain operations;
-// the drift signals "OAuth-class apps will break".
+// --- Finding::TenantKeychainAbsent ---
 
 #[test]
 fn finding_display_tenant_keychain_absent() {
@@ -1260,9 +1128,7 @@ Alternative
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
-// ============================================================
-// Finding::StashAbsent — Display + severity + guidance
-// ============================================================
+// --- Finding::StashAbsent ---
 
 #[test]
 fn finding_display_stash_absent() {

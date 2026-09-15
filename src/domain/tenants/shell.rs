@@ -1,7 +1,3 @@
-//! Shell-verb error type and the `Tenants::shell` orchestrators.
-//! Wraps `ModeError` for the auto-narrow path and adds `NarrowFailed`
-//! for the command form's post-child reapply.
-
 use std::path::{Path, PathBuf};
 
 use crate::domain::reporter::Reporter;
@@ -14,18 +10,7 @@ use crate::{InboundLevel, ModeLevel};
 use super::reapply::{ReapplyPlan, ReapplyScope};
 use super::{ModeError, Tenants};
 
-/// Failure surface for `shell` (interactive + command forms).
-/// `NarrowFailed` is exercised only by the command form when the
-/// post-child narrow-on-finally reapply fails; the dispatcher emits
-/// a warning and propagates the child's exit code. `StashAbsent`
-/// fires when the operator-side keychain entry is missing (legacy
-/// tenants) — refuse-with-EX_USAGE because the operator needs to
-/// re-bootstrap (`tenant destroy && tenant create`). `UnlockFailed`
-/// fires on substrate failures of either the retrieval or unlock
-/// call — surfaces as EX_IOERR. The two `Directory*` variants are the
-/// `-d/--directory` pre-flight refusals (both EX_USAGE); a probe that
-/// fails to run at all is a substrate failure and rides `DirectoryProbe`
-/// at EX_IOERR.
+// TODO(smell): per-variant exit codes live only in dispatch; put them on the error type
 #[derive(Debug)]
 pub(crate) enum ShellError {
     Account(AccountError),
@@ -51,18 +36,9 @@ pub(crate) enum ShellError {
     },
 }
 
-/// Resolve a `-d/--directory` value against the TENANT's filesystem.
-/// Three accepted shapes: absolute ⇒ literal; `$HOME`-prefix ⇒ the
-/// tenant's home (the same prefix-only contract as a share's
-/// `tenant_path`); anything else ⇒ relative to the tenant's home. The
-/// relative shape is the primary UX — it sidesteps the quoting footgun
-/// where an unquoted `$HOME` expands to the OPERATOR's home before clap
-/// ever sees it. Mid-string `$HOME` refuses rather than passing through
-/// as a surprising literal.
-///
-/// Deliberately NOT taught to `expand_tenant_path`: shares' template
-/// semantics flow through that helper too, and a relative share
-/// `tenant_path` must keep its current literal behavior.
+/// Relative paths resolve against the tenant home, the primary UX: an unquoted `$HOME`
+/// expands to the OPERATOR's home before clap sees it. Not folded into
+/// `expand_tenant_path`: a relative share `tenant_path` must stay literal.
 pub(crate) fn resolve_shell_directory(
     name: &TenantUserName,
     raw: &str,
@@ -77,23 +53,12 @@ pub(crate) fn resolve_shell_directory(
     } else if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {
-        // Relative ⇒ tenant home. Routed through `expand_tenant_path` so
-        // `/Users/<name>` has exactly one source.
         expand_tenant_path(name.as_str(), &format!("$HOME/{raw}"))
     };
-    // Any surviving `$` refuses — checked on the RESOLVED path, not the
-    // raw input, so it also catches a `$` trailing a legal `$HOME/`
-    // prefix (`$HOME/projects/$scratch`), which an input-side check
-    // would return past. `sudo -i` escapes its command "except
-    // alphanumerics, underscores, hyphens, and dollar signs", so a `$`
-    // survives into the tenant's login shell and expands there — even
-    // inside the wrapper's single quotes, which sudo has already
-    // neutralized. An unset variable would silently truncate the path
-    // and run the operator's command in the WRONG directory at exit 0;
-    // a set one would splice its value into shell code. Quoting cannot
-    // fix this across sudo's re-parse, so the shape is refused instead.
-    // Never fires spuriously: the tenant-name charset can't introduce a
-    // `$`, so the only source is the operator's own value.
+    // Checked on the RESOLVED path so `$HOME/x/$y` is caught too. `sudo -i` leaves `$`
+    // unescaped, so it expands in the tenant's login shell even inside the wrapper's
+    // quotes: an unset var runs the command in the wrong dir at exit 0, a set one splices
+    // into shell code. Quoting can't survive sudo's re-parse, so refuse.
     if resolved.to_string_lossy().contains('$') {
         return Err(ShellError::DirectoryInvalid {
             raw: raw.to_string(),
@@ -104,14 +69,8 @@ pub(crate) fn resolve_shell_directory(
 }
 
 impl<'a> Tenants<'a> {
-    /// Shell-verb entry: empty argv → interactive; non-empty → command.
-    /// `inbound` controls the command form's inbound-loopback axis;
-    /// the interactive form ignores it (it always auto-narrows inbound
-    /// to restricted, and `--inbound` is parse-rejected without argv).
-    /// `directory` is the raw `-d/--directory` value, valid on BOTH
-    /// forms; it resolves and pre-flights here — before the branch, so
-    /// nothing widens, unlocks or reapplies on either path until the
-    /// directory is known-good (the `[[shares]]` pre-flight doctrine).
+    /// `directory` pre-flights before either form, so nothing widens, unlocks or reapplies
+    /// until it's known-good.
     // Eight distinct-typed params read at one call site each; bundling
     // them would add a struct that exists only to satisfy the lint.
     #[allow(clippy::too_many_arguments)]
@@ -132,21 +91,8 @@ impl<'a> Tenants<'a> {
         self.shell_command(name, host, argv, mode, inbound, dir.as_deref(), reporter)
     }
 
-    /// Resolve + probe the requested working directory. A path that
-    /// doesn't resolve (through symlinks) to a directory the tenant can
-    /// enter refuses at EX_USAGE naming the RESOLVED path — the operator
-    /// typed `projects/foo`, so the error has to say
-    /// `/Users/<name>/projects/foo` for the fix to be obvious. No `-d` ⇒
-    /// no resolution, no probe.
-    ///
-    /// The probe is gated on a live sudo session: `sudo -n` can't
-    /// authenticate on a cold timestamp, so the probe would fail and
-    /// refuse the operator's first command in every fresh terminal.
-    /// Uncached ⇒ skip the pre-flight and let the entry reapply prompt as
-    /// usual; an unusable dir then surfaces as the wrapper's own `cd`
-    /// failure. A share-bearing tenant has already authenticated at plan
-    /// build (`build_share_ops`) by the time this runs, so the gate only
-    /// stays cold for share-less profiles.
+    /// The probe needs a warm sudo cache: `sudo -n` fails cold and would refuse the first
+    /// command in every fresh terminal. Cold ⇒ skip; a bad dir then fails at `cd`.
     fn prepare_shell_directory(
         &self,
         name: &TenantUserName,
@@ -166,9 +112,6 @@ impl<'a> Tenants<'a> {
         }
     }
 
-    /// Light reapply (PF + host membership + tenant-side symlinks),
-    /// then unlock the keychain and log in. Inbound auto-narrows to
-    /// restricted (steady-state `None` ⇒ profile-declared ports).
     fn shell_interactive(
         &self,
         name: &TenantUserName,
@@ -196,20 +139,6 @@ impl<'a> Tenants<'a> {
         self.machine.login(name, dir).map_err(ShellError::Account)
     }
 
-    /// Command-form shell. Build + execute the entry reapply at the
-    /// requested egress tier + inbound posture, run the child, then
-    /// reapply at the steady posture (egress runtime + inbound
-    /// restricted) on completion. The narrow is skipped only when
-    /// NEITHER axis was widened (`mode == Runtime && inbound ==
-    /// Restricted`), since a second reapply would write the same bytes
-    /// for zero on-disk delta. Failure composition:
-    ///
-    /// - widen-build-failure → `Mode`, no narrow (nothing to undo).
-    /// - widen-execute-failure → best-effort narrow inline, then `Mode`.
-    /// - child-spawn-failure → `Account`, no narrow (entry reapply
-    ///   already reflects the requested posture).
-    /// - child-ran + narrow-failed → `NarrowFailed` carrying both the
-    ///   child exit and the narrow error; child exit propagates.
     #[allow(clippy::too_many_arguments)]
     fn shell_command(
         &self,
@@ -228,9 +157,7 @@ impl<'a> Tenants<'a> {
             .map_err(ShellError::Mode)?;
 
         if let Err(entry_err) = self.execute_reapply_plan(&entry_plan, reporter) {
-            // Best-effort narrow (both axes); drop any secondary failure
-            // on the floor — the operator's primary signal is the entry
-            // failure.
+            // Best-effort: the entry failure is the operator's signal, so a narrow error is dropped.
             let _ = self
                 .build_reapply_plan(
                     name,
@@ -247,9 +174,6 @@ impl<'a> Tenants<'a> {
 
         let child_result = self.machine.exec_as_tenant(name, argv, dir);
 
-        // Narrow when EITHER axis widened. Runtime egress + restricted
-        // inbound is the steady posture; a no-widen call skips the
-        // redundant second reapply.
         let widened = mode == ModeLevel::Install || inbound == InboundLevel::Permissive;
         let narrow_result = if !widened {
             Ok(())
@@ -274,22 +198,9 @@ impl<'a> Tenants<'a> {
         }
     }
 
-    /// Shared pre-spawn step (both interactive + command forms): retrieve
-    /// the operator-stashed password, unlock the tenant's
-    /// `tenant.keychain-db`, emit the `✓` line. Already-unlocked is a
-    /// no-op at the substrate (exit 0 either way); the ✓ still emits
-    /// so a silent regression where the pass skipped would be visible.
-    /// The dry-run posture lives in the `DryRunHostMachine` carve-outs:
-    /// `find_stashed_password` returns `NotFound` and the dispatch arm
-    /// surfaces the refusal frame — matches the production refusal
-    /// shape so a dry-run preview mirrors what a real run would do
-    /// against a legacy tenant.
-    ///
-    /// The unlock is unconditional by design — do NOT add a locked-state
-    /// pre-probe (e.g. a doctor `TenantKeychainLocked` finding):
-    /// `security show-keychain-info` via `sudo -iu` triggers a
-    /// SecurityAgent GUI prompt on Darwin 25.x, which hangs a headless
-    /// run.
+    // TODO(smell): dry-run shell always refuses (DryRunHostMachine stash lookup ⇒ NotFound, exit 64); a preview shouldn't manufacture a refusal
+    /// Unconditional by design, no locked-state pre-probe: `security show-keychain-info` via
+    /// `sudo -iu` raises a SecurityAgent GUI prompt on Darwin 25.x and hangs headless runs.
     fn unlock_tenant_keychain(
         &self,
         name: &TenantUserName,

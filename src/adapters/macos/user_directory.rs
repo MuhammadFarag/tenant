@@ -6,22 +6,14 @@ use crate::domain::{
     GroupId, GroupName, HostUserDirectory, TenantUserName, UserDirectoryError, UserId,
 };
 
-/// macOS `HostUserDirectory` driver: per-call dscl. Symmetric with
-/// `MacosHostMachine` — a ZST whose trait methods own argv. No eager
-/// snapshot, so a tenant created between two verb steps is visible to
-/// the second step (and an externally-deleted tenant won't masquerade
-/// as still-present). The tradeoff is N+1 dscl spawns per verb;
-/// acceptable for an interactive admin CLI.
+/// Per-call dscl, no snapshot: host changes between verb steps stay visible,
+/// at the cost of N+1 dscl spawns.
 pub struct MacosUserDirectory;
 
 impl HostUserDirectory for MacosUserDirectory {
     fn used_uids(&self) -> Result<Vec<UserId>, UserDirectoryError> {
-        // Fold-to-lowest on duplicate name rows: hand-edited OD state
-        // could emit duplicates, and the lowest UID is the safer pick
-        // (more likely to match a system account and trip the floor
-        // refusal). Negative IDs filtered out so `nobody`-class
-        // accounts can't masquerade as tenant-range IDs or perturb
-        // allocator state.
+        // Duplicate name rows (hand-edited OD state) fold to the lowest UID — the
+        // safer pick, more likely to trip the floor refusal.
         let output = run_dscl(&[".", "-list", "/Users", "UniqueID"])?;
         let mut by_name: HashMap<String, UserId> = HashMap::new();
         for line in output.lines() {
@@ -76,9 +68,7 @@ impl HostUserDirectory for MacosUserDirectory {
                 stderr: stderr.into_owned(),
             });
         }
-        // `dscl -read /Users/<name> UniqueID` prints `UniqueID: <n>`.
-        // The trailing token is the UID; non-positive values trip the
-        // same negative-UID filter the bulk path enforces.
+        // Prints `UniqueID: <n>`.
         let stdout = String::from_utf8_lossy(&output.stdout);
         let id = stdout
             .split_whitespace()
@@ -90,11 +80,9 @@ impl HostUserDirectory for MacosUserDirectory {
         }
     }
 
+    // TODO(smell): fold-to-lowest loop is copied from used_uids (and used_gids) — extract
     fn tenant_names(&self) -> Result<Vec<TenantUserName>, UserDirectoryError> {
-        // Mirror `used_uids` (fold-to-lowest + negative filter), then
-        // keep only names whose UID is in the tenant range. Stable
-        // alphabetical order keeps doctor's all-tenants diff meaningful
-        // across runs.
+        // Sorted so doctor's all-tenants output is stable across runs.
         let output = run_dscl(&[".", "-list", "/Users", "UniqueID"])?;
         let mut by_name: HashMap<String, UserId> = HashMap::new();
         for line in output.lines() {
@@ -115,13 +103,8 @@ impl HostUserDirectory for MacosUserDirectory {
     }
 }
 
-/// Probe a dscl path for existence. Mapping: exit 0 ⇒ present,
-/// `eDSRecordNotFound` ⇒ absent, anything else ⇒ Err. We pattern-match
-/// the dscl error code rather than treating every nonzero as "absent"
-/// so a real dscl breakage (permissions, daemon hung) surfaces as
-/// `UserDirectoryError` instead of silently reporting "absent" — and the
-/// conflict-probe / eligibility frames already exist to carry that
-/// surface to the operator.
+/// Only `eDSRecordNotFound` means absent; any other failure is an error, so a
+/// broken dscl (permissions, hung daemon) never reads as "absent".
 fn record_exists(path: &str) -> Result<bool, UserDirectoryError> {
     let output = match Command::new("dscl").args([".", "-read", path]).output() {
         Ok(o) => o,
@@ -148,9 +131,7 @@ fn is_record_not_found(stderr: &str) -> bool {
 }
 
 fn parse_id_line(line: &str) -> Option<(String, u32)> {
-    // Shared by `/Users UniqueID` and `/Groups PrimaryGroupID` — both
-    // emit "name<whitespace>id". Negative IDs (e.g. `nobody`) are
-    // dropped.
+    // Negative IDs (`nobody`) dropped: cast to u32 they'd land in the tenant range.
     let mut parts = line.split_whitespace();
     let name = parts.next()?;
     let id = parts.next()?.parse::<i32>().ok()?;

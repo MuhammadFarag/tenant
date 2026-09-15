@@ -1,19 +1,8 @@
-//! Combinatorial unit tests for `doctor::pf_rule_presence_check` —
-//! the structural-presence check on the kernel's `tenant-<name>`
-//! anchor.
-//!
-//! Justification (per CLAUDE.md test discipline): the check's input
-//! space is combinatorial over pfctl output shape (empty / pass-only
-//! / block-only / both, plus leading whitespace, commented lines,
-//! and accidental substring matches like `# pass-through note`) and
-//! per-shape E2E coverage would be redundant. The function is pure
-//! so unit-level testing is the right tool.
+//! Unit tests for `doctor::pf_rule_presence_check`: combinatorial over pfctl output shapes.
 
 use tenant::doctor::{Finding, pf_rule_presence_check};
 
-// ============================================================
-// Both rules present → no findings
-// ============================================================
+// --- Both rules present ---
 
 #[test]
 fn both_rules_present_no_findings() {
@@ -28,8 +17,6 @@ fn both_rules_present_no_findings() {
 
 #[test]
 fn rules_in_reversed_order_still_pass() {
-    // pfctl output can list pass / block in either order — the
-    // structural check is order-insensitive.
     let rules = "pass inet from 192.0.2.1 to <allowed> keep state\n\
                  block return inet from any to any\n";
     let findings = pf_rule_presence_check(rules, "dev");
@@ -38,8 +25,6 @@ fn rules_in_reversed_order_still_pass() {
 
 #[test]
 fn leading_whitespace_tolerated() {
-    // Some pfctl output formats indent rules; the parser strips
-    // leading whitespace before the `pass`/`block` prefix check.
     let rules = "    block return inet from any to any\n\
                  \tpass inet from 192.0.2.1 to <allowed> keep state\n";
     let findings = pf_rule_presence_check(rules, "dev");
@@ -51,9 +36,6 @@ fn leading_whitespace_tolerated() {
 
 #[test]
 fn multiple_pass_rules_one_block_is_fine() {
-    // The anchor's runtime allowlist tier produces many `pass`
-    // entries (one per allowed host); only one `block return`
-    // catch-all. Test pins that "many pass + one block" is happy.
     let rules = "block return inet from any to any\n\
                  pass inet from 10.0.0.1 to <allowed>\n\
                  pass inet from 10.0.0.2 to <allowed>\n\
@@ -62,9 +44,7 @@ fn multiple_pass_rules_one_block_is_fine() {
     assert!(findings.is_empty(), "got {findings:?}");
 }
 
-// ============================================================
-// One rule class missing → one finding
-// ============================================================
+// --- One rule class missing ---
 
 #[test]
 fn missing_pass_emits_one_finding_naming_pass() {
@@ -100,16 +80,12 @@ fn missing_block_emits_one_finding_naming_block() {
     }
 }
 
-// ============================================================
-// Both rule classes missing → two findings, order locked
-// ============================================================
+// --- Both rule classes missing ---
 
 #[test]
 fn empty_input_emits_two_findings_pass_then_block() {
     let findings = pf_rule_presence_check("", "dev");
     assert_eq!(findings.len(), 2);
-    // Order is locked: pass first, then block. Tests downstream
-    // may depend on the operator reading them in this order.
     match (&findings[0], &findings[1]) {
         (Finding::PfRuleDrift { detail: d1, .. }, Finding::PfRuleDrift { detail: d2, .. }) => {
             assert!(d1.contains("pass"), "first detail names pass; got {d1:?}");
@@ -128,13 +104,10 @@ fn whitespace_only_input_emits_two_findings() {
     assert_eq!(findings.len(), 2);
 }
 
-// ============================================================
-// Negative pins — substring / comment / wrong-prefix don't count
-// ============================================================
+// --- Substring / comment / wrong prefix don't count ---
 
 #[test]
 fn commented_pass_rule_does_not_count() {
-    // A `#`-prefixed line that mentions pass is not a real rule.
     let rules = "# pass-through note for future operator\n\
                  block return inet from any to any\n";
     let findings = pf_rule_presence_check(rules, "dev");
@@ -152,10 +125,6 @@ fn commented_pass_rule_does_not_count() {
 
 #[test]
 fn substring_pass_in_other_word_does_not_count() {
-    // A line containing `passport` or `bypass` substring must NOT
-    // trigger a happy match. The check uses prefix-match on
-    // `pass ` (with trailing space) — `passport` doesn't start with
-    // `pass ` (space).
     let rules = "block return inet from any to any\n\
                  # bypass logic for keepalives — see anchor file\n\
                  # passport-control IP ranges below\n";
@@ -169,8 +138,6 @@ fn substring_pass_in_other_word_does_not_count() {
 
 #[test]
 fn tenant_name_propagates_into_finding() {
-    // Pin: the function uses the passed-in tenant name in every
-    // emitted finding, not a hardcoded constant.
     let findings = pf_rule_presence_check("", "staging");
     for f in &findings {
         match f {

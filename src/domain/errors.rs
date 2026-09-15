@@ -7,17 +7,8 @@ use super::ops::PathKind;
 #[derive(Debug)]
 pub enum AccountError {
     Spawn(io::Error),
-    NonZero {
-        code: i32,
-        stderr: String,
-    },
-    /// The cowork-dir pre-flight saw the target path already occupied
-    /// by something other than a directory we can re-own. Operator
-    /// must remove the existing entry before re-running.
-    CoworkDirOccupied {
-        path: PathBuf,
-        kind: PathKind,
-    },
+    NonZero { code: i32, stderr: String },
+    CoworkDirOccupied { path: PathBuf, kind: PathKind },
 }
 
 impl fmt::Display for AccountError {
@@ -38,8 +29,7 @@ impl fmt::Display for AccountError {
                         format!("a symlink to {}", target.display())
                     }
                     PathKind::Other => "a non-directory entry".to_string(),
-                    // Dir + Absent never reach the refuse branch; spelled
-                    // out for completeness if a probe misclassifies.
+                    // Unreachable unless a probe misclassifies.
                     PathKind::Dir => "a directory".to_string(),
                     PathKind::Absent => "absent".to_string(),
                 };
@@ -54,10 +44,6 @@ impl fmt::Display for AccountError {
     }
 }
 
-/// Failure surface for `HostUserDirectory` queries. Mirrors the substrate-
-/// shaped convention used by the other domain error types. The macOS
-/// adapter runs per-call dscl on every trait method, so any of them
-/// can spawn-fail or exit nonzero on a substrate-level error.
 #[derive(Debug)]
 pub enum UserDirectoryError {
     Spawn(io::Error),
@@ -130,10 +116,8 @@ impl fmt::Display for ProbeError {
     }
 }
 
-/// `RestoreFailed` is the recovery-of-recovery case: a reload failure
-/// triggered a config-restore that itself failed, leaving the host with a
-/// half-edited firewall config. Display names the backup path and the
-/// manual recovery command.
+/// `RestoreFailed`: a failed reload's pf.conf restore itself failed, leaving
+/// a half-edited config.
 #[derive(Debug)]
 pub enum FirewallError {
     Spawn(io::Error),
@@ -188,10 +172,6 @@ impl fmt::Display for AclError {
     }
 }
 
-/// Failure surface for `security`-driven keychain operations.
-/// `NotFound` is a distinct variant so `destroy` can treat an absent
-/// stash on a tenant created before keychain bootstrap landed as
-/// success rather than an IO failure.
 #[derive(Debug)]
 pub enum KeychainError {
     Spawn(io::Error),
@@ -199,9 +179,8 @@ pub enum KeychainError {
         code: i32,
         stderr: String,
     },
-    /// Stashed password absent in the operator's keychain. Destroy
-    /// converges on this; the `shell` / `bootstrap` unlock refuses on
-    /// it.
+    /// Stash absent in the operator keychain: destroy converges, `shell` /
+    /// `bootstrap` refuse.
     NotFound,
 }
 

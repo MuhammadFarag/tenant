@@ -1,21 +1,11 @@
-//! Combinatorial coverage on `firewall::render_anchor`. Pinning the
-//! anchor body shape directly because the inbound/egress section shapes
-//! (empty hosts vs populated, ordering, the three inbound forms, and
-//! structural invariants like the egress section staying constant across
-//! inbound postures) are content-shape facts awkward to drive through the
-//! CLI surface. Same in-tree precedent and justification as
-//! `tests/macos_host_machine.rs`'s per-variant pins.
+//! Unit tests: `firewall::render_anchor` body shapes are combinatorial and awkward via the CLI.
 
 use tenant::firewall::{EgressHost, InboundRules, anchor_is_permissive, render_anchor};
 
-// Locked (restricted + empty ports) is the migration default — every
-// non-inbound-aware call site renders this. Keep it close to hand.
 fn locked() -> InboundRules {
     InboundRules::Restricted(vec![])
 }
 
-// Bare hosts (TCP 443 only) — what a pre-ports bare-string profile
-// resolves to. The default `<allowed>` group.
 fn bare(hosts: &[&str]) -> Vec<EgressHost> {
     hosts
         .iter()
@@ -54,9 +44,6 @@ fn render_with_one_host_uses_backslash_continuation() {
 
 #[test]
 fn render_with_multiple_hosts_preserves_input_order() {
-    // Operator groups hosts in profile.toml in a meaningful order (e.g.
-    // provider, ecosystem). The rendered anchor must respect that order
-    // so diffs against a hand-reviewed profile stay readable.
     let body = render_anchor(
         "dev",
         &bare(&["api.anthropic.com", "github.com", "crates.io"]),
@@ -75,11 +62,7 @@ fn render_with_multiple_hosts_preserves_input_order() {
 
 #[test]
 fn render_emits_loopback_egress_pass_before_catchall_block() {
-    // Load-bearing invariant: without the lo0 egress pass-before-block,
-    // tenants can't reach localhost-bound services (host's MySQL, Redis,
-    // dev-mode web servers). PF rules match all interfaces by default
-    // including lo0, so the catchall block would otherwise drop loopback
-    // egress too.
+    // Without it the catchall block also drops loopback egress (host-run MySQL, Redis).
     let body = render_anchor("dev", &[], locked());
     let loopback_idx = body
         .find("pass out quick on lo0 proto tcp from any to any user dev no state")
@@ -96,10 +79,6 @@ fn render_emits_loopback_egress_pass_before_catchall_block() {
 
 #[test]
 fn render_block_rule_scoped_to_tenant_via_user_keyword() {
-    // The catchall block must carry the tenant's user keyword so that
-    // tenant traffic is what gets dropped — not the host's traffic, not
-    // every UID's traffic. The user keyword binds PF's match to the
-    // socket's owning UID.
     let body = render_anchor("smoketest", &[], locked());
     assert!(
         body.contains("block out quick proto { tcp udp } from any to any user smoketest"),
@@ -111,9 +90,6 @@ fn render_block_rule_scoped_to_tenant_via_user_keyword() {
 
 #[test]
 fn render_locked_omits_inbound_pass() {
-    // Restricted + empty ports = locked: no inbound pass at all, just the
-    // block-in and the no-state egress pass. A locked tenant accepts no
-    // loopback inbound from anyone (not even itself on its own ports).
     let body = render_anchor("dev", &[], InboundRules::Restricted(vec![]));
     assert!(
         !body.contains("pass in quick on lo0"),
@@ -142,8 +118,6 @@ fn render_restricted_single_port_emits_bare_port() {
 
 #[test]
 fn render_restricted_multi_port_uses_pf_list_in_declared_order() {
-    // Operator declares ports in a meaningful order; preserve it so the
-    // rendered anchor diffs cleanly against the profile.
     let body = render_anchor("dev", &[], InboundRules::Restricted(vec![8080, 3000]));
     assert!(
         body.contains(
@@ -155,9 +129,7 @@ fn render_restricted_multi_port_uses_pf_list_in_declared_order() {
 
 #[test]
 fn render_restricted_with_ports_orders_pass_in_before_block_in() {
-    // The inbound pass must precede the block-in (pf first-match-wins via
-    // quick): otherwise the block-in would drop the declared-port SYN
-    // before the pass could match it.
+    // `quick` is first-match-wins: block-in first would drop the declared-port SYN.
     let body = render_anchor("dev", &[], InboundRules::Restricted(vec![3000]));
     let pass_idx = body
         .find("pass in quick on lo0 proto tcp from any to any port 3000 user dev no state")
@@ -173,8 +145,6 @@ fn render_restricted_with_ports_orders_pass_in_before_block_in() {
 
 #[test]
 fn render_permissive_collapses_inbound_to_single_pass() {
-    // Permissive replaces the whole inbound section with one all-ports
-    // pass; no block-in, no separate egress line.
     let body = render_anchor("dev", &[], InboundRules::Permissive);
     assert!(
         body.contains("pass quick on lo0 proto tcp from any to any user dev no state\n"),
@@ -192,8 +162,6 @@ fn render_permissive_collapses_inbound_to_single_pass() {
 
 #[test]
 fn render_egress_section_constant_across_inbound_postures() {
-    // Negative pin: the egress allowlist gate + catchall block are
-    // inbound-axis-independent. Only the loopback section changes.
     let egress = "pass out quick proto tcp from any to <allowed> port 443 user dev\n\
                   block out quick proto { tcp udp } from any to any user dev\n";
     for inbound in [
@@ -224,16 +192,7 @@ fn render_is_deterministic() {
     assert_eq!(a, b, "render_anchor must be deterministic");
 }
 
-// ============================================================
-// anchor_is_permissive — structural detection of a widened anchor
-// ============================================================
-//
-// Doctor reads the on-disk anchor body to learn the CURRENT inbound
-// posture (no state file). A permissive anchor carries the single
-// `pass quick on lo0 … no state` line (no `in`/`out` keyword); restricted
-// and locked anchors never do. Detection is structural — the renderer is
-// deterministic, but a hand-edit could re-order lines, so match on the
-// permissive line's presence, not byte-exact.
+// --- anchor_is_permissive ---
 
 #[test]
 fn anchor_is_permissive_true_for_permissive_render() {
@@ -262,20 +221,11 @@ fn anchor_is_permissive_false_for_restricted_with_ports() {
     );
 }
 
-// ── per-host egress ports ────────────────────────────────────────────
-//
-// The renderer groups hosts by their verbatim port list, one table + one
-// pass rule per group. The `[443]` DEFAULT group renders first, always,
-// as today's `<allowed>` table + `port 443` rule — that is the
-// byte-identity gate: any bare-only / empty profile must render exactly
-// as it did before per-host ports existed.
+// --- per-host egress ports ---
 
 #[test]
 fn render_bare_only_populated_is_byte_identical_to_pre_ports_render() {
-    // REGRESSION GATE: a bare-only profile (every existing profile) must
-    // render byte-for-byte the pre-ports shape. `anchor_body_matches` is a
-    // byte-exact doctor check — any drift here flags every existing tenant
-    // as drifted after upgrade.
+    // Byte-exact: `anchor_body_matches` would flag every existing tenant as drifted.
     let body = render_anchor("dev", &bare(&["github.com", "api.anthropic.com"]), locked());
     assert_eq!(
         body,
@@ -296,10 +246,7 @@ fn render_bare_only_populated_is_byte_identical_to_pre_ports_render() {
 
 #[test]
 fn render_bare_only_empty_is_byte_identical_to_pre_ports_render() {
-    // The empty-hosts arm of the gate: `table <allowed> persist { }` +
-    // the `port 443` rule, unchanged. (This is what the dry-run
-    // placeholder renders — it must keep matching a parsed default
-    // profile.)
+    // Also the dry-run placeholder render; must keep matching a parsed default profile.
     let body = render_anchor("dev", &[], locked());
     assert_eq!(
         body,
@@ -317,10 +264,6 @@ fn render_bare_only_empty_is_byte_identical_to_pre_ports_render() {
 
 #[test]
 fn render_mixed_entries_orders_tables_and_rules() {
-    // The git-over-ssh case: a default-group host and a `[443, 22]`
-    // host. Pins table order (default first, then group in
-    // first-occurrence order), table naming (`allowed_443_22`), and rule
-    // order (default 443 rule, then the group rule, then the catchall).
     let hosts = vec![
         EgressHost {
             host: "api.anthropic.com".to_string(),
@@ -354,8 +297,6 @@ fn render_mixed_entries_orders_tables_and_rules() {
 
 #[test]
 fn render_same_nondefault_ports_share_one_table() {
-    // Two hosts with an identical non-default port list collapse into one
-    // group / one table / one rule.
     let hosts = vec![
         EgressHost {
             host: "git.example.com".to_string(),
@@ -382,9 +323,6 @@ fn render_same_nondefault_ports_share_one_table() {
 
 #[test]
 fn render_port_order_makes_distinct_groups() {
-    // Group key is the ports list VERBATIM: `[22, 443]` and `[443, 22]`
-    // are distinct groups with distinct tables — deterministic and
-    // documented on `render_anchor`.
     let hosts = vec![
         EgressHost {
             host: "a.example".to_string(),
@@ -408,11 +346,7 @@ fn render_port_order_makes_distinct_groups() {
 
 #[test]
 fn render_single_nondefault_port_renders_bare() {
-    // One host, one non-default port → table `<allowed_993>`, rule with
-    // a bare `port 993` (no list braces). Byte-exact so it ALSO pins
-    // the no-default-hosts edge: the default `<allowed>` table still
-    // renders (empty `{ }`) and the default `port 443` rule still
-    // emits, ahead of the group's.
+    // Also pins that the empty default `<allowed>` table and 443 rule still render first.
     let hosts = vec![EgressHost {
         host: "mail.example.com".to_string(),
         ports: vec![993],

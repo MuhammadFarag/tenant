@@ -1,7 +1,4 @@
-//! Combinatorial pin on `src/ansi.rs` color helpers + box renderers.
-//! Justified as a unit-test file because the module is a pure function
-//! library (no I/O) and its state space is combinatorial — same pattern
-//! as `firewall_render.rs` and `doctor.rs`.
+//! Unit tests: `ansi` is a pure helper library with a combinatorial state space.
 
 use tenant::ansi;
 
@@ -39,8 +36,6 @@ fn dim_wraps_with_dim_esc_and_reset() {
 
 #[test]
 fn empty_input_still_yields_esc_pair() {
-    // Edge case — wrap-empty must still emit the reset so a following
-    // string isn't accidentally colored.
     assert_eq!(ansi::red(""), "\x1b[31m\x1b[0m");
 }
 
@@ -48,18 +43,14 @@ fn empty_input_still_yields_esc_pair() {
 
 #[test]
 fn rule_renders_title_with_three_leading_dashes_and_pad_to_width() {
-    // ─── Creating tenant 'devtest' ────────...─── (padded to 80)
     let out = ansi::rule("Creating tenant 'devtest'", 80);
     assert!(out.starts_with("─── Creating tenant 'devtest' ───"));
-    // Width in chars (not bytes — each `─` is 3 bytes in UTF-8).
     let chars: usize = out.chars().count();
     assert_eq!(chars, 80, "rule should pad to width 80, got {chars}");
 }
 
 #[test]
 fn rule_with_short_width_still_renders_full_title() {
-    // Width smaller than the title should still emit the full title;
-    // no truncation. Trailing dashes vanish or become a single trailer.
     let out = ansi::rule("Creating tenant 'devtest'", 10);
     assert!(out.contains("Creating tenant 'devtest'"));
 }
@@ -69,22 +60,18 @@ fn rule_with_short_width_still_renders_full_title() {
 #[test]
 fn panel_renders_rounded_corners_and_pipe_borders() {
     let out = ansi::panel("ERROR", "first line\nsecond line", 40);
-    // Top-left corner.
     assert!(
         out.starts_with("╭"),
         "panel must start with rounded top-left ╭, got: {out}",
     );
-    // Title appears in first line.
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].contains("ERROR"), "first line: {}", lines[0]);
-    // Body lines wrapped with │ ... │.
     let body_lines: Vec<&&str> = lines.iter().filter(|l| l.starts_with("│")).collect();
     assert_eq!(
         body_lines.len(),
         2,
         "expected 2 body lines, got {body_lines:?}"
     );
-    // Last line is the bottom border with ╰.
     let last = lines.last().expect("panel must have at least one line");
     assert!(
         last.starts_with("╰"),

@@ -6,18 +6,9 @@ use tenant::domain::{
     GroupId, GroupName, HostUserDirectory, TenantUserName, UserDirectoryError, UserId,
 };
 
-/// Test substitute for `HostUserDirectory`. Each `fail_*` field is a queue
-/// of pending per-call outcomes: every call to the matching trait method
-/// pops the front of the queue. `Some(err)` returns `Err(err)`,
-/// `None` falls through to the snapshot lookup, and an empty queue
-/// also falls through. The Some/None queue shape (rather than a flat
-/// `Option<UserDirectoryError>`) is load-bearing for dispatch frames that
-/// fire on the SECOND call to a method — e.g. `destroy_uid_lookup_failed`
-/// fires only after `destroy_eligibility` has already consumed the
-/// first `uid_for` call, so the test queues `[None, Some(err)]` to
-/// skip the eligibility call and fail the dispatch lookup. Empty
-/// default queues keep the existing `..Default::default()` struct
-/// literals working unchanged.
+/// Each `fail_*` queue pops once per call: `Some(err)` fails that call; `None` or an empty
+/// queue falls through to the snapshot. `[None, Some(err)]` fails the SECOND call (e.g. a
+/// dispatch lookup after eligibility consumed the first).
 #[derive(Default)]
 pub struct StubUserDirectory {
     pub uid_by_name: HashMap<String, UserId>,

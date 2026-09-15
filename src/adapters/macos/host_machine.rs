@@ -1,6 +1,3 @@
-//! Production `HostMachine` substrate — macOS tool argv + XDG-style profile
-//! path convention.
-
 use std::env;
 use std::fs;
 use std::io;
@@ -18,26 +15,15 @@ use crate::domain::{
 use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
-/// `/etc/pam.d/sudo` — the system PAM stack for sudo. On modern macOS it
-/// `include`s `sudo_local` as the first directive of its auth stack;
-/// tenant never edits this file (OS updates overwrite it), only reads it
-/// for detection.
+/// Read-only: OS updates overwrite it. Customizations go in `sudo_local`, which it includes first.
 const PAM_SUDO: &str = "/etc/pam.d/sudo";
 
-/// `/etc/pam.d/sudo_local` — the OS-update-safe customization file
-/// `/etc/pam.d/sudo` includes. The Touch-ID directive lands here.
 const PAM_SUDO_LOCAL: &str = "/etc/pam.d/sudo_local";
 
-/// Fixed backup path written before `setup` mutates `sudo_local`.
-/// Parallels `PF_CONF_BACKUP` — deterministic, overwritten each apply.
+/// Overwritten on each apply.
 const PAM_SUDO_LOCAL_BACKUP: &str = "/etc/pam.d/sudo_local.tenant-backup";
 
-/// The canonical Touch-ID-for-sudo directive. `sufficient` short-circuits
-/// the auth stack on a Touch ID hit and falls through to password on a
-/// miss. Single source so `describe_pam`'s echo and `execute_pam`'s
-/// appended bytes can't drift; `doctor::has_pam_tid` is whitespace-
-/// tolerant so the single-space form is detected identically to the
-/// tab-aligned form an operator might hand-write.
+/// `sufficient`: a Touch ID hit short-circuits the auth stack; a miss falls through to password.
 const PAM_TID_DIRECTIVE: &str = "auth sufficient pam_tid.so";
 
 pub struct MacosHostMachine;
@@ -60,11 +46,7 @@ impl HostMachine for MacosHostMachine {
             }
             AccountOp::LookupUserRecord { name } => format!("dscl . -read /Users/{name}"),
             AccountOp::DeleteUserRecord { name } => format!("sudo dscl . -delete /Users/{name}"),
-            // With a dir, the display is derived from the real argv so the
-            // two can't drift — the wrapper's script element is composed by
-            // the adapter, not typed by the operator, so it IS shell-exact.
-            // Without one, the historical hand-built display shape stands
-            // (argv joined verbatim, no escaping — the operator typed it).
+            // With a dir, render the real argv: the adapter-composed script is shell-exact.
             AccountOp::LoginAsUser { name, dir } => match dir {
                 Some(_) => render_argv(&account_argv(op)),
                 None => format!("sudo -iu {name}"),
@@ -93,11 +75,6 @@ impl HostMachine for MacosHostMachine {
                 group,
                 mode,
             } => {
-                // Four-call sequence; render one line per substrate
-                // invocation so the verbose plan + `$` echo each carry
-                // the complete mechanism. `acl_entry` matches the rw
-                // AclMode bits so the inheritable grant lines up
-                // byte-for-byte with a rw share's `chmod +a` entry.
                 let path = path.display();
                 let entry = acl_entry(group.as_str(), AclMode::Rw);
                 format!(
@@ -115,8 +92,7 @@ impl HostMachine for MacosHostMachine {
 
     fn execute_account(&self, op: &AccountOp) -> Result<(), AccountError> {
         if let AccountOp::RemoveHostFromShareGroup { group, host } = op {
-            // Idempotence: skip the `-d` edit when host isn't a current
-            // member. dseditgroup `-d` on a non-member exits non-zero.
+            // dseditgroup `-d` on a non-member exits non-zero.
             if !self.host_in_group(host, group)? {
                 return Ok(());
             }
@@ -128,13 +104,6 @@ impl HostMachine for MacosHostMachine {
             mode,
         } = op
         {
-            // Four substrate calls in sequence — every one is natively
-            // idempotent on macOS: `mkdir -p` no-ops on an existing
-            // directory, `chown` / `chmod` are state-setters, and the
-            // recursive `chmod -R +a` ACL pass picks up tenant-added
-            // children between reapply cycles. The rw bit list matches
-            // what `AclMode::Rw` produces, so the cowork dir's
-            // inheritable grant is byte-identical to a rw share's.
             return execute_ensure_cowork_dir(path, owner, group, *mode);
         }
         let argv = match op {
@@ -154,8 +123,7 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn login(&self, name: &TenantUserName, dir: Option<&Path>) -> Result<i32, AccountError> {
-        // Stdio inherits so sudo can prompt for the host password and the
-        // launched login shell can drive the controlling terminal.
+        // Inherited stdio: sudo may prompt, and the login shell drives the tty.
         let argv = account_argv(&AccountOp::LoginAsUser {
             name: name.clone(),
             dir: dir.map(Path::to_path_buf),
@@ -176,9 +144,7 @@ impl HostMachine for MacosHostMachine {
         argv: &[String],
         dir: Option<&Path>,
     ) -> Result<i32, AccountError> {
-        // The `--` separator in `sudo -iu <name> -- <argv...>` is
-        // load-bearing — without it, an argv[0] starting with `-` would
-        // be interpreted as a sudo flag.
+        // `--` is load-bearing: an argv[0] starting with `-` would parse as a sudo flag.
         let full = account_argv(&AccountOp::ExecAsUser {
             name: name.clone(),
             argv: argv.to_vec(),
@@ -197,13 +163,10 @@ impl HostMachine for MacosHostMachine {
     fn describe_profile(&self, op: &ProfileOp) -> String {
         match op {
             ProfileOp::Create { name } => {
-                // Pretend-shell `tee … < default.toml` framing — no actual
-                // tee invocation; the shape signals "a file landed here".
+                // Pretend-shell: no tee runs; the shape signals a file landing here.
                 format!("tee {} < default.toml", display_path_for(name.as_str()))
             }
             ProfileOp::Delete { name } => {
-                // `rm -f` reflects the idempotent semantics — NotFound is
-                // success.
                 format!("rm -f {}", display_path_for(name.as_str()))
             }
         }
@@ -248,13 +211,8 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
-        // `dscl . -read /Groups/<group> PrimaryGroupID` prints
-        // `PrimaryGroupID: <n>`; the trailing whitespace-delimited token
-        // is the gid. No `sudo` — group records are world-readable on
-        // macOS, mirroring `MacosUserDirectory::has_group`/`uid_for`. An
-        // unparseable record (group absent / OD breakage) is a hard error,
-        // not a fabricated gid, so a missing share group can't silently
-        // re-point the tenant's primary group at a wrong/default value.
+        // No sudo: group records are world-readable. Unparseable ⇒ error, never a
+        // fabricated gid that would silently re-point the tenant's primary group.
         let path = format!("/Groups/{}", group.as_str());
         let output = Command::new("dscl")
             .args([".", "-read", &path, "PrimaryGroupID"])
@@ -284,8 +242,7 @@ impl HostMachine for MacosHostMachine {
     fn describe_firewall(&self, op: &FirewallOp) -> String {
         match op {
             FirewallOp::InstallAnchor { name, .. } => {
-                // Pretend-shell framing; actual mechanism in
-                // `execute_firewall` is tempfile + sudo mv + sudo chmod.
+                // Pretend-shell: execute is tempfile + sudo mv + sudo chmod.
                 format!("sudo tee /etc/pf.anchors/tenant-{name} < anchor.body")
             }
             FirewallOp::RemoveAnchor { name } => {
@@ -319,8 +276,7 @@ impl HostMachine for MacosHostMachine {
         path: &std::path::Path,
         mode: AccessMode,
     ) -> Result<AccessOutcome, ProbeError> {
-        // Denied includes file-doesn't-exist; mechanism-of-denial is the
-        // remediation surface's job.
+        // Denied also covers a nonexistent path.
         let flag = match mode {
             AccessMode::Read => "-r",
             AccessMode::List => "-x",
@@ -334,10 +290,8 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_env_policy(&self) -> Result<String, HostFileError> {
-        // /etc/sudoers is mode 0440 root:wheel — sudo required. Concatenate
-        // primary + every drop-in with newlines so the parser's
-        // `env_delete` grep can't bridge one file's last line into the
-        // next's first.
+        // Newline-join the files so the `env_delete` grep can't bridge one
+        // file's last line into the next's first.
         let primary = read_privileged_text("/etc/sudoers")?;
         let mut combined = primary;
         if !combined.ends_with('\n') {
@@ -348,8 +302,7 @@ impl HostMachine for MacosHostMachine {
             .args(&listing_argv[1..])
             .output()
             .map_err(HostFileError::Spawn)?;
-        // Non-existent/unreadable /etc/sudoers.d/ → "no drop-ins", not a
-        // hard failure; sudo doesn't require the dir to exist.
+        // sudo doesn't require /etc/sudoers.d to exist; absent means no drop-ins.
         if listing_output.status.success() {
             let listing = String::from_utf8_lossy(&listing_output.stdout).into_owned();
             for entry in listing.lines() {
@@ -373,16 +326,12 @@ impl HostMachine for MacosHostMachine {
             FirewallOp::InstallAnchor { name, body } => {
                 write_privileged(&tenant_anchor_path(name.as_str()), body)
             }
-            FirewallOp::RemoveAnchor { name } => {
-                // `rm -f` returns 0 on NotFound — partial-state destroy
-                // doesn't trip here.
-                spawn_firewall(&[
-                    "sudo".into(),
-                    "rm".into(),
-                    "-f".into(),
-                    tenant_anchor_path(name.as_str()),
-                ])
-            }
+            FirewallOp::RemoveAnchor { name } => spawn_firewall(&[
+                "sudo".into(),
+                "rm".into(),
+                "-f".into(),
+                tenant_anchor_path(name.as_str()),
+            ]),
             FirewallOp::BackupConfig => spawn_firewall(&[
                 "sudo".into(),
                 "cp".into(),
@@ -390,9 +339,8 @@ impl HostMachine for MacosHostMachine {
                 PF_CONF_BACKUP.into(),
             ]),
             FirewallOp::RestoreConfigFromBackup => {
-                // Failure here leaves a half-edited pf.conf with no
-                // automated path back; `RestoreFailed` names the backup
-                // path so the Reporter can emit the manual recovery hint.
+                // A failed restore leaves pf.conf half-edited with no automated
+                // way back; `RestoreFailed` names the backup for manual recovery.
                 spawn_firewall(&[
                     "sudo".into(),
                     "cp".into(),
@@ -416,8 +364,7 @@ impl HostMachine for MacosHostMachine {
                 "all".into(),
             ]),
             FirewallOp::Enable => {
-                // `pfctl -e` exits non-zero with "pf already enabled" when
-                // already on — treat that as success.
+                // `pfctl -e` exits non-zero with "already enabled" when pf is on.
                 match spawn_firewall(&["sudo".into(), "pfctl".into(), "-e".into()]) {
                     Ok(()) => Ok(()),
                     Err(FirewallError::NonZero { stderr, .. })
@@ -455,9 +402,6 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_pam_sudo_local(&self) -> Result<String, HostFileError> {
-        // /etc/pam.d/sudo_local is mode 0644 — direct fs read, no sudo.
-        // Absent is the common case (no local customizations applied) and
-        // is NOT an error: an empty body parses as "no pam_tid directive".
         match fs::read_to_string(PAM_SUDO_LOCAL) {
             Ok(body) => Ok(body),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
@@ -480,9 +424,7 @@ impl HostMachine for MacosHostMachine {
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
-        // `pfctl -si` writes to BOTH stdout and stderr — the
-        // "Status: Enabled" line lands on stderr in practice. Combine
-        // both into one blob for the parser.
+        // `pfctl -si` prints the Status line on stderr in practice; parse both streams.
         let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(combined)
@@ -502,12 +444,8 @@ impl HostMachine for MacosHostMachine {
         name: &TenantUserName,
         path: &std::path::Path,
     ) -> Result<PathKind, ProbeError> {
-        // readlink stores the link entry verbatim — no intermediate
-        // resolution; SymlinkDrift compares string-exact against the
-        // declared host_path.
-        //
-        // readlink absolute at /usr/bin/readlink (not /bin/readlink):
-        // Darwin 25.x scatters utilities.
+        // Link target verbatim, unresolved: SymlinkDrift compares string-exact.
+        // `/usr/bin/readlink`, not `/bin`: Darwin 25.x scatters utilities.
         let path_str = path.to_string_lossy().into_owned();
         let file_test = |flag: &str| {
             run_file_test_as_tenant(&file_test_as_tenant_argv(name.as_str(), flag, &path_str))
@@ -538,9 +476,6 @@ impl HostMachine for MacosHostMachine {
                 }
             }
         }
-        // `test -d` first so an existing directory comes back as Dir;
-        // `test -e` then catches any other non-symlink entry (file,
-        // fifo, socket, etc.) as Other.
         if file_test("-d")? {
             return Ok(PathKind::Dir);
         }
@@ -566,13 +501,7 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
-        // Direct fs read from the operator process — the cowork dir
-        // (and any future host-owned path) is owned by the host with a
-        // mode the operator can stat. No `sudo` shell-out, no
-        // tenant-perspective probe; works uniformly whether the tenant
-        // user exists or not. `symlink_metadata` (not `metadata`) so a
-        // symlink at the path resolves as `Symlink(_)`, mirroring the
-        // semantics of `tenant_path_kind`.
+        // `symlink_metadata` so a link reads as `Symlink(_)`, matching `tenant_path_kind`.
         match fs::symlink_metadata(path) {
             Ok(meta) => {
                 let ft = meta.file_type();
@@ -591,9 +520,7 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
-        // Host-side ACL is host state — read from the operator process,
-        // no sudo, no run-as-tenant. Unreadable path IS a substrate
-        // failure: operator can't audit a path they can't list.
+        // Unreadable is a substrate failure: the operator can't audit what they can't list.
         let path_str = path.to_string_lossy().into_owned();
         let output = Command::new("ls")
             .args(["-lde", &path_str])
@@ -609,9 +536,6 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
-        // Literal double-quotes around the entry match the form an
-        // operator would type at a prompt. Grant runs under `sudo`
-        // (see `execute_acl` for the WHY); Revoke does not.
         let entry_str = |group: &GroupName, mode: AclMode| acl_entry(group.as_str(), mode);
         match op {
             AclOp::Grant {
@@ -632,33 +556,16 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn execute_acl(&self, op: &AclOp) -> Result<(), AclError> {
-        // Grant uses `sudo chmod -R +a` so the recursive ACL pass reaches
-        // existing children regardless of ownership. Files created by
-        // the tenant inside a rw share are tenant-owned (e.g.
-        // `.ruff_cache/`, build artifacts, anything the tenant writes),
-        // and POSIX requires owner-or-root to modify a file's ACL —
-        // being in the share group with rw doesn't include
-        // `writesecurity`. Without sudo, the second reapply after a
-        // tenant has written into the share fails with EPERM on every
-        // tenant-owned descendant. `chmod +a` is natively idempotent
-        // (duplicate-add is a no-op per node), and macOS canonicalizes
-        // bit names on storage (`read,write,execute` →
-        // `list,add_file,search`), so any substring-match pre-check
-        // would always miss — Grant runs unconditionally. One wrinkle:
-        // macOS does NOT dedupe across the direct/inherited boundary,
-        // so nodes present at apply time show two `ls -le` entries (one
-        // direct, one inherited). Bounded and inert — the direct
-        // duplicate stays idempotent, so it never accumulates further;
-        // not worth a strip-and-regrant given the `chmod -R -a`
-        // asymmetry below.
+        // Grant needs `sudo`: files the tenant writes into a rw share are tenant-owned,
+        // and only owner-or-root may change an ACL, so a bare second reapply EPERMs.
+        // It runs unconditionally: `chmod +a` is idempotent per node, and macOS
+        // canonicalizes bit names on storage, so a substring pre-check would always
+        // miss. macOS doesn't dedupe direct vs inherited ACEs, so nodes present at
+        // apply time show two entries — bounded and inert.
         //
-        // Revoke stays bare: it's single-pass at the top-level of the
-        // share host_path, which is host-owned by design. `chmod -R -a`
-        // would fail on any tree node missing the ACE (e.g. files
-        // copied in via `cp`, which doesn't preserve macOS ACLs).
-        // Top-level revoke is the semantic operation; inherited child
-        // ACEs become orphan-inert once the share group is removed
-        // later in the destroy sequence.
+        // Revoke stays bare and top-level only: the share root is host-owned, and
+        // `chmod -R -a` fails on any node missing the ACE (e.g. `cp`'d files). Child
+        // ACEs go inert once destroy removes the share group.
         let (argv_prefix, path, group, mode): (&[&str], _, _, _) = match op {
             AclOp::Grant {
                 path, group, mode, ..
@@ -676,9 +583,8 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn current_host_user_name(&self) -> HostUserName {
-        // Under sudo, USER becomes `root` but SUDO_USER preserves the
-        // real invoker — prefer it so `sudo tenant doctor` audits the
-        // operator's home, not /Users/root/*. Fallback is a placeholder.
+        // Under sudo, USER is `root`; SUDO_USER keeps the real invoker, so
+        // `sudo tenant doctor` audits the operator's home, not /Users/root.
         HostUserName(
             env::var("SUDO_USER")
                 .or_else(|_| env::var("USER"))
@@ -687,13 +593,6 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn describe_keychain(&self, op: &KeychainOp) -> String {
-        // Password is fed on argv (`-p <pw>` / `-w <pw>`); the displayed
-        // shell-line uses `<password>` as a literal redaction marker so
-        // an operator who copies the line and runs it separately can
-        // substitute their own value. Each provision sub-step renders
-        // as its own one-line shell command — `Tenants::create` emits
-        // the four in sequence; the plan-side rendering shows them in
-        // order.
         match op {
             KeychainOp::CreateTenantKeychain { name, .. } => {
                 format!(
@@ -719,42 +618,17 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn execute_keychain(&self, op: &KeychainOp) -> Result<(), KeychainError> {
-        // Password lives on argv (`-p <pw>` / `-w <pw>`) — macOS
-        // `security` does NOT support stdin reads on `-p` / `-w` (the
-        // `-` argument is taken as a literal one-character password,
-        // not a stdin sentinel). `-p password` appears briefly in
-        // process args during the single `security` invocation; macOS
-        // platform limit. Brief argv exposure (~milliseconds) is
-        // accepted; alternative is the Security Framework C API via
-        // FFI, which is out of scope for solo-Mac.
+        // Password on argv: `security` has no stdin mode for `-p`/`-w` (`-` is taken
+        // as a literal password). The brief argv exposure is accepted; the
+        // alternative is Security.framework FFI.
         //
-        // Partial-failure recovery: the 4 variants are emitted
-        // sequentially by `Tenants::create`; partial-state cleanup is
-        // transitive via `tenant destroy`'s `sysadminctl -deleteUser`
-        // moving the home to `/Users/Deleted Users/`. The
-        // partially-provisioned `tenant.keychain-db` rides along with
-        // the home, so no per-variant rollback is needed at the
-        // substrate.
+        // No per-variant rollback: `tenant destroy` moves the home — and a half-built
+        // keychain with it — to /Users/Deleted Users/.
         //
-        // `CreateTenantKeychain` exits non-zero with an "already exists"
-        // stderr (historically code 25299 / errSecDuplicateKeychain,
-        // but the exit code shifts across macOS versions — see
-        // destroy's `errSecItemNotFound` 44 for the same family of
-        // non-stable codes) when the tenant's `tenant.keychain-db` is
-        // already present. This happens on retry after a partial
-        // create, or on any re-run where the previous tenant's home
-        // survived in `/Users/Deleted Users/` and the substrate is
-        // somehow re-attached. Treat as convergent: same posture as
-        // `pfctl -e "already enabled"` in execute_firewall and
-        // `EnsureDirAsUser`'s `mkdir -p` semantics. Match on the
-        // substring "already exists" (case-insensitive) because macOS
-        // uses both "already exists" and "Already exists" across
-        // versions; the exit code itself is not a stable contract. The
-        // remaining three provision variants are natively idempotent
-        // in macOS (they overwrite the user-pref entry) and are
-        // re-applied unconditionally so the post-state is consistent
-        // regardless of which leg of the sequence the previous attempt
-        // died on.
+        // `CreateTenantKeychain` on an existing keychain (retry after a partial create)
+        // converges. Match "already exists" case-insensitively: macOS varies the casing,
+        // and the exit code (historically 25299) isn't stable. The other three calls
+        // overwrite, so they're natively idempotent.
         match op {
             KeychainOp::CreateTenantKeychain { name, password } => {
                 run_security_as_tenant_allowing_duplicate(
@@ -787,11 +661,8 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn describe_pam(&self, op: &PamOp) -> String {
-        // "Pretend-shell" mechanism (same posture as `InstallAnchor`'s
-        // `tee < anchor.body`): the real `execute_pam` backs up via
-        // `sudo cp`, guards idempotency, and appends via a stdin-fed
-        // `sudo tee -a` (no shell pipe). The echo shows the legible
-        // two-step shape an operator could run by hand.
+        // Pretend-shell: the real execute backs up, guards idempotency, and
+        // appends via stdin-fed `sudo tee -a`.
         match op {
             PamOp::EnableTouchIdForSudo => format!(
                 "sudo cp {PAM_SUDO_LOCAL} {PAM_SUDO_LOCAL_BACKUP}\n\
@@ -803,22 +674,11 @@ impl HostMachine for MacosHostMachine {
     fn execute_pam(&self, op: &PamOp) -> Result<(), HostFileError> {
         match op {
             PamOp::EnableTouchIdForSudo => {
-                // A failed `sudo` read defaults to empty so detection still
-                // falls through to sudo_local; the sudo_local read failure
-                // (non-ENOENT) propagates. Both feed the pure
-                // `pam_tid_append_payload` decision (idempotency +
-                // newline-glue guard).
                 let sudo = self.read_pam_sudo().unwrap_or_default();
                 let sudo_local = self.read_pam_sudo_local()?;
                 let Some(payload) = pam_tid_append_payload(&sudo, &sudo_local) else {
-                    // Already enabled in either file — no-op so a duplicate
-                    // directive never accumulates (the verb offers
-                    // unconditionally; this is the substrate-side guard).
                     return Ok(());
                 };
-                // Back up sudo_local before mutating, if it exists (fresh
-                // hosts have no sudo_local — nothing to back up; `tee -a`
-                // below creates it).
                 if Path::new(PAM_SUDO_LOCAL).exists() {
                     spawn_host_file(&[
                         "sudo".into(),
@@ -827,17 +687,13 @@ impl HostMachine for MacosHostMachine {
                         PAM_SUDO_LOCAL_BACKUP.into(),
                     ])?;
                 }
-                // Append-only via stdin-fed `sudo tee -a` (no shell pipe);
-                // creates sudo_local if absent, appends if present.
                 append_privileged(PAM_SUDO_LOCAL, &payload)
             }
         }
     }
 
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
-        // Exit 0 ⇒ member; any non-zero (host absent, group absent) ⇒
-        // false — dseditgroup conflates these and the idempotence
-        // contract doesn't need to distinguish.
+        // dseditgroup conflates non-member, absent host, and absent group; all read false.
         let output = Command::new("dseditgroup")
             .args(["-o", "checkmember", "-m", host.as_str(), group.as_str()])
             .output()
@@ -846,12 +702,6 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn sudo_session_cached(&self) -> bool {
-        // `sudo -n -v` validates the cached timestamp without running
-        // a command: exit 0 ⇒ a fresh timestamp exists, non-zero ⇒
-        // none (or expired). The `-n` is load-bearing — its whole job
-        // is to answer "would the next sudo prompt?" without itself
-        // prompting. A spawn failure reads as "not cached" so the gate
-        // fails closed.
         let argv = sudo_session_cached_argv();
         Command::new(&argv[0])
             .args(&argv[1..])
@@ -861,8 +711,7 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn authenticate_sudo(&self) -> Result<(), ProbeError> {
-        // Inherited stdio: sudo prompts on the tty and streams its retry
-        // lines live, so there is no stderr to capture.
+        // Inherited stdio: sudo prompts on the tty.
         let argv = authenticate_sudo_argv();
         let status = Command::new(&argv[0])
             .args(&argv[1..])
@@ -881,16 +730,11 @@ impl HostMachine for MacosHostMachine {
         run_file_test_as_tenant(&tenant_keychain_present_argv(name.as_str()))
     }
 
+    // TODO(smell): errSecItemNotFound (44) classification is copied in stash_present and delete_stashed_password — extract
     fn find_stashed_password(
         &self,
         name: &TenantUserName,
     ) -> Result<KeychainPassword, KeychainError> {
-        // `security find-generic-password -a <name> -s tenant-<name> -w`
-        // against the operator's keychain. `-w` writes the password
-        // bytes to stdout. Exit code map mirrors `stash_present` /
-        // `delete_stashed_password`: exit 44 (`errSecItemNotFound`) or
-        // "could not be found" stderr ⇒ NotFound; anything else
-        // non-zero ⇒ substrate failure.
         let service = format!("tenant-{name}");
         let output = Command::new("security")
             .args([
@@ -920,31 +764,12 @@ impl HostMachine for MacosHostMachine {
         name: &TenantUserName,
         password: &KeychainPassword,
     ) -> Result<(), KeychainError> {
-        // `sudo -iu <name> security unlock-keychain -p <pw>
-        // tenant.keychain-db`. `-iu` is load-bearing on the same grounds
-        // as the provision-flow `run_security_as_tenant` calls (HOME /
-        // USER / PWD must switch to the tenant so the relative
-        // `tenant.keychain-db` resolves under their Library/Keychains).
-        // Password on argv — same platform-limit carve-out as
-        // `create-keychain -p` (see provision comment block).
-        //
-        // Routes through `run_security_as_tenant` (same helper as every
-        // other `sudo -iu <name> security ...` call site in this file)
-        // so the prefix is built in one place. The unlock-specific tail
-        // is extracted into `unlock_keychain_argv` for the byte-exact
-        // test pin in `tests/macos_host_machine.rs`.
         let args = unlock_keychain_argv(password);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         run_security_as_tenant(name.as_str(), &refs)
     }
 
     fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError> {
-        // `security find-generic-password -a <name> -s tenant-<name>`
-        // against the operator's keychain. Exit 0 ⇒ present; exit 44
-        // (`errSecItemNotFound`) or "could not be found" stderr ⇒
-        // absent; anything else ⇒ substrate failure. Symmetric with
-        // `delete_stashed_password`'s NotFound handling — same
-        // exit-code convention.
         let service = format!("tenant-{name}");
         let output = Command::new("security")
             .args(["find-generic-password", "-a", name.as_str(), "-s", &service])
@@ -962,16 +787,12 @@ impl HostMachine for MacosHostMachine {
     }
 }
 
-/// Privileged read of a host-config file (`/etc/sudoers` + drop-ins).
-/// Bare sudo — NO `-n`. This is a doctor host-config read; the lead such
-/// probe in the doctor flow prompts-and-caches at point of use so the
-/// subsequent `-n` run-as-tenant probes ride the timestamp.
+/// Doctor host-config reads use bare sudo, no `-n`: the first one prompts and caches,
+/// so the later `sudo -n -u <tenant>` probes ride the timestamp regardless of order.
 pub fn privileged_cat_argv(path: &str) -> Vec<String> {
     vec!["sudo".into(), "cat".into(), path.into()]
 }
 
-/// `/etc/sudoers.d` listing for `read_env_policy`. Same doctor
-/// host-config-read class as `privileged_cat_argv` — bare sudo, no `-n`.
 pub fn sudoers_dropins_listing_argv() -> Vec<String> {
     vec![
         "sudo".into(),
@@ -981,16 +802,10 @@ pub fn sudoers_dropins_listing_argv() -> Vec<String> {
     ]
 }
 
-/// `pfctl -si` for `read_pf_status`. Doctor host-config read — bare
-/// sudo, no `-n`, so the lead privileged probe prompts-and-caches.
 pub fn pf_status_argv() -> Vec<String> {
     vec!["sudo".into(), "pfctl".into(), "-si".into()]
 }
 
-/// `pfctl -a tenant-<name> -sr` for `read_kernel_pf_rules`. Doctor
-/// host-config read — bare sudo, no `-n`. By the time this runs in the
-/// doctor flow the lead host-config read has already populated the
-/// timestamp, but it stays bare-sudo so ordering can't break it.
 pub fn kernel_pf_rules_argv(name: &str) -> Vec<String> {
     vec![
         "sudo".into(),
@@ -1001,11 +816,8 @@ pub fn kernel_pf_rules_argv(name: &str) -> Vec<String> {
     ]
 }
 
-/// Verdict of a `sudo -n -u <tenant> /bin/test <flag> <path>` probe.
-/// `/bin/test` never writes stderr for a plain yes/no, and `sudo -n`
-/// reports "a password is required" / "a terminal is required" with
-/// exit 1 — the same code as "no". Exit 1 is only a verdict when
-/// stderr is empty.
+/// `sudo -n` reports "a password/terminal is required" with exit 1 — the same code
+/// as `test`'s "no". Exit 1 is a verdict only when stderr is empty.
 pub fn sudo_test_verdict(output: &Output) -> Result<bool, ProbeError> {
     match (output.status.code(), output.stderr.is_empty()) {
         (Some(0), _) => Ok(true),
@@ -1021,10 +833,8 @@ pub fn tenant_keychain_present_argv(name: &str) -> Vec<String> {
     file_test_as_tenant_argv(name, "-e", &tenant_keychain_path(name))
 }
 
-/// `/bin/test` AS THE TENANT — NOT `std::fs::metadata` from the operator
-/// process: tenant-side paths like `/Users/<tenant>/Library/` are mode
-/// 0700, so the operator gets EACCES on every healthy tenant.
-/// Absolute `/bin/test`: `/usr/bin/test` is absent on Darwin 25.x.
+/// As the tenant, not `fs::metadata`: tenant paths like `~/Library` are 0700 to the
+/// operator. `/bin/test` because `/usr/bin/test` is absent on Darwin 25.x.
 fn file_test_as_tenant_argv(name: &str, flag: &str, path: &str) -> Vec<String> {
     vec![
         "sudo".into(),
@@ -1049,9 +859,7 @@ pub fn authenticate_sudo_argv() -> Vec<String> {
     vec!["sudo".into(), "-v".into()]
 }
 
-/// `sudo -n -v` cache CHECK. Keeps `-n` — its whole job is to answer
-/// "would the next sudo prompt?" WITHOUT itself prompting. Every other
-/// `-n` call runs as the tenant (`sudo -n -u <tenant>`).
+/// `-n` is load-bearing: asks whether sudo would prompt, without prompting.
 pub fn sudo_session_cached_argv() -> Vec<String> {
     vec!["sudo".into(), "-n".into(), "-v".into()]
 }
@@ -1071,8 +879,7 @@ fn read_privileged_text(path: &str) -> Result<String, HostFileError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Tempfile + `sudo mv` + `sudo chmod`. Atomic from the operator's
-/// viewpoint: either the file lands fully or it doesn't.
+/// Tempfile + `sudo mv`, so the file lands whole or not at all.
 fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
     let tmp_path = tempfile_path();
     let mut tmp = fs::File::create(&tmp_path).map_err(|e| FirewallError::Fs {
@@ -1091,14 +898,10 @@ fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
         spawn_firewall(&["sudo".into(), "mv".into(), tmp_str.clone(), path.into()])?;
         spawn_firewall(&["sudo".into(), "chmod".into(), "0644".into(), path.into()])
     })();
-    // Best-effort cleanup — `sudo mv` may have moved it already, which
-    // makes remove_file a NotFound that we silently swallow.
     let _ = fs::remove_file(&tmp_path);
     result
 }
 
-/// PID + nanos suffix avoids collision between concurrent tenant
-/// invocations.
 fn tempfile_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1127,9 +930,6 @@ fn spawn_firewall(argv: &[String]) -> Result<(), FirewallError> {
     Ok(())
 }
 
-/// Spawn a privileged host-config command, mapping failure to
-/// `HostFileError` (the shared host-config substrate error). Sibling of
-/// `spawn_firewall`/`spawn_capturing` for the `PamOp` substrate.
 fn spawn_host_file(argv: &[String]) -> Result<(), HostFileError> {
     let (program, rest) = argv
         .split_first()
@@ -1147,15 +947,10 @@ fn spawn_host_file(argv: &[String]) -> Result<(), HostFileError> {
     Ok(())
 }
 
-/// Decide what to append to `/etc/pam.d/sudo_local` to enable Touch ID.
-/// `None` ⇒ `pam_tid` is already present in `sudo` OR `sudo_local`, so
-/// enabling is a no-op (idempotent — never appends a duplicate). `Some`
-/// payload ⇒ the exact bytes to append, with a leading-newline guard so a
-/// final line lacking a trailing `\n` isn't glued onto the directive
-/// (which would both malform the PAM stack and defeat the duplicate guard
-/// on a later re-run). Pure so the idempotency + newline logic is unit-
-/// testable without the substrate; `pub` for the pin in
-/// `tests/macos_host_machine.rs`.
+// TODO(smell): pub only for tests/macos_host_machine.rs pins — narrow visibility or move the pin
+/// `None` when `pam_tid` is already in `sudo` or `sudo_local`. Otherwise the bytes to
+/// append, led by a newline when needed so an unterminated last line isn't glued onto
+/// the directive (malforming the stack and defeating the duplicate check on re-run).
 pub fn pam_tid_append_payload(sudo: &str, sudo_local: &str) -> Option<String> {
     if crate::doctor::has_pam_tid(sudo) || crate::doctor::has_pam_tid(sudo_local) {
         return None;
@@ -1168,10 +963,7 @@ pub fn pam_tid_append_payload(sudo: &str, sudo_local: &str) -> Option<String> {
     Some(format!("{lead}{PAM_TID_DIRECTIVE}\n"))
 }
 
-/// Append `payload` (verbatim — the caller owns any leading/trailing
-/// newlines, see `pam_tid_append_payload`) to a root-owned file via
-/// `sudo tee -a`, feeding the bytes through the child's stdin so no shell
-/// pipe is needed. Creates the file if absent.
+/// `sudo tee -a` fed through stdin (no shell pipe); `payload` is appended verbatim.
 fn append_privileged(path: &str, payload: &str) -> Result<(), HostFileError> {
     let mut child = Command::new("sudo")
         .args(["tee", "-a", path])
@@ -1179,9 +971,7 @@ fn append_privileged(path: &str, payload: &str) -> Result<(), HostFileError> {
         .stdout(Stdio::null())
         .spawn()
         .map_err(HostFileError::Spawn)?;
-    // Take + drop the stdin handle so `tee` sees EOF before we wait.
-    // (`Child::wait` also closes stdin, but taking it here makes the
-    // EOF-before-wait intent explicit and robust against future refactors.)
+    // Drop stdin so `tee` sees EOF before we wait.
     let mut stdin = child
         .stdin
         .take()
@@ -1206,8 +996,7 @@ fn op_name(op: &ProfileOp) -> &TenantUserName {
     }
 }
 
-/// `$HOME/.config/tenant/profiles/<name>.toml`. Display form with literal
-/// `~` lives in `profile::display_path_for`.
+// TODO(smell): profile paths are spelled here and again in profile::display_path_for / display_fragment_path_for — one builder
 fn profile_path(name: &TenantUserName) -> Result<PathBuf, ProfileError> {
     let home = env::var("HOME").map_err(|_| ProfileError {
         message: "HOME environment variable is not set".to_string(),
@@ -1217,11 +1006,6 @@ fn profile_path(name: &TenantUserName) -> Result<PathBuf, ProfileError> {
         .join(format!("{name}.toml")))
 }
 
-/// `$HOME/.config/tenant/profiles/includes/<fragment>.toml`. The single
-/// spelling of the fragment path (centralized-name-builder doctrine, same
-/// reason `profile_path` exists). Display form with literal `~` lives in
-/// `profile::display_fragment_path_for`. Takes `&str`: the lexical rail
-/// already ran at parse, so `fragment` is safe by the time it reaches here.
 fn profile_fragment_path(fragment: &str) -> Result<PathBuf, ProfileError> {
     let home = env::var("HOME").map_err(|_| ProfileError {
         message: "HOME environment variable is not set".to_string(),
@@ -1231,11 +1015,8 @@ fn profile_fragment_path(fragment: &str) -> Result<PathBuf, ProfileError> {
         .join(format!("{fragment}.toml")))
 }
 
-/// `sudo -iu <name> -- /bin/sh -c <script> [args…]`. `sudo -i` always lands
-/// in the tenant's home (that is what `-i` means) and sudo's own `--chdir`
-/// is sudoers-policy-gated on macOS, so `tenant shell -d` applies the
-/// working directory with this inner shell instead. Absolute `/bin/sh` per
-/// the Darwin absolute-paths doctrine.
+/// `sudo -i` always lands in the tenant's home and sudo's `--chdir` is sudoers-gated
+/// on macOS, so `tenant shell -d` changes directory in this inner shell.
 fn sudo_sh_argv(name: &TenantUserName, tail: &[String]) -> Vec<String> {
     let mut full = vec![
         "sudo".into(),
@@ -1253,11 +1034,8 @@ fn cd_wrapper(dir: &Path, exec_tail: &str) -> String {
     format!("cd {} && {exec_tail}", sh_quote(&dir.display().to_string()))
 }
 
-/// POSIX single-quoting. Bare words pass through unquoted so the common
-/// path renders like the command an operator would type; anything else is
-/// wrapped, with embedded `'` closed-escaped-reopened (`'\''` — POSIX has
-/// no escape *inside* single quotes). Without this a directory containing
-/// a space would re-split inside the wrapper script.
+/// POSIX single-quoting. Bare words stay unquoted so the display reads as typed;
+/// an embedded `'` becomes `'\''` (no escapes exist inside single quotes).
 fn sh_quote(s: &str) -> String {
     if !s.is_empty()
         && s.bytes()
@@ -1275,12 +1053,7 @@ fn render_argv(argv: &[String]) -> String {
         .join(" ")
 }
 
-/// Describe-side renders its own strings (byte-exact verbose output); this
-/// builder stays separate so a change to one form doesn't silently drift
-/// the other. `pub` for the argv contract pins in
-/// `tests/macos_host_machine.rs` — the dir-less shapes have no other
-/// executable-side coverage (their `describe_account` arms are
-/// hand-built and never call through here).
+// TODO(smell): pub only for test pins, and describe_account hand-builds the same shapes — derive describe from this
 pub fn account_argv(op: &AccountOp) -> Vec<String> {
     match op {
         AccountOp::CreateShareGroup { group, gid } => vec![
@@ -1420,9 +1193,8 @@ pub fn account_argv(op: &AccountOp) -> Vec<String> {
     }
 }
 
-/// Cowork-dir provisioning: mkdir -p → chown → chmod 2770 → chmod -R +a.
-/// Substrate-mechanism stays here so describe + execute share the same
-/// argv composition.
+/// Every step is idempotent; the recursive ACL pass picks up children the tenant
+/// added since the last reapply.
 fn execute_ensure_cowork_dir(
     path: &Path,
     owner: &HostUserName,
@@ -1452,16 +1224,10 @@ fn execute_ensure_cowork_dir(
     Ok(())
 }
 
-/// One source of truth so describe_acl and execute_acl render identically.
 fn acl_entry(group: &str, mode: AclMode) -> String {
     format!("group:{group} allow {}", mode.acl_bits())
 }
 
-/// `run_security_as_tenant` variant that swallows the
-/// duplicate-keychain failure as `Ok(())`. Used only by
-/// `KeychainOp::CreateTenantKeychain` in `execute_keychain`; the other
-/// three `security` sub-commands the provision flow drives are
-/// natively idempotent on macOS and use the strict helper.
 fn run_security_as_tenant_allowing_duplicate(
     tenant: &str,
     args: &[&str],
@@ -1481,10 +1247,7 @@ fn stash_password_in_operator_keychain(
     name: &TenantUserName,
     password: &crate::domain::KeychainPassword,
 ) -> Result<(), KeychainError> {
-    // `-U` upserts: replace any existing entry under the same
-    // (account, service) so a re-run after a partial create doesn't
-    // double-stash. `-w <pw>` on argv (not stdin) — same macOS
-    // platform limit as `create-keychain`; see provision comment.
+    // `-U` upserts, so a re-run after a partial create doesn't double-stash.
     let service = format!("tenant-{name}");
     let output = Command::new("security")
         .args([
@@ -1509,9 +1272,6 @@ fn stash_password_in_operator_keychain(
 }
 
 fn delete_stashed_password(name: &TenantUserName) -> Result<(), KeychainError> {
-    // `security delete-generic-password` exits 44 (`errSecItemNotFound`)
-    // when the entry is absent. Map that to `NotFound` so destroy
-    // converges on a legacy tenant.
     let service = format!("tenant-{name}");
     let output = Command::new("security")
         .args([
@@ -1534,18 +1294,8 @@ fn delete_stashed_password(name: &TenantUserName) -> Result<(), KeychainError> {
     Err(KeychainError::NonZero { code, stderr })
 }
 
-/// Post-`sudo -iu <name> security` args for the keychain-unlock
-/// substrate call — the tail consumed by `run_security_as_tenant`.
-/// Single source of the unlock-specific argv shape: production
-/// (`<MacosHostMachine as HostMachine>::unlock_tenant_keychain`) builds
-/// it and feeds it to `run_security_as_tenant`; the byte-exact test pin
-/// in `tests/macos_host_machine.rs` asserts on the same value. The
-/// `sudo -iu <name> security` prefix is locked by
-/// `run_security_as_tenant`'s own argv build and covered by its
-/// sibling pins. `pub` so the integration test can reach it via
-/// `tenant::adapters::macos::host_machine::unlock_keychain_argv`; not
-/// re-exported from the `macos` module to keep it out of the prominent
-/// public surface.
+// TODO(smell): pub only for tests/macos_host_machine.rs pins — narrow visibility or move the pin
+/// Tail after `sudo -iu <name> security` for the keychain unlock.
 pub fn unlock_keychain_argv(password: &KeychainPassword) -> Vec<String> {
     vec![
         "unlock-keychain".to_string(),
@@ -1556,14 +1306,8 @@ pub fn unlock_keychain_argv(password: &KeychainPassword) -> Vec<String> {
 }
 
 fn run_security_as_tenant(tenant: &str, args: &[&str]) -> Result<(), KeychainError> {
-    // `-iu` (login-shell + user) — NOT plain `-u`. `security
-    // create-keychain tenant.keychain-db` resolves the relative path
-    // against `$HOME`; bare `sudo -u <tenant>` preserves the
-    // operator's HOME (so the call writes against
-    // `/Users/<operator>/Library/Keychains/`, fails with
-    // errSecWrPerm = code 195). `-i` switches HOME / USER / PWD to
-    // the tenant's login environment, so the keychain lands at the
-    // tenant's standard location: `/Users/<tenant>/Library/Keychains/`.
+    // `-iu`, not `-u`: `security` resolves `tenant.keychain-db` against `$HOME`,
+    // and bare `-u` keeps the operator's HOME (errSecWrPerm, code 195).
     let mut argv = vec!["-iu", tenant, "security"];
     argv.extend_from_slice(args);
     let output = Command::new("sudo")

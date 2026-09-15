@@ -1,7 +1,3 @@
-//! Operator-facing output. Reporter owns verb-specific phrasing and
-//! mode/verbosity branching; callers signal lifecycle events
-//! (starting / done / refused / failed) without checking flags.
-
 use std::path::PathBuf;
 
 use super::tenants::{ConflictError, NameError, ShareError, tenant_share_group_name};
@@ -82,10 +78,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// `$ <rendered>` per-step echo. Real+verbose only. Multi-line
-    /// describes (e.g. `EnsureCoworkDir`'s four-call sequence) emit
-    /// one `$` prefix per substrate call so the operator sees the
-    /// complete mechanism rather than a joined blob.
     pub fn step(&mut self, op: Op<'_>) {
         if self.dry_run || !self.verbose {
             return;
@@ -96,8 +88,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// `✓ <label>` business-level progress line after a successful op.
-    /// Silent in dry-run.
     pub fn progress(&mut self, op: Op<'_>) {
         if self.dry_run {
             return;
@@ -106,12 +96,9 @@ impl<'t, 'm> Reporter<'t, 'm> {
         self.ok(&label);
     }
 
-    /// Pre-execution confirmation. Auto-proceeds in dry-run, when
-    /// `yes_flag` is set, or when stdin is non-TTY. Re-prompts on
-    /// unrecognized input.
+    /// Auto-proceeds under dry-run, `--yes`, or a non-TTY stdin.
     pub fn confirm(&mut self, default_yes: bool) -> ConfirmOutcome {
         if self.dry_run {
-            // Preview what the real run would have asked.
             let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
             let _ = writeln!(
                 self.terminal.stdout,
@@ -160,18 +147,11 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Dim post-success "next step" hint. Single source of truth for the
-    /// breadcrumb shape so every mutating verb's `*_done` reads
-    /// uniformly. Skips emission in dry-run (the closing `Done` section
-    /// itself is gated out) — keep the hint paired with the closing.
     fn next_step(&mut self, msg: &str) {
         let painted = self.paint_stdout(msg, ansi::dim);
         let _ = writeln!(self.terminal.stdout, "{painted}");
     }
 
-    /// Render a `tenant help <topic>` body to stdout. Body is plain text;
-    /// callers compose the exact wording. Bodies that end with `\n` get
-    /// no extra trailing newline.
     pub fn help_topic(&mut self, body: &str) {
         let _ = write!(self.terminal.stdout, "{body}");
     }
@@ -221,8 +201,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// Caller follows with `confirm(false, …)` — destroy defaults to N
-    /// so muscle-memory ENTER never deletes.
+    /// Destroy's confirm defaults to N so a muscle-memory ENTER never deletes.
     pub fn destroy_summary(
         &mut self,
         name: &TenantUserName,
@@ -265,7 +244,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// Same default-N posture as `destroy_summary`.
     pub fn destroy_orphan_summary(
         &mut self,
         name: &TenantUserName,
@@ -429,8 +407,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// No confirm prompt — operator becomes the shell directly. The
-    /// summary gives the pre-exec doctor audit visual context.
     pub fn shell_summary(
         &mut self,
         name: &TenantUserName,
@@ -545,9 +521,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
         self.section("Done");
         let _ = writeln!(self.terminal.stdout, "Tenant '{name}' destroyed.");
-        // No `Next: ...` breadcrumb here: the tenant is gone, so there's no
-        // actionable next-step verb to point at — the operator returns to
-        // the host prompt. Other `*_done` methods always trail a breadcrumb.
+        // No `Next:` breadcrumb: the tenant is gone, so there's no verb to point at.
     }
 
     pub fn orphan_group_starting(&mut self, name: &TenantUserName) {
@@ -571,11 +545,8 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Intent line only (no plan). Shell has no post-exec confirmation,
-    /// so this emits in standard mode too — without it the operator
-    /// would face a bare sudo prompt with no project-side context. Emit
-    /// before the reapply plan is built so verb context survives a
-    /// profile-read failure; plan rendering lives in `shell_plan`.
+    /// Emits in standard mode too, before the plan is built: otherwise the operator faces a
+    /// bare sudo prompt, and verb context wouldn't survive a profile-read failure.
     pub fn shell_intent(&mut self, name: &TenantUserName) {
         if self.dry_run {
             let _ = writeln!(self.terminal.stdout, "Would shell into '{name}'.");
@@ -584,9 +555,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// Plan block in real+verbose mode. Shell has no confirm, so plan
-    /// stays here rather than moving into a summary — only prompt-having
-    /// verbs relocate plan emission into their summary.
     pub fn shell_plan(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         if self.verbose {
             let _ = writeln!(self.terminal.stdout, "Plan (commands to execute):");
@@ -657,8 +625,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
             "  \u{2022} refresh tenant-side symlinks for declared shares"
         );
         let _ = match directory {
-            // Same honesty rule as the interactive summary: the working
-            // directory is part of what the operator is consenting to.
             Some(dir) => writeln!(
                 self.terminal.stdout,
                 "  \u{2022} run as '{name}' in '{dir}': {joined}"
@@ -686,10 +652,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// `✓` line confirming the tenant's keychain was unlocked, so a silent
-    /// regression where the unlock pass skipped stays visible. Verb-neutral
-    /// name: `shell` (both forms) and `bootstrap` emit it byte-identically.
-    /// Real-mode only.
+    /// A visible `✓`, so an unlock pass that silently skipped would show.
     pub fn keychain_unlocked(&mut self, name: &TenantUserName) {
         if self.dry_run {
             return;
@@ -697,8 +660,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         self.ok(&format!("Tenant '{name}' keychain unlocked"));
     }
 
-    /// Yellow `⚠` stderr one-liner for narrow-on-finally failure (command
-    /// form only). Does NOT override the child's exit code.
     pub fn shell_narrow_failed(&mut self, name: &TenantUserName, _err: &super::tenants::ModeError) {
         let prefix = if self.terminal.colors.stderr {
             "\x1b[33m\u{26a0}\x1b[0m"
@@ -711,9 +672,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Closing surface for the command form. The narrow-back
-    /// parenthetical fires only when the entry widened — load-bearing
-    /// confirmation that on-disk state returned to runtime tier.
     pub fn shell_command_done(&mut self, child_exit: i32, mode: ModeLevel) {
         if self.dry_run {
             return;
@@ -780,9 +738,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
 
     // ---- setup verb (host-wide, opt-in host prep) ----
 
-    /// Opening line/section for `tenant setup`. Real → section divider;
-    /// dry-run → a "would" line (the section dividers are dry-run-gated
-    /// across every verb).
     pub fn setup_intent(&mut self) {
         if self.dry_run {
             let _ = writeln!(self.terminal.stdout, "Would set up this host.");
@@ -791,12 +746,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// Present the Touch-ID-for-sudo item and return the operator's
-    /// decision. The description always prints (operator context for the
-    /// offer); `-v` additionally echoes the substrate mechanism. The
-    /// decision itself is delegated to `setup_offer` — default-NO,
-    /// non-TTY-declines (an auth-stack change must not auto-apply from a
-    /// pipe), `--yes`-accepts, dry-run-previews.
     pub fn setup_touch_id_offer(&mut self) -> ConfirmOutcome {
         let _ = writeln!(self.terminal.stdout, "Touch ID for sudo");
         let _ = writeln!(
@@ -812,16 +761,11 @@ impl<'t, 'm> Reporter<'t, 'm> {
             "  `auth sufficient pam_tid.so` to /etc/pam.d/sudo_local."
         );
         let _ = writeln!(self.terminal.stdout);
-        // The substrate mechanism echoes under `-v` via `Tenants::run`'s
-        // `step` (`$ …`) at execution time, same as every other verb — no
-        // separate plan echo here (it would double the lines).
         self.setup_offer("Enable Touch ID for sudo?")
     }
 
-    /// Per-item opt-in decision. Defaults to NO and DECLINES on a non-TTY
-    /// without `--yes` — the deliberate divergence from `confirm` (which
-    /// proceeds on non-TTY): `setup`'s items are security-sensitive
-    /// opt-ins, not converge-to-declared-state operations.
+    /// Declines on a non-TTY without `--yes`, unlike `confirm`: setup items are
+    /// security-sensitive opt-ins, not converge-to-declared-state operations.
     fn setup_offer(&mut self, question: &str) -> ConfirmOutcome {
         if self.dry_run {
             let _ = writeln!(
@@ -836,9 +780,8 @@ impl<'t, 'm> Reporter<'t, 'm> {
         if !self.terminal.stdin_is_tty {
             return ConfirmOutcome::Abort;
         }
-        // Chicken-and-egg heads-up: enabling Touch ID needs sudo, which
-        // isn't fingerprint-gated yet, so this one prompts for a typed
-        // password. Printed only here, where an actual prompt fires.
+        // Enabling Touch ID needs sudo, which isn't fingerprint-gated yet, so this
+        // one prompts for a typed password.
         let _ = writeln!(
             self.terminal.stdout,
             "  You'll be asked for your password once to apply this."
@@ -866,8 +809,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// Post-success note after Touch ID is enabled. Dim breadcrumb;
-    /// real-mode only (the `✓` line comes from the op's progress).
     pub fn setup_touch_id_done(&mut self) {
         if self.dry_run {
             return;
@@ -877,8 +818,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Operator declined the Touch-ID item. Real-mode only (dry-run
-    /// always previews a Proceed, so this never fires under dry-run).
     pub fn setup_touch_id_skipped(&mut self) {
         if self.dry_run {
             return;
@@ -886,7 +825,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout, "Skipped Touch ID for sudo.");
     }
 
-    /// Closing section for `tenant setup`. Real-mode only.
     pub fn setup_done(&mut self) {
         if self.dry_run {
             return;
@@ -895,11 +833,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout, "Host setup complete.");
     }
 
-    /// Stderr frame for a `SetupError::Pam` substrate failure. Names the
-    /// backup so the operator can recover by hand if the append left
-    /// `/etc/pam.d/sudo_local` in a bad state (the change is append-only
-    /// and newline-guarded, so this is belt-and-suspenders on the auth
-    /// stack — there's no auto-restore for a PAM file).
+    /// Names the backup: there's no auto-restore for a PAM file.
     pub fn setup_pam_failed(&mut self, err: &HostFileError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -909,7 +843,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Convergent-noop. Tense-neutral; emits in both real and dry-run.
     pub fn destroy_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
             self.terminal.stdout,
@@ -971,11 +904,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Refusal frame for `ShellError::StashAbsent`: the tenant exists
-    /// (eligibility passed) but the operator-side stash of its
-    /// keychain password is missing. Legacy tenants created before
-    /// the bootstrap-stash landed need a one-time re-bootstrap; the
-    /// hint names the exact recovery verbs verbatim.
     pub fn shell_refuse_stash_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -984,12 +912,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Refusal frame for a lexically invalid `-d/--directory` (mid-string
-    /// `$HOME`, or any other `$` in the resolved path). `reason` carries
-    /// the specific clause. Named for the flag the operator typed — a
-    /// message saying `tenant_path` (the `[[shares]]` wording this
-    /// mirrors) would send them hunting through their profile for a
-    /// command-line mistake.
+    /// Names `-d`, not `tenant_path`: the mistake is on the command line, not in the profile.
     pub fn refuse_shell_directory_invalid(&mut self, raw: &str, reason: &str) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -997,13 +920,8 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Refusal frame for a `-d/--directory` that resolved to something
-    /// the tenant can't `cd` into. Names the RESOLVED path — the
-    /// operator typed `projects/foo`; the fix is only obvious once they
-    /// see `/Users/dev/projects/foo`. One message covers absent /
-    /// not-a-directory / unreadable: the probe is a single `test -d`, so
-    /// claiming to know WHICH would assert more than it established, and
-    /// the operator's next move is the same either way.
+    /// Names the RESOLVED path (the fix is obvious only then). One message for absent /
+    /// not-a-directory / unreadable: a single `test -d` can't tell which.
     pub fn refuse_shell_directory_unavailable(
         &mut self,
         name: &TenantUserName,
@@ -1016,9 +934,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stderr frame for a `-d/--directory` pre-flight probe that could
-    /// not run at all (sudo/spawn failure). Substrate breakage, not
-    /// operator input — no recovery hint, parallel to `shell_failed`.
     pub fn shell_directory_probe_failed(&mut self, path: &std::path::Path, err: &ProbeError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1027,13 +942,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Verb-neutral stderr frame for `ShellError::UnlockFailed` and
-    /// `BootstrapError::UnlockFailed`: substrate failure on either the
-    /// operator-stash retrieval or the in-tenant `security unlock-keychain`
-    /// call. No recovery hint — substrate failure is investigative
-    /// ground, not an operator-action surface (parallel to
-    /// `shell_failed` / `shell_narrow_firewall_failed`).
-    /// `KeychainError::Display` carries the substrate exit code + stderr.
     pub fn keychain_unlock_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1143,9 +1051,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// In verbose, append `Finding::guidance()` indented 2 spaces below
-    /// the one-liner. Findings that return `None` render the one-liner
-    /// alone.
     pub fn doctor_finding(&mut self, finding: &Finding) {
         self.doctor_finding_one_liner(finding);
         if self.verbose
@@ -1162,16 +1067,12 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// Colored one-liner only — guidance body is skipped regardless of
-    /// verbose. Verb output names what the verb is doing; full guidance
-    /// stays behind `tenant doctor -v`.
+    /// Never guidance, even under `-v`: full guidance stays behind `tenant doctor -v`.
     pub fn doctor_finding_one_liner(&mut self, finding: &Finding) {
         let rendered = self.color_finding_prefix(finding);
         let _ = writeln!(self.terminal.stdout, "{rendered}");
     }
 
-    /// Critical → red+bold; warning → yellow; info → dim. Color-off
-    /// preserves the plain byte-form contract.
     fn color_finding_prefix(&self, finding: &Finding) -> String {
         let text = finding.to_string();
         if !self.terminal.colors.stdout {
@@ -1197,8 +1098,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         text
     }
 
-    /// Headers (unindented) get bold; body lines (indented) get dim, so
-    /// the finding one-liner stays the scannable focus.
     fn style_guidance_line(&self, line: &str) -> String {
         if !self.terminal.colors.stdout {
             return line.to_string();
@@ -1210,10 +1109,8 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// Scoped to per-tenant findings. Wording is explicit ("no
-    /// per-tenant findings") so a clean line doesn't read as "doctor
-    /// said everything is clean" when host-wide warnings already
-    /// surfaced above.
+    /// "No per-tenant findings", not "clean": host-wide warnings may already have
+    /// printed above.
     pub fn doctor_done_summary(&mut self, name: &TenantUserName, finding_count: usize) {
         if self.dry_run {
             return;
@@ -1251,9 +1148,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stderr frame for substrate failures on the tenant-keychain
-    /// presence probe. Doctor continues the walk after emitting; the
-    /// audit is a courtesy, never an abort gate.
     pub fn doctor_keychain_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1261,8 +1155,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stderr frame for substrate failures on the operator-stash
-    /// presence probe. Doctor continues the walk after emitting.
     pub fn doctor_stash_probe_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1270,12 +1162,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    // HostUserDirectory (dscl) failure frames, one per call site. The five
-    // `*_eligibility_probe_failed` frames carry near-identical Display
-    // strings; they stay split per verb to match the sibling pattern
-    // already paid for by `mode_failed` / `reload_firewall_failed` /
-    // `shell_narrow_firewall_failed` — verb-named frames let log-grep
-    // bind to the verb without parsing the message body.
+    // TODO(smell): the *_eligibility_probe_failed frames are near-identical, split per verb only for log-grep — parameterize by verb
 
     pub fn create_conflict_probe_failed(
         &mut self,
@@ -1389,9 +1276,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Yellow ⚠ aggregate for non-critical pre-exec findings. `target`
-    /// is `None` for create (no tenant yet). Silent on `count == 0`.
-    /// Goes to stdout — advisory, not failure.
+    /// `target` is `None` for create (no tenant yet).
     pub fn doctor_summary_pending(&mut self, count: usize, target: Option<&TenantUserName>) {
         if count == 0 {
             return;
@@ -1410,13 +1295,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout, "{painted}");
     }
 
-    /// Calibrated shell-entry inbound posture line. Locked (no
-    /// declared ports, anchor not permissive) is quiet — `posture` is
-    /// `None`, nothing emits. `InboundExposure` (restricted with
-    /// ports) gets a dim info-flavored line naming the ports; the loud
-    /// `InboundPermissive` gets a yellow ⚠ warning plus a narrow hint.
-    /// Distinct from `doctor_summary_pending`'s warning aggregate: the
-    /// posture line is a calibrated heads-up, not a "run doctor" nag.
+    /// `None` means locked (no declared ports, anchor not permissive): nothing emits.
     pub fn doctor_inbound_posture(&mut self, posture: Option<&Finding>) {
         let Some(finding) = posture else {
             return;
@@ -1475,8 +1354,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// SECOND stderr line after `create_failed` when the rollback
-    /// itself failed.
     pub fn create_rollback_failed(&mut self, name: &TenantUserName, err: &AccountError) {
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(
@@ -1523,13 +1400,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stdout one-liner emitted at the tail of both destroy paths
-    /// (full + orphan-group convergence) when the cowork dir at
-    /// `/Users/Shared/tenants/<name>` is still present. The dir is
-    /// intentionally preserved — it holds operator-authored work and
-    /// auto-deleting it is the failure mode we're avoiding. Naming
-    /// the tenant disambiguates back-to-back destroys; naming the
-    /// path tells the operator exactly what to clean up.
     pub fn destroy_cowork_dir_intact(&mut self, name: &TenantUserName, path: &std::path::Path) {
         if self.dry_run {
             return;
@@ -1541,10 +1411,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Yellow `⚠` stderr warning when the upfront cowork-dir probe
-    /// fails. Mirrors the doctor-pass posture (substrate-machinery
-    /// failures surface as warnings; the verb proceeds). Naming the
-    /// path lets the operator verify manually.
     pub fn destroy_cowork_probe_failed(
         &mut self,
         name: &TenantUserName,
@@ -1563,10 +1429,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Warning frame for the destroy-side stash-delete: the rest of
-    /// destroy already removed the user + group + firewall, but
-    /// scrubbing the operator-side stash failed for a non-NotFound
-    /// reason. Em-dash hint names the manual recovery.
     pub fn destroy_keychain_delete_warning(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1575,8 +1437,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stderr frame for `CreateError::CoworkDir`. Tenant user + group
-    /// already exist; recovery is `tenant destroy <name>`.
     pub fn create_cowork_dir_failed(&mut self, name: &TenantUserName, err: &AccountError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1585,8 +1445,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stderr frame for `CreateError::KeychainProvision`. Tenant user
-    /// + group already exist; recovery is `tenant destroy <name>`.
     pub fn create_keychain_provision_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1595,9 +1453,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Stderr frame for `CreateError::KeychainStash`. Tenant user +
-    /// group + keychain provisioned but the operator-side stash
-    /// failed; recovery is `tenant destroy <name>`.
     pub fn create_keychain_stash_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1650,8 +1505,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    // Share-reapply failure framing — per-verb context phrases so the
-    // operator's recovery guidance reads in the verb they invoked.
+    // Share-reapply failures: per-verb phrasing so recovery reads in the invoked verb.
 
     pub fn mode_acl_failed(&mut self, name: &TenantUserName, err: &AclError) {
         let _ = writeln!(
@@ -1667,15 +1521,8 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    // Covers every reapply probe that surfaces as `ModeError::Probe`: the
-    // share-symlink `tenant_path_kind` filesystem probe (mode/inbound/
-    // reload), the `sudo -v` authentication a cold-sudo plan build needs
-    // before that probe, and reload's `read_share_group_gid` directory
-    // read. Phrased
-    // as "host state" rather than "filesystem" so it's honest for the
-    // directory-services read too; the `ProbeError` detail carries the
-    // failing command's stderr (empty for `sudo -v`, whose retry lines
-    // already streamed to the terminal).
+    // TODO(smell): mode_{profile,acl,account,probe}_failed also serve inbound/reload/create — rename without the `mode_` prefix
+    // "Host state", not "filesystem": also covers `sudo -v` and reload's share-group gid read.
     pub fn mode_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1683,8 +1530,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// `refuse_*` framing because the operator authored the conflict;
-    /// the substrate never ran.
     pub fn refuse_mode_share(&mut self, name: &TenantUserName, err: &ShareError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1727,8 +1572,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    // Create's post-provision arms. Recovery is `tenant reload <name>`
-    // rather than `tenant create` (which would refuse on name-conflict).
+    // Create's post-provision arms: recovery is `tenant reload`, not `tenant create`.
 
     pub fn create_post_provision_acl_failed(&mut self, name: &TenantUserName, err: &AclError) {
         let _ = writeln!(
@@ -1781,7 +1625,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         self.next_step(&format!("Next: audit with `tenant doctor {name}`."));
     }
 
-    /// Silent when `count == 0`; `reload_all_done_summary` handles that.
     pub fn reload_all_starting(&mut self, count: usize) {
         if count == 0 {
             return;
@@ -1791,8 +1634,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// The no-tenant case emits a distinct line so the operator gets
-    /// feedback instead of empty output.
     pub fn reload_all_done_summary(&mut self, succeeded: usize, failed: usize) {
         if self.dry_run {
             return;
@@ -1819,8 +1660,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Distinct from `mode_failed`; "firewall mode" wording would imply
-    /// a tier-swap, and reload doesn't swap tiers.
     pub fn reload_firewall_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1873,11 +1712,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         self.next_step(&format!("Next: audit with `tenant doctor {name}`."));
     }
 
-    /// Pre-confirm summary. The command list ALWAYS renders (the honesty
-    /// backstop — every command visible before the operator says yes),
-    /// via the `AccountOp::ExecAsUser` plan/echo shape in `command_entries`.
-    /// The widen infra plan (`infra_entries`) stays verbose-gated per the
-    /// plan-rendering doctrine.
     pub fn bootstrap_summary(
         &mut self,
         name: &TenantUserName,
@@ -1904,7 +1738,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
             "  \u{2022} narrow egress back to runtime tier on completion (even if a command fails)"
         );
         let _ = writeln!(self.terminal.stdout);
-        // Verbose-only firewall infra plan (the widen reapply ops).
         if self.verbose && !infra_entries.is_empty() {
             let _ = writeln!(
                 self.terminal.stdout,
@@ -1926,9 +1759,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// Single-tenant quiet no-op: a tenant declaring no commands is a
-    /// convergent success (mirrors destroy-absent). One stdout line, no
-    /// section framing, no confirm — exit 0.
     pub fn bootstrap_nothing_declared(&mut self, name: &TenantUserName) {
         let _ = writeln!(
             self.terminal.stdout,
@@ -1936,9 +1766,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// `✓` per successfully-run command, naming the command verbatim
-    /// (the `ExecAsUser` business label would only say 'sh'). Silent in
-    /// dry-run, mirroring `progress`.
+    /// Names the command itself; the `ExecAsUser` label would only say `sh`.
     pub fn bootstrap_command_ran(&mut self, name: &TenantUserName, command: &str) {
         if self.dry_run {
             return;
@@ -1960,9 +1788,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Yellow `⚠` stderr one-liner for narrow-on-finally failure after the
-    /// commands ran. Does NOT mask the commands' outcome (they succeeded);
-    /// names the recovery verb. Parallel to `shell_narrow_failed`.
     pub fn bootstrap_narrow_failed(
         &mut self,
         name: &TenantUserName,
@@ -1979,8 +1804,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Firewall-widen/narrow reapply failure with bootstrap phrasing
-    /// (distinct from `mode_failed`'s tier-swap wording).
     pub fn bootstrap_firewall_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1995,9 +1818,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Same refusal shape as shell's (`EX_USAGE`, names destroy/recreate),
-    /// with bootstrap wording — a legacy tenant missing its operator-side
-    /// keychain stash can't have its keychain unlocked.
     pub fn bootstrap_refuse_stash_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -2043,7 +1863,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    /// Pre-confirm summary for the fleet walk (mirrors `reload_all_summary`).
     pub fn bootstrap_all_summary(&mut self, host: &HostUserName, names: &[TenantUserName]) {
         let count = names.len();
         let list = names
@@ -2079,7 +1898,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// Silent when `count == 0`; `bootstrap_all_done_summary` handles that.
     pub fn bootstrap_all_starting(&mut self, count: usize) {
         if count == 0 {
             return;
@@ -2112,8 +1930,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout, "{line}");
     }
 
-    /// Dim per-tenant skip note during the walk (a tenant with no
-    /// commands). Real-mode only.
     pub fn bootstrap_walk_nothing_declared(&mut self, name: &TenantUserName) {
         if self.dry_run {
             return;
@@ -2144,12 +1960,8 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(self.terminal.stdout);
     }
 
-    /// Intent-leads-shell-follows layout, NO blank line between entries
-    /// — a 14-entry create plan would accumulate too much vertical
-    /// fatigue otherwise. Annotations hang off the intent line, not the
-    /// shell line, so the operator reads WHAT + WHEN at headline level.
-    /// Privilege-aware shell rendering uses bold `sudo` + dim rest;
-    /// bold-not-color reserves the severity color budget for severity.
+    /// No blank lines between entries (a 14-entry create plan gets tall). Bold, not
+    /// colored, `sudo`: color is reserved for severity.
     fn render_plan_block(&mut self, plan: &[(Op<'_>, Option<&'static str>)]) {
         for (op, annotation) in plan {
             let intent = op.intent_label();
@@ -2159,9 +1971,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
                 None => format!("  \u{2022} {intent}"),
             };
             let _ = writeln!(self.terminal.stdout, "{intent_line}");
-            // Multi-line describes (e.g. `EnsureCoworkDir`'s four-call
-            // sequence) get one indented shell line per substrate call
-            // under the same intent bullet.
             for line in shell.lines() {
                 let shell_line = self.format_shell_line(line);
                 let _ = writeln!(self.terminal.stdout, "      {shell_line}");

@@ -1,7 +1,3 @@
-//! Doctor-verb error type, dispatch-scope classifier, outcome carrier,
-//! and the `Tenants::doctor` / `Tenants::doctor_all` orchestrators
-//! plus their per-check helpers.
-
 use crate::ModeLevel;
 use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, classify_inbound_exposure, curated_paths,
@@ -60,7 +56,6 @@ impl From<UserDirectoryError> for DoctorError {
     }
 }
 
-/// `max_severity()` feeds the `--strict` exit-code decision at dispatch.
 #[derive(Debug, Default)]
 pub(crate) struct DoctorOutcome {
     pub findings: Vec<Finding>,
@@ -73,10 +68,7 @@ impl DoctorOutcome {
 }
 
 impl<'a> Tenants<'a> {
-    /// Single-tenant audit. Host-wide checks (env policy, Touch ID,
-    /// pf status) run even in single-tenant mode because each affects
-    /// every tenant. `others` lists the other tenants on the host for
-    /// cross-tenant probes.
+    /// `others`: the host's other tenants, for cross-tenant probes.
     pub(crate) fn doctor(
         &self,
         host: &HostUserName,
@@ -98,9 +90,6 @@ impl<'a> Tenants<'a> {
         Ok(DoctorOutcome { findings })
     }
 
-    /// All-tenants audit. Host-wide checks run once; per-tenant walks
-    /// follow in alphabetical order. With no tenants, host-wide checks
-    /// still run (operator-relevant) before the noop message.
     pub(crate) fn doctor_all(
         &self,
         host: &HostUserName,
@@ -145,13 +134,8 @@ impl<'a> Tenants<'a> {
         &self,
         reporter: &mut Reporter,
     ) -> Result<Option<Finding>, HostFileError> {
-        // Detection consults BOTH /etc/pam.d/sudo and the OS-update-safe
-        // /etc/pam.d/sudo_local. Touch ID configured the sanctioned way
-        // lands in sudo_local; reading only sudo would false-positive
-        // `TouchIdMissing` on a correctly-set-up modern host. Reads are
-        // short-circuited: a directive in sudo proves the check without
-        // touching sudo_local, so a (non-ENOENT) sudo_local read failure
-        // can't abort an already-satisfied audit.
+        // Sanctioned Touch ID setup lands in `sudo_local`. Checking `sudo` first means a
+        // `sudo_local` read failure can't abort an already-satisfied audit.
         if has_pam_tid(&self.machine.read_pam_sudo()?) {
             return Ok(None);
         }
@@ -173,8 +157,7 @@ impl<'a> Tenants<'a> {
         Ok(Some(finding))
     }
 
-    /// Probe one tenant's curated paths + structural pf anchor check.
-    /// Host-wide findings are the caller's responsibility.
+    /// Per-tenant checks only; host-wide findings are the caller's.
     fn probe_tenant_paths(
         &self,
         host: &HostUserName,
@@ -221,13 +204,8 @@ impl<'a> Tenants<'a> {
         if let Some(drift) = self.check_host_in_share_group(name, host, reporter)? {
             findings.push(drift);
         }
-        // Keychain probes follow the "doctor courtesy" posture: a
-        // substrate-machinery failure surfaces via the keychain probe
-        // frame and the walk continues with the remaining checks.
-        // Other probe failures in this method propagate via `?` because
-        // they're load-bearing inputs for the firewall + share drift
-        // checks; keychain absence isn't a precondition for anything
-        // later.
+        // Keychain probe failures warn and continue: unlike the `?` probes above, no later
+        // check depends on them.
         match self.machine.tenant_keychain_present(name) {
             Ok(true) => {}
             Ok(false) => {
@@ -279,11 +257,7 @@ impl<'a> Tenants<'a> {
         Ok(Some(finding))
     }
 
-    /// Walk the profile's `[[shares]]` and emit AclDrift +
-    /// SymlinkDrift findings. The two checks are independent — one
-    /// share can fire both. An unreadable / unparseable profile
-    /// silently skips the check (a future `ProfileMissing` finding
-    /// would surface that case separately).
+    // TODO(smell): check_*_drift vs collect_*_drift names don't say emit+abort vs record+continue; unify the duplicated probes
     fn check_share_drift(
         &self,
         name: &TenantUserName,
@@ -335,10 +309,6 @@ impl<'a> Tenants<'a> {
         Ok(findings)
     }
 
-    /// Probe the cowork directory for absence and ACL drift.
-    /// Absence short-circuits the ACL probe (no ACL on a missing
-    /// path). Substrate failures propagate via `?` to abort the
-    /// audit, consistent with the other reading probes.
     fn check_cowork_drift(
         &self,
         name: &TenantUserName,
@@ -369,14 +339,8 @@ impl<'a> Tenants<'a> {
         Ok(findings)
     }
 
-    /// Classify the tenant's inbound loopback posture into an exposure
-    /// finding: `InboundPermissive` (warning) if the on-disk anchor is
-    /// the widened all-ports form, else `InboundExposure` (info) naming
-    /// the profile's declared ports, else locked = quiet. Composes the
-    /// profile's declared ports (intent) with the observed anchor's
-    /// permissive flag (current posture — there's no state file).
-    /// Unreadable / unparseable profile skips silently, same posture as
-    /// the anchor-body and share-drift checks.
+    /// Composes declared ports (intent) with the on-disk anchor's permissive flag (current
+    /// posture; there's no state file).
     fn check_inbound_exposure(
         &self,
         name: &TenantUserName,
@@ -393,10 +357,8 @@ impl<'a> Tenants<'a> {
         ))
     }
 
-    /// Compare on-disk anchor body against the runtime-tier render.
-    /// An unreadable / unparseable profile skips the check silently.
-    /// Runtime-tier only: install-tier widening outside a shell session
-    /// IS drift, since shell auto-narrows on entry.
+    /// Runtime tier only: install-tier widening outside a shell session IS drift, since
+    /// shell auto-narrows on entry.
     fn check_anchor_body_drift(
         &self,
         name: &TenantUserName,
@@ -419,11 +381,6 @@ impl<'a> Tenants<'a> {
         }))
     }
 
-    /// Run a verb-relevant subset of doctor's checks pre-confirm.
-    /// Critical findings emit inline; warnings + info aggregate into a
-    /// single hint pointing at `tenant doctor`. Substrate failures
-    /// surface as stderr frames; the audit is a courtesy and never
-    /// aborts the verb.
     pub(crate) fn pre_exec_doctor_summary(
         &self,
         name: Option<&TenantUserName>,
@@ -441,23 +398,10 @@ impl<'a> Tenants<'a> {
             }
         };
 
-        // The pre-pass runs pre-consent (before `Proceed?`), so it must
-        // never force or await a sudo prompt, nor spam probe-failure
-        // frames when the operator simply hasn't authed yet. The gate
-        // is precise: only the GENUINE sudo probes (`read_pf_status`,
-        // `read_env_policy`, `read_kernel_pf_rules`, and the
-        // sudo-bearing half of `collect_share_drift`) are gated on a
-        // cached sudo timestamp. The auth-free probes
-        // (`check_anchor_body_drift` direct fs read,
-        // `collect_cowork_drift` host-side, `host_in_group`
-        // dseditgroup checkmember) run regardless of cache state — they
-        // can't prompt, so suppressing them only cost pre-confirm
-        // coverage. Uncached ⇒ the sudo probes skip quietly; the doctor
-        // verb (post point-of-use auth) is the surface that prompts and
-        // reports those.
+        // Runs pre-consent: never prompt or spam failure frames on a cold sudo cache. Only the
+        // genuine sudo probes are gated; auth-free probes always run.
         let sudo_cached = self.machine.sudo_session_cached();
 
-        // PfDisabled is host-wide: pf off means no tenant anchor enforces.
         if sudo_cached {
             match self.machine.read_pf_status() {
                 Ok(text) => {
@@ -489,7 +433,6 @@ impl<'a> Tenants<'a> {
                 scope,
                 DoctorScope::Shell | DoctorScope::Mode | DoctorScope::Reload
             ) {
-                // read_kernel_pf_rules is `sudo pfctl -a .. -sr` — gate it.
                 if sudo_cached {
                     match self.machine.read_kernel_pf_rules(tenant) {
                         Ok(rules) => {
@@ -500,45 +443,23 @@ impl<'a> Tenants<'a> {
                         Err(e) => reporter.doctor_firewall_failed(&e),
                     }
                 }
-                // check_anchor_body_drift reads the on-disk anchor
-                // directly (no sudo) — run regardless of cache state.
                 match self.check_anchor_body_drift(tenant) {
                     Ok(Some(drift)) => record(drift),
                     Ok(None) => {}
                     Err(e) => reporter.doctor_host_file_failed(&e),
                 }
-                // Inbound posture: a calibrated heads-up, NOT a doctor
-                // nag (locked = quiet, restricted-with-ports = a dim
-                // info line, permissive = a loud ⚠). Reads the same
-                // auth-free profile + anchor body — run regardless of
-                // cache state. Emitted directly via the posture line
-                // (not `record`) so it stays out of the warning
-                // aggregate.
+                // Posture line, not `record`: a calibrated heads-up that stays out of the warning aggregate.
                 match self.check_inbound_exposure(tenant) {
                     Ok(posture) => reporter.doctor_inbound_posture(posture.as_ref()),
                     Err(e) => reporter.doctor_host_file_failed(&e),
                 }
             }
 
-            // Share + cowork drift surfaces on shell + mode (Light
-            // scope skips the recursive ACL pass that would heal it)
-            // and on reload (the recursive pass will run; surfacing
-            // pending drift pre-prompt lets the operator decide
-            // whether to proceed).
             if matches!(
                 scope,
                 DoctorScope::Shell | DoctorScope::Mode | DoctorScope::Reload
             ) {
-                // collect_share_drift mixes an auth-free AclDrift read
-                // (`ls -lde`) with a sudo SymlinkDrift probe
-                // (`sudo -n -u`). It always runs the AclDrift half and
-                // gates ONLY the SymlinkDrift half on the cached
-                // timestamp — the split is a caller-side decision
-                // (which findings to collect), not a substrate change.
                 self.collect_share_drift(tenant, sudo_cached, reporter, &mut record);
-                // collect_cowork_drift (host_path_kind + read_host_acl)
-                // and host_in_group (dseditgroup checkmember) are fully
-                // auth-free — run them regardless of cache state.
                 self.collect_cowork_drift(tenant, reporter, &mut record);
                 match self
                     .machine
@@ -561,22 +482,12 @@ impl<'a> Tenants<'a> {
         }
 
         for finding in &criticals {
-            // One-liner only; the aggregate hint already points the
-            // operator at `tenant doctor` for guidance body.
+            // One-liner only: the aggregate hint already points at `tenant doctor`.
             reporter.doctor_finding_one_liner(finding);
         }
         reporter.doctor_summary_pending(warning_count, name);
     }
 
-    /// Quiet counterpart to `check_share_drift` for the pre-exec
-    /// aggregator: same probes, no inline emission. Per-share substrate
-    /// failures surface via the doctor frame and the walk continues.
-    ///
-    /// The AclDrift check reads `ls -lde` from the operator process
-    /// (no sudo) and always runs. The SymlinkDrift check probes
-    /// `sudo -n -u <tenant>` and runs only when `sudo_cached` — gating
-    /// it pre-consent keeps the pre-pass from forcing a sudo prompt or
-    /// spamming a failure frame on a fresh terminal.
     fn collect_share_drift<F: FnMut(Finding)>(
         &self,
         name: &TenantUserName,
@@ -605,10 +516,7 @@ impl<'a> Tenants<'a> {
                     continue;
                 }
             }
-            // SymlinkDrift probes the tenant-side path via
-            // `sudo -n -u <tenant>` — gated on the cached timestamp so
-            // the pre-pass never forces a prompt. AclDrift above is
-            // auth-free and already ran.
+            // SymlinkDrift needs `sudo -n -u`; AclDrift above is auth-free.
             if !sudo_cached {
                 continue;
             }
@@ -642,10 +550,6 @@ impl<'a> Tenants<'a> {
         }
     }
 
-    /// Probe the cowork directory: emit `CoworkDirAbsent` if it's
-    /// gone, else `CoworkAclDrift` if the share-group ACE is
-    /// missing. Absence short-circuits the ACL probe. Substrate
-    /// failures surface via `doctor_failed` and the walk continues.
     fn collect_cowork_drift<F: FnMut(Finding)>(
         &self,
         name: &TenantUserName,
