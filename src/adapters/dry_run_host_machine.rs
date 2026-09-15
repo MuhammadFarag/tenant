@@ -53,6 +53,9 @@ impl HostMachine for DryRunHostMachine {
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
         Ok(String::new())
     }
+    fn pf_conf_references_anchor(&self, _name: &TenantUserName) -> Result<bool, FirewallError> {
+        Ok(true)
+    }
     fn describe_firewall(&self, op: &FirewallOp) -> String {
         MacosHostMachine.describe_firewall(op)
     }

@@ -839,6 +839,25 @@ fn reload_pre_exec_doctor_auth_free_probes_surface_when_sudo_uncached() {
 }
 
 #[test]
+fn reload_pre_exec_doctor_surfaces_missing_anchor_ref_when_sudo_uncached() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_sudo_session_cached(false)
+        .with_pf_conf(STOCK_PF_CONF);
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("critical: tenant 'dev' anchor not referenced from /etc/pf.conf"),
+        "stdout={stdout:?}"
+    );
+}
+
+#[test]
 fn reload_pre_exec_doctor_runs_sudo_probes_when_sudo_cached() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -1169,6 +1188,193 @@ fn reload_missing_fragment_fails_before_prompt() {
     assert!(
         exec.firewall_ops().is_empty(),
         "missing-fragment failure fires no firewall ops: {:?}",
+        exec.firewall_ops()
+    );
+}
+
+// --- pf.conf anchor reference self-heal ---
+
+#[test]
+fn reload_restores_anchor_reference_missing_from_pf_conf() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_conf(STOCK_PF_CONF);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let ops = exec.firewall_ops();
+    assert!(
+        matches!(ops[0], FirewallOp::InstallAnchor { .. }),
+        "ops={ops:?}"
+    );
+    assert_eq!(
+        ops[1..],
+        [
+            FirewallOp::UpdateConfig {
+                content: format!("{STOCK_PF_CONF}{}", anchor_ref_lines("dev")),
+            },
+            FirewallOp::Reload,
+        ]
+    );
+}
+
+#[test]
+fn reload_leaves_pf_conf_alone_when_anchor_reference_present() {
+    let referenced = format!("{}{STOCK_PF_CONF}", anchor_ref_lines("dev"));
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_conf(&referenced);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let ops = exec.firewall_ops();
+    assert!(
+        matches!(
+            ops[..],
+            [FirewallOp::InstallAnchor { .. }, FirewallOp::Reload]
+        ),
+        "ops={ops:?}"
+    );
+}
+
+#[test]
+fn reload_all_restores_only_the_tenant_whose_reference_is_missing() {
+    let staging_only = format!("{STOCK_PF_CONF}{}", anchor_ref_lines("staging"));
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_existing_profile("staging", &tenant::profile::default_profile_toml())
+        .with_pf_conf(&staging_only);
+    let (code, _stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let updates: Vec<FirewallOp> = exec
+        .firewall_ops()
+        .into_iter()
+        .filter(|op| matches!(op, FirewallOp::UpdateConfig { .. }))
+        .collect();
+    assert_eq!(
+        updates,
+        vec![FirewallOp::UpdateConfig {
+            content: format!("{staging_only}{}", anchor_ref_lines("dev")),
+        }]
+    );
+}
+
+#[test]
+fn reload_all_restores_every_reference_after_full_reset() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_existing_profile("staging", &tenant::profile::default_profile_toml())
+        .with_pf_conf(STOCK_PF_CONF);
+    let (code, _stdout, stderr) = run_with_exec(make_two_tenant_stub_reader(), &exec, &["reload"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let updates: Vec<FirewallOp> = exec
+        .firewall_ops()
+        .into_iter()
+        .filter(|op| matches!(op, FirewallOp::UpdateConfig { .. }))
+        .collect();
+    let with_dev = format!("{STOCK_PF_CONF}{}", anchor_ref_lines("dev"));
+    assert_eq!(
+        updates,
+        vec![
+            FirewallOp::UpdateConfig {
+                content: with_dev.clone(),
+            },
+            FirewallOp::UpdateConfig {
+                content: format!("{with_dev}{}", anchor_ref_lines("staging")),
+            },
+        ]
+    );
+}
+
+#[test]
+fn reload_update_conf_failure_aborts_before_reload() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_conf(STOCK_PF_CONF)
+        .fail_firewall_op(
+            FirewallOp::UpdateConfig {
+                content: format!("{STOCK_PF_CONF}{}", anchor_ref_lines("dev")),
+            },
+            FirewallError::NonZero {
+                code: 1,
+                stderr: "mv: rename failed\n".into(),
+            },
+        );
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 74, "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to reload firewall for 'dev': process exited with code 1: mv: rename failed\n"
+    );
+    let ops = exec.firewall_ops();
+    assert!(
+        matches!(
+            ops[..],
+            [
+                FirewallOp::InstallAnchor { .. },
+                FirewallOp::UpdateConfig { .. }
+            ]
+        ),
+        "ops={ops:?}"
+    );
+    assert!(
+        exec.account_ops().is_empty(),
+        "account_ops={:?}",
+        exec.account_ops()
+    );
+}
+
+#[test]
+fn reload_pf_conf_read_failure_surfaces_before_prompt() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .fail_next_pf_conf(FirewallError::Fs {
+            path: "/etc/pf.conf".into(),
+            message: "Permission denied".into(),
+        });
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 74, "stderr={stderr:?}");
+    assert_eq!(stdout, "", "no stdout pre-prompt; got {stdout:?}");
+    assert!(
+        exec.firewall_ops().is_empty(),
+        "ops={:?}",
+        exec.firewall_ops()
+    );
+    assert_eq!(
+        stderr,
+        "tenant: failed to reload firewall for 'dev': filesystem error at /etc/pf.conf: Permission denied\n"
+    );
+}
+
+#[test]
+fn reload_pre_exec_doctor_counts_missing_anchor_ref_as_one_critical_and_proceeds() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_conf(STOCK_PF_CONF)
+        .with_kernel_pf_rules("dev", "");
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stdout
+            .matches("critical: tenant 'dev' anchor not referenced from /etc/pf.conf")
+            .count(),
+        1,
+        "stdout={stdout:?}"
+    );
+    assert!(!stdout.contains("\u{26a0} Doctor:"), "stdout={stdout:?}");
+    assert!(
+        exec.kernel_pf_rules_calls().is_empty(),
+        "calls={:?}",
+        exec.kernel_pf_rules_calls()
+    );
+    assert!(
+        exec.firewall_ops()
+            .iter()
+            .any(|op| matches!(op, FirewallOp::UpdateConfig { .. })),
+        "ops={:?}",
         exec.firewall_ops()
     );
 }

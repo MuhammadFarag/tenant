@@ -12,7 +12,7 @@ use crate::domain::{
     KeychainOp, KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TENANT_KEYCHAIN_FILE,
     TenantUserName, tenant_keychain_path,
 };
-use crate::firewall::{PF_CONF, PF_CONF_BACKUP, tenant_anchor_path};
+use crate::firewall::{PF_CONF, PF_CONF_BACKUP, is_anchor_referenced, tenant_anchor_path};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
 /// Read-only: OS updates overwrite it. Customizations go in `sudo_local`, which it includes first.
@@ -268,6 +268,10 @@ impl HostMachine for MacosHostMachine {
             path: PF_CONF.to_string(),
             message: e.to_string(),
         })
+    }
+
+    fn pf_conf_references_anchor(&self, name: &TenantUserName) -> Result<bool, FirewallError> {
+        Ok(is_anchor_referenced(&self.read_pf_conf()?, name.as_str()))
     }
 
     fn probe_access_as_tenant(

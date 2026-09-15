@@ -182,10 +182,24 @@ impl<'a> Tenants<'a> {
                 findings.push(finding);
             }
         }
-        let rules = self.machine.read_kernel_pf_rules(name)?;
-        for drift in crate::doctor::pf_rule_presence_check(&rules, name.as_str()) {
-            reporter.doctor_finding(&drift);
-            findings.push(drift);
+        let anchor_ref_missing = match self.check_pf_conf_anchor_ref(name) {
+            Ok(None) => false,
+            Ok(Some(missing)) => {
+                reporter.doctor_finding(&missing);
+                findings.push(missing);
+                true
+            }
+            Err(e) => {
+                reporter.doctor_firewall_failed(&e);
+                false
+            }
+        };
+        if !anchor_ref_missing {
+            let rules = self.machine.read_kernel_pf_rules(name)?;
+            for drift in crate::doctor::pf_rule_presence_check(&rules, name.as_str()) {
+                reporter.doctor_finding(&drift);
+                findings.push(drift);
+            }
         }
         if let Some(drift) = self.check_anchor_body_drift(name)? {
             reporter.doctor_finding(&drift);
@@ -230,6 +244,18 @@ impl<'a> Tenants<'a> {
         }
         reporter.doctor_done_summary(name, findings.len());
         Ok(findings)
+    }
+
+    fn check_pf_conf_anchor_ref(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<Option<Finding>, FirewallError> {
+        if self.machine.pf_conf_references_anchor(name)? {
+            return Ok(None);
+        }
+        Ok(Some(Finding::PfConfAnchorRefMissing {
+            tenant: name.clone(),
+        }))
     }
 
     fn check_host_in_share_group(
@@ -433,7 +459,18 @@ impl<'a> Tenants<'a> {
                 scope,
                 DoctorScope::Shell | DoctorScope::Mode | DoctorScope::Reload
             ) {
-                if sudo_cached {
+                let anchor_ref_missing = match self.check_pf_conf_anchor_ref(tenant) {
+                    Ok(None) => false,
+                    Ok(Some(missing)) => {
+                        record(missing);
+                        true
+                    }
+                    Err(e) => {
+                        reporter.doctor_firewall_failed(&e);
+                        false
+                    }
+                };
+                if sudo_cached && !anchor_ref_missing {
                     match self.machine.read_kernel_pf_rules(tenant) {
                         Ok(rules) => {
                             for drift in pf_rule_presence_check(&rules, tenant.as_str()) {

@@ -43,6 +43,19 @@ pub fn directory_fail_on_second_call() -> RefCell<VecDeque<Option<UserDirectoryE
 /// Returned by `StubHostMachine::new()` and `NeverHostMachine`; keeps host-derived paths deterministic.
 pub const TEST_HOST: &str = "operator";
 
+pub const STOCK_PF_CONF: &str = "scrub-anchor \"com.apple/*\"\n\
+nat-anchor \"com.apple/*\"\n\
+rdr-anchor \"com.apple/*\"\n\
+dummynet-anchor \"com.apple/*\"\n\
+anchor \"com.apple/*\"\n\
+load anchor \"com.apple\" from \"/etc/pf.anchors/com.apple\"\n";
+
+pub fn anchor_ref_lines(name: &str) -> String {
+    format!(
+        "anchor \"tenant-{name}\"\nload anchor \"tenant-{name}\" from \"/etc/pf.anchors/tenant-{name}\"\n"
+    )
+}
+
 /// `Reporter::section` divider at colors-off, width 80.
 pub fn section_line(title: &str) -> String {
     tenant::ansi::rule(title, 80)

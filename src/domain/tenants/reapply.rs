@@ -3,7 +3,9 @@ use crate::domain::{
     AccountError, AccountOp, AclError, FirewallError, FirewallOp, HostUserDirectory, HostUserName,
     Op, ProbeError, TenantUserName, UserDirectoryError,
 };
-use crate::firewall::{EgressHost, InboundRules, render_anchor};
+use crate::firewall::{
+    EgressHost, InboundRules, ensure_anchor_ref, is_anchor_referenced, render_anchor,
+};
 use crate::profile::{Profile, ProfileError};
 use crate::{InboundLevel, ModeLevel};
 
@@ -31,6 +33,7 @@ pub(crate) enum ReapplyScope {
 
 pub(crate) struct ReapplyPlan {
     pub(crate) install_anchor: FirewallOp,
+    pub(crate) update_conf: Option<FirewallOp>,
     pub(crate) reload: FirewallOp,
     pub(crate) add_host: AccountOp,
     pub(crate) ensure_primary_group: Option<AccountOp>,
@@ -41,8 +44,14 @@ pub(crate) struct ReapplyPlan {
 impl ReapplyPlan {
     pub(crate) fn as_plan_entries(&self) -> Vec<(Op<'_>, Option<&'static str>)> {
         let mut entries: Vec<(Op<'_>, Option<&'static str>)> =
-            Vec::with_capacity(5 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
+            Vec::with_capacity(6 + self.share_ops.iter().map(|s| s.op_count()).sum::<usize>());
         entries.push((Op::Firewall(&self.install_anchor), None));
+        if let Some(update_conf) = &self.update_conf {
+            entries.push((
+                Op::Firewall(update_conf),
+                Some("only when /etc/pf.conf lacks the anchor reference"),
+            ));
+        }
         entries.push((Op::Firewall(&self.reload), None));
         entries.push((Op::Account(&self.add_host), None));
         if let Some(ensure_primary_group) = &self.ensure_primary_group {
@@ -167,6 +176,14 @@ impl<'a> Tenants<'a> {
             name: name.into(),
             body: render_anchor(name.as_str(), &hosts, inbound),
         };
+        let pf_conf = self.machine.read_pf_conf().map_err(ModeError::Firewall)?;
+        let update_conf = if is_anchor_referenced(&pf_conf, name.as_str()) {
+            None
+        } else {
+            Some(FirewallOp::UpdateConfig {
+                content: ensure_anchor_ref(&pf_conf, name.as_str()),
+            })
+        };
         let reload = FirewallOp::Reload;
         let group = tenant_share_group_name(name.as_str());
         let add_host = AccountOp::AddHostToShareGroup {
@@ -203,6 +220,7 @@ impl<'a> Tenants<'a> {
         let share_ops = self.build_share_ops(name, parsed_profile, scope)?;
         Ok(ReapplyPlan {
             install_anchor,
+            update_conf,
             reload,
             add_host,
             ensure_primary_group,
@@ -220,6 +238,10 @@ impl<'a> Tenants<'a> {
     ) -> Result<(), ModeError> {
         self.run(&plan.install_anchor, reporter)
             .map_err(ModeError::Firewall)?;
+        if let Some(update_conf) = &plan.update_conf {
+            self.run(update_conf, reporter)
+                .map_err(ModeError::Firewall)?;
+        }
         self.run(&plan.reload, reporter)
             .map_err(ModeError::Firewall)?;
         self.run(&plan.add_host, reporter)

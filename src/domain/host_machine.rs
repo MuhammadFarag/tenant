@@ -38,6 +38,8 @@ pub trait HostMachine {
 
     fn read_pf_conf(&self) -> Result<String, FirewallError>;
 
+    fn pf_conf_references_anchor(&self, name: &TenantUserName) -> Result<bool, FirewallError>;
+
     fn describe_firewall(&self, op: &FirewallOp) -> String;
     fn execute_firewall(&self, op: &FirewallOp) -> Result<(), FirewallError>;
 

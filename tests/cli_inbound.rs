@@ -339,6 +339,11 @@ fn inbound_dry_run_verbose_shows_plan_no_echo() {
             "sudo tee /etc/pf.anchors/tenant-dev < anchor.body",
             None,
         ),
+        (
+            "Update /etc/pf.conf",
+            "sudo tee /etc/pf.conf < updated.conf",
+            Some("only when /etc/pf.conf lacks the anchor reference"),
+        ),
         ("Reload pf ruleset", "sudo pfctl -f /etc/pf.conf", None),
         (
             "Add host 'operator' to share group 'dev-tenant-share'",

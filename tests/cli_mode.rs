@@ -483,6 +483,11 @@ fn mode_dry_run_verbose_shows_plan_no_echo() {
             "sudo tee /etc/pf.anchors/tenant-dev < anchor.body",
             None,
         ),
+        (
+            "Update /etc/pf.conf",
+            "sudo tee /etc/pf.conf < updated.conf",
+            Some("only when /etc/pf.conf lacks the anchor reference"),
+        ),
         ("Reload pf ruleset", "sudo pfctl -f /etc/pf.conf", None),
         (
             "Add host 'operator' to share group 'dev-tenant-share'",
@@ -1274,5 +1279,31 @@ fn mode_pre_exec_doctor_surfaces_cowork_dir_absent() {
             "\u{26a0} Doctor: 1 warning for tenant 'dev' \u{2014} run `tenant doctor dev` for details"
         ),
         "cowork dir absence must surface as a Warning aggregate; stdout={stdout:?}"
+    );
+}
+
+// --- pf.conf anchor reference self-heal ---
+
+#[test]
+fn mode_restores_anchor_reference_missing_from_pf_conf() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_conf(STOCK_PF_CONF);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let ops = exec.firewall_ops();
+    assert!(
+        matches!(ops[0], FirewallOp::InstallAnchor { .. }),
+        "ops={ops:?}"
+    );
+    assert_eq!(
+        ops[1..],
+        [
+            FirewallOp::UpdateConfig {
+                content: format!("{STOCK_PF_CONF}{}", anchor_ref_lines("dev")),
+            },
+            FirewallOp::Reload,
+        ]
     );
 }

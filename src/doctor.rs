@@ -61,6 +61,9 @@ pub enum Finding {
     },
     TouchIdMissing,
     PfDisabled,
+    PfConfAnchorRefMissing {
+        tenant: TenantUserName,
+    },
     AnchorBodyDrift {
         tenant: TenantUserName,
     },
@@ -123,6 +126,7 @@ impl Finding {
             Finding::PfRuleDrift { .. } => Severity::Warning,
             Finding::TouchIdMissing => Severity::Info,
             Finding::PfDisabled => Severity::Critical,
+            Finding::PfConfAnchorRefMissing { .. } => Severity::Critical,
             Finding::AnchorBodyDrift { .. } => Severity::Warning,
             Finding::InboundExposure { .. } => Severity::Info,
             Finding::InboundPermissive { .. } => Severity::Warning,
@@ -296,6 +300,38 @@ Side-effects to know about
     not just tenant anchors."
                     .to_string(),
             ),
+            Finding::PfConfAnchorRefMissing { tenant } => Some(format!(
+                "Why this matters
+  /etc/pf.conf carries no `anchor \"tenant-{tenant}\"` / `load anchor` pair,
+  so pf never loads /etc/pf.anchors/tenant-{tenant}. The tenant's egress
+  allowlist and inbound rules are not enforcing anything \u{2014} the anchor
+  file on disk may be perfect and it makes no difference. The usual
+  cause is a macOS update: it replaces /etc/pf.conf with Apple's stock
+  file, and every tenant loses its reference at once. A reload that ran
+  since reported success while loading a file that never named the
+  tenant.
+
+Recommended fix
+  tenant reload {tenant}
+  Re-adds the two lines, re-renders the anchor, and reloads pf. `tenant
+  mode` and `tenant shell` do the same on their way in.
+
+Side-effects to know about
+  \u{2022} None beyond the reload itself; the added lines are the ones `tenant
+    create` writes.
+  \u{2022} Do not restore /etc/pf.conf.tenant-backup: it is the rollback
+    snapshot from the last create or destroy and omits every tenant
+    created since. `tenant reload` rebuilds from the live tenant set.
+  \u{2022} While the reference is missing, doctor skips this tenant's
+    kernel-rule checks \u{2014} an empty kernel anchor is this finding's
+    consequence, not a second problem.
+
+Alternative
+  tenant reload
+  Without a name, repairs every tenant: after an update it is rarely
+  just one. For a scheduled check, `tenant doctor --strict` exits 2 on
+  this finding."
+            )),
             Finding::EnvLeak { var } => Some(format!(
                 "Why this matters
   /etc/sudoers (with drop-ins) doesn't carry an unqualified
@@ -759,6 +795,12 @@ impl fmt::Display for Finding {
                 f,
                 "critical: pf is globally disabled \u{2014} no tenant firewall \
                  is enforcing; run `sudo pfctl -e` to enable"
+            ),
+            Finding::PfConfAnchorRefMissing { tenant } => write!(
+                f,
+                "critical: tenant '{tenant}' anchor not referenced from /etc/pf.conf \u{2014} \
+                 its egress allowlist is not loaded; \
+                 run `tenant reload {tenant}` to restore the reference"
             ),
             Finding::AnchorBodyDrift { tenant } => write!(
                 f,

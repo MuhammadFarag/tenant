@@ -41,6 +41,11 @@ fn shell_dry_run_verbose_shows_mechanism() {
                 "sudo tee /etc/pf.anchors/tenant-dev < anchor.body",
                 None,
             ),
+            (
+                "Update /etc/pf.conf",
+                "sudo tee /etc/pf.conf < updated.conf",
+                Some("only when /etc/pf.conf lacks the anchor reference"),
+            ),
             ("Reload pf ruleset", "sudo pfctl -f /etc/pf.conf", None),
             (
                 "Add host 'operator' to share group 'dev-tenant-share'",
@@ -1066,6 +1071,26 @@ fn shell_pre_exec_inbound_posture_permissive_warns_with_narrow_hint() {
 }
 
 #[test]
+fn shell_pre_exec_doctor_pf_conf_read_failure_surfaces_and_proceeds() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .fail_next_pf_conf(FirewallError::Fs {
+            path: "/etc/pf.conf".into(),
+            message: "Permission denied".into(),
+        });
+    let (code, _stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to read pf state: filesystem error at /etc/pf.conf: Permission denied\n"
+    );
+    assert_eq!(exec.kernel_pf_rules_calls(), vec!["dev".to_string()]);
+    assert_eq!(exec.logins(), vec!["dev".to_string()]);
+}
+
+#[test]
 fn shell_pre_exec_doctor_substrate_failure_surfaces_and_proceeds() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
@@ -2001,6 +2026,31 @@ fn shell_command_install_silently_succeeds_when_cowork_path_is_symlink_under_lig
         cowork_ops.is_empty(),
         "shell --mode install must NOT emit EnsureCoworkDir on either pass; got {cowork_ops:?}"
     );
+}
+
+#[test]
+fn shell_entry_restores_anchor_reference_missing_from_pf_conf() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_pf_conf(STOCK_PF_CONF);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let ops = exec.firewall_ops();
+    assert!(
+        matches!(ops[0], FirewallOp::InstallAnchor { .. }),
+        "ops={ops:?}"
+    );
+    assert_eq!(
+        ops[1..],
+        [
+            FirewallOp::UpdateConfig {
+                content: format!("{STOCK_PF_CONF}{}", anchor_ref_lines("dev")),
+            },
+            FirewallOp::Reload,
+        ]
+    );
+    assert_eq!(exec.logins(), vec!["dev".to_string()]);
 }
 
 // --- Cowork-dir drift in pre-exec doctor ---

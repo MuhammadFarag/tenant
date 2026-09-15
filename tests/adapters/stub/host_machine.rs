@@ -53,8 +53,12 @@ pub struct StubHostMachine {
     /// Backs both `execute_profile` mutations and `read_profile` reads.
     profile_state: RefCell<HashMap<String, String>>,
 
-    /// Not mutated by `execute_firewall`; assert via `firewall_ops()`.
     pf_conf_state: RefCell<String>,
+
+    /// Until `with_pf_conf`, every tenant reads as referenced (no spurious `PfConfAnchorRefMissing`).
+    pf_conf_supplied: Cell<bool>,
+
+    pf_conf_failure: RefCell<Option<FirewallError>>,
 
     /// Unmatched groups fall back to `GroupId(600)`.
     share_group_gids: RefCell<HashMap<String, GroupId>>,
@@ -84,6 +88,8 @@ pub struct StubHostMachine {
     kernel_pf_rules: RefCell<HashMap<String, String>>,
 
     kernel_pf_rules_failure: RefCell<Option<FirewallError>>,
+
+    kernel_pf_rules_calls: RefCell<Vec<String>>,
 
     /// Defaults to Touch-ID-active (no spurious `TouchIdMissing`).
     pam_sudo_content: RefCell<String>,
@@ -291,6 +297,8 @@ impl StubHostMachine {
         self.profile_state
             .borrow_mut()
             .insert(name.to_string(), content.to_string());
+        self.pf_conf_state
+            .replace_with(|conf| tenant::firewall::ensure_anchor_ref(conf, name));
         self
     }
 
@@ -306,8 +314,15 @@ impl StubHostMachine {
         self
     }
 
+    /// Replaces the whole file, dropping the references `with_existing_profile` added.
     pub fn with_pf_conf(self, content: &str) -> Self {
         *self.pf_conf_state.borrow_mut() = content.to_string();
+        self.pf_conf_supplied.set(true);
+        self
+    }
+
+    pub fn fail_next_pf_conf(self, err: FirewallError) -> Self {
+        *self.pf_conf_failure.borrow_mut() = Some(err);
         self
     }
 
@@ -379,6 +394,10 @@ impl StubHostMachine {
     pub fn fail_next_kernel_pf_rules(self, err: FirewallError) -> Self {
         *self.kernel_pf_rules_failure.borrow_mut() = Some(err);
         self
+    }
+
+    pub fn kernel_pf_rules_calls(&self) -> Vec<String> {
+        self.kernel_pf_rules_calls.borrow().clone()
     }
 
     pub fn with_pam_sudo_content(self, content: &str) -> Self {
@@ -747,7 +766,16 @@ impl HostMachine for StubHostMachine {
     }
 
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
+        if let Some(err) = self.pf_conf_failure.borrow_mut().take() {
+            return Err(err);
+        }
         Ok(self.pf_conf_state.borrow().clone())
+    }
+
+    fn pf_conf_references_anchor(&self, name: &TenantUserName) -> Result<bool, FirewallError> {
+        let conf = self.read_pf_conf()?;
+        Ok(!self.pf_conf_supplied.get()
+            || tenant::firewall::is_anchor_referenced(&conf, name.as_str()))
     }
 
     fn describe_firewall(&self, op: &FirewallOp) -> String {
@@ -765,6 +793,9 @@ impl HostMachine for StubHostMachine {
         drop(overrides);
         if let Some(err) = self.firewall_failure.borrow_mut().take() {
             return Err(err);
+        }
+        if let FirewallOp::UpdateConfig { content } = op {
+            *self.pf_conf_state.borrow_mut() = content.clone();
         }
         Ok(())
     }
@@ -798,6 +829,9 @@ impl HostMachine for StubHostMachine {
     }
 
     fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError> {
+        self.kernel_pf_rules_calls
+            .borrow_mut()
+            .push(name.to_string());
         if let Some(err) = self.kernel_pf_rules_failure.borrow_mut().take() {
             return Err(err);
         }

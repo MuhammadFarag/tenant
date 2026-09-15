@@ -55,6 +55,9 @@ impl HostMachine for NeverHostMachine {
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
         panic!("host machine unexpectedly invoked (read_pf_conf)");
     }
+    fn pf_conf_references_anchor(&self, name: &TenantUserName) -> Result<bool, FirewallError> {
+        panic!("host machine unexpectedly invoked (pf_conf_references_anchor): name={name:?}");
+    }
     fn describe_firewall(&self, op: &FirewallOp) -> String {
         panic!("host machine unexpectedly invoked (describe_firewall) with op: {op:?}");
     }

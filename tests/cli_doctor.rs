@@ -508,6 +508,128 @@ fn doctor_pf_rules_substrate_failure_routes_to_firewall_failed_frame() {
     );
 }
 
+// --- pf.conf anchor reference (per-tenant) ---
+
+const DEV_ANCHOR_REF_MISSING: &str = "critical: tenant 'dev' anchor not referenced from /etc/pf.conf \u{2014} \
+     its egress allowlist is not loaded; run `tenant reload dev` to restore the reference\n";
+
+#[test]
+fn doctor_pf_conf_ref_present_no_finding() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_conf(&format!("{STOCK_PF_CONF}{}", anchor_ref_lines("dev")));
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stdout,
+        "doctor: tenant 'dev' \u{2014} no per-tenant findings.\n"
+    );
+}
+
+#[test]
+fn doctor_pf_conf_read_failure_routes_to_firewall_failed_frame_and_walk_continues() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_tenant_keychain_present("dev", false)
+        .fail_next_pf_conf(tenant::domain::FirewallError::Fs {
+            path: "/etc/pf.conf".into(),
+            message: "Permission denied".into(),
+        });
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to read pf state: filesystem error at /etc/pf.conf: Permission denied\n"
+    );
+    assert_eq!(
+        stdout,
+        "warning: tenant 'dev' keychain absent \u{2014} \
+         apps inside the tenant won't be able to persist credentials\n"
+    );
+    assert_eq!(stub_exec.kernel_pf_rules_calls(), vec!["dev".to_string()]);
+}
+
+#[test]
+fn doctor_pf_conf_ref_missing_skips_kernel_rules_check() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_conf(STOCK_PF_CONF)
+        .with_kernel_pf_rules("dev", "");
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(stdout, DEV_ANCHOR_REF_MISSING);
+    assert!(
+        stub_exec.kernel_pf_rules_calls().is_empty(),
+        "calls={:?}",
+        stub_exec.kernel_pf_rules_calls()
+    );
+}
+
+#[test]
+fn doctor_pf_conf_ref_all_tenants_scoped_per_tenant() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_existing_profile("staging", &tenant::profile::default_profile_toml())
+        .with_pf_conf(&format!("{STOCK_PF_CONF}{}", anchor_ref_lines("staging")))
+        .with_kernel_pf_rules("dev", "")
+        .with_kernel_pf_rules("staging", "");
+    let (code, stdout, stderr) =
+        run_with_exec(make_two_tenant_stub_reader(), &stub_exec, &["doctor"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stdout,
+        format!(
+            "{DEV_ANCHOR_REF_MISSING}\
+             warning: tenant 'staging' pf anchor drift \u{2014} no `pass` rule in kernel anchor; \
+             run `tenant mode staging runtime` to re-render and reload\n\
+             warning: tenant 'staging' pf anchor drift \u{2014} no `block` rule in kernel anchor; \
+             run `tenant mode staging runtime` to re-render and reload\n"
+        )
+    );
+    assert_eq!(
+        stub_exec.kernel_pf_rules_calls(),
+        vec!["staging".to_string()]
+    );
+}
+
+#[test]
+fn doctor_pf_conf_ref_missing_with_strict_exits_2() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_pf_conf(STOCK_PF_CONF);
+    let (code, _stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev", "--strict"],
+    );
+    assert_eq!(code, 2, "stderr={stderr:?}");
+}
+
+#[test]
+fn doctor_pf_conf_ref_dry_run_strict_exits_0() {
+    let (code, stdout, stderr) = run_with(
+        make_tenant_stub_reader("dev"),
+        &["doctor", "dev", "--dry-run", "--strict"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        !stdout.contains("anchor not referenced"),
+        "stdout={stdout:?}"
+    );
+}
+
 // --- Touch-ID-for-sudo (host-wide) ---
 
 #[test]
