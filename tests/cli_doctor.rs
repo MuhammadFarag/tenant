@@ -630,6 +630,125 @@ fn doctor_pf_conf_ref_dry_run_strict_exits_0() {
     );
 }
 
+// --- Primary-group drift (per-tenant) ---
+
+const DEV_STASH_ABSENT: &str = "warning: stashed password absent for tenant 'dev' \u{2014} \
+     `tenant shell` and `tenant bootstrap` can't unlock the keychain without it; \
+     run `tenant destroy dev && tenant create dev` to re-bootstrap\n";
+
+#[test]
+fn doctor_primary_group_drift_emits_critical_finding() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_share_group_gid("dev-tenant-share", 612)
+        .with_user_primary_gid("dev", 20);
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stdout,
+        "critical: tenant 'dev' primary group is gid 20, not dev-tenant-share (612) \u{2014} \
+         the tenant has joined another group and left its share group; \
+         run `tenant reload dev` to re-assert\n"
+    );
+}
+
+#[test]
+fn doctor_primary_group_matches_share_group_no_finding() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_share_group_gid("dev-tenant-share", 612)
+        .with_user_primary_gid("dev", 612);
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stdout,
+        "doctor: tenant 'dev' \u{2014} no per-tenant findings.\n"
+    );
+}
+
+#[test]
+fn doctor_primary_group_probe_failure_surfaces_and_walk_continues() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_stash_present("dev", false)
+        .fail_next_user_primary_gid(tenant::domain::ProbeError::NonZero {
+            code: 56,
+            stderr: "eDSRecordNotFound".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to probe tenant 'dev' primary group: probe exited with code 56: eDSRecordNotFound\n"
+    );
+    assert_eq!(stdout, DEV_STASH_ABSENT);
+}
+
+#[test]
+fn doctor_primary_group_share_gid_probe_failure_surfaces_and_walk_continues() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_stash_present("dev", false)
+        .fail_next_share_group_gid(tenant::domain::ProbeError::NonZero {
+            code: 56,
+            stderr: "eDSRecordNotFound".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to probe tenant 'dev' primary group: probe exited with code 56: eDSRecordNotFound\n"
+    );
+    assert_eq!(stdout, DEV_STASH_ABSENT);
+}
+
+#[test]
+fn doctor_primary_group_and_pf_conf_ref_all_tenants_scoped_per_tenant() {
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_existing_profile("staging", &tenant::profile::default_profile_toml())
+        .with_pf_conf(STOCK_PF_CONF)
+        .with_share_group_gid("staging-tenant-share", 601)
+        .with_user_primary_gid("dev", 20)
+        .with_user_primary_gid("staging", 20);
+    let (code, stdout, stderr) = run_with_exec(
+        make_two_tenant_stub_reader(),
+        &stub_exec,
+        &["doctor", "--strict"],
+    );
+    assert_eq!(code, 2, "stderr={stderr:?}");
+    assert_eq!(
+        stdout,
+        format!(
+            "{DEV_ANCHOR_REF_MISSING}\
+         critical: tenant 'dev' primary group is gid 20, not dev-tenant-share (600) \u{2014} \
+         the tenant has joined another group and left its share group; \
+         run `tenant reload dev` to re-assert\n\
+         critical: tenant 'staging' anchor not referenced from /etc/pf.conf \u{2014} \
+         its egress allowlist is not loaded; run `tenant reload staging` to restore the reference\n\
+         critical: tenant 'staging' primary group is gid 20, not staging-tenant-share (601) \u{2014} \
+         the tenant has joined another group and left its share group; \
+         run `tenant reload staging` to re-assert\n"
+        )
+    );
+}
+
 // --- Touch-ID-for-sudo (host-wide) ---
 
 #[test]

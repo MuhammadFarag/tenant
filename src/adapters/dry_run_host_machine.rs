@@ -50,6 +50,9 @@ impl HostMachine for DryRunHostMachine {
     fn read_share_group_gid(&self, _group: &GroupName) -> Result<GroupId, ProbeError> {
         Ok(GroupId(crate::allocation::TENANT_UID_FLOOR))
     }
+    fn read_user_primary_gid(&self, _name: &TenantUserName) -> Result<GroupId, ProbeError> {
+        Ok(GroupId(crate::allocation::TENANT_UID_FLOOR))
+    }
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
         Ok(String::new())
     }

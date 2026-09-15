@@ -52,6 +52,9 @@ impl HostMachine for NeverHostMachine {
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
         panic!("host machine unexpectedly invoked (read_share_group_gid) with group: {group:?}");
     }
+    fn read_user_primary_gid(&self, name: &TenantUserName) -> Result<GroupId, ProbeError> {
+        panic!("host machine unexpectedly invoked (read_user_primary_gid) with name: {name:?}");
+    }
     fn read_pf_conf(&self) -> Result<String, FirewallError> {
         panic!("host machine unexpectedly invoked (read_pf_conf)");
     }

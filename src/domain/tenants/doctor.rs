@@ -218,8 +218,14 @@ impl<'a> Tenants<'a> {
         if let Some(drift) = self.check_host_in_share_group(name, host, reporter)? {
             findings.push(drift);
         }
-        // Keychain probe failures warn and continue: unlike the `?` probes above, no later
-        // check depends on them.
+        match self.check_primary_group_drift(name) {
+            Ok(None) => {}
+            Ok(Some(drift)) => {
+                reporter.doctor_finding(&drift);
+                findings.push(drift);
+            }
+            Err(e) => reporter.doctor_primary_group_probe_failed(name, &e),
+        }
         match self.machine.tenant_keychain_present(name) {
             Ok(true) => {}
             Ok(false) => {
@@ -255,6 +261,24 @@ impl<'a> Tenants<'a> {
         }
         Ok(Some(Finding::PfConfAnchorRefMissing {
             tenant: name.clone(),
+        }))
+    }
+
+    fn check_primary_group_drift(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<Option<Finding>, ProbeError> {
+        let expected = self
+            .machine
+            .read_share_group_gid(&tenant_share_group_name(name.as_str()))?;
+        let actual = self.machine.read_user_primary_gid(name)?;
+        if actual == expected {
+            return Ok(None);
+        }
+        Ok(Some(Finding::PrimaryGroupDrift {
+            tenant: name.clone(),
+            expected,
+            actual,
         }))
     }
 
@@ -514,6 +538,11 @@ impl<'a> Tenants<'a> {
                             stderr: format!("dseditgroup -o checkmember failed: {e}"),
                         });
                     }
+                }
+                match self.check_primary_group_drift(tenant) {
+                    Ok(Some(drift)) => record(drift),
+                    Ok(None) => {}
+                    Err(e) => reporter.doctor_primary_group_probe_failed(tenant, &e),
                 }
             }
         }

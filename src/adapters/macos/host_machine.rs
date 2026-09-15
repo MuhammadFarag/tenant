@@ -211,32 +211,11 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError> {
-        // No sudo: group records are world-readable. Unparseable ⇒ error, never a
-        // fabricated gid that would silently re-point the tenant's primary group.
-        let path = format!("/Groups/{}", group.as_str());
-        let output = Command::new("dscl")
-            .args([".", "-read", &path, "PrimaryGroupID"])
-            .output()
-            .map_err(ProbeError::Spawn)?;
-        if !output.status.success() {
-            return Err(ProbeError::NonZero {
-                code: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            });
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout
-            .split_whitespace()
-            .next_back()
-            .and_then(|tok| tok.parse::<u32>().ok())
-            .map(GroupId)
-            .ok_or_else(|| ProbeError::NonZero {
-                code: -1,
-                stderr: format!(
-                    "unparseable PrimaryGroupID for group '{}': {stdout:?}",
-                    group.as_str()
-                ),
-            })
+        read_primary_group_id(&share_group_gid_argv(group.as_str()))
+    }
+
+    fn read_user_primary_gid(&self, name: &TenantUserName) -> Result<GroupId, ProbeError> {
+        read_primary_group_id(&user_primary_gid_argv(name.as_str()))
     }
 
     fn describe_firewall(&self, op: &FirewallOp) -> String {
@@ -804,6 +783,50 @@ pub fn sudoers_dropins_listing_argv() -> Vec<String> {
         "-1".into(),
         "/etc/sudoers.d".into(),
     ]
+}
+
+pub fn share_group_gid_argv(group: &str) -> Vec<String> {
+    primary_group_id_argv(&format!("/Groups/{group}"))
+}
+
+pub fn user_primary_gid_argv(name: &str) -> Vec<String> {
+    primary_group_id_argv(&format!("/Users/{name}"))
+}
+
+fn primary_group_id_argv(record: &str) -> Vec<String> {
+    vec![
+        "dscl".into(),
+        ".".into(),
+        "-read".into(),
+        record.into(),
+        "PrimaryGroupID".into(),
+    ]
+}
+
+/// Unparseable ⇒ error, never a fabricated gid that would silently re-point the tenant's
+/// primary group.
+fn read_primary_group_id(argv: &[String]) -> Result<GroupId, ProbeError> {
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+        .map_err(ProbeError::Spawn)?;
+    let command = argv.join(" ");
+    if !output.status.success() {
+        return Err(ProbeError::NonZero {
+            code: output.status.code().unwrap_or(-1),
+            stderr: format!("`{command}`: {}", String::from_utf8_lossy(&output.stderr)),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .split_whitespace()
+        .next_back()
+        .and_then(|tok| tok.parse::<u32>().ok())
+        .map(GroupId)
+        .ok_or_else(|| ProbeError::NonZero {
+            code: -1,
+            stderr: format!("unparseable output from `{command}`: {stdout:?}"),
+        })
 }
 
 pub fn pf_status_argv() -> Vec<String> {

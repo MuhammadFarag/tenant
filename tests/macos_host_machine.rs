@@ -604,6 +604,30 @@ fn macos_sudoers_dropins_listing_argv_is_bare_sudo() {
 }
 
 #[test]
+fn macos_share_group_gid_argv_reads_without_sudo() {
+    use tenant::adapters::macos::host_machine::share_group_gid_argv;
+    assert_eq!(
+        share_group_gid_argv("dev-tenant-share"),
+        vec![
+            "dscl",
+            ".",
+            "-read",
+            "/Groups/dev-tenant-share",
+            "PrimaryGroupID"
+        ]
+    );
+}
+
+#[test]
+fn macos_user_primary_gid_argv_reads_without_sudo() {
+    use tenant::adapters::macos::host_machine::user_primary_gid_argv;
+    assert_eq!(
+        user_primary_gid_argv("dev"),
+        vec!["dscl", ".", "-read", "/Users/dev", "PrimaryGroupID"]
+    );
+}
+
+#[test]
 fn macos_authenticate_sudo_argv_prompts() {
     use tenant::adapters::macos::host_machine::authenticate_sudo_argv;
     assert_eq!(authenticate_sudo_argv(), vec!["sudo", "-v"]);

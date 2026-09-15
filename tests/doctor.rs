@@ -6,7 +6,7 @@ use tenant::doctor::{
     Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify,
     classify_inbound_exposure, curated_paths,
 };
-use tenant::domain::{AccessMode, AccessOutcome, HostUserName, TenantUserName};
+use tenant::domain::{AccessMode, AccessOutcome, GroupId, HostUserName, TenantUserName};
 
 // --- Finding display ---
 
@@ -1298,5 +1298,65 @@ Alternative
   Without a name, repairs every tenant: after an update it is rarely
   just one. For a scheduled check, `tenant doctor --strict` exits 2 on
   this finding.";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+// --- Finding::PrimaryGroupDrift ---
+
+#[test]
+fn finding_display_primary_group_drift() {
+    let f = Finding::PrimaryGroupDrift {
+        tenant: TenantUserName::from("dev"),
+        expected: GroupId(612),
+        actual: GroupId(601),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "critical: tenant 'dev' primary group is gid 601, not dev-tenant-share (612) \u{2014} \
+         the tenant has joined another group and left its share group; \
+         run `tenant reload dev` to re-assert"
+    );
+}
+
+#[test]
+fn finding_primary_group_drift_severity_is_critical() {
+    let f = Finding::PrimaryGroupDrift {
+        tenant: TenantUserName::from("dev"),
+        expected: GroupId(612),
+        actual: GroupId(601),
+    };
+    assert_eq!(f.severity(), Severity::Critical);
+}
+
+#[test]
+fn guidance_primary_group_drift_byte_form() {
+    let f = Finding::PrimaryGroupDrift {
+        tenant: TenantUserName::from("dev"),
+        expected: GroupId(612),
+        actual: GroupId(601),
+    };
+    let expected = "Why this matters
+  Tenant 'dev' was created with primary group dev-tenant-share (612);
+  its record now says 601. When that is 20 (staff) \u{2014} the value macOS
+  updates write back \u{2014} the tenant gains group access to every staff-group
+  directory on the host, including /Users/<operator> (mode 750, group
+  staff), and stops being a member of dev-tenant-share, so every declared share
+  denies it. The isolation the tenant depends on is inverted, not just
+  weakened. Cause on record: the update's templateMigrator re-creating
+  local user records at first boot.
+
+Recommended fix
+  tenant reload dev
+  Full reapply re-asserts the primary group from the live share-group
+  record, then reapplies shares. Processes already running as the tenant
+  keep their old group set until they restart.
+
+Side-effects to know about
+  \u{2022} Group caches may lag: `sudo dsmemberutil flushcache` if a share still
+    denies after the reload.
+
+Alternative
+  sudo dscl . -create /Users/dev PrimaryGroupID 612
+  The single write reload performs; skips the share reapply.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::tenants::tenant_share_group_name;
 use crate::domain::{
-    AccessMode, AccessOutcome, GroupName, HostUserName, TENANT_KEYCHAIN_FILE, TenantUserName,
-    tenant_keychain_path,
+    AccessMode, AccessOutcome, GroupId, GroupName, HostUserName, TENANT_KEYCHAIN_FILE,
+    TenantUserName, tenant_keychain_path,
 };
 
 /// Order is load-bearing: `--strict` maps max severity to exit code
@@ -102,6 +102,11 @@ pub enum Finding {
         host: HostUserName,
         group: GroupName,
     },
+    PrimaryGroupDrift {
+        tenant: TenantUserName,
+        expected: GroupId,
+        actual: GroupId,
+    },
     /// OAuth-class apps inside the tenant hit `errSecNoSuchKeychain`.
     TenantKeychainAbsent {
         tenant: TenantUserName,
@@ -135,6 +140,7 @@ impl Finding {
             Finding::CoworkDirAbsent { .. } => Severity::Warning,
             Finding::SymlinkDrift { .. } => Severity::Warning,
             Finding::HostNotInShareGroup { .. } => Severity::Warning,
+            Finding::PrimaryGroupDrift { .. } => Severity::Critical,
             Finding::TenantKeychainAbsent { .. } => Severity::Warning,
             Finding::StashAbsent { .. } => Severity::Warning,
         }
@@ -671,6 +677,38 @@ Alternative
   Adds just the membership without running the full reload. Use when
   `tenant reload` is blocked by an unrelated refusal."
             )),
+            Finding::PrimaryGroupDrift {
+                tenant,
+                expected,
+                actual,
+            } => {
+                let group = tenant_share_group_name(tenant.as_str());
+                Some(format!(
+                    "Why this matters
+  Tenant '{tenant}' was created with primary group {group} ({expected});
+  its record now says {actual}. When that is 20 (staff) \u{2014} the value macOS
+  updates write back \u{2014} the tenant gains group access to every staff-group
+  directory on the host, including /Users/<operator> (mode 750, group
+  staff), and stops being a member of {group}, so every declared share
+  denies it. The isolation the tenant depends on is inverted, not just
+  weakened. Cause on record: the update's templateMigrator re-creating
+  local user records at first boot.
+
+Recommended fix
+  tenant reload {tenant}
+  Full reapply re-asserts the primary group from the live share-group
+  record, then reapplies shares. Processes already running as the tenant
+  keep their old group set until they restart.
+
+Side-effects to know about
+  \u{2022} Group caches may lag: `sudo dsmemberutil flushcache` if a share still
+    denies after the reload.
+
+Alternative
+  sudo dscl . -create /Users/{tenant} PrimaryGroupID {expected}
+  The single write reload performs; skips the share reapply."
+                ))
+            }
             Finding::TenantKeychainAbsent { tenant } => {
                 let keychain_path = tenant_keychain_path(tenant.as_str());
                 Some(format!(
@@ -894,6 +932,20 @@ impl fmt::Display for Finding {
                  files created by tenant '{tenant}' inside RW shares are not host-writable; \
                  run `tenant reload {tenant}` to fix"
             ),
+            Finding::PrimaryGroupDrift {
+                tenant,
+                expected,
+                actual,
+            } => {
+                let group = tenant_share_group_name(tenant.as_str());
+                write!(
+                    f,
+                    "critical: tenant '{tenant}' primary group is gid {actual}, \
+                     not {group} ({expected}) \u{2014} \
+                     the tenant has joined another group and left its share group; \
+                     run `tenant reload {tenant}` to re-assert"
+                )
+            }
             Finding::TenantKeychainAbsent { tenant } => write!(
                 f,
                 "warning: tenant '{tenant}' keychain absent \u{2014} \

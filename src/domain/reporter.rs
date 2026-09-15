@@ -1155,6 +1155,13 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    pub fn doctor_primary_group_probe_failed(&mut self, name: &TenantUserName, err: &ProbeError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to probe tenant '{name}' primary group: {err}"
+        );
+    }
+
     pub fn doctor_stash_probe_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,

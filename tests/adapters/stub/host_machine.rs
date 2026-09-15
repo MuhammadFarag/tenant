@@ -65,6 +65,11 @@ pub struct StubHostMachine {
 
     share_group_gid_failure: RefCell<Option<ProbeError>>,
 
+    /// Unmatched tenants default to their share group's gid (no spurious `PrimaryGroupDrift`).
+    user_primary_gids: RefCell<HashMap<String, GroupId>>,
+
+    user_primary_gid_failure: RefCell<Option<ProbeError>>,
+
     /// Overrides what `ProfileOp::Create` writes (production always writes the default).
     create_profile_overrides: RefCell<HashMap<String, String>>,
 
@@ -311,6 +316,18 @@ impl StubHostMachine {
 
     pub fn fail_next_share_group_gid(self, err: ProbeError) -> Self {
         *self.share_group_gid_failure.borrow_mut() = Some(err);
+        self
+    }
+
+    pub fn with_user_primary_gid(self, name: &str, gid: u32) -> Self {
+        self.user_primary_gids
+            .borrow_mut()
+            .insert(name.to_string(), GroupId(gid));
+        self
+    }
+
+    pub fn fail_next_user_primary_gid(self, err: ProbeError) -> Self {
+        *self.user_primary_gid_failure.borrow_mut() = Some(err);
         self
     }
 
@@ -654,6 +671,14 @@ impl StubHostMachine {
     pub fn unlock_calls(&self) -> Vec<String> {
         self.unlock_calls.borrow().clone()
     }
+
+    fn share_group_gid(&self, group: &str) -> GroupId {
+        self.share_group_gids
+            .borrow()
+            .get(group)
+            .copied()
+            .unwrap_or(GroupId(600))
+    }
 }
 
 impl HostMachine for StubHostMachine {
@@ -757,12 +782,23 @@ impl HostMachine for StubHostMachine {
         if let Some(err) = self.share_group_gid_failure.borrow_mut().take() {
             return Err(err);
         }
+        Ok(self.share_group_gid(group.as_str()))
+    }
+
+    fn read_user_primary_gid(&self, name: &TenantUserName) -> Result<GroupId, ProbeError> {
+        if let Some(err) = self.user_primary_gid_failure.borrow_mut().take() {
+            return Err(err);
+        }
         Ok(self
-            .share_group_gids
+            .user_primary_gids
             .borrow()
-            .get(group.as_str())
+            .get(name.as_str())
             .copied()
-            .unwrap_or(GroupId(600)))
+            .unwrap_or_else(|| {
+                self.share_group_gid(
+                    tenant::domain::tenants::tenant_share_group_name(name.as_str()).as_str(),
+                )
+            }))
     }
 
     fn read_pf_conf(&self) -> Result<String, FirewallError> {

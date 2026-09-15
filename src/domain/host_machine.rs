@@ -36,6 +36,9 @@ pub trait HostMachine {
     /// pre-prompt without tripping the uncached-sudo path.
     fn read_share_group_gid(&self, group: &GroupName) -> Result<GroupId, ProbeError>;
 
+    /// Unprivileged: user records are world-readable.
+    fn read_user_primary_gid(&self, name: &TenantUserName) -> Result<GroupId, ProbeError>;
+
     fn read_pf_conf(&self) -> Result<String, FirewallError>;
 
     fn pf_conf_references_anchor(&self, name: &TenantUserName) -> Result<bool, FirewallError>;

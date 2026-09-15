@@ -1147,6 +1147,62 @@ fn mode_pre_exec_doctor_silent_when_host_is_clean() {
 }
 
 #[test]
+fn mode_pre_exec_doctor_emits_primary_group_drift_critical_and_proceeds() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_sudo_session_cached(false)
+        .with_user_primary_gid("dev", 20);
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout
+            .contains("critical: tenant 'dev' primary group is gid 20, not dev-tenant-share (600)"),
+        "stdout={stdout:?}"
+    );
+    assert!(!stdout.contains("\u{26a0} Doctor:"), "stdout={stdout:?}");
+    assert!(
+        exec.firewall_ops()
+            .iter()
+            .any(|op| matches!(op, FirewallOp::Reload)),
+        "ops={:?}",
+        exec.firewall_ops()
+    );
+}
+
+#[test]
+fn mode_pre_exec_doctor_primary_group_probe_failure_surfaces_and_proceeds() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .fail_next_user_primary_gid(tenant::domain::ProbeError::NonZero {
+            code: 56,
+            stderr: "eDSRecordNotFound".to_string(),
+        });
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime", "-y"],
+        b"",
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to probe tenant 'dev' primary group: probe exited with code 56: eDSRecordNotFound\n"
+    );
+    assert!(
+        exec.firewall_ops()
+            .iter()
+            .any(|op| matches!(op, FirewallOp::Reload)),
+        "ops={:?}",
+        exec.firewall_ops()
+    );
+}
+
+#[test]
 fn mode_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
