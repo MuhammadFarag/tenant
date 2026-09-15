@@ -628,6 +628,19 @@ fn macos_user_primary_gid_argv_reads_without_sudo() {
 }
 
 #[test]
+fn macos_privileged_install_argv_moves_then_owns_by_root_then_sets_mode() {
+    use tenant::adapters::macos::host_machine::privileged_install_argv;
+    assert_eq!(
+        privileged_install_argv("/tmp/tenant-pf-1.tmp", "/etc/pf.conf"),
+        [
+            vec!["sudo", "mv", "/tmp/tenant-pf-1.tmp", "/etc/pf.conf"],
+            vec!["sudo", "chown", "root:wheel", "/etc/pf.conf"],
+            vec!["sudo", "chmod", "0644", "/etc/pf.conf"],
+        ]
+    );
+}
+
+#[test]
 fn macos_authenticate_sudo_argv_prompts() {
     use tenant::adapters::macos::host_machine::authenticate_sudo_argv;
     assert_eq!(authenticate_sudo_argv(), vec!["sudo", "-v"]);

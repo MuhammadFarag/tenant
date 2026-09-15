@@ -552,6 +552,19 @@ Side-effects to know about
 }
 
 #[test]
+fn finding_display_env_leak() {
+    let f = Finding::EnvLeak {
+        var: "SSH_AUTH_SOCK".to_string(),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "warning: SSH_AUTH_SOCK not in env_delete \u{2014} host's session env leaks into 'tenant shell' sessions; \
+         add `Defaults env_delete += \"SSH_AUTH_SOCK\"` to /etc/sudoers.d/tenant \
+         (/etc/sudoers is replaced by macOS updates)"
+    );
+}
+
+#[test]
 fn guidance_env_leak_byte_form() {
     let f = Finding::EnvLeak {
         var: "SSH_AUTH_SOCK".to_string(),

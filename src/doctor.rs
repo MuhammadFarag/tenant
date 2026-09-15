@@ -816,7 +816,8 @@ impl fmt::Display for Finding {
             Finding::EnvLeak { var } => write!(
                 f,
                 "warning: {var} not in env_delete \u{2014} host's session env leaks into 'tenant shell' sessions; \
-                 add `Defaults env_delete += \"{var}\"` to /etc/sudoers"
+                 add `Defaults env_delete += \"{var}\"` to /etc/sudoers.d/tenant \
+                 (/etc/sudoers is replaced by macOS updates)"
             ),
             Finding::PfRuleDrift { tenant, detail } => write!(
                 f,

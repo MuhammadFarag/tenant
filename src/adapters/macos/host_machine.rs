@@ -221,7 +221,6 @@ impl HostMachine for MacosHostMachine {
     fn describe_firewall(&self, op: &FirewallOp) -> String {
         match op {
             FirewallOp::InstallAnchor { name, .. } => {
-                // Pretend-shell: execute is tempfile + sudo mv + sudo chmod.
                 format!("sudo tee /etc/pf.anchors/tenant-{name} < anchor.body")
             }
             FirewallOp::RemoveAnchor { name } => {
@@ -920,13 +919,26 @@ fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
         })?;
     drop(tmp);
 
-    let tmp_str = tmp_path.display().to_string();
-    let result = (|| -> Result<(), FirewallError> {
-        spawn_firewall(&["sudo".into(), "mv".into(), tmp_str.clone(), path.into()])?;
-        spawn_firewall(&["sudo".into(), "chmod".into(), "0644".into(), path.into()])
-    })();
+    let result = privileged_install_argv(&tmp_path.display().to_string(), path)
+        .iter()
+        .try_for_each(|argv| spawn_firewall(argv));
     let _ = fs::remove_file(&tmp_path);
     result
+}
+
+/// rename(2) keeps the tempfile's operator ownership, so `mv` alone leaves the target
+/// writable without sudo.
+pub fn privileged_install_argv(tmp: &str, path: &str) -> [Vec<String>; 3] {
+    [
+        vec!["sudo".into(), "mv".into(), tmp.into(), path.into()],
+        vec![
+            "sudo".into(),
+            "chown".into(),
+            "root:wheel".into(),
+            path.into(),
+        ],
+        vec!["sudo".into(), "chmod".into(), "0644".into(), path.into()],
+    ]
 }
 
 fn tempfile_path() -> PathBuf {
