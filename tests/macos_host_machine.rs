@@ -628,14 +628,14 @@ fn macos_user_primary_gid_argv_reads_without_sudo() {
 }
 
 #[test]
-fn macos_privileged_install_argv_moves_then_owns_by_root_then_sets_mode() {
+fn macos_privileged_install_argv_owns_and_modes_tempfile_then_moves() {
     use tenant::adapters::macos::host_machine::privileged_install_argv;
     assert_eq!(
         privileged_install_argv("/tmp/tenant-pf-1.tmp", "/etc/pf.conf"),
         [
+            vec!["sudo", "chown", "root:wheel", "/tmp/tenant-pf-1.tmp"],
+            vec!["sudo", "chmod", "0644", "/tmp/tenant-pf-1.tmp"],
             vec!["sudo", "mv", "/tmp/tenant-pf-1.tmp", "/etc/pf.conf"],
-            vec!["sudo", "chown", "root:wheel", "/etc/pf.conf"],
-            vec!["sudo", "chmod", "0644", "/etc/pf.conf"],
         ]
     );
 }

@@ -927,17 +927,18 @@ fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
 }
 
 /// rename(2) keeps the tempfile's operator ownership, so `mv` alone leaves the target
-/// writable without sudo.
+/// writable without sudo. Owner and mode are set on the tempfile so the rename lands the
+/// finished file in one step.
 pub fn privileged_install_argv(tmp: &str, path: &str) -> [Vec<String>; 3] {
     [
-        vec!["sudo".into(), "mv".into(), tmp.into(), path.into()],
         vec![
             "sudo".into(),
             "chown".into(),
             "root:wheel".into(),
-            path.into(),
+            tmp.into(),
         ],
-        vec!["sudo".into(), "chmod".into(), "0644".into(), path.into()],
+        vec!["sudo".into(), "chmod".into(), "0644".into(), tmp.into()],
+        vec!["sudo".into(), "mv".into(), tmp.into(), path.into()],
     ]
 }
 
