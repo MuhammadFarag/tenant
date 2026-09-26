@@ -99,6 +99,13 @@ only — code comments don't restate or cite them.
 - **Convergent teardown.** Destroy-absent is a successful noop; orphan
   group converges. The final kernel-anchor flush is load-bearing (pfctl
   doesn't GC anchors — see `destroy.rs`); create/reapply paths do NOT flush.
+- **State a macOS update resets is a convergence target.** Updates rewrite
+  `/etc/pf.conf` (anchor references), user records (`PrimaryGroupID`) and
+  `/etc/sudoers`. Every reapply re-asserts what it can; doctor reports the
+  rest as Critical; nothing written at `create` is assumed to persist.
+- **The tenant keychain is `tenant.keychain-db`, never `login.keychain-db`**
+  (`TENANT_KEYCHAIN_FILE`) — macOS 26.6+ refuses the login name outside
+  the user's session.
 - **Centralized name builders** (`tenant_share_group_name`,
   `firewall::tenant_anchor_name`/`_path`, `cowork_dir_path`) — don't
   inline `format!`.
