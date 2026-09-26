@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.9
+# tenant 0.1.0-alpha.10
 
-Ninth alpha. Still alpha quality: the verbs work end-to-end on the
+Tenth alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,6 +21,60 @@ The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
+
+## New since 0.1.0-alpha.9
+
+A resilience release. Three macOS updates in a row (26.5.1, 26.6.2,
+27.0) silently reset host state that `tenant` wrote once at `create`.
+This release makes the CLI converge on that state instead of assuming
+it persists. **Existing hosts have a one-time step** — see the third
+item.
+
+- **Reapply restores the `/etc/pf.conf` anchor reference.** Every
+  update replaces `/etc/pf.conf` with Apple's stock file, dropping the
+  `anchor "tenant-<name>"` / `load anchor` lines, so pf loaded none of
+  the tenant anchors and every tenant had unrestricted egress while
+  `tenant reload` reported success. Now `reload`, `mode`, `inbound`,
+  `shell`, and `bootstrap` read `/etc/pf.conf` and re-add the
+  reference before reloading pf when it is missing. The plan shows the
+  step as "Update /etc/pf.conf" with the note "only when /etc/pf.conf
+  lacks the anchor reference"; in real runs it appears only when
+  needed.
+
+- **Doctor names the cause.** A tenant whose anchor is not referenced
+  from `/etc/pf.conf` is a new `critical:` finding, once per affected
+  tenant, with `tenant reload <name>` as the fix. While that is the
+  case, doctor skips that tenant's kernel-rule checks, so you no longer
+  get two misdirecting "pf anchor drift, run `tenant mode`" warnings
+  per tenant for a problem `tenant mode` could not fix. Default doctor
+  still exits 0; `tenant doctor --strict` exits 2 on it, which is the
+  hook for a scheduled check. The guidance also warns against
+  restoring `/etc/pf.conf.tenant-backup`: it is create's rollback
+  snapshot and omits every tenant created since.
+
+- **Doctor reports primary-group drift.** Updates rewrite local user
+  records and each tenant's primary group reverts to `staff` (20),
+  which gives the tenant group access to your home directory and drops
+  it from its share group. `tenant reload` has repaired this since
+  alpha.5, but nothing reported it. Doctor now reads the user record
+  (no sudo) and emits a `critical:` finding when the primary group is
+  not the tenant's share group.
+
+- **Firewall files are root-owned.** Privileged writes used a tempfile
+  and `sudo mv`, and rename preserves ownership, so `/etc/pf.conf` and
+  every anchor were owned by you, mode 0644 — the firewall config was
+  writable without sudo. Writes now set `root:wheel` and `0644` on the
+  tempfile before the move. Anchors re-own themselves on the next
+  reload; `/etc/pf.conf` only when it is next rewritten, so on an
+  existing host run this once:
+
+  ```
+  sudo chown root:wheel /etc/pf.conf /etc/pf.anchors/tenant-*
+  ```
+
+- **Text.** The `SSH_AUTH_SOCK` doctor warning now points at
+  `/etc/sudoers.d/tenant`, since `/etc/sudoers` itself is replaced by
+  updates.
 
 ## New since 0.1.0-alpha.8
 
