@@ -221,7 +221,7 @@ pub fn parse_partial(content: &str, role: ProfileRole) -> Result<PartialProfile,
         .chain(&partial.allowlist.install)
         .flat_map(|tier| &tier.hosts)
     {
-        validate_host_entry_ports(entry)?;
+        validate_host_entry(entry)?;
     }
     for share in &partial.shares {
         validate_tenant_path_template(&share.tenant_path)?;
@@ -360,7 +360,18 @@ fn validate_fragment_name(name: &str) -> Result<(), ProfileError> {
     Ok(())
 }
 
-fn validate_host_entry_ports(entry: &HostEntry) -> Result<(), ProfileError> {
+/// Hosts are interpolated into a root-installed pf anchor, so pf syntax must never pass.
+fn validate_host_entry(entry: &HostEntry) -> Result<(), ProfileError> {
+    let is_host_char = |c: char| c.is_ascii_alphanumeric() || ".-:/_".contains(c);
+    if entry.host.is_empty() || !entry.host.chars().all(is_host_char) {
+        return Err(ProfileError {
+            message: format!(
+                "allowlist host {:?} is not a hostname, IP address or CIDR range \u{2014} \
+                 allowed characters are letters, digits and . - : / _",
+                entry.host
+            ),
+        });
+    }
     if entry.ports.is_empty() {
         return Err(ProfileError {
             message: format!(

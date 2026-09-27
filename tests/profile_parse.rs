@@ -1150,3 +1150,41 @@ fn unknown_posture_value_rejected() {
                 hosts = []\n[inbound]\nposture = \"open\"\n";
     assert!(parse(toml).is_err());
 }
+
+fn profile_with_runtime_host(host_toml: &str) -> String {
+    format!(
+        "schema_version = 1\n[allowlist.runtime]\nhosts = [{host_toml}]\n[allowlist.install]\nhosts = []\n"
+    )
+}
+
+#[test]
+fn host_entry_with_pf_syntax_is_refused_before_it_reaches_the_anchor() {
+    for bad in [
+        r#""a.example\nblock out all""#,
+        r#""1.2.3.4 } pass""#,
+        r#""""#,
+        r#""!10.0.0.0/8""#,
+    ] {
+        let err = parse(&profile_with_runtime_host(bad)).expect_err(bad);
+        assert!(
+            err.message.ends_with(
+                "is not a hostname, IP address or CIDR range \u{2014} allowed characters are \
+                 letters, digits and . - : / _"
+            ),
+            "{bad}: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn host_entry_accepts_hostnames_addresses_and_ranges() {
+    for good in [
+        r#""dl.google.com""#,
+        r#""142.250.0.0/15""#,
+        r#""2001:db8::/32""#,
+        r#"{ host = "github.com", ports = [22] }"#,
+    ] {
+        parse(&profile_with_runtime_host(good)).expect(good);
+    }
+}
