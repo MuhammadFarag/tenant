@@ -918,7 +918,7 @@ fn shell_pre_exec_doctor_aggregates_warnings_into_single_line() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
-        .with_env_policy_content("");
+        .with_host_in_group("operator", "dev-tenant-share", false);
     let (code, stdout, _stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
     assert_eq!(code, 0);
@@ -938,8 +938,11 @@ fn shell_pre_exec_doctor_critical_plus_warnings_emits_both_lines() {
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n")
-        .with_env_policy_content("")
-        .with_host_in_group("operator", "dev-tenant-share", false);
+        .with_host_in_group("operator", "dev-tenant-share", false)
+        .with_host_path_kind(
+            &tenant::domain::tenants::cowork_dir_path("dev"),
+            PathKind::Absent,
+        );
     let (code, stdout, _stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
     assert_eq!(code, 0);
@@ -3134,4 +3137,16 @@ fn shell_gates_on_primary_group_drift_which_entry_does_not_repair() {
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"n\n");
     assert!(stderr.contains("Enter 'dev' anyway?"), "stderr={stderr:?}");
     assert!(exec.logins().is_empty());
+}
+
+#[test]
+fn shell_pre_exec_does_not_count_the_ssh_auth_sock_note_as_a_warning() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_env_policy_content("");
+    let (code, stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(!stdout.contains("\u{26a0} Doctor:"), "stdout={stdout:?}");
 }

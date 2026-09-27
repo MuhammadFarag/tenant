@@ -211,43 +211,34 @@ fn doctor_verbose_then_findings_ordering() {
 // --- Sudoers env-leak check ---
 
 #[test]
-fn doctor_reports_ssh_auth_sock_leak_when_env_delete_missing() {
-    let stub_reader = make_tenant_stub_reader("dev");
-    let stub_exec = StubHostMachine::new().with_env_policy_content("");
-    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
-    assert_eq!(code, 0, "stderr={stderr:?}");
-    assert!(
-        stdout.contains("SSH_AUTH_SOCK not in env_delete"),
-        "expected env-leak warning; stdout={stdout:?}"
-    );
-}
-
-#[test]
-fn doctor_silent_when_env_delete_in_main_sudoers() {
-    let stub_reader = make_tenant_stub_reader("dev");
+fn doctor_notes_ssh_auth_sock_forwarding_as_info() {
     let stub_exec = StubHostMachine::new()
         .with_env_policy_content("Defaults env_delete += \"SSH_AUTH_SOCK\"\n");
-    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        !stdout.contains("SSH_AUTH_SOCK"),
-        "no env-leak should fire when directive present; stdout={stdout:?}"
+        stdout.contains("info: sudo forwards SSH_AUTH_SOCK into 'tenant shell' sessions"),
+        "env_delete is ignored under env_reset, so it doesn't count; stdout={stdout:?}"
     );
 }
 
 #[test]
-fn doctor_finds_env_delete_in_drop_in_file() {
+fn doctor_silent_when_a_drop_in_strips_ssh_auth_sock_from_env_keep() {
     // The substrate concatenates drop-ins into the same policy text.
-    let stub_reader = make_tenant_stub_reader("dev");
     let policy = "Defaults env_keep += \"PATH\"\n\
-                  Defaults env_delete += \"SSH_AUTH_SOCK\"\n";
+                  Defaults env_keep -= \"SSH_AUTH_SOCK\"\n";
     let stub_exec = StubHostMachine::new().with_env_policy_content(policy);
-    let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
-    assert_eq!(code, 0, "stderr={stderr:?}");
-    assert!(
-        !stdout.contains("SSH_AUTH_SOCK not in env_delete"),
-        "drop-in directive should suppress leak; stdout={stdout:?}"
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
     );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(!stdout.contains("SSH_AUTH_SOCK"), "stdout={stdout:?}");
 }
 
 // --- All-tenants walk + cross-tenant probes ---

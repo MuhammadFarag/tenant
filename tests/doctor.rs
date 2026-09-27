@@ -585,11 +585,12 @@ fn finding_display_env_leak() {
     let f = Finding::EnvLeak {
         var: "SSH_AUTH_SOCK".to_string(),
     };
+    assert_eq!(f.severity(), Severity::Info);
     assert_eq!(
         format!("{f}"),
-        "warning: SSH_AUTH_SOCK not in env_delete \u{2014} host's session env leaks into 'tenant shell' sessions; \
-         add `Defaults env_delete += \"SSH_AUTH_SOCK\"` to /etc/sudoers.d/tenant \
-         (/etc/sudoers is replaced by macOS updates)"
+        "info: sudo forwards SSH_AUTH_SOCK into 'tenant shell' sessions \u{2014} harmless while \
+         your agent's socket sits in launchd's private directory; add \
+         `Defaults env_keep -= \"SSH_AUTH_SOCK\"` to /etc/sudoers.d/tenant to stop it"
     );
 }
 
@@ -599,44 +600,23 @@ fn guidance_env_leak_byte_form() {
         var: "SSH_AUTH_SOCK".to_string(),
     };
     let expected = "Why this matters
-  /etc/sudoers (with drop-ins) doesn't carry an unqualified
-  `Defaults env_delete += \"SSH_AUTH_SOCK\"` directive, so the operator's
-  session env propagates verbatim into every `sudo -u <tenant>`
-  invocation \u{2014} which is exactly how `tenant shell` enters a tenant.
-  The canonical case is SSH_AUTH_SOCK: macOS's ssh-agent socket gets
-  inherited, and any tenant the operator shells into can `ssh` to
-  every host the operator has cached keys for. The isolation between
-  host and tenant is breached at the SSH layer even though pf, the
-  filesystem, and the UID/GID are all correct.
+  macOS sudo runs with env_reset and keeps SSH_AUTH_SOCK on its default
+  env_keep list, so `tenant shell` sessions inherit the path to your
+  ssh-agent socket. launchd's agent socket sits in a directory only you
+  can open, so the tenant gets Permission denied and can't use your keys.
+  It matters if you run an agent whose socket other users can reach (one
+  started with `ssh-agent -a <path>`, or a third-party agent).
 
 Recommended fix
-  echo 'Defaults env_delete += \"SSH_AUTH_SOCK\"' | sudo tee -a /etc/sudoers.d/tenant >/dev/null
-  Appends to a drop-in file so the main /etc/sudoers stays pristine.
-  The directive must be unqualified (no `Defaults:user`, no
-  `Defaults>runas`); qualified forms restrict scope and don't protect
-  `sudo -u <tenant>` invocations.
+  sudo visudo -f /etc/sudoers.d/tenant
+  Add `Defaults env_keep -= \"SSH_AUTH_SOCK\"`. visudo locks and validates the
+  file before saving; a drop-in survives the macOS updates that replace
+  /etc/sudoers. The directive must be unqualified (no `Defaults:user`, no
+  `Defaults>runas`) to cover `sudo -u <tenant>`.
 
 Side-effects to know about
-  \u{2022} Future `sudo -u <tenant>` sessions won't see SSH_AUTH_SOCK in their env.
-    A tenant can still set the var manually (e.g. explicit agent
-    forwarding) \u{2014} this closes the unintentional leak path, not all
-    paths.
-  \u{2022} Other shells that invoke sudo (`sudo bash`, `sudo make`) also
-    lose SSH_AUTH_SOCK from their inherited env, regardless of which user sudo
-    is running as. Usually fine; flag if a host-side workflow depended
-    on the leak.
-  \u{2022} Validate the edit with `sudo visudo -c -f /etc/sudoers.d/tenant`
-    before relying on it \u{2014} a syntax error in a drop-in can break sudo
-    across the host.
-
-Alternative
-  Defaults>tenant env_delete += \"SSH_AUTH_SOCK\"
-  A `Defaults>runas` form targets only sudo invocations whose -u arg
-  matches a tenant by name \u{2014} narrower than the unqualified form but
-  doctor will still nag (the parser conservatively rejects qualified
-  Defaults per CLAUDE.md's unqualified-directive doctrine). If you
-  prefer the qualified form, accept the false-positive warning on
-  every doctor run.";
+  \u{2022} No sudo command keeps your agent afterwards (`sudo git ...` included).
+  \u{2022} `env_delete` looks like the fix but is ignored while env_reset is on.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 

@@ -221,8 +221,7 @@ impl StubHostMachine {
     pub fn new() -> Self {
         let s = Self::default();
         *s.host.borrow_mut() = "operator".to_string();
-        *s.env_policy_content.borrow_mut() =
-            "Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string();
+        *s.env_policy_content.borrow_mut() = "Defaults env_keep -= \"SSH_AUTH_SOCK\"\n".to_string();
         *s.pam_sudo_content.borrow_mut() = "auth       sufficient     pam_tid.so\n".to_string();
         *s.pf_status_content.borrow_mut() = "Status: Enabled for 0 days 00:00:00\n".to_string();
         s.sudo_session_cached.set(true);

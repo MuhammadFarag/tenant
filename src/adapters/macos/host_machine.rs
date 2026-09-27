@@ -275,7 +275,7 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_env_policy(&self) -> Result<String, HostFileError> {
-        // Newline-join the files so the `env_delete` grep can't bridge one
+        // Newline-join the files so the env-list grep can't bridge one
         // file's last line into the next's first.
         let primary = read_privileged_text("/etc/sudoers")?;
         let mut combined = primary;

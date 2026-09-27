@@ -85,7 +85,7 @@ impl HostMachine for DryRunHostMachine<'_> {
     }
 
     fn read_env_policy(&self) -> Result<String, HostFileError> {
-        Ok("Defaults env_delete += \"SSH_AUTH_SOCK\"\n".to_string())
+        Ok("Defaults env_keep -= \"SSH_AUTH_SOCK\"\n".to_string())
     }
 
     fn read_kernel_pf_rules(&self, _name: &TenantUserName) -> Result<String, FirewallError> {

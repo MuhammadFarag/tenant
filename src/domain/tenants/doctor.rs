@@ -1,8 +1,8 @@
 use crate::ModeLevel;
 use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, classify_egress_resolve_drift,
-    classify_inbound_exposure, curated_paths, entries_missing_group_ace, has_env_delete_for,
-    has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
+    classify_inbound_exposure, curated_paths, entries_missing_group_ace, has_group_acl_entry,
+    has_pam_tid, pf_rule_presence_check, pf_status_enabled, sudo_strips_env_var,
 };
 use crate::domain::reporter::Reporter;
 use crate::domain::{
@@ -155,7 +155,7 @@ impl<'a> Tenants<'a> {
 
     fn check_env_leak(&self, reporter: &mut Reporter) -> Result<Option<Finding>, HostFileError> {
         let policy = self.machine.read_env_policy()?;
-        if has_env_delete_for(&policy, "SSH_AUTH_SOCK") {
+        if sudo_strips_env_var(&policy, "SSH_AUTH_SOCK") {
             return Ok(None);
         }
         let finding = Finding::EnvLeak {
@@ -539,12 +539,10 @@ impl<'a> Tenants<'a> {
     ) -> usize {
         let mut criticals: Vec<Finding> = Vec::new();
         let mut warning_count: usize = 0;
-        let mut record = |finding: Finding| {
-            if finding.severity() == crate::doctor::Severity::Critical {
-                criticals.push(finding);
-            } else {
-                warning_count += 1;
-            }
+        let mut record = |finding: Finding| match finding.severity() {
+            crate::doctor::Severity::Critical => criticals.push(finding),
+            crate::doctor::Severity::Warning => warning_count += 1,
+            crate::doctor::Severity::Info => {}
         };
 
         // Runs pre-consent: never prompt or spam failure frames on a cold sudo cache. Only the
@@ -567,7 +565,7 @@ impl<'a> Tenants<'a> {
         if sudo_cached && matches!(scope, DoctorScope::Shell) {
             match self.machine.read_env_policy() {
                 Ok(text) => {
-                    if !has_env_delete_for(&text, "SSH_AUTH_SOCK") {
+                    if !sudo_strips_env_var(&text, "SSH_AUTH_SOCK") {
                         record(Finding::EnvLeak {
                             var: "SSH_AUTH_SOCK".to_string(),
                         });

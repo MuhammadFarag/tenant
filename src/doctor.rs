@@ -42,8 +42,8 @@ pub enum Category {
     Keychain,
 }
 
-/// Non-obvious severities: `EnvLeak` is warning (only bites if the var is
-/// set; one-line sudoers fix); `PfDisabled` is critical (every anchor is
+/// Non-obvious severities: `EnvLeak` is info (launchd's agent socket is private to the
+/// operator, so the inherited path is unusable by default); `PfDisabled` is critical (every anchor is
 /// inert). `SymlinkDrift` compares targets string-exact — the profile names
 /// intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,7 +150,7 @@ impl Finding {
     pub fn severity(&self) -> Severity {
         match self {
             Finding::FilesystemExposure { severity, .. } => *severity,
-            Finding::EnvLeak { .. } => Severity::Warning,
+            Finding::EnvLeak { .. } => Severity::Info,
             Finding::PfRuleDrift { .. } => Severity::Warning,
             Finding::TouchIdMissing => Severity::Info,
             Finding::PfDisabled => Severity::Critical,
@@ -430,44 +430,23 @@ Alternative
             )),
             Finding::EnvLeak { var } => Some(format!(
                 "Why this matters
-  /etc/sudoers (with drop-ins) doesn't carry an unqualified
-  `Defaults env_delete += \"{var}\"` directive, so the operator's
-  session env propagates verbatim into every `sudo -u <tenant>`
-  invocation \u{2014} which is exactly how `tenant shell` enters a tenant.
-  The canonical case is SSH_AUTH_SOCK: macOS's ssh-agent socket gets
-  inherited, and any tenant the operator shells into can `ssh` to
-  every host the operator has cached keys for. The isolation between
-  host and tenant is breached at the SSH layer even though pf, the
-  filesystem, and the UID/GID are all correct.
+  macOS sudo runs with env_reset and keeps {var} on its default
+  env_keep list, so `tenant shell` sessions inherit the path to your
+  ssh-agent socket. launchd's agent socket sits in a directory only you
+  can open, so the tenant gets Permission denied and can't use your keys.
+  It matters if you run an agent whose socket other users can reach (one
+  started with `ssh-agent -a <path>`, or a third-party agent).
 
 Recommended fix
-  echo 'Defaults env_delete += \"{var}\"' | sudo tee -a /etc/sudoers.d/tenant >/dev/null
-  Appends to a drop-in file so the main /etc/sudoers stays pristine.
-  The directive must be unqualified (no `Defaults:user`, no
-  `Defaults>runas`); qualified forms restrict scope and don't protect
-  `sudo -u <tenant>` invocations.
+  sudo visudo -f /etc/sudoers.d/tenant
+  Add `Defaults env_keep -= \"{var}\"`. visudo locks and validates the
+  file before saving; a drop-in survives the macOS updates that replace
+  /etc/sudoers. The directive must be unqualified (no `Defaults:user`, no
+  `Defaults>runas`) to cover `sudo -u <tenant>`.
 
 Side-effects to know about
-  \u{2022} Future `sudo -u <tenant>` sessions won't see {var} in their env.
-    A tenant can still set the var manually (e.g. explicit agent
-    forwarding) \u{2014} this closes the unintentional leak path, not all
-    paths.
-  \u{2022} Other shells that invoke sudo (`sudo bash`, `sudo make`) also
-    lose {var} from their inherited env, regardless of which user sudo
-    is running as. Usually fine; flag if a host-side workflow depended
-    on the leak.
-  \u{2022} Validate the edit with `sudo visudo -c -f /etc/sudoers.d/tenant`
-    before relying on it \u{2014} a syntax error in a drop-in can break sudo
-    across the host.
-
-Alternative
-  Defaults>tenant env_delete += \"{var}\"
-  A `Defaults>runas` form targets only sudo invocations whose -u arg
-  matches a tenant by name \u{2014} narrower than the unqualified form but
-  doctor will still nag (the parser conservatively rejects qualified
-  Defaults per CLAUDE.md's unqualified-directive doctrine). If you
-  prefer the qualified form, accept the false-positive warning on
-  every doctor run."
+  \u{2022} No sudo command keeps your agent afterwards (`sudo git ...` included).
+  \u{2022} `env_delete` looks like the fix but is ignored while env_reset is on."
             )),
             Finding::TouchIdMissing => Some(
                 "Why this matters
@@ -905,9 +884,9 @@ impl fmt::Display for Finding {
             }
             Finding::EnvLeak { var } => write!(
                 f,
-                "warning: {var} not in env_delete \u{2014} host's session env leaks into 'tenant shell' sessions; \
-                 add `Defaults env_delete += \"{var}\"` to /etc/sudoers.d/tenant \
-                 (/etc/sudoers is replaced by macOS updates)"
+                "info: sudo forwards {var} into 'tenant shell' sessions \u{2014} harmless while \
+                 your agent's socket sits in launchd's private directory; add \
+                 `Defaults env_keep -= \"{var}\"` to /etc/sudoers.d/tenant to stop it"
             ),
             Finding::PfRuleDrift { tenant, detail } => write!(
                 f,
@@ -1095,39 +1074,29 @@ pub fn anchor_body_matches(actual: &str, expected: &str) -> bool {
     actual == expected
 }
 
-/// Unqualified `Defaults env_delete` only: qualified forms (`Defaults:user`,
-/// `>runas`, `@host`, `!cmd`) may not cover `sudo -u <tenant>`, so they read
-/// as missing — a false nag beats a silently missed leak.
-pub fn has_env_delete_for(policy: &str, var: &str) -> bool {
-    for raw_line in policy.lines() {
-        let line = raw_line.trim();
-        let after_defaults = match line.strip_prefix("Defaults") {
-            Some(rest) if rest.starts_with(|c: char| c.is_whitespace()) => rest.trim(),
-            _ => continue,
+/// Unqualified `Defaults env_keep -=` only: under env_reset (the macOS default) that's the
+/// form that removes a var; `env_delete` is ignored. Qualified forms (`Defaults:user`,
+/// `>runas`, `@host`, `!cmd`) may not cover `sudo -u <tenant>`, so they read as missing.
+pub fn sudo_strips_env_var(policy: &str, var: &str) -> bool {
+    policy.lines().any(|raw_line| {
+        let Some(rest) = raw_line.trim().strip_prefix("Defaults") else {
+            return false;
         };
-        // Word-boundary check so `env_delete_extra` doesn't false-match.
-        let after_envdel = match after_defaults.strip_prefix("env_delete") {
-            Some(rest) if rest.starts_with(|c: char| c.is_whitespace() || c == '=' || c == '+') => {
-                rest.trim()
-            }
-            _ => continue,
-        };
-        let after_op = if let Some(rest) = after_envdel.strip_prefix("+=") {
-            rest.trim()
-        } else if let Some(rest) = after_envdel.strip_prefix('=') {
-            rest.trim()
-        } else {
-            continue;
-        };
-        let value = after_op
-            .trim_start_matches('"')
-            .trim_end_matches('"')
-            .trim();
-        if value.split_whitespace().any(|tok| tok == var) {
-            return true;
+        if !rest.starts_with(char::is_whitespace) {
+            return false;
         }
-    }
-    false
+        let Some(rest) = rest.trim().strip_prefix("env_keep") else {
+            return false;
+        };
+        let Some(value) = rest.trim_start().strip_prefix("-=") else {
+            return false;
+        };
+        value
+            .trim()
+            .trim_matches('"')
+            .split_whitespace()
+            .any(|token| token == var)
+    })
 }
 
 fn render_port_list(ports: &[u16]) -> String {

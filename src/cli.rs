@@ -221,8 +221,9 @@ Examples:
     /// to runtime tier, ensures the host's share-group membership,
     /// reapplies declared `[[shares]]`, then launches a login shell as
     /// the tenant via `sudo -iu <name>`. The login shell inherits the
-    /// tenant's `/etc/zprofile` + `~/.zprofile` environment (the host
-    /// shell's env vars do NOT propagate — including `SSH_AUTH_SOCK`).
+    /// tenant's `/etc/zprofile` + `~/.zprofile` environment. Host env
+    /// vars don't propagate except sudo's `env_keep` list, which on macOS
+    /// includes `SSH_AUTH_SOCK` (see `tenant doctor`).
     ///
     /// `tenant shell <name> [--mode install|runtime] -- <cmd...>`
     /// (command form): same reapply at the requested tier (runtime by
@@ -307,7 +308,7 @@ Examples:
     /// <name> /bin/test ...`) and treats the kernel's exit code as
     /// ground truth — composes POSIX + ACL + sandbox + TCC without
     /// a separate effective-access model. Also checks host-wide PF
-    /// posture, sudo `env_delete` protection, the PF anchor body
+    /// posture, sudo `SSH_AUTH_SOCK` forwarding, the PF anchor body
     /// against the profile, and per-tenant share drift.
     ///
     /// Bare `tenant doctor` walks every tenant. `--strict` maps the

@@ -1,113 +1,91 @@
-//! Unit tests for `doctor::has_env_delete_for`: combinatorial over sudoers `env_delete` shapes.
+//! Unit tests for `doctor::sudo_strips_env_var`: combinatorial over sudoers env-list shapes.
 
-use tenant::doctor::has_env_delete_for;
+use tenant::doctor::sudo_strips_env_var;
 
-// --- Positive cases ---
+const VAR: &str = "SSH_AUTH_SOCK";
 
-#[test]
-fn detects_plus_equals_quoted_single_var() {
-    let policy = "Defaults env_delete += \"SSH_AUTH_SOCK\"\n";
-    assert!(has_env_delete_for(policy, "SSH_AUTH_SOCK"));
-}
+// --- Positive: `env_keep -=` is what removes a var under env_reset (the macOS default) ---
 
 #[test]
-fn detects_equals_quoted_single_var() {
-    let policy = "Defaults env_delete = \"SSH_AUTH_SOCK\"\n";
-    assert!(has_env_delete_for(policy, "SSH_AUTH_SOCK"));
+fn detects_quoted_single_var() {
+    assert!(sudo_strips_env_var(
+        "Defaults env_keep -= \"SSH_AUTH_SOCK\"\n",
+        VAR
+    ));
 }
 
 #[test]
 fn detects_quoted_multi_var_list() {
-    let policy = "Defaults env_delete += \"FOO SSH_AUTH_SOCK BAR\"\n";
-    assert!(has_env_delete_for(policy, "SSH_AUTH_SOCK"));
+    assert!(sudo_strips_env_var(
+        "Defaults env_keep -= \"FOO SSH_AUTH_SOCK BAR\"\n",
+        VAR
+    ));
 }
 
 #[test]
 fn detects_unquoted_single_var() {
-    let policy = "Defaults env_delete += SSH_AUTH_SOCK\n";
-    assert!(has_env_delete_for(policy, "SSH_AUTH_SOCK"));
+    assert!(sudo_strips_env_var(
+        "Defaults env_keep -= SSH_AUTH_SOCK\n",
+        VAR
+    ));
 }
 
 #[test]
-fn detects_with_leading_whitespace() {
-    let policy = "    Defaults env_delete += \"SSH_AUTH_SOCK\"\n";
-    assert!(has_env_delete_for(policy, "SSH_AUTH_SOCK"));
-}
-
-#[test]
-fn detects_across_multiple_lines() {
+fn detects_with_leading_whitespace_across_lines() {
     let policy = "# Comment line\n\
                   Defaults env_keep += \"PATH\"\n\
-                  Defaults env_delete += \"SSH_AUTH_SOCK\"\n";
-    assert!(has_env_delete_for(policy, "SSH_AUTH_SOCK"));
-}
-
-// Qualified `Defaults` forms don't reliably cover `sudo -u <tenant>`, so they don't count.
-
-#[test]
-fn rejects_defaults_runas_qualifier() {
-    let policy = "Defaults>plugin-dev env_delete += \"SSH_AUTH_SOCK\"\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
-}
-
-#[test]
-fn rejects_defaults_user_qualifier() {
-    let policy = "Defaults:alice env_delete += \"SSH_AUTH_SOCK\"\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
-}
-
-#[test]
-fn rejects_defaults_host_qualifier() {
-    let policy = "Defaults@somehost env_delete += \"SSH_AUTH_SOCK\"\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
-}
-
-#[test]
-fn rejects_defaults_cmnd_qualifier() {
-    let policy = "Defaults!SUDO_EDITOR env_delete += \"SSH_AUTH_SOCK\"\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
+                  \t  Defaults env_keep -= \"SSH_AUTH_SOCK\"\n";
+    assert!(sudo_strips_env_var(policy, VAR));
 }
 
 #[test]
 fn unqualified_defaults_alongside_qualified_still_detects() {
-    let policy = "Defaults>plugin-dev env_delete += \"SSH_AUTH_SOCK\"\n\
-                  Defaults env_delete += \"SSH_AUTH_SOCK\"\n";
-    assert!(has_env_delete_for(policy, "SSH_AUTH_SOCK"));
+    let policy = "Defaults>plugin-dev env_keep -= \"SSH_AUTH_SOCK\"\n\
+                  Defaults env_keep -= \"SSH_AUTH_SOCK\"\n";
+    assert!(sudo_strips_env_var(policy, VAR));
 }
 
-// --- Negative cases ---
+// --- Negative ---
 
+// Ignored while env_reset is on, so it strips nothing on a default host.
 #[test]
-fn empty_policy_returns_false() {
-    assert!(!has_env_delete_for("", "SSH_AUTH_SOCK"));
-}
-
-#[test]
-fn no_env_delete_directive_returns_false() {
-    let policy = "Defaults env_keep += \"PATH HOME\"\nDefaults timestamp_timeout = 5\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
-}
-
-#[test]
-fn env_delete_for_different_var_returns_false() {
-    let policy = "Defaults env_delete += \"FOO BAR BAZ\"\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
+fn env_delete_does_not_count() {
+    assert!(!sudo_strips_env_var(
+        "Defaults env_delete += \"SSH_AUTH_SOCK\"\n",
+        VAR
+    ));
 }
 
 #[test]
-fn substring_in_other_var_not_matched() {
-    let policy = "Defaults env_delete += \"SSH_AUTH_SOCK_BUDDY\"\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
+fn env_keep_add_or_replace_keeps_the_var() {
+    assert!(!sudo_strips_env_var(
+        "Defaults env_keep += \"SSH_AUTH_SOCK\"\n",
+        VAR
+    ));
+    assert!(!sudo_strips_env_var(
+        "Defaults env_keep = \"SSH_AUTH_SOCK\"\n",
+        VAR
+    ));
+}
+
+// Qualified `Defaults` forms don't reliably cover `sudo -u <tenant>`, so they don't count.
+#[test]
+fn rejects_qualified_defaults() {
+    for qualifier in [">plugin-dev", ":alice", "@somehost", "!SUDO_EDITOR"] {
+        let policy = format!("Defaults{qualifier} env_keep -= \"SSH_AUTH_SOCK\"\n");
+        assert!(!sudo_strips_env_var(&policy, VAR), "{qualifier}");
+    }
 }
 
 #[test]
-fn env_keep_for_target_var_does_not_block_leak() {
-    let policy = "Defaults env_keep += \"SSH_AUTH_SOCK\"\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
-}
-
-#[test]
-fn random_text_returns_false() {
-    let policy = "This is a README, not sudoers\nMaybe SSH_AUTH_SOCK appears here\n";
-    assert!(!has_env_delete_for(policy, "SSH_AUTH_SOCK"));
+fn other_vars_substrings_and_prose_do_not_match() {
+    for policy in [
+        "",
+        "Defaults env_keep -= \"FOO BAR\"\n",
+        "Defaults env_keep -= \"SSH_AUTH_SOCK_BUDDY\"\n",
+        "Defaults env_keep_extra -= \"SSH_AUTH_SOCK\"\n",
+        "This is a README, not sudoers\nMaybe SSH_AUTH_SOCK appears here\n",
+    ] {
+        assert!(!sudo_strips_env_var(policy, VAR), "{policy:?}");
+    }
 }
