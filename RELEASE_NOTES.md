@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.10
+# tenant 0.1.0-alpha.11
 
-Tenth alpha. Still alpha quality: the verbs work end-to-end on the
+Eleventh alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,6 +21,83 @@ The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
+
+## New since 0.1.0-alpha.10
+
+Fixes and diagnostics from provisioning JVM (Gradle/Android) and ESP-IDF
+tenants, plus the resilience follow-ups from the macOS-update work. No
+migration steps.
+
+- **Bootstrap and `shell -- <cmd>` evaluate your command once.** Both
+  ran through `sudo -i`, which hands the command to the tenant's login
+  shell as a single string, so `$VAR` was expanded before your command
+  ran, even inside single quotes. A bootstrap line appending
+  `'export PATH="$JAVA_HOME/bin:$PATH"'` to a dotfile wrote an empty
+  `JAVA_HOME` and *your* PATH into the tenant. Commands now run as
+  `sudo -H -u <name> -- /bin/zsh -lc 'exec "$@"' …`: still a login
+  shell with the tenant's dotfile PATH, argv passed through verbatim.
+  This also fixes `tenant shell <name> -d <dir> -- <cmd>`, which could
+  run nothing and exit 0.
+
+- **Privileged verbs fail fast without a terminal.** Run from a script
+  or an agent with a cold sudo timestamp, `reload`, `bootstrap`,
+  `shell`, and the other mutating verbs sat forever at a hidden sudo
+  prompt with no output. They now exit 64 with: *this verb needs sudo
+  and no terminal is attached — run it in your terminal, or run
+  'sudo -v' in this session first*. `doctor` and `--dry-run` are
+  unaffected.
+
+- **`[inbound] posture = "permissive"` — persistent all-ports
+  loopback.** Gradle, Maven, sbt, Bazel and Kotlin fork workers that
+  report back over random loopback ports, so JVM builds cannot run
+  under `restricted`, and `tenant inbound <name> permissive` was undone
+  by every `tenant shell` entry. Declaring the posture in the profile
+  (or an include fragment) makes it the steady state that every
+  reapply renders. `tenant inbound <name> restricted` and
+  `shell --inbound restricted` then refuse (exit 64) and name the
+  profile to edit; doctor reports the posture as info. The same
+  exposure caveat applies: every listener the tenant opens is reachable
+  by the host and peer tenants.
+
+- **Doctor warns when a CDN host has moved.** pf resolves allowlisted
+  hostnames once, when the anchor loads; Google, Fastly and other CDNs
+  rotate their answers within minutes, and connections to the new
+  addresses hang until they time out. `tenant doctor <name>` now
+  re-resolves each runtime hostname and warns when an address is
+  outside the loaded pf table (CIDR entries are understood). `tenant
+  help profile` explains the fix: pin the provider's published ranges
+  in an include fragment, and regenerate it when the provider updates
+  its list.
+
+- **Doctor lists shared files missing the share ACL.** The inherited
+  share-group ACE lands only on files created in place. Tools that
+  write a temp file and rename it into the tree (Gradle, Android
+  Studio, cargo, npm) leave files the other side gets EACCES on. Doctor
+  now walks the co-working directory and each share and names them;
+  `tenant reload` repairs them.
+
+- **One un-ACL-able file no longer aborts a reload.** macOS
+  `chmod -R +a` applies the ACE to the rest of the tree and exits 1
+  when it meets something it cannot change (a dangling socket symlink,
+  a protected `.app` bundle); `reload` treated that as fatal and
+  skipped every remaining share step for the tenant. It now prints a
+  `⚠` line with chmod's message and continues.
+
+- **`shell -- <cmd>` narrows back when the keychain unlock fails.** A
+  missing stashed password left the tenant at install tier and/or
+  permissive inbound until the next reapply.
+
+- **Doctor finishes the audit when a probe fails.** A deleted share
+  path or a never-loaded anchor used to abort `tenant doctor` with exit
+  74, and in the no-argument form hid every tenant after it. Each
+  failure is now reported and the walk continues, exiting 74 at the end
+  when anything could not be checked. A missing anchor file is reported
+  as anchor drift.
+
+- **Text.** `tenant help profile` and `tenant inbound --help` now say
+  that `[inbound]` governs only listeners the tenant opens; the
+  tenant's connections to host-owned loopback services (databases,
+  adb, dev servers) always pass.
 
 ## New since 0.1.0-alpha.9
 
