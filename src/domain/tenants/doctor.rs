@@ -529,31 +529,38 @@ impl<'a> Tenants<'a> {
         }))
     }
 
-    /// For a run with no terminal: the criticals shell entry won't repair, found silently.
-    /// Probe failures read as clean; the caller has already warmed sudo.
-    pub(crate) fn shell_entry_criticals(&self, name: &TenantUserName) -> Vec<Finding> {
+    /// The criticals shell entry won't repair (its reapply restores a missing pf.conf reference
+    /// but not these). Warms sudo first so pf status is always probed; a failed probe prints.
+    /// `Err` only when sudo can't be authenticated: entry would fail the same way.
+    pub(crate) fn shell_entry_criticals(
+        &self,
+        name: &TenantUserName,
+        reporter: &mut Reporter,
+    ) -> Result<Vec<Finding>, ProbeError> {
+        if !self.machine.sudo_session_cached() {
+            self.machine.authenticate_sudo()?;
+        }
         let mut criticals = Vec::new();
-        if self
-            .machine
-            .read_pf_status()
-            .is_ok_and(|status| !pf_status_enabled(&status))
-        {
-            criticals.push(Finding::PfDisabled);
+        match self.machine.read_pf_status() {
+            Ok(status) if !pf_status_enabled(&status) => criticals.push(Finding::PfDisabled),
+            Ok(_) => {}
+            Err(e) => reporter.doctor_firewall_failed(&e),
         }
-        if let Ok(Some(drift)) = self.check_primary_group_drift(name) {
-            criticals.push(drift);
+        match self.check_primary_group_drift(name) {
+            Ok(Some(drift)) => criticals.push(drift),
+            Ok(None) => {}
+            Err(e) => reporter.doctor_primary_group_probe_failed(name, &e),
         }
-        criticals
+        Ok(criticals)
     }
 
-    /// Returns the criticals the verb's own reapply won't repair.
     pub(crate) fn pre_exec_doctor_summary(
         &self,
         name: Option<&TenantUserName>,
         host: &HostUserName,
         scope: DoctorScope,
         reporter: &mut Reporter,
-    ) -> usize {
+    ) {
         let mut criticals: Vec<Finding> = Vec::new();
         let mut warning_count: usize = 0;
         let mut record = |finding: Finding| match finding.severity() {
@@ -566,7 +573,10 @@ impl<'a> Tenants<'a> {
         // genuine sudo probes are gated; auth-free probes always run.
         let sudo_cached = self.machine.sudo_session_cached();
 
-        if sudo_cached {
+        // Shell's entry gate probes pf status and the primary group itself, once sudo is warm.
+        let gated_by_shell_entry = scope == DoctorScope::Shell;
+
+        if sudo_cached && !gated_by_shell_entry {
             match self.machine.read_pf_status() {
                 Ok(text) => {
                     if !pf_status_enabled(&text) {
@@ -574,21 +584,6 @@ impl<'a> Tenants<'a> {
                     }
                 }
                 Err(e) => reporter.doctor_firewall_failed(&e),
-            }
-        }
-
-        // EnvLeak is shell-only: only the shell entry path materializes
-        // the operator's ssh-agent socket inside the tenant session.
-        if sudo_cached && matches!(scope, DoctorScope::Shell) {
-            match self.machine.read_env_policy() {
-                Ok(text) => {
-                    if !sudo_strips_env_var(&text, "SSH_AUTH_SOCK") {
-                        record(Finding::EnvLeak {
-                            var: "SSH_AUTH_SOCK".to_string(),
-                        });
-                    }
-                }
-                Err(e) => reporter.doctor_host_file_failed(&e),
             }
         }
 
@@ -655,10 +650,12 @@ impl<'a> Tenants<'a> {
                         });
                     }
                 }
-                match self.check_primary_group_drift(tenant) {
-                    Ok(Some(drift)) => record(drift),
-                    Ok(None) => {}
-                    Err(e) => reporter.doctor_primary_group_probe_failed(tenant, &e),
+                if !gated_by_shell_entry {
+                    match self.check_primary_group_drift(tenant) {
+                        Ok(Some(drift)) => record(drift),
+                        Ok(None) => {}
+                        Err(e) => reporter.doctor_primary_group_probe_failed(tenant, &e),
+                    }
                 }
             }
         }
@@ -668,10 +665,6 @@ impl<'a> Tenants<'a> {
             reporter.doctor_finding_one_liner(finding);
         }
         reporter.doctor_summary_pending(warning_count, name);
-        criticals
-            .iter()
-            .filter(|f| !f.repaired_by_any_reapply())
-            .count()
     }
 
     fn collect_share_drift<F: FnMut(Finding)>(

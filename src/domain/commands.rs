@@ -1,4 +1,4 @@
-use super::reporter::{ConfirmOutcome, Reporter, ShellInbound};
+use super::reporter::{ConfirmOutcome, EntryGate, Reporter, ShellInbound};
 use super::{AccountOp, FirewallOp, KeychainOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
 use crate::{
@@ -203,30 +203,30 @@ pub(crate) fn dispatch(
                                 shell_directory.as_deref(),
                             );
                         }
-                        let criticals = tenants.pre_exec_doctor_summary(
+                        tenants.pre_exec_doctor_summary(
                             Some(&name),
                             host,
                             tenants::DoctorScope::Shell,
                             reporter,
                         );
-                        if criticals > 0
-                            && reporter.confirm_entry_despite_criticals(&name, criticals)
-                                == ConfirmOutcome::Abort
-                        {
-                            reporter.shell_entry_declined(&name);
-                            return 0;
-                        }
                     }
                     if reporter.refuse_sudo_without_terminal() {
                         return EX_USAGE;
                     }
-                    if !show_summary {
-                        let criticals = tenants.shell_entry_criticals(&name);
-                        if !criticals.is_empty()
-                            && !reporter.allow_entry_without_terminal(&name, &criticals)
-                        {
-                            return EX_USAGE;
+                    let criticals = match tenants.shell_entry_criticals(&name, reporter) {
+                        Ok(criticals) => criticals,
+                        Err(e) => {
+                            reporter.shell_narrow_probe_failed(&name, &e);
+                            return EX_IOERR;
                         }
+                    };
+                    match reporter.gate_entry_on_criticals(&name, &criticals) {
+                        EntryGate::Enter => {}
+                        EntryGate::Declined => {
+                            reporter.shell_entry_declined(&name);
+                            return 0;
+                        }
+                        EntryGate::Refused => return EX_USAGE,
                     }
                     match tenants.shell(
                         &name,

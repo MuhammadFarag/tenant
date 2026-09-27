@@ -17,6 +17,13 @@ pub(crate) enum ConfirmOutcome {
     Abort,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryGate {
+    Enter,
+    Declined,
+    Refused,
+}
+
 /// Which inbound line, if any, a shell summary owes the operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShellInbound {
@@ -145,48 +152,17 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
-    /// Default no, and unlike `confirm` a non-TTY declines: entering a tenant whose
-    /// guarantees are broken must be an explicit choice (`-y` is that choice).
-    pub fn confirm_entry_despite_criticals(
-        &mut self,
-        name: &TenantUserName,
-        criticals: usize,
-    ) -> ConfirmOutcome {
-        let findings = if criticals == 1 {
-            "1 critical doctor finding".to_string()
-        } else {
-            format!("{criticals} critical doctor findings")
-        };
-        let warning = format!(
-            "\u{26a0}  '{name}' has {findings} (above). Its sandbox guarantees may not hold:\n\
-             \u{26a0}  entering now can run code without the isolation you expect.\n\
-             \u{26a0}  Run `tenant doctor {name}` for details and fixes."
-        );
-        let painted = self.paint_stdout(&warning, ansi::red);
-        let _ = writeln!(self.terminal.stdout, "\n{painted}\n");
-        let question = format!("Enter '{name}' anyway?");
-        if self.dry_run {
-            let _ = writeln!(
-                self.terminal.stdout,
-                "(Real run would prompt: {question} [y/N])"
-            );
-            return ConfirmOutcome::Proceed;
-        }
-        if self.yes_flag {
-            return ConfirmOutcome::Proceed;
-        }
-        if !self.terminal.stdin_is_tty {
-            return ConfirmOutcome::Abort;
-        }
-        self.ask(&question, false)
-    }
-
-    /// No terminal to ask on, so `-y` is the only way past: refuse otherwise.
-    pub(crate) fn allow_entry_without_terminal(
+    /// Criticals print to stderr. `-y` enters with a note; a terminal gets a default-no
+    /// `[y/N]`; with no terminal there's no one to ask, so it refuses.
+    pub(crate) fn gate_entry_on_criticals(
         &mut self,
         name: &TenantUserName,
         criticals: &[Finding],
-    ) -> bool {
+    ) -> EntryGate {
+        if criticals.is_empty() {
+            return EntryGate::Enter;
+        }
+        let _ = self.terminal.stdout.flush();
         for finding in criticals {
             let _ = writeln!(self.terminal.stderr, "{finding}");
         }
@@ -195,20 +171,40 @@ impl<'t, 'm> Reporter<'t, 'm> {
         } else {
             format!("{} critical doctor findings", criticals.len())
         };
+        let question = format!("Enter '{name}' anyway?");
+        if self.dry_run {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "(Real run would prompt: {question} [y/N])"
+            );
+            return EntryGate::Enter;
+        }
+        let prefix = self.stderr_warn_prefix();
         if self.yes_flag {
-            let prefix = self.stderr_warn_prefix();
             let _ = writeln!(
                 self.terminal.stderr,
                 "{prefix} entering '{name}' despite {findings} (-y)"
             );
-            return true;
+            return EntryGate::Enter;
+        }
+        if !self.terminal.stdin_is_tty {
+            let _ = writeln!(
+                self.terminal.stderr,
+                "tenant: refusing to enter '{name}' with no terminal to confirm: {findings} above \
+                 \u{2014} run `tenant doctor {name}`, or pass -y to enter anyway"
+            );
+            return EntryGate::Refused;
         }
         let _ = writeln!(
             self.terminal.stderr,
-            "tenant: refusing to enter '{name}' with no terminal to confirm: {findings} above \
-             \u{2014} run `tenant doctor {name}`, or pass -y to enter anyway"
+            "\n{prefix}  '{name}' has {findings} (above). Its sandbox guarantees may not hold:\n\
+             {prefix}  entering now can run code without the isolation you expect.\n\
+             {prefix}  Run `tenant doctor {name}` for details and fixes.\n"
         );
-        false
+        match self.ask(&question, false) {
+            ConfirmOutcome::Proceed => EntryGate::Enter,
+            ConfirmOutcome::Abort => EntryGate::Declined,
+        }
     }
 
     pub fn shell_entry_declined(&mut self, name: &TenantUserName) {

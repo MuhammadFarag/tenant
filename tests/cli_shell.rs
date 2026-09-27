@@ -904,12 +904,12 @@ fn shell_pre_exec_doctor_emits_critical_inline_when_pf_disabled() {
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n");
-    let (code, stdout, _stderr) =
+    let (code, _stdout, stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("critical: pf is globally disabled"),
-        "PfDisabled critical must emit inline; stdout={stdout:?}"
+        stderr.contains("critical: pf is globally disabled"),
+        "PfDisabled critical must emit inline; stdout={stderr:?}"
     );
 }
 
@@ -943,12 +943,12 @@ fn shell_pre_exec_doctor_critical_plus_warnings_emits_both_lines() {
             &tenant::domain::tenants::cowork_dir_path("dev"),
             PathKind::Absent,
         );
-    let (code, stdout, _stderr) =
+    let (code, stdout, stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("critical: pf is globally disabled"),
-        "PfDisabled critical must emit inline; stdout={stdout:?}"
+        stderr.contains("critical: pf is globally disabled"),
+        "PfDisabled critical must emit inline; stdout={stderr:?}"
     );
     assert!(
         stdout.contains("\u{26a0} Doctor: 2 warnings for tenant 'dev'"),
@@ -962,12 +962,12 @@ fn shell_pre_exec_doctor_verbose_does_not_emit_guidance_for_inline_critical() {
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n");
-    let (code, stdout, _stderr) =
+    let (code, stdout, stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev", "-v"], b"");
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("critical: pf is globally disabled"),
-        "critical inline still emits; stdout={stdout:?}"
+        stderr.contains("critical: pf is globally disabled"),
+        "critical inline still emits; stdout={stderr:?}"
     );
     assert!(
         !stdout.contains("Why this matters"),
@@ -1697,12 +1697,12 @@ fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
 
     // Interactive form (regression baseline).
     let exec_a = make_exec();
-    let (_code, stdout_a, _stderr) =
+    let (_code, _stdout, stderr_a) =
         run_with_stdin(stub_with_tenant("dev"), &exec_a, &["shell", "dev"], b"");
 
     // Command form.
     let exec_b = make_exec();
-    let (_code, stdout_b, _stderr) = run_with_stdin(
+    let (_code, _stdout, stderr_b) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec_b,
         &["shell", "dev", "--", "true"],
@@ -1710,12 +1710,12 @@ fn shell_command_pre_exec_doctor_audit_same_as_interactive_shell() {
     );
 
     assert!(
-        stdout_a.contains("critical: pf is globally disabled"),
-        "interactive form's pre-exec audit surfaces PfDisabled: {stdout_a:?}"
+        stderr_a.contains("critical: pf is globally disabled"),
+        "interactive form's entry gate surfaces PfDisabled: {stderr_a:?}"
     );
     assert!(
-        stdout_b.contains("critical: pf is globally disabled"),
-        "command form's pre-exec audit surfaces PfDisabled: {stdout_b:?}"
+        stderr_b.contains("critical: pf is globally disabled"),
+        "command form's entry gate surfaces PfDisabled: {stderr_b:?}"
     );
 }
 
@@ -2599,27 +2599,24 @@ fn shell_directory_probe_failure_is_substrate_error() {
 }
 
 #[test]
-fn shell_directory_pre_flight_skipped_when_sudo_uncached() {
-    // `sudo -n` fails uncached, so probing would fail every fresh terminal's first command.
+fn shell_directory_pre_flight_runs_once_entry_has_warmed_sudo() {
+    // The entry gate authenticates a cold cache, so the `sudo -n` directory probe is trustworthy.
     let dir = PathBuf::from("/Users/dev/projects/foo");
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
-        .with_sudo_session_cached(false); // and NO with_tenant_dir_present
+        .with_sudo_session_cached(false)
+        .with_tenant_dir_present("dev", &dir);
     let (code, _stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "-d", "projects/foo", "--", "ls"],
         b"",
     );
+    assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(
-        code, 0,
-        "must not refuse on an untrustworthy answer; stderr={stderr:?}"
-    );
-    assert!(
-        exec.tenant_dir_present_calls().is_empty(),
-        "uncached sudo ⇒ the probe must not even run: {:?}",
-        exec.tenant_dir_present_calls()
+        exec.tenant_dir_present_calls(),
+        vec![("dev".to_string(), dir.clone())]
     );
     assert_eq!(
         exec.exec_calls_with_dir(),
@@ -3030,6 +3027,9 @@ fn pf_disabled_host() -> StubHostMachine {
         .with_pf_status_content("Status: Disabled\n")
 }
 
+const PF_DISABLED_LINE: &str = "critical: pf is globally disabled \u{2014} no tenant firewall is \
+     enforcing; run `sudo pfctl -e` to enable\n";
+
 const CRITICAL_ENTRY_WARNING: &str = "
 \u{26a0}  'dev' has 1 critical doctor finding (above). Its sandbox guarantees may not hold:
 \u{26a0}  entering now can run code without the isolation you expect.
@@ -3043,8 +3043,10 @@ fn shell_on_critical_findings_warns_and_declining_enters_nothing() {
     let (code, stdout, stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"n\n");
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert!(stdout.contains(CRITICAL_ENTRY_WARNING), "stdout={stdout:?}");
-    assert_eq!(stderr, "Enter 'dev' anyway? [y/N] ");
+    assert_eq!(
+        stderr,
+        format!("{PF_DISABLED_LINE}{CRITICAL_ENTRY_WARNING}Enter 'dev' anyway? [y/N] ")
+    );
     assert!(
         stdout.ends_with("Not entering 'dev'.\n"),
         "stdout={stdout:?}"
@@ -3073,11 +3075,15 @@ fn shell_critical_prompt_answered_yes_enters() {
 #[test]
 fn shell_yes_flag_is_the_explicit_allow_past_criticals() {
     let exec = pf_disabled_host();
-    let (code, stdout, stderr) =
+    let (code, _stdout, stderr) =
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev", "-y"], b"");
     assert_eq!(code, 0, "stderr={stderr:?}");
-    assert!(stdout.contains(CRITICAL_ENTRY_WARNING), "stdout={stdout:?}");
-    assert!(!stderr.contains("anyway?"), "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        format!(
+            "{PF_DISABLED_LINE}\u{26a0} entering 'dev' despite 1 critical doctor finding (-y)\n"
+        )
+    );
     assert_eq!(exec.logins(), vec!["dev".to_string()]);
 }
 
@@ -3201,4 +3207,38 @@ fn shell_without_terminal_refuses_on_primary_group_drift() {
     );
     assert_eq!(code, 64);
     assert!(exec.exec_calls().is_empty());
+}
+
+#[test]
+fn shell_on_a_terminal_with_cold_sudo_still_gates_on_pf_disabled() {
+    let exec = pf_disabled_host().with_sudo_session_cached(false);
+    let (code, _stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"n\n");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(exec.authenticate_sudo_calls(), 1, "warms sudo to probe pf");
+    assert!(
+        stderr.contains("Enter 'dev' anyway? [y/N] "),
+        "stderr={stderr:?}"
+    );
+    assert!(exec.logins().is_empty());
+}
+
+#[test]
+fn shell_gate_prints_a_failed_probe_instead_of_reading_it_as_clean() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .fail_next_pf_status(FirewallError::NonZero {
+            code: 1,
+            stderr: "pfctl: /dev/pf: Permission denied".into(),
+        });
+    let (_code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+    );
+    assert!(
+        stderr.contains("/dev/pf: Permission denied"),
+        "stderr={stderr:?}"
+    );
 }

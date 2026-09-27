@@ -142,11 +142,6 @@ pub enum SymlinkActual {
 }
 
 impl Finding {
-    /// Every reapply restores the pf.conf reference before it reloads.
-    pub fn repaired_by_any_reapply(&self) -> bool {
-        matches!(self, Finding::PfConfAnchorRefMissing { .. })
-    }
-
     pub fn severity(&self) -> Severity {
         match self {
             Finding::FilesystemExposure { severity, .. } => *severity,

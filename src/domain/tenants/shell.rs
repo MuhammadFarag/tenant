@@ -78,8 +78,7 @@ impl<'a> Tenants<'a> {
         self.shell_command(name, host, argv, mode, inbound, dir.as_deref(), reporter)
     }
 
-    /// The probe needs a warm sudo cache: `sudo -n` fails cold and would refuse the first
-    /// command in every fresh terminal. Cold ⇒ skip; a bad dir then fails at `cd`.
+    /// Dispatch's entry gate has already warmed sudo, so the `sudo -n` probe answers truthfully.
     fn prepare_shell_directory(
         &self,
         name: &TenantUserName,
@@ -89,9 +88,6 @@ impl<'a> Tenants<'a> {
             return Ok(None);
         };
         let path = resolve_shell_directory(name, raw)?;
-        if !self.machine.sudo_session_cached() {
-            return Ok(Some(path));
-        }
         match self.machine.tenant_dir_present(name, &path) {
             Ok(true) => Ok(Some(path)),
             Ok(false) => Err(ShellError::DirectoryUnavailable { path }),
