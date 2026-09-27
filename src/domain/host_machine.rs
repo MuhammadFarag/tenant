@@ -82,6 +82,16 @@ pub trait HostMachine {
 
     fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError>;
 
+    /// `pfctl -T show` output for one table of the tenant's loaded anchor.
+    fn read_kernel_pf_table(
+        &self,
+        name: &TenantUserName,
+        table: &str,
+    ) -> Result<String, FirewallError>;
+
+    /// The host's system resolver: the same lookup pf ran at anchor load.
+    fn resolve_host(&self, host: &str) -> Result<Vec<std::net::IpAddr>, ProbeError>;
+
     fn read_pam_sudo(&self) -> Result<String, HostFileError>;
 
     /// Absent file ⇒ `Ok(String::new())`. Sanctioned Touch ID setup lands here, so doctor

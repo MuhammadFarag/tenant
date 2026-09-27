@@ -12,7 +12,9 @@ use crate::domain::{
     KeychainOp, KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TENANT_KEYCHAIN_FILE,
     TenantUserName, tenant_keychain_path,
 };
-use crate::firewall::{PF_CONF, PF_CONF_BACKUP, is_anchor_referenced, tenant_anchor_path};
+use crate::firewall::{
+    PF_CONF, PF_CONF_BACKUP, is_anchor_referenced, tenant_anchor_name, tenant_anchor_path,
+};
 use crate::profile::{ProfileError, default_profile_toml, display_path_for};
 
 /// Read-only: OS updates overwrite it. Customizations go in `sudo_local`, which it includes first.
@@ -358,18 +360,26 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError> {
-        let argv = kernel_pf_rules_argv(name.as_str());
-        let output = Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
-            .map_err(FirewallError::Spawn)?;
-        if !output.status.success() {
-            return Err(FirewallError::NonZero {
-                code: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            });
+        read_firewall_stdout(&kernel_pf_rules_argv(name.as_str()))
+    }
+
+    fn read_kernel_pf_table(
+        &self,
+        name: &TenantUserName,
+        table: &str,
+    ) -> Result<String, FirewallError> {
+        read_firewall_stdout(&kernel_pf_table_argv(name.as_str(), table))
+    }
+
+    fn resolve_host(&self, host: &str) -> Result<Vec<std::net::IpAddr>, ProbeError> {
+        use std::net::ToSocketAddrs;
+        let mut ips: Vec<std::net::IpAddr> = Vec::new();
+        for addr in (host, 0).to_socket_addrs().map_err(ProbeError::Spawn)? {
+            if !ips.contains(&addr.ip()) {
+                ips.push(addr.ip());
+            }
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(ips)
     }
 
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {
@@ -827,6 +837,33 @@ fn read_primary_group_id(argv: &[String]) -> Result<GroupId, ProbeError> {
 
 pub fn pf_status_argv() -> Vec<String> {
     vec!["sudo".into(), "pfctl".into(), "-si".into()]
+}
+
+fn read_firewall_stdout(argv: &[String]) -> Result<String, FirewallError> {
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+        .map_err(FirewallError::Spawn)?;
+    if !output.status.success() {
+        return Err(FirewallError::NonZero {
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+pub fn kernel_pf_table_argv(name: &str, table: &str) -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "pfctl".into(),
+        "-a".into(),
+        tenant_anchor_name(name),
+        "-t".into(),
+        table.into(),
+        "-T".into(),
+        "show".into(),
+    ]
 }
 
 pub fn kernel_pf_rules_argv(name: &str) -> Vec<String> {

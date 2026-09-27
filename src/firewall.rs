@@ -171,6 +171,15 @@ fn push_table(out: &mut String, table: &str, hosts: &[&str]) {
     }
 }
 
+/// The anchor table a host with these ports renders into.
+pub fn egress_table_name(ports: &[u16]) -> String {
+    if ports == DEFAULT_PORTS {
+        "allowed".to_string()
+    } else {
+        table_name(ports)
+    }
+}
+
 fn table_name(ports: &[u16]) -> String {
     let joined = ports
         .iter()

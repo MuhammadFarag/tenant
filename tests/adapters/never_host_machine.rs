@@ -83,6 +83,16 @@ impl HostMachine for NeverHostMachine {
     fn read_kernel_pf_rules(&self, name: &TenantUserName) -> Result<String, FirewallError> {
         panic!("host machine unexpectedly invoked (read_kernel_pf_rules): name={name:?}");
     }
+    fn read_kernel_pf_table(
+        &self,
+        name: &TenantUserName,
+        table: &str,
+    ) -> Result<String, FirewallError> {
+        panic!("host machine unexpectedly invoked (read_kernel_pf_table): {name:?} {table}");
+    }
+    fn resolve_host(&self, host: &str) -> Result<Vec<std::net::IpAddr>, ProbeError> {
+        panic!("host machine unexpectedly invoked (resolve_host): {host}");
+    }
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {
         panic!("host machine unexpectedly invoked (read_pam_sudo)");
     }

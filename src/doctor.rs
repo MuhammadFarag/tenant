@@ -1,6 +1,7 @@
 //! Pure; all doctor I/O lives in `Tenants::doctor_*`.
 
 use std::fmt;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use crate::profile::{Inbound, InboundPosture};
@@ -82,6 +83,12 @@ pub enum Finding {
     InboundPermissiveByProfile {
         tenant: TenantUserName,
     },
+    /// pf resolves hostnames once, at load; CDN answers rotate away from that set.
+    EgressResolveDrift {
+        tenant: TenantUserName,
+        host: String,
+        unloaded: Vec<IpAddr>,
+    },
     AclDrift {
         tenant: TenantUserName,
         host_path: PathBuf,
@@ -141,6 +148,7 @@ impl Finding {
             Finding::InboundExposure { .. } => Severity::Info,
             Finding::InboundPermissive { .. } => Severity::Warning,
             Finding::InboundPermissiveByProfile { .. } => Severity::Info,
+            Finding::EgressResolveDrift { .. } => Severity::Warning,
             Finding::AclDrift { .. } => Severity::Warning,
             Finding::CoworkAclDrift { .. } => Severity::Warning,
             Finding::CoworkDirAbsent { .. } => Severity::Warning,
@@ -221,6 +229,24 @@ Alternative
   blanket widen when the port is known."
                 ))
             }
+            Finding::EgressResolveDrift { tenant, host, .. } => Some(format!(
+                "Why this matters
+  pf resolves each allowlisted hostname once, when the anchor loads.
+  {host} now answers with addresses outside that set, so the tenant's
+  connections to it hang until they time out. CDN-fronted hosts
+  (Google, Fastly, Cloudflare, CloudFront) rotate their answers every
+  few minutes, so a reload only helps until the next rotation.
+
+Recommended fix
+  Pin the provider's published CIDR ranges in an include fragment
+  instead of the hostname (see `tenant help profile`, Egress), then
+  run `tenant reload {tenant}`.
+
+Alternative
+  tenant reload {tenant}
+  Re-resolves every hostname now. Enough for a host whose address
+  moved once; a stopgap for a CDN."
+            )),
             Finding::InboundPermissiveByProfile { tenant } => Some(format!(
                 "Why this matters
   Tenant '{tenant}'s profile declares `[inbound] posture = \"permissive\"`, so
@@ -879,6 +905,21 @@ impl fmt::Display for Finding {
                      reachable by host + peer tenants"
                 )
             }
+            Finding::EgressResolveDrift {
+                tenant,
+                host,
+                unloaded,
+            } => write!(
+                f,
+                "warning: tenant '{tenant}' egress host {host} now resolves to {}, outside the \
+                 loaded pf table \u{2014} CDN-backed? pin its CIDR ranges (see `tenant help \
+                 profile`), or `tenant reload {tenant}` to re-resolve",
+                unloaded
+                    .iter()
+                    .map(IpAddr::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Finding::InboundPermissiveByProfile { tenant } => write!(
                 f,
                 "info: tenant '{tenant}' inbound posture is permissive (profile) \u{2014} \
@@ -1033,6 +1074,58 @@ fn render_port_list(ports: &[u16]) -> String {
         .map(u16::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// `table_show` is `pfctl -t <table> -T show` output: one address or CIDR per line.
+pub fn classify_egress_resolve_drift(
+    tenant: &TenantUserName,
+    host: &str,
+    resolved: &[IpAddr],
+    table_show: &str,
+) -> Option<Finding> {
+    let entries: Vec<&str> = table_show
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('!'))
+        .collect();
+    let unloaded: Vec<IpAddr> = resolved
+        .iter()
+        .copied()
+        .filter(|ip| !entries.iter().any(|entry| table_entry_covers(entry, *ip)))
+        .collect();
+    if unloaded.is_empty() {
+        return None;
+    }
+    Some(Finding::EgressResolveDrift {
+        tenant: tenant.clone(),
+        host: host.to_string(),
+        unloaded,
+    })
+}
+
+fn table_entry_covers(entry: &str, ip: IpAddr) -> bool {
+    let (addr, prefix) = match entry.split_once('/') {
+        Some((addr, prefix)) => (addr, prefix.parse::<u32>().ok()),
+        None => (entry, None),
+    };
+    let Ok(net) = addr.parse::<IpAddr>() else {
+        return false;
+    };
+    match (net, ip) {
+        (IpAddr::V4(net), IpAddr::V4(ip)) => {
+            let mask = u32::MAX
+                .checked_shl(32 - prefix.unwrap_or(32).min(32))
+                .unwrap_or(0);
+            u32::from(net) & mask == u32::from(ip) & mask
+        }
+        (IpAddr::V6(net), IpAddr::V6(ip)) => {
+            let mask = u128::MAX
+                .checked_shl(128 - prefix.unwrap_or(128).min(128))
+                .unwrap_or(0);
+            u128::from(net) & mask == u128::from(ip) & mask
+        }
+        _ => false,
+    }
 }
 
 /// Observed permissive wins over declared ports: the live surface is wider

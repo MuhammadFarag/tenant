@@ -96,6 +96,14 @@ pub struct StubHostMachine {
 
     kernel_pf_rules_calls: RefCell<Vec<String>>,
 
+    /// Keyed `(tenant, table)`; absent ⇒ empty table.
+    kernel_pf_tables: RefCell<HashMap<(String, String), String>>,
+
+    /// Absent host ⇒ resolves to nothing, so no resolve-drift finding by default.
+    resolved_hosts: RefCell<HashMap<String, Vec<std::net::IpAddr>>>,
+
+    resolve_calls: RefCell<Vec<String>>,
+
     /// Defaults to Touch-ID-active (no spurious `TouchIdMissing`).
     pam_sudo_content: RefCell<String>,
 
@@ -411,6 +419,25 @@ impl StubHostMachine {
     pub fn fail_next_kernel_pf_rules(self, err: FirewallError) -> Self {
         *self.kernel_pf_rules_failure.borrow_mut() = Some(err);
         self
+    }
+
+    pub fn with_kernel_pf_table(self, name: &str, table: &str, content: &str) -> Self {
+        self.kernel_pf_tables
+            .borrow_mut()
+            .insert((name.to_string(), table.to_string()), content.to_string());
+        self
+    }
+
+    pub fn with_resolved_host(self, host: &str, ips: &[&str]) -> Self {
+        self.resolved_hosts.borrow_mut().insert(
+            host.to_string(),
+            ips.iter().map(|ip| ip.parse().unwrap()).collect(),
+        );
+        self
+    }
+
+    pub fn resolved_hosts(&self) -> Vec<String> {
+        self.resolve_calls.borrow().clone()
     }
 
     pub fn kernel_pf_rules_calls(&self) -> Vec<String> {
@@ -877,6 +904,29 @@ impl HostMachine for StubHostMachine {
                         pass inet from 192.0.2.1 to <allowed> keep state\n"
                 .to_string()),
         }
+    }
+
+    fn read_kernel_pf_table(
+        &self,
+        name: &TenantUserName,
+        table: &str,
+    ) -> Result<String, FirewallError> {
+        Ok(self
+            .kernel_pf_tables
+            .borrow()
+            .get(&(name.to_string(), table.to_string()))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn resolve_host(&self, host: &str) -> Result<Vec<std::net::IpAddr>, ProbeError> {
+        self.resolve_calls.borrow_mut().push(host.to_string());
+        Ok(self
+            .resolved_hosts
+            .borrow()
+            .get(host)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {

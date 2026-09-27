@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use tenant::doctor::{
     Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify,
-    classify_inbound_exposure, curated_paths,
+    classify_egress_resolve_drift, classify_inbound_exposure, curated_paths,
 };
 use tenant::domain::{AccessMode, AccessOutcome, GroupId, HostUserName, TenantUserName};
 use tenant::profile::{Inbound, InboundPosture};
@@ -1422,4 +1422,62 @@ fn classify_permissive_anchor_on_permissive_profile_is_info() {
         "info: tenant 'dev' inbound posture is permissive (profile) \u{2014} \
          every loopback port the tenant opens is reachable by host + peer tenants"
     );
+}
+
+// --- classify_egress_resolve_drift: resolved addresses vs the live `pfctl -T show` table ---
+
+fn ips(list: &[&str]) -> Vec<std::net::IpAddr> {
+    list.iter().map(|s| s.parse().unwrap()).collect()
+}
+
+const LOADED_TABLE: &str = "   142.250.137.93\n   10.0.0.0/8\n   2001:db8::/32\n";
+
+#[test]
+fn egress_resolve_drift_none_when_every_address_is_loaded_or_covered() {
+    let resolved = ips(&["142.250.137.93", "10.1.2.3", "2001:db8::1"]);
+    let f = classify_egress_resolve_drift(
+        &TenantUserName::from("dev"),
+        "dl.google.com",
+        &resolved,
+        LOADED_TABLE,
+    );
+    assert_eq!(f, None);
+}
+
+#[test]
+fn egress_resolve_drift_names_only_unloaded_addresses() {
+    let resolved = ips(&["142.250.137.93", "142.250.139.7", "2001:db9::1"]);
+    let f = classify_egress_resolve_drift(
+        &TenantUserName::from("dev"),
+        "dl.google.com",
+        &resolved,
+        LOADED_TABLE,
+    )
+    .unwrap();
+    assert_eq!(
+        f,
+        Finding::EgressResolveDrift {
+            tenant: TenantUserName::from("dev"),
+            host: "dl.google.com".to_string(),
+            unloaded: ips(&["142.250.139.7", "2001:db9::1"]),
+        }
+    );
+    assert_eq!(f.severity(), Severity::Warning);
+    assert_eq!(
+        format!("{f}"),
+        "warning: tenant 'dev' egress host dl.google.com now resolves to 142.250.139.7, \
+         2001:db9::1, outside the loaded pf table \u{2014} CDN-backed? pin its CIDR ranges \
+         (see `tenant help profile`), or `tenant reload dev` to re-resolve"
+    );
+}
+
+#[test]
+fn egress_resolve_drift_none_when_nothing_resolved() {
+    let f = classify_egress_resolve_drift(
+        &TenantUserName::from("dev"),
+        "gone.example",
+        &[],
+        LOADED_TABLE,
+    );
+    assert_eq!(f, None);
 }

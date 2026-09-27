@@ -1,15 +1,15 @@
 use crate::ModeLevel;
 use crate::doctor::{
-    Finding, SymlinkActual, anchor_body_matches, classify_inbound_exposure, curated_paths,
-    has_env_delete_for, has_group_acl_entry, has_pam_tid, pf_rule_presence_check,
-    pf_status_enabled,
+    Finding, SymlinkActual, anchor_body_matches, classify_egress_resolve_drift,
+    classify_inbound_exposure, curated_paths, has_env_delete_for, has_group_acl_entry, has_pam_tid,
+    pf_rule_presence_check, pf_status_enabled,
 };
 use crate::domain::reporter::Reporter;
 use crate::domain::{
     FirewallError, HostFileError, HostUserDirectory, HostUserName, PathKind, ProbeError,
     TenantUserName, UserDirectoryError,
 };
-use crate::firewall::{anchor_is_permissive, render_anchor};
+use crate::firewall::{anchor_is_permissive, egress_table_name, render_anchor};
 use crate::profile::expand_tenant_path;
 
 use super::reapply::{hosts_for_level, steady_inbound_rules};
@@ -200,6 +200,15 @@ impl<'a> Tenants<'a> {
                 reporter.doctor_finding(&drift);
                 findings.push(drift);
             }
+            match self.check_egress_resolve_drift(name) {
+                Ok(drifts) => {
+                    for drift in drifts {
+                        reporter.doctor_finding(&drift);
+                        findings.push(drift);
+                    }
+                }
+                Err(e) => reporter.doctor_firewall_failed(&e),
+            }
         }
         if let Some(drift) = self.check_anchor_body_drift(name)? {
             reporter.doctor_finding(&drift);
@@ -387,6 +396,38 @@ impl<'a> Tenants<'a> {
             findings.push(finding);
         }
         Ok(findings)
+    }
+
+    /// Runtime tier, against the kernel's live tables. Address and CIDR entries can't drift.
+    fn check_egress_resolve_drift(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<Vec<Finding>, FirewallError> {
+        let Ok(parsed) = self.load_profile(name) else {
+            return Ok(Vec::new());
+        };
+        let mut tables: std::collections::HashMap<String, String> = Default::default();
+        let mut drifts = Vec::new();
+        for egress in hosts_for_level(&parsed, ModeLevel::Runtime) {
+            let literal = egress.host.split('/').next().unwrap_or_default();
+            if literal.parse::<std::net::IpAddr>().is_ok() {
+                continue;
+            }
+            let Ok(resolved) = self.machine.resolve_host(&egress.host) else {
+                continue;
+            };
+            let table = egress_table_name(&egress.ports);
+            if !tables.contains_key(&table) {
+                let shown = self.machine.read_kernel_pf_table(name, &table)?;
+                tables.insert(table.clone(), shown);
+            }
+            if let Some(drift) =
+                classify_egress_resolve_drift(name, &egress.host, &resolved, &tables[&table])
+            {
+                drifts.push(drift);
+            }
+        }
+        Ok(drifts)
     }
 
     /// Composes declared ports (intent) with the on-disk anchor's permissive flag (current

@@ -86,6 +86,19 @@ impl HostMachine for DryRunHostMachine {
         )
     }
 
+    fn read_kernel_pf_table(
+        &self,
+        _name: &TenantUserName,
+        _table: &str,
+    ) -> Result<String, FirewallError> {
+        Ok(String::new())
+    }
+
+    /// Empty so the preview never manufactures a resolve-drift finding.
+    fn resolve_host(&self, _host: &str) -> Result<Vec<std::net::IpAddr>, ProbeError> {
+        Ok(Vec::new())
+    }
+
     fn read_pam_sudo(&self) -> Result<String, HostFileError> {
         Ok("auth       sufficient     pam_tid.so\n".to_string())
     }

@@ -37,6 +37,21 @@ Schema
   Egress hosts can be bare strings (TCP 443 only) or inline tables
   with a `ports` array to allow specific TCP ports.
 
+  Entries may also be IP addresses or CIDR ranges ("142.250.0.0/15").
+  pf resolves each hostname ONCE, when the anchor loads (reload,
+  mode, shell entry). Hostnames work for hosts with stable addresses.
+  CDN-fronted hosts (Google, Fastly, Cloudflare, CloudFront) rotate
+  their answers every few minutes; once the answer leaves the loaded
+  set, connections silently hang until they time out. `tenant doctor
+  <name>` warns when a hostname now resolves outside the loaded table.
+
+  For a CDN host, pin the provider's published ranges in an include
+  fragment (e.g. `includes/google-services.toml`, generated from
+  gstatic.com/ipranges/goog.json minus cloud.json; Fastly publishes
+  api.fastly.com/public-ip-list). Providers change these lists
+  occasionally: regenerate the fragment, run `tenant reload <name>`,
+  and note the source + date in the fragment's header.
+
 Shares
 
   [[shares]]

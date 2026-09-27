@@ -2284,3 +2284,33 @@ fn doctor_permissive_anchor_on_permissive_profile_is_info_not_strict_failure() {
     );
     assert!(!stdout.contains("PERMISSIVE"), "stdout={stdout:?}");
 }
+
+#[test]
+fn doctor_warns_when_egress_host_resolves_outside_loaded_table() {
+    let profile = format!(
+        "{}\n",
+        profile_with_hosts(&["dl.google.com", "142.250.0.0/15"], &[])
+    );
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile)
+        .with_resolved_host("dl.google.com", &["142.250.137.93", "192.178.192.139"])
+        .with_kernel_pf_table("dev", "allowed", "   142.250.137.93\n   142.250.0.0/15\n");
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "warning: tenant 'dev' egress host dl.google.com now resolves to 192.178.192.139, \
+             outside the loaded pf table"
+        ),
+        "stdout={stdout:?}"
+    );
+    assert_eq!(
+        stub_exec.resolved_hosts(),
+        vec!["dl.google.com".to_string()],
+        "CIDR entries are not hostnames"
+    );
+}

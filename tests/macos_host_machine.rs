@@ -769,3 +769,21 @@ fn macos_exec_as_user_runs_argv_in_directory() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn macos_kernel_pf_table_argv_shows_one_anchor_table() {
+    use tenant::adapters::macos::host_machine::kernel_pf_table_argv;
+    assert_eq!(
+        kernel_pf_table_argv("dev", "allowed_443_22"),
+        vec![
+            "sudo",
+            "pfctl",
+            "-a",
+            "tenant-dev",
+            "-t",
+            "allowed_443_22",
+            "-T",
+            "show"
+        ],
+    );
+}
