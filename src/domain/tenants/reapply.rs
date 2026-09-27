@@ -80,7 +80,6 @@ pub(crate) struct ReloadAllOutcome {
     pub(crate) failed: u32,
 }
 
-/// The inbound axis for verbs that don't control it; empty ports stays locked.
 impl Tenants<'_> {
     /// Display only: an unreadable profile reads as restricted and surfaces at plan build.
     pub(crate) fn inbound_posture_is_permissive(&self, name: &TenantUserName) -> bool {
@@ -89,6 +88,7 @@ impl Tenants<'_> {
     }
 }
 
+/// The inbound axis for verbs that don't control it; empty ports stays locked.
 pub(crate) fn steady_inbound_rules(profile: &Profile) -> InboundRules {
     match profile.inbound.posture {
         InboundPosture::Permissive => InboundRules::Permissive,

@@ -189,12 +189,10 @@ pub(crate) fn dispatch(
                                 posture_permissive,
                             );
                         } else {
-                            let shell_inbound = if inbound == Some(InboundLevel::Permissive) {
-                                ShellInbound::WidenedForCommand
-                            } else if posture_permissive {
-                                ShellInbound::PermissiveByProfile
-                            } else {
-                                ShellInbound::Restricted
+                            let shell_inbound = match inbound {
+                                Some(InboundLevel::Permissive) => ShellInbound::WidenedForCommand,
+                                None if posture_permissive => ShellInbound::PermissiveByProfile,
+                                _ => ShellInbound::Restricted,
                             };
                             reporter.shell_command_summary(
                                 &name,

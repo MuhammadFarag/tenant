@@ -1058,9 +1058,6 @@ fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
     result
 }
 
-/// rename(2) keeps the tempfile's operator ownership, so `mv` alone leaves the target
-/// writable without sudo. Owner and mode are set on the tempfile so the rename lands the
-/// finished file in one step.
 /// Anchors stay root-only so tenants can't read each other's allowlists; pf reads as root.
 fn install_mode(path: &str) -> &'static str {
     if path.starts_with(crate::firewall::ANCHOR_DIR) {
@@ -1070,6 +1067,9 @@ fn install_mode(path: &str) -> &'static str {
     }
 }
 
+/// rename(2) keeps the tempfile's operator ownership, so `mv` alone leaves the target
+/// writable without sudo. Owner and mode are set on the tempfile so the rename lands the
+/// finished file in one step.
 pub fn privileged_install_argv(tmp: &str, path: &str) -> [Vec<String>; 3] {
     [
         vec![

@@ -3088,3 +3088,20 @@ fn shell_command_form_gates_on_criticals_too() {
     assert_eq!(code, 0);
     assert!(exec.exec_calls().is_empty() && exec.firewall_ops().is_empty());
 }
+
+#[test]
+fn shell_summary_for_explicit_restricted_does_not_claim_the_profile_posture() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile_with_permissive_posture(&["a.example"], &[]))
+        .with_default_stash("dev");
+    let (_code, stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "restricted", "--", "ls"],
+        b"",
+    );
+    assert!(
+        !stdout.contains("PERMISSIVE (profile posture)"),
+        "stdout={stdout:?}"
+    );
+}
