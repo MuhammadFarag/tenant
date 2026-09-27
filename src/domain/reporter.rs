@@ -675,12 +675,32 @@ impl<'t, 'm> Reporter<'t, 'm> {
         self.ok(&format!("Tenant '{name}' keychain unlocked"));
     }
 
-    pub fn shell_narrow_failed(&mut self, name: &TenantUserName, _err: &super::tenants::ModeError) {
-        let prefix = if self.terminal.colors.stderr {
+    fn stderr_warn_prefix(&self) -> &'static str {
+        if self.terminal.colors.stderr {
             "\x1b[33m\u{26a0}\x1b[0m"
         } else {
             "\u{26a0}"
-        };
+        }
+    }
+
+    pub fn share_grant_incomplete(
+        &mut self,
+        name: &TenantUserName,
+        path: &std::path::Path,
+        chmod_stderr: &str,
+    ) {
+        let prefix = self.stderr_warn_prefix();
+        let _ = writeln!(
+            self.terminal.stderr,
+            "{prefix} tenant '{name}': ACL grant on {} incomplete \u{2014} {}; the rest of the \
+             tree was granted, `tenant doctor {name}` lists what still lacks it",
+            path.display(),
+            chmod_stderr.trim()
+        );
+    }
+
+    pub fn shell_narrow_failed(&mut self, name: &TenantUserName, _err: &super::tenants::ModeError) {
+        let prefix = self.stderr_warn_prefix();
         let _ = writeln!(
             self.terminal.stderr,
             "{prefix} tenant '{name}': firewall not narrowed after command — install-tier widening still in effect; run `tenant mode {name} runtime` to recover"
@@ -1455,11 +1475,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         path: &std::path::Path,
         err: &ProbeError,
     ) {
-        let prefix = if self.terminal.colors.stderr {
-            "\x1b[33m\u{26a0}\x1b[0m"
-        } else {
-            "\u{26a0}"
-        };
+        let prefix = self.stderr_warn_prefix();
         let display = path.display();
         let _ = writeln!(
             self.terminal.stderr,
@@ -1831,11 +1847,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         name: &TenantUserName,
         _err: &super::tenants::ModeError,
     ) {
-        let prefix = if self.terminal.colors.stderr {
-            "\x1b[33m\u{26a0}\x1b[0m"
-        } else {
-            "\u{26a0}"
-        };
+        let prefix = self.stderr_warn_prefix();
         let _ = writeln!(
             self.terminal.stderr,
             "{prefix} tenant '{name}': bootstrap commands ran, but the firewall was not narrowed \u{2014} install-tier widening still in effect; run `tenant mode {name} runtime` to recover"

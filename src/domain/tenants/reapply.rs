@@ -33,6 +33,7 @@ pub(crate) enum ReapplyScope {
 }
 
 pub(crate) struct ReapplyPlan {
+    pub(crate) name: TenantUserName,
     pub(crate) install_anchor: FirewallOp,
     pub(crate) update_conf: Option<FirewallOp>,
     pub(crate) reload: FirewallOp,
@@ -231,6 +232,7 @@ impl<'a> Tenants<'a> {
         };
         let share_ops = self.build_share_ops(name, parsed_profile, scope)?;
         Ok(ReapplyPlan {
+            name: name.clone(),
             install_anchor,
             update_conf,
             reload,
@@ -265,7 +267,7 @@ impl<'a> Tenants<'a> {
         if let Some(cowork) = &plan.ensure_cowork_dir {
             self.run(cowork, reporter).map_err(ModeError::Account)?;
         }
-        self.execute_share_ops(&plan.share_ops, reporter)
+        self.execute_share_ops(&plan.name, &plan.share_ops, reporter)
     }
 
     pub(crate) fn reload(

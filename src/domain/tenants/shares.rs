@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::domain::reporter::Reporter;
-use crate::domain::{AccountOp, AclMode, AclOp, PathKind, TenantUserName};
+use crate::domain::{AccountOp, AclError, AclMode, AclOp, PathKind, TenantUserName};
 use crate::profile::{Profile, ShareMode, expand_tenant_path};
 
 use super::reapply::{ModeError, ReapplyScope};
@@ -124,17 +124,26 @@ impl<'a> Tenants<'a> {
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
         let share_ops = self.build_share_ops(name, parsed_profile, ReapplyScope::Full)?;
-        self.execute_share_ops(&share_ops, reporter)
+        self.execute_share_ops(name, &share_ops, reporter)
     }
 
     pub(crate) fn execute_share_ops(
         &self,
+        name: &TenantUserName,
         share_ops: &[ShareOps],
         reporter: &mut Reporter,
     ) -> Result<(), ModeError> {
         for share in share_ops {
             if let Some(grant) = &share.grant {
-                self.run(grant, reporter).map_err(ModeError::Acl)?;
+                match self.run(grant, reporter) {
+                    Ok(()) => {}
+                    // `chmod -R` keeps walking past a failed node and exits 1 at the end.
+                    Err(AclError::NonZero { stderr, .. }) => {
+                        let (AclOp::Grant { path, .. } | AclOp::Revoke { path, .. }) = grant;
+                        reporter.share_grant_incomplete(name, path, &stderr);
+                    }
+                    Err(spawn) => return Err(ModeError::Acl(spawn)),
+                }
             }
             if let Some(ensure_dir) = &share.ensure_dir {
                 self.run(ensure_dir, reporter).map_err(ModeError::Account)?;

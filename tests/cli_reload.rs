@@ -486,8 +486,13 @@ fn reload_refuses_when_cowork_path_is_a_regular_file() {
 
 // TODO(smell): rename ModeError + Reporter mode_*_failed to reapply_*; reload + shell use them.
 #[test]
-fn reload_routes_acl_failure_via_reapply_arms() {
-    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+fn reload_partial_acl_grant_failure_warns_and_continues_with_remaining_shares() {
+    // chmod -R applies the ACE to the rest of the tree and exits 1 at the end.
+    let toml = profile_with_shares(
+        &[],
+        &[],
+        &[("/tmp", "rw", "$HOME/src"), ("/var", "ro", "$HOME/var")],
+    );
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &toml)
         .fail_acl_op(
@@ -498,14 +503,39 @@ fn reload_routes_acl_failure_via_reapply_arms() {
             },
             AclError::NonZero {
                 code: 1,
-                stderr: "chmod: Permission denied".into(),
+                stderr:
+                    "chmod: Failed to set ACL on file 'mysql.sock': No such file or directory\n"
+                        .into(),
             },
         );
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "\u{26a0} tenant 'dev': ACL grant on /tmp incomplete \u{2014} chmod: Failed to set ACL on \
+         file 'mysql.sock': No such file or directory; the rest of the tree was granted, \
+         `tenant doctor dev` lists what still lacks it\n"
+    );
+    assert_eq!(exec.acl_ops().len(), 2, "second share still granted");
+    let symlinks = exec
+        .account_ops()
+        .into_iter()
+        .filter(|op| matches!(op, AccountOp::EnsureSymlinkAsUser { .. }))
+        .count();
+    assert_eq!(symlinks, 2, "both shares' symlinks still installed");
+}
+
+#[test]
+fn reload_acl_spawn_failure_still_aborts() {
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .fail_next_acl(AclError::Spawn(std::io::Error::other("no chmod")));
     let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
     assert_eq!(code, 74);
     assert!(
         stderr.contains("failed to apply ACL for 'dev'"),
-        "expected mode_acl_failed frame (reused for reload): {stderr:?}"
+        "stderr={stderr:?}"
     );
 }
 
