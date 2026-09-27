@@ -698,6 +698,16 @@ pub(crate) fn dispatch(
                 EX_IOERR
             }
         },
+        Verb::List => match directory.tenant_names() {
+            Ok(names) => {
+                reporter.list_tenants(&names);
+                0
+            }
+            Err(e) => {
+                reporter.list_failed(&e);
+                EX_IOERR
+            }
+        },
         Verb::Help { topic } => {
             let body = match topic {
                 Some(HelpTopic::Profile) => help_body_profile(),

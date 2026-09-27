@@ -1431,6 +1431,22 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    pub fn list_tenants(&mut self, names: &[TenantUserName]) {
+        if names.is_empty() {
+            let _ = writeln!(self.terminal.stderr, "No tenants on this host.");
+        }
+        for name in names {
+            let _ = writeln!(self.terminal.stdout, "{name}");
+        }
+    }
+
+    pub fn list_failed(&mut self, err: &UserDirectoryError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to list tenants: {err}"
+        );
+    }
+
     pub fn doctor_enumeration_failed(&mut self, err: &UserDirectoryError) {
         let _ = writeln!(
             self.terminal.stderr,

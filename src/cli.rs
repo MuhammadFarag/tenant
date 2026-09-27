@@ -304,6 +304,13 @@ Examples:
         #[arg(last = true)]
         argv: Vec<String>,
     },
+    /// List the tenants on this host, one name per line.
+    ///
+    /// Read-only and sudo-free: enumerates local users at or above the
+    /// tenant UID floor. With no tenants, stdout stays empty (the note
+    /// goes to stderr), so `tenant ls | ...` pipes cleanly.
+    #[command(visible_alias = "ls")]
+    List,
     /// Audit host + tenant state read-only. Bare form walks every tenant.
     ///
     /// Probes sensitive host paths as each tenant (via `sudo -n -u
