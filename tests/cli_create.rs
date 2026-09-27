@@ -1905,7 +1905,7 @@ fn create_refuses_an_existing_profile_that_does_not_parse_before_creating_anythi
     assert!(
         stderr.starts_with(
             "tenant: refusing to create 'dev': the existing profile \
-             ~/.config/tenant/profiles/dev.toml does not load \u{2014} "
+             ~/.config/tenant/profiles/dev.toml can't be applied \u{2014} "
         ),
         "stderr={stderr:?}"
     );
@@ -1943,4 +1943,15 @@ fn create_fails_when_the_new_anchor_never_reaches_the_kernel() {
         stderr.contains("the kernel has no pass/block rules for anchor tenant-dev"),
         "stderr={stderr:?}"
     );
+}
+
+#[test]
+fn create_refuses_a_kept_profile_whose_share_path_is_missing_before_creating_anything() {
+    let toml = profile_with_shares(&[], &[], &[("/nonexistent/src", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 64, "stderr={stderr:?}");
+    assert!(stderr.contains("/nonexistent/src"), "stderr={stderr:?}");
+    assert!(exec.account_ops().is_empty());
 }

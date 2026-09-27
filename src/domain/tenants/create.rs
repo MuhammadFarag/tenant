@@ -31,7 +31,8 @@ pub(crate) enum CreateError {
 }
 
 impl<'a> Tenants<'a> {
-    /// `Ok(true)` when a hand-written profile is already in place and loads; create keeps it.
+    /// `Ok(true)` when a hand-written profile is already in place and would apply; create
+    /// keeps it. Checked before any mutation, so a bad one refuses with nothing created.
     pub(crate) fn existing_profile_loads(
         &self,
         name: &TenantUserName,
@@ -39,7 +40,16 @@ impl<'a> Tenants<'a> {
         if !self.machine.profile_exists(name) {
             return Ok(false);
         }
-        self.load_profile(name).map(|_| true)
+        let profile = self.load_profile(name)?;
+        if let Some(share) = profile.shares.iter().find(|s| !s.host_path.exists()) {
+            return Err(ProfileError {
+                message: super::ShareError::HostPathMissing {
+                    path: share.host_path.clone(),
+                }
+                .to_string(),
+            });
+        }
+        Ok(true)
     }
 
     pub(crate) fn create(

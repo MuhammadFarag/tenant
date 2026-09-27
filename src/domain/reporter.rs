@@ -1548,7 +1548,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
     pub fn refuse_create_profile_invalid(&mut self, name: &TenantUserName, err: &ProfileError) {
         let _ = writeln!(
             self.terminal.stderr,
-            "tenant: refusing to create '{name}': the existing profile {} does not load \
+            "tenant: refusing to create '{name}': the existing profile {} can't be applied \
              \u{2014} {err}; fix it, or move it aside to start from the default",
             display_path_for(name.as_str())
         );
