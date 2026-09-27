@@ -164,9 +164,11 @@ impl<'a> Tenants<'a> {
             return Err(ShellError::Mode(entry_err));
         }
 
-        self.unlock_tenant_keychain(name, reporter)?;
-
-        let child_result = self.machine.exec_as_tenant(name, argv, dir);
+        let child_result = self.unlock_tenant_keychain(name, reporter).and_then(|()| {
+            self.machine
+                .exec_as_tenant(name, argv, dir)
+                .map_err(ShellError::Account)
+        });
 
         let widened = mode == ModeLevel::Install || inbound == Some(InboundLevel::Permissive);
         let narrow_result = if !widened {
@@ -182,7 +184,7 @@ impl<'a> Tenants<'a> {
                 child_exit: code,
                 narrow_err,
             }),
-            (Err(spawn_err), _) => Err(ShellError::Account(spawn_err)),
+            (Err(child_err), _) => Err(child_err),
         }
     }
 

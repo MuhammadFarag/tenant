@@ -2863,3 +2863,65 @@ fn shell_inbound_restricted_refuses_on_permissive_profile() {
     assert_eq!(stderr, refuse_restricted_on_permissive_profile("dev"));
     assert!(exec.firewall_ops().is_empty() && exec.exec_calls().is_empty());
 }
+
+fn anchor_install(body: String) -> FirewallOp {
+    FirewallOp::InstallAnchor {
+        name: "dev".into(),
+        body,
+    }
+}
+
+#[test]
+fn shell_command_install_narrows_back_when_keychain_unlock_refuses() {
+    let exec = StubHostMachine::new().with_existing_profile(
+        "dev",
+        &profile_with_hosts(&["api.example.com"], &["pypi.org"]),
+    );
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "ls"],
+    );
+    assert_eq!(code, 64, "stderr={stderr:?}");
+    let restricted = |hosts: &[&str]| {
+        tenant::firewall::render_anchor(
+            "dev",
+            &common::egress(hosts),
+            tenant::firewall::InboundRules::Restricted(vec![]),
+        )
+    };
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            anchor_install(restricted(&["api.example.com", "pypi.org"])),
+            FirewallOp::Reload,
+            anchor_install(restricted(&["api.example.com"])),
+            FirewallOp::Reload,
+        ],
+    );
+    assert!(exec.exec_calls().is_empty());
+}
+
+#[test]
+fn shell_command_permissive_inbound_narrows_back_when_keychain_unlock_refuses() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile_with_hosts(&["api.example.com"], &[]));
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "permissive", "--", "ls"],
+    );
+    assert_eq!(code, 64, "stderr={stderr:?}");
+    let body = |inbound| {
+        tenant::firewall::render_anchor("dev", &common::egress(&["api.example.com"]), inbound)
+    };
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            anchor_install(body(tenant::firewall::InboundRules::Permissive)),
+            FirewallOp::Reload,
+            anchor_install(body(tenant::firewall::InboundRules::Restricted(vec![]))),
+            FirewallOp::Reload,
+        ],
+    );
+}
