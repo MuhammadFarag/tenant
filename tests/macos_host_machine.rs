@@ -641,6 +641,15 @@ fn macos_privileged_install_argv_owns_and_modes_tempfile_then_moves() {
 }
 
 #[test]
+fn macos_privileged_install_argv_keeps_anchors_root_only() {
+    use tenant::adapters::macos::host_machine::privileged_install_argv;
+    assert_eq!(
+        privileged_install_argv("/tmp/t.tmp", "/etc/pf.anchors/tenant-dev")[1],
+        vec!["sudo", "chmod", "0600", "/tmp/t.tmp"],
+    );
+}
+
+#[test]
 fn macos_authenticate_sudo_argv_prompts() {
     use tenant::adapters::macos::host_machine::authenticate_sudo_argv;
     assert_eq!(authenticate_sudo_argv(), vec!["sudo", "-v"]);

@@ -602,15 +602,17 @@ impl<'a> Tenants<'a> {
                         Err(e) => reporter.doctor_firewall_failed(&e),
                     }
                 }
-                match self.check_anchor_body_drift(tenant) {
-                    Ok(Some(drift)) => record(drift),
-                    Ok(None) => {}
-                    Err(e) => reporter.doctor_host_file_failed(&e),
-                }
-                // Posture line, not `record`: a calibrated heads-up that stays out of the warning aggregate.
-                match self.check_inbound_exposure(tenant) {
-                    Ok(posture) => reporter.doctor_inbound_posture(posture.as_ref()),
-                    Err(e) => reporter.doctor_host_file_failed(&e),
+                if sudo_cached {
+                    match self.check_anchor_body_drift(tenant) {
+                        Ok(Some(drift)) => record(drift),
+                        Ok(None) => {}
+                        Err(e) => reporter.doctor_host_file_failed(&e),
+                    }
+                    // Posture line, not `record`: a calibrated heads-up that stays out of the warning aggregate.
+                    match self.check_inbound_exposure(tenant) {
+                        Ok(posture) => reporter.doctor_inbound_posture(posture.as_ref()),
+                        Err(e) => reporter.doctor_host_file_failed(&e),
+                    }
                 }
             }
 

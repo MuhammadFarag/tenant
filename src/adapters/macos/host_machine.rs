@@ -426,15 +426,11 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
-        // Mode 0644 root-owned — direct fs read, no sudo.
         let path = crate::firewall::tenant_anchor_path(name.as_str());
-        match fs::read_to_string(&path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
-            read => read.map_err(|e| HostFileError::Fs {
-                path,
-                message: e.to_string(),
-            }),
+        if !Path::new(&path).exists() {
+            return Ok(String::new());
         }
+        read_privileged_text(&path)
     }
 
     fn tenant_path_kind(
@@ -1061,6 +1057,15 @@ fn write_privileged(path: &str, content: &str) -> Result<(), FirewallError> {
 /// rename(2) keeps the tempfile's operator ownership, so `mv` alone leaves the target
 /// writable without sudo. Owner and mode are set on the tempfile so the rename lands the
 /// finished file in one step.
+/// Anchors stay root-only so tenants can't read each other's allowlists; pf reads as root.
+fn install_mode(path: &str) -> &'static str {
+    if path.starts_with(crate::firewall::ANCHOR_DIR) {
+        "0600"
+    } else {
+        "0644"
+    }
+}
+
 pub fn privileged_install_argv(tmp: &str, path: &str) -> [Vec<String>; 3] {
     [
         vec![
@@ -1069,7 +1074,12 @@ pub fn privileged_install_argv(tmp: &str, path: &str) -> [Vec<String>; 3] {
             "root:wheel".into(),
             tmp.into(),
         ],
-        vec!["sudo".into(), "chmod".into(), "0644".into(), tmp.into()],
+        vec![
+            "sudo".into(),
+            "chmod".into(),
+            install_mode(path).into(),
+            tmp.into(),
+        ],
         vec!["sudo".into(), "mv".into(), tmp.into(), path.into()],
     ]
 }

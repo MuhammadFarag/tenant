@@ -124,6 +124,8 @@ pub struct StubHostMachine {
 
     anchor_body_failure: RefCell<Option<HostFileError>>,
 
+    anchor_body_reads: Cell<usize>,
+
     acl_ops: RefCell<Vec<AclOp>>,
 
     /// First match (by full equality) wins.
@@ -629,6 +631,10 @@ impl StubHostMachine {
         self.pam_ops.borrow().clone()
     }
 
+    pub fn anchor_body_reads(&self) -> usize {
+        self.anchor_body_reads.get()
+    }
+
     pub fn sudoers_ops(&self) -> Vec<SudoersOp> {
         self.sudoers_ops.borrow().clone()
     }
@@ -974,6 +980,7 @@ impl HostMachine for StubHostMachine {
     }
 
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
+        self.anchor_body_reads.set(self.anchor_body_reads.get() + 1);
         if let Some(err) = self.anchor_body_failure.borrow_mut().take() {
             return Err(err);
         }

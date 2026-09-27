@@ -37,7 +37,6 @@ pub enum Category {
     /// Enumerable file names can reveal activity even when files are protected.
     HostHomeListing,
     CrossTenant,
-    /// Anchors are 0644 by design, so they surface as `Allowed` → info.
     TenantArtifact,
     // TODO(smell): `Keychain` is never constructed and never reaches `classify` — remove it or give keychain findings their own axis
     Keychain,
@@ -1219,7 +1218,7 @@ pub fn classify(category: Category, outcome: AccessOutcome) -> Option<Severity> 
         (Category::HostSecret, AccessOutcome::Allowed) => Some(Severity::Critical),
         (Category::HostHomeListing, AccessOutcome::Allowed) => Some(Severity::Warning),
         (Category::CrossTenant, AccessOutcome::Allowed) => Some(Severity::Warning),
-        (Category::TenantArtifact, AccessOutcome::Allowed) => Some(Severity::Info),
+        (Category::TenantArtifact, AccessOutcome::Allowed) => Some(Severity::Warning),
         (Category::Keychain, AccessOutcome::Allowed) => None,
     }
 }

@@ -2925,3 +2925,19 @@ fn shell_command_permissive_inbound_narrows_back_when_keychain_unlock_refuses() 
         ],
     );
 }
+
+#[test]
+fn shell_pre_exec_skips_root_only_anchor_reads_on_cold_sudo() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_sudo_session_cached(false);
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+        b"",
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(exec.anchor_body_reads(), 0);
+}

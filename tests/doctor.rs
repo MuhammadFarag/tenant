@@ -43,14 +43,14 @@ fn finding_display_warning_list() {
 #[test]
 fn finding_display_info_read() {
     let f = Finding::FilesystemExposure {
-        severity: Severity::Info,
+        severity: Severity::Warning,
         tenant: TenantUserName::from("dev"),
         path: PathBuf::from("/etc/pf.anchors/tenant-staging"),
         access: AccessMode::Read,
     };
     assert_eq!(
         format!("{f}"),
-        "info: tenant 'dev' can read /etc/pf.anchors/tenant-staging"
+        "warning: tenant 'dev' can read /etc/pf.anchors/tenant-staging"
     );
 }
 
@@ -81,11 +81,10 @@ fn classify_cross_tenant_allowed_is_warning() {
 }
 
 #[test]
-fn classify_tenant_artifact_allowed_is_info() {
-    // Anchors are 0644 by design: the exposure is intentional, so info rather than critical.
+fn classify_tenant_artifact_allowed_is_warning() {
     assert_eq!(
         classify(Category::TenantArtifact, AccessOutcome::Allowed),
-        Some(Severity::Info)
+        Some(Severity::Warning)
     );
 }
 
