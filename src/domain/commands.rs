@@ -424,7 +424,18 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     tenants::Eligibility::Destroyable => {
-                        doctor_outcome_exit_code(&tenants.doctor(host, &n, &[], reporter), strict)
+                        let (peers, enumerated) = match directory.tenant_names() {
+                            Ok(names) => (names, true),
+                            Err(e) => {
+                                reporter.doctor_enumeration_failed(&e);
+                                (Vec::new(), false)
+                            }
+                        };
+                        let others: Vec<&super::TenantUserName> =
+                            peers.iter().filter(|peer| **peer != n).collect();
+                        let mut outcome = tenants.doctor(host, &n, &others, reporter);
+                        outcome.probe_failed |= !enumerated;
+                        doctor_outcome_exit_code(&outcome, strict)
                     }
                 }
             }

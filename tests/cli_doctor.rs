@@ -307,12 +307,6 @@ fn doctor_single_tenant_omits_other_tenant_perspectives() {
         !probes.iter().any(|(name, _, _)| name == "staging"),
         "single-tenant `doctor dev` must not emit probes as `staging`; probes={probes:?}"
     );
-    assert!(
-        !probes
-            .iter()
-            .any(|(_, path, _)| path == &std::path::PathBuf::from("/Users/staging")),
-        "single-tenant `doctor dev` should not probe other tenant homes; probes={probes:?}"
-    );
 }
 
 // --- --strict exit codes ---
@@ -2389,5 +2383,25 @@ fn doctor_all_audits_the_next_tenant_after_one_fails() {
     assert!(
         stdout.contains("warning: tenant 'staging' keychain absent"),
         "stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_single_tenant_probes_its_peers_too() {
+    let stub_exec = StubHostMachine::new();
+    let (code, _stdout, stderr) = run_with_exec(
+        make_two_tenant_stub_reader(),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stub_exec
+            .probes()
+            .iter()
+            .any(|(name, path, _)| name == "dev"
+                && path == &std::path::PathBuf::from("/etc/pf.anchors/tenant-staging")),
+        "probes={:?}",
+        stub_exec.probes()
     );
 }
