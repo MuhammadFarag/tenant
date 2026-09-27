@@ -100,6 +100,7 @@ pub trait HostMachine {
 
     fn read_pf_status(&self) -> Result<String, FirewallError>;
 
+    /// Absent file ⇒ `Ok(String::new())`: a missing anchor is drift doctor reports.
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError>;
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError>;

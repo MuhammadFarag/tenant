@@ -137,7 +137,10 @@ fn doctor_probe_substrate_failure_exits_74() {
     ));
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
-    assert!(stdout.is_empty(), "stdout should be empty: {stdout:?}");
+    assert!(
+        stdout.contains("tenant 'dev'"),
+        "the walk continues past a failed probe; stdout={stdout:?}"
+    );
     assert!(
         stderr.contains("failed to probe"),
         "stderr should frame as doctor probe failure; got: {stderr:?}"
@@ -544,7 +547,7 @@ fn doctor_pf_conf_read_failure_routes_to_firewall_failed_frame_and_walk_continue
         &stub_exec,
         &["doctor", "dev"],
     );
-    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(code, 74, "stderr={stderr:?}");
     assert_eq!(
         stderr,
         "tenant: failed to read pf state: filesystem error at /etc/pf.conf: Permission denied\n"
@@ -688,7 +691,7 @@ fn doctor_primary_group_probe_failure_surfaces_and_walk_continues() {
         &stub_exec,
         &["doctor", "dev"],
     );
-    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(code, 74, "stderr={stderr:?}");
     assert_eq!(
         stderr,
         "tenant: failed to probe tenant 'dev' primary group: probe exited with code 56: eDSRecordNotFound\n"
@@ -710,7 +713,7 @@ fn doctor_primary_group_share_gid_probe_failure_surfaces_and_walk_continues() {
         &stub_exec,
         &["doctor", "dev"],
     );
-    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(code, 74, "stderr={stderr:?}");
     assert_eq!(
         stderr,
         "tenant: failed to probe tenant 'dev' primary group: probe exited with code 56: eDSRecordNotFound\n"
@@ -845,8 +848,8 @@ fn doctor_pam_sudo_local_substrate_failure_routes_to_host_file_failed_frame() {
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     assert!(
-        stdout.is_empty(),
-        "substrate failure aborts before findings; stdout={stdout:?}"
+        stdout.contains("tenant 'dev'"),
+        "the per-tenant walk still runs; stdout={stdout:?}"
     );
     assert!(
         stderr.contains("failed to read host config"),
@@ -907,8 +910,8 @@ fn doctor_pam_substrate_failure_routes_to_host_file_failed_frame() {
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     assert!(
-        stdout.is_empty(),
-        "substrate failure aborts before findings; stdout={stdout:?}"
+        stdout.contains("tenant 'dev'"),
+        "the per-tenant walk still runs; stdout={stdout:?}"
     );
     assert!(
         stderr.contains("failed to read host config"),
@@ -977,8 +980,8 @@ fn doctor_pf_status_substrate_failure_routes_to_firewall_failed_frame() {
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
     assert_eq!(code, 74, "expected EX_IOERR; stderr={stderr:?}");
     assert!(
-        stdout.is_empty(),
-        "substrate failure aborts before findings; stdout={stdout:?}"
+        stdout.contains("tenant 'dev'"),
+        "the per-tenant walk still runs; stdout={stdout:?}"
     );
     assert!(
         stderr.contains("failed to read pf state"),
@@ -2173,7 +2176,7 @@ fn doctor_tenant_keychain_probe_failure_surfaces_and_walk_continues() {
         tenant::domain::ProbeError::Spawn(std::io::Error::other("stat failed")),
     );
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
-    assert_eq!(code, 0, "audit-as-courtesy: probe failure does not abort");
+    assert_eq!(code, 74, "the walk completes, then exits EX_IOERR");
     assert!(
         !stdout.contains("keychain absent"),
         "no finding emits when the probe itself failed; stdout={stdout:?}"
@@ -2193,7 +2196,7 @@ fn doctor_stash_probe_failure_surfaces_and_walk_continues() {
             stderr: "security: argv parse failed".to_string(),
         });
     let (code, stdout, stderr) = run_with_exec(stub_reader, &stub_exec, &["doctor", "dev"]);
-    assert_eq!(code, 0, "audit-as-courtesy: probe failure does not abort");
+    assert_eq!(code, 74, "the walk completes, then exits EX_IOERR");
     assert!(
         !stdout.contains("stashed password absent"),
         "no finding emits when the probe itself failed; stdout={stdout:?}"
@@ -2335,6 +2338,56 @@ fn doctor_warns_on_cowork_entries_moved_in_without_the_share_ace() {
              'dev-tenant-share' ACE (moved in, not created in place) \u{2014} \
              run `tenant reload dev` to re-walk"
         ),
+        "stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_continues_past_a_failed_share_probe_and_exits_74_at_the_end() {
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .fail_next_host_acl(
+            std::path::Path::new("/tmp"),
+            tenant::domain::ProbeError::NonZero {
+                code: 1,
+                stderr: "ls: /tmp: No such file or directory".into(),
+            },
+        )
+        .with_tenant_keychain_present("dev", false);
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 74, "stdout={stdout:?}");
+    assert!(
+        stderr.contains("No such file or directory"),
+        "stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("warning: tenant 'dev' keychain absent"),
+        "later probes still run; stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn doctor_all_audits_the_next_tenant_after_one_fails() {
+    let stub_exec = StubHostMachine::new()
+        .fail_next_kernel_pf_rules(tenant::domain::FirewallError::NonZero {
+            code: 1,
+            stderr: "pfctl: anchor does not exist".into(),
+        })
+        .with_tenant_keychain_present("staging", false);
+    let (code, stdout, stderr) =
+        run_with_exec(make_two_tenant_stub_reader(), &stub_exec, &["doctor"]);
+    assert_eq!(code, 74, "stdout={stdout:?}");
+    assert!(
+        stderr.contains("anchor does not exist"),
+        "stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("warning: tenant 'staging' keychain absent"),
         "stdout={stdout:?}"
     );
 }

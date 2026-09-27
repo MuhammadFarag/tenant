@@ -787,3 +787,11 @@ fn macos_kernel_pf_table_argv_shows_one_anchor_table() {
         ],
     );
 }
+
+#[test]
+fn macos_absent_anchor_file_reads_as_empty_body() {
+    let body = MacosHostMachine
+        .read_anchor_body(&"never-created-tenant-xyz".into())
+        .unwrap();
+    assert_eq!(body, "");
+}

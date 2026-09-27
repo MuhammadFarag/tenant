@@ -22,6 +22,13 @@ fn consent(reporter: &mut Reporter, default_yes: bool) -> Option<u8> {
     }
 }
 
+fn doctor_outcome_exit_code(outcome: &tenants::DoctorOutcome, strict: bool) -> u8 {
+    if outcome.probe_failed {
+        return EX_IOERR;
+    }
+    doctor_exit_code(outcome.max_severity(), strict)
+}
+
 fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
     if !strict {
         return 0;
@@ -410,20 +417,14 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     tenants::Eligibility::Destroyable => {
-                        match tenants.doctor(host, &n, &[], reporter) {
-                            Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
-                            Err(e) => {
-                                surface_doctor_error(reporter, &e);
-                                EX_IOERR
-                            }
-                        }
+                        doctor_outcome_exit_code(&tenants.doctor(host, &n, &[], reporter), strict)
                     }
                 }
             }
             None => match tenants.doctor_all(host, directory, reporter) {
-                Ok(outcome) => doctor_exit_code(outcome.max_severity(), strict),
+                Ok(outcome) => doctor_outcome_exit_code(&outcome, strict),
                 Err(e) => {
-                    surface_doctor_error(reporter, &e);
+                    reporter.doctor_error(&e);
                     EX_IOERR
                 }
             },
@@ -733,15 +734,6 @@ fn surface_destroy_error(
 fn surface_setup_error(reporter: &mut Reporter, error: &tenants::SetupError) {
     match error {
         tenants::SetupError::Pam(e) => reporter.setup_pam_failed(e),
-    }
-}
-
-fn surface_doctor_error(reporter: &mut Reporter, error: &tenants::DoctorError) {
-    match error {
-        tenants::DoctorError::Probe(e) => reporter.doctor_failed(e),
-        tenants::DoctorError::HostFile(e) => reporter.doctor_host_file_failed(e),
-        tenants::DoctorError::Firewall(e) => reporter.doctor_firewall_failed(e),
-        tenants::DoctorError::UserDirectoryLookup(e) => reporter.doctor_enumeration_failed(e),
     }
 }
 

@@ -422,10 +422,13 @@ impl HostMachine for MacosHostMachine {
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
         // Mode 0644 root-owned — direct fs read, no sudo.
         let path = crate::firewall::tenant_anchor_path(name.as_str());
-        fs::read_to_string(&path).map_err(|e| HostFileError::Fs {
-            path,
-            message: e.to_string(),
-        })
+        match fs::read_to_string(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            read => read.map_err(|e| HostFileError::Fs {
+                path,
+                message: e.to_string(),
+            }),
+        }
     }
 
     fn tenant_path_kind(

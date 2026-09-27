@@ -20,7 +20,7 @@ pub mod validation;
 pub(crate) use bootstrap::{BootstrapError, surface_bootstrap_error};
 pub(crate) use create::CreateError;
 pub(crate) use destroy::{DestroyError, Eligibility, destroy_eligibility};
-pub(crate) use doctor::{DoctorError, DoctorScope};
+pub(crate) use doctor::{DoctorError, DoctorOutcome, DoctorScope};
 pub(crate) use reapply::{ModeError, ReapplyScope};
 pub(crate) use setup::SetupError;
 pub(crate) use shares::ShareError;

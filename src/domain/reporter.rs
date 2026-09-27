@@ -1156,6 +1156,16 @@ impl<'t, 'm> Reporter<'t, 'm> {
 
     /// "No per-tenant findings", not "clean": host-wide warnings may already have
     /// printed above.
+    pub(crate) fn doctor_error(&mut self, error: &super::tenants::DoctorError) {
+        use super::tenants::DoctorError;
+        match error {
+            DoctorError::Probe(e) => self.doctor_failed(e),
+            DoctorError::HostFile(e) => self.doctor_host_file_failed(e),
+            DoctorError::Firewall(e) => self.doctor_firewall_failed(e),
+            DoctorError::UserDirectoryLookup(e) => self.doctor_enumeration_failed(e),
+        }
+    }
+
     pub fn doctor_done_summary(&mut self, name: &TenantUserName, finding_count: usize) {
         if self.dry_run {
             return;

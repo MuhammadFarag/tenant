@@ -135,7 +135,8 @@ only — code comments don't restate or cite them.
   failure on every verb except shell — shell propagates the child's exit
   (clamped 0..=255; narrow-on-finally failure warns without overriding);
   `1` clap parse default; doctor `--strict` maps `1` warning / `2`
-  critical.
+  critical. Doctor finishes the whole walk past a failed probe, then
+  exits `74`.
 
 ### Conventions
 

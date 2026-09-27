@@ -59,11 +59,53 @@ impl From<UserDirectoryError> for DoctorError {
 #[derive(Debug, Default)]
 pub(crate) struct DoctorOutcome {
     pub findings: Vec<Finding>,
+    pub probe_failed: bool,
 }
 
 impl DoctorOutcome {
     pub fn max_severity(&self) -> Option<crate::doctor::Severity> {
         self.findings.iter().map(|f| f.severity()).max()
+    }
+
+    fn soft<T, E: Into<DoctorError>>(
+        &mut self,
+        result: Result<T, E>,
+        reporter: &mut Reporter,
+    ) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(e) => {
+                reporter.doctor_error(&e.into());
+                self.probe_failed = true;
+                None
+            }
+        }
+    }
+
+    fn emit(&mut self, finding: Finding, reporter: &mut Reporter) {
+        reporter.doctor_finding(&finding);
+        self.findings.push(finding);
+    }
+
+    /// For checks that already emitted their finding.
+    fn record_probe<E: Into<DoctorError>>(
+        &mut self,
+        result: Result<Option<Finding>, E>,
+        reporter: &mut Reporter,
+    ) {
+        if let Some(Some(finding)) = self.soft(result, reporter) {
+            self.findings.push(finding);
+        }
+    }
+
+    fn record_emitting<E: Into<DoctorError>>(
+        &mut self,
+        result: Result<Option<Finding>, E>,
+        reporter: &mut Reporter,
+    ) {
+        if let Some(Some(finding)) = self.soft(result, reporter) {
+            self.emit(finding, reporter);
+        }
     }
 }
 
@@ -75,19 +117,11 @@ impl<'a> Tenants<'a> {
         name: &TenantUserName,
         others: &[&TenantUserName],
         reporter: &mut Reporter,
-    ) -> Result<DoctorOutcome, DoctorError> {
-        let mut findings: Vec<Finding> = Vec::new();
-        if let Some(env_leak) = self.check_env_leak(reporter)? {
-            findings.push(env_leak);
-        }
-        if let Some(touch_id) = self.check_touch_id_for_sudo(reporter)? {
-            findings.push(touch_id);
-        }
-        if let Some(pf_disabled) = self.check_pf_status(reporter)? {
-            findings.push(pf_disabled);
-        }
-        findings.extend(self.probe_tenant_paths(host, name, others, reporter)?);
-        Ok(DoctorOutcome { findings })
+    ) -> DoctorOutcome {
+        let mut outcome = DoctorOutcome::default();
+        self.probe_host(reporter, &mut outcome);
+        self.probe_tenant_paths(host, name, others, reporter, &mut outcome);
+        outcome
     }
 
     pub(crate) fn doctor_all(
@@ -96,26 +130,27 @@ impl<'a> Tenants<'a> {
         directory: &dyn HostUserDirectory,
         reporter: &mut Reporter,
     ) -> Result<DoctorOutcome, DoctorError> {
-        let mut findings: Vec<Finding> = Vec::new();
-        if let Some(env_leak) = self.check_env_leak(reporter)? {
-            findings.push(env_leak);
-        }
-        if let Some(touch_id) = self.check_touch_id_for_sudo(reporter)? {
-            findings.push(touch_id);
-        }
-        if let Some(pf_disabled) = self.check_pf_status(reporter)? {
-            findings.push(pf_disabled);
-        }
+        let mut outcome = DoctorOutcome::default();
+        self.probe_host(reporter, &mut outcome);
         let tenants = directory.tenant_names()?;
         if tenants.is_empty() {
             reporter.doctor_all_tenants_noop();
-            return Ok(DoctorOutcome { findings });
+            return Ok(outcome);
         }
         for name in &tenants {
             let others: Vec<&TenantUserName> = tenants.iter().filter(|n| *n != name).collect();
-            findings.extend(self.probe_tenant_paths(host, name, &others, reporter)?);
+            self.probe_tenant_paths(host, name, &others, reporter, &mut outcome);
         }
-        Ok(DoctorOutcome { findings })
+        Ok(outcome)
+    }
+
+    fn probe_host(&self, reporter: &mut Reporter, outcome: &mut DoctorOutcome) {
+        let env_leak = self.check_env_leak(reporter);
+        outcome.record_probe(env_leak, reporter);
+        let touch_id = self.check_touch_id_for_sudo(reporter);
+        outcome.record_probe(touch_id, reporter);
+        let pf_disabled = self.check_pf_status(reporter);
+        outcome.record_probe(pf_disabled, reporter);
     }
 
     fn check_env_leak(&self, reporter: &mut Reporter) -> Result<Option<Finding>, HostFileError> {
@@ -157,108 +192,107 @@ impl<'a> Tenants<'a> {
         Ok(Some(finding))
     }
 
-    /// Per-tenant checks only; host-wide findings are the caller's.
+    /// Per-tenant checks only; host-wide findings are the caller's. A failed probe is
+    /// reported and recorded, and the audit carries on.
     fn probe_tenant_paths(
         &self,
         host: &HostUserName,
         name: &TenantUserName,
         others: &[&TenantUserName],
         reporter: &mut Reporter,
-    ) -> Result<Vec<Finding>, DoctorError> {
+        outcome: &mut DoctorOutcome,
+    ) {
         let others_str: Vec<&str> = others.iter().map(|n| n.as_str()).collect();
         let curated = curated_paths(host.as_str(), name.as_str(), &others_str);
         reporter.doctor_starting(name, &curated);
-        let mut findings: Vec<Finding> = Vec::new();
+        let before = outcome.findings.len();
         for (category, mode, path) in &curated {
-            let outcome = self.machine.probe_access_as_tenant(name, path, *mode)?;
-            if let Some(severity) = crate::doctor::classify(*category, outcome) {
-                let finding = Finding::FilesystemExposure {
-                    severity,
-                    tenant: name.clone(),
-                    path: path.clone(),
-                    access: *mode,
-                };
-                reporter.doctor_finding(&finding);
-                findings.push(finding);
+            let probed = self.machine.probe_access_as_tenant(name, path, *mode);
+            let Some(access) = outcome.soft(probed, reporter) else {
+                continue;
+            };
+            if let Some(severity) = crate::doctor::classify(*category, access) {
+                outcome.emit(
+                    Finding::FilesystemExposure {
+                        severity,
+                        tenant: name.clone(),
+                        path: path.clone(),
+                        access: *mode,
+                    },
+                    reporter,
+                );
             }
         }
         let anchor_ref_missing = match self.check_pf_conf_anchor_ref(name) {
             Ok(None) => false,
             Ok(Some(missing)) => {
-                reporter.doctor_finding(&missing);
-                findings.push(missing);
+                outcome.emit(missing, reporter);
                 true
             }
             Err(e) => {
                 reporter.doctor_firewall_failed(&e);
+                outcome.probe_failed = true;
                 false
             }
         };
         if !anchor_ref_missing {
-            let rules = self.machine.read_kernel_pf_rules(name)?;
-            for drift in crate::doctor::pf_rule_presence_check(&rules, name.as_str()) {
-                reporter.doctor_finding(&drift);
-                findings.push(drift);
-            }
-            match self.check_egress_resolve_drift(name) {
-                Ok(drifts) => {
-                    for drift in drifts {
-                        reporter.doctor_finding(&drift);
-                        findings.push(drift);
-                    }
+            let rules = self.machine.read_kernel_pf_rules(name);
+            if let Some(rules) = outcome.soft(rules, reporter) {
+                for drift in crate::doctor::pf_rule_presence_check(&rules, name.as_str()) {
+                    outcome.emit(drift, reporter);
                 }
-                Err(e) => reporter.doctor_firewall_failed(&e),
+            }
+            let resolve_drift = self.check_egress_resolve_drift(name);
+            for drift in outcome.soft(resolve_drift, reporter).unwrap_or_default() {
+                outcome.emit(drift, reporter);
             }
         }
-        if let Some(drift) = self.check_anchor_body_drift(name)? {
-            reporter.doctor_finding(&drift);
-            findings.push(drift);
+        let body_drift = self.check_anchor_body_drift(name);
+        outcome.record_emitting(body_drift, reporter);
+        let exposure = self.check_inbound_exposure(name);
+        outcome.record_emitting(exposure, reporter);
+        self.check_share_drift(name, reporter, outcome);
+        let cowork = self.check_cowork_drift(name, reporter);
+        for drift in outcome.soft(cowork, reporter).unwrap_or_default() {
+            outcome.findings.push(drift);
         }
-        if let Some(exposure) = self.check_inbound_exposure(name)? {
-            reporter.doctor_finding(&exposure);
-            findings.push(exposure);
-        }
-        for drift in self.check_share_drift(name, reporter)? {
-            findings.push(drift);
-        }
-        for drift in self.check_cowork_drift(name, reporter)? {
-            findings.push(drift);
-        }
-        if let Some(drift) = self.check_host_in_share_group(name, host, reporter)? {
-            findings.push(drift);
-        }
+        let membership = self.check_host_in_share_group(name, host, reporter);
+        outcome.record_probe(membership, reporter);
         match self.check_primary_group_drift(name) {
             Ok(None) => {}
-            Ok(Some(drift)) => {
-                reporter.doctor_finding(&drift);
-                findings.push(drift);
+            Ok(Some(drift)) => outcome.emit(drift, reporter),
+            Err(e) => {
+                reporter.doctor_primary_group_probe_failed(name, &e);
+                outcome.probe_failed = true;
             }
-            Err(e) => reporter.doctor_primary_group_probe_failed(name, &e),
         }
         match self.machine.tenant_keychain_present(name) {
             Ok(true) => {}
-            Ok(false) => {
-                let finding = Finding::TenantKeychainAbsent {
+            Ok(false) => outcome.emit(
+                Finding::TenantKeychainAbsent {
                     tenant: name.clone(),
-                };
-                reporter.doctor_finding(&finding);
-                findings.push(finding);
+                },
+                reporter,
+            ),
+            Err(e) => {
+                reporter.doctor_keychain_probe_failed(name, &e);
+                outcome.probe_failed = true;
             }
-            Err(e) => reporter.doctor_keychain_probe_failed(name, &e),
         }
         match self.machine.stash_present(name) {
             Ok(true) => {}
-            Ok(false) => {
-                let finding = Finding::StashAbsent {
+            Ok(false) => outcome.emit(
+                Finding::StashAbsent {
                     tenant: name.clone(),
-                };
-                reporter.doctor_finding(&finding);
-                findings.push(finding);
+                },
+                reporter,
+            ),
+            Err(e) => {
+                reporter.doctor_stash_probe_failed(name, &e);
+                outcome.probe_failed = true;
             }
-            Err(e) => reporter.doctor_stash_probe_failed(name, &e),
         }
-        reporter.doctor_done_summary(name, findings.len());
-        Ok(findings)
+        reporter.doctor_done_summary(name, outcome.findings.len() - before);
     }
 
     fn check_pf_conf_anchor_ref(
@@ -321,33 +355,36 @@ impl<'a> Tenants<'a> {
         &self,
         name: &TenantUserName,
         reporter: &mut Reporter,
-    ) -> Result<Vec<Finding>, DoctorError> {
-        let parsed = match self.load_profile(name) {
-            Ok(p) => p,
-            Err(_) => return Ok(Vec::new()),
+        outcome: &mut DoctorOutcome,
+    ) {
+        let Ok(parsed) = self.load_profile(name) else {
+            return;
         };
         let group = tenant_share_group_name(name.as_str());
-        let mut findings: Vec<Finding> = Vec::new();
         for share in &parsed.shares {
-            let listing = self.machine.read_host_acl(&share.host_path)?;
-            if !has_group_acl_entry(&listing, group.as_str()) {
-                let finding = Finding::AclDrift {
-                    tenant: name.clone(),
-                    host_path: share.host_path.clone(),
-                    group: group.clone(),
-                };
-                reporter.doctor_finding(&finding);
-                findings.push(finding);
-            } else if let Some(finding) =
-                self.check_tree_acl_drift(name, &share.host_path, &group)?
-            {
-                reporter.doctor_finding(&finding);
-                findings.push(finding);
+            let listing = self.machine.read_host_acl(&share.host_path);
+            if let Some(listing) = outcome.soft(listing, reporter) {
+                if !has_group_acl_entry(&listing, group.as_str()) {
+                    outcome.emit(
+                        Finding::AclDrift {
+                            tenant: name.clone(),
+                            host_path: share.host_path.clone(),
+                            group: group.clone(),
+                        },
+                        reporter,
+                    );
+                } else {
+                    let tree = self.check_tree_acl_drift(name, &share.host_path, &group);
+                    outcome.record_emitting(tree, reporter);
+                }
             }
             // String-exact comparison — the profile names the operator's
             // declared intent, not a canonicalized path.
             let tenant_path = expand_tenant_path(name.as_str(), &share.tenant_path);
-            let kind = self.machine.tenant_path_kind(name, &tenant_path)?;
+            let kind = self.machine.tenant_path_kind(name, &tenant_path);
+            let Some(kind) = outcome.soft(kind, reporter) else {
+                continue;
+            };
             let actual_opt = match kind {
                 PathKind::Absent => Some(SymlinkActual::Absent),
                 PathKind::Dir | PathKind::Other => Some(SymlinkActual::NotSymlink),
@@ -360,17 +397,17 @@ impl<'a> Tenants<'a> {
                 }
             };
             if let Some(actual) = actual_opt {
-                let finding = Finding::SymlinkDrift {
-                    tenant: name.clone(),
-                    tenant_path,
-                    expected_target: share.host_path.clone(),
-                    actual,
-                };
-                reporter.doctor_finding(&finding);
-                findings.push(finding);
+                outcome.emit(
+                    Finding::SymlinkDrift {
+                        tenant: name.clone(),
+                        tenant_path,
+                        expected_target: share.host_path.clone(),
+                        actual,
+                    },
+                    reporter,
+                );
             }
         }
-        Ok(findings)
     }
 
     fn check_cowork_drift(
