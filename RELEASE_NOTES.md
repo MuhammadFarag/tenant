@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.11
+# tenant 0.1.0-alpha.12
 
-Eleventh alpha. Still alpha quality: the verbs work end-to-end on the
+Twelfth alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,6 +21,68 @@ The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
+
+## New since 0.1.0-alpha.11
+
+Hardening from two adversarial reviews, a new `list` verb, and a gate on
+entering a broken sandbox. **After upgrading, run `tenant reload` once**
+(see the first item). One change can make an existing profile refuse to
+load (see "Stricter allowlist hosts").
+
+- **Anchors are root-only (0600).** Every tenant could read every other
+  tenant's allowlist and declared ports. Anchors are now installed
+  `root:wheel 0600` (pf reads them as root, so filtering is unchanged)
+  and doctor reads them with sudo. Existing anchors change mode on
+  their next reapply: **run `tenant reload` once after upgrading.**
+  Until then doctor warns that each tenant can read its peers' anchors.
+
+- **`tenant shell` asks before entering a broken sandbox.** When pf is
+  disabled or the tenant's primary group has been reset (both things
+  macOS updates do), shell prints the finding and a warning, then asks
+  `Enter '<name>' anyway? [y/N]`, defaulting to no. With no terminal
+  (agents, scripts) it refuses with exit 64. `-y` is the explicit
+  allow. A missing `/etc/pf.conf` anchor reference doesn't count:
+  entry restores it.
+
+- **A reload whose rules never reach the kernel fails.** `pfctl -f`
+  succeeds even when pf.conf doesn't load the tenant's anchor, so
+  `reload`, `mode`, `shell` and `create` could report success with
+  egress unenforced. Each now reads the anchor back from the kernel and
+  fails (74) when it has no rules. A `create` that fails this way says
+  the tenant exists and names `tenant reload` / `tenant destroy`.
+
+- **`create` keeps an existing profile.** It used to overwrite a
+  hand-written profile with the default scaffold. Now it keeps and uses
+  one that loads, and refuses (64, before creating anything) one that
+  doesn't parse or names a share path that doesn't exist.
+
+- **Stricter allowlist hosts.** Host strings went verbatim into the
+  root-owned anchor, so pf syntax or a bare word pf gives meaning to
+  (`self`, an interface name like `lo0`) could change the firewall. A
+  host must now be an IP address (IPv6 zones allowed), a CIDR range, or
+  a dotted hostname (a trailing dot is fine). **A profile with any other
+  host entry now refuses to load** with a message naming it.
+
+- **`--dry-run` previews your real profile.** Previews used the default
+  profile, so they showed no shares, hosts or bootstrap commands, and
+  `tenant shell --dry-run` always refused with advice to destroy a
+  healthy tenant. Both fixed.
+
+- **`tenant list` (alias `ls`).** Prints the host's tenants, one per
+  line, sorted. Read-only, no sudo; with none, stdout stays empty.
+
+- **Doctor.** `tenant doctor <name>` now also checks what the tenant can
+  reach in its peers. The SSH_AUTH_SOCK finding is now accurate `info`:
+  sudo does forward the variable, but launchd's agent socket sits in a
+  directory only you can open, so a tenant can't use it. The note is
+  satisfied by `Defaults env_keep -= "SSH_AUTH_SOCK"` in
+  `/etc/sudoers.d/tenant` (`env_delete`, which the old warning
+  suggested, is ignored by macOS sudo).
+
+- **Smaller.** Confirmation prompts go to stderr, so piping stdout no
+  longer hides them. Shell's summary names an inbound widen or a
+  permissive profile posture, and a failed narrow-back names what was
+  left open.
 
 ## New since 0.1.0-alpha.10
 
@@ -272,8 +334,8 @@ A small release — polish on the alpha.7 features, no new verbs.
 
 - `tenant setup` — opt-in host preparation (enable Touch ID for sudo).
 - `tenant create <name>` — provision a new tenant (user account,
-  share group, login keychain, co-working dir, profile scaffold, PF
-  anchor).
+  share group, tenant keychain, co-working dir, profile scaffold
+  unless one exists, PF anchor).
 - `tenant destroy <name>` — convergent teardown; safe to re-run. Leaves
   the co-working directory intact.
 - `tenant shell <name>` — enter a tenant interactively, or run a
@@ -290,6 +352,7 @@ A small release — polish on the alpha.7 features, no new verbs.
   fragments) to host state, including filesystem shares and the
   co-working directory. Walks every tenant when called without an
   argument.
+- `tenant list` (`ls`) — the host's tenants, one per line.
 - `tenant doctor [<name>]` — read-only audit covering paths, sudoers,
   PF state, anchor coherence, share grants, inbound exposure, Touch-ID
   posture, and group membership.
