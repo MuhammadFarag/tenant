@@ -525,7 +525,7 @@ impl HostMachine for MacosHostMachine {
     }
 
     fn read_host_acl_tree(&self, path: &std::path::Path) -> Result<String, ProbeError> {
-        let output = Command::new("ls")
+        let output = Command::new("/bin/ls")
             .arg("-leRA")
             .arg(path)
             .output()
