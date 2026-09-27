@@ -529,6 +529,7 @@ impl<'a> Tenants<'a> {
         }))
     }
 
+    /// Returns the criticals the verb's own reapply won't repair.
     pub(crate) fn pre_exec_doctor_summary(
         &self,
         name: Option<&TenantUserName>,
@@ -652,7 +653,10 @@ impl<'a> Tenants<'a> {
             reporter.doctor_finding_one_liner(finding);
         }
         reporter.doctor_summary_pending(warning_count, name);
-        criticals.len()
+        criticals
+            .iter()
+            .filter(|f| !f.repaired_by_any_reapply())
+            .count()
     }
 
     fn collect_share_drift<F: FnMut(Finding)>(

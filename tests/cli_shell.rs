@@ -3105,3 +3105,33 @@ fn shell_summary_for_explicit_restricted_does_not_claim_the_profile_posture() {
         "stdout={stdout:?}"
     );
 }
+
+#[test]
+fn shell_does_not_gate_on_a_critical_that_entry_itself_repairs() {
+    // The entry reapply restores a missing pf.conf anchor reference before login.
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_pf_conf(STOCK_PF_CONF);
+    let (code, stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("anchor not referenced"),
+        "still reported; stdout={stdout:?}"
+    );
+    assert!(!stderr.contains("anyway?"), "stderr={stderr:?}");
+    assert_eq!(exec.logins(), vec!["dev".to_string()]);
+}
+
+#[test]
+fn shell_gates_on_primary_group_drift_which_entry_does_not_repair() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_user_primary_gid("dev", 20);
+    let (_code, _stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"n\n");
+    assert!(stderr.contains("Enter 'dev' anyway?"), "stderr={stderr:?}");
+    assert!(exec.logins().is_empty());
+}
