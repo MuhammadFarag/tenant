@@ -7,13 +7,15 @@ use crate::domain::{
 use crate::profile::{ProfileError, default_profile_toml};
 
 /// Mutations no-op; reads and probes return clean-host placeholders so a preview
-/// never fires a spurious doctor finding or refusal. `host` is the invoker resolved
-/// by the real machine before construction.
-pub struct DryRunHostMachine {
+/// never fires a spurious doctor finding or refusal. Profile reads go to `inner`, so the
+/// preview renders what the real run would. `host` is the invoker resolved by the real
+/// machine before construction.
+pub struct DryRunHostMachine<'a> {
     pub host: HostUserName,
+    pub inner: &'a dyn HostMachine,
 }
 
-impl HostMachine for DryRunHostMachine {
+impl HostMachine for DryRunHostMachine<'_> {
     fn describe_account(&self, op: &AccountOp) -> String {
         MacosHostMachine.describe_account(op)
     }
@@ -41,14 +43,18 @@ impl HostMachine for DryRunHostMachine {
     fn execute_profile(&self, _op: &ProfileOp) -> Result<(), ProfileError> {
         Ok(())
     }
-    fn read_profile(&self, _name: &TenantUserName) -> Result<String, ProfileError> {
+    fn read_profile(&self, name: &TenantUserName) -> Result<String, ProfileError> {
+        if self.inner.profile_exists(name) {
+            return self.inner.read_profile(name);
+        }
+        // A create preview reads the profile it would have just written.
         Ok(default_profile_toml())
     }
-    fn profile_exists(&self, _name: &TenantUserName) -> bool {
-        false
+    fn profile_exists(&self, name: &TenantUserName) -> bool {
+        self.inner.profile_exists(name)
     }
-    fn read_profile_fragment(&self, _fragment: &str) -> Result<String, ProfileError> {
-        Ok(String::new())
+    fn read_profile_fragment(&self, fragment: &str) -> Result<String, ProfileError> {
+        self.inner.read_profile_fragment(fragment)
     }
     fn read_share_group_gid(&self, _group: &GroupName) -> Result<GroupId, ProbeError> {
         Ok(GroupId(crate::allocation::TENANT_UID_FLOOR))
@@ -131,12 +137,26 @@ impl HostMachine for DryRunHostMachine {
         Ok(())
     }
 
+    /// Needs sudo, so it can't be read: a declared share's link answers as in place, anything
+    /// else as absent (the free answer for an occupancy check).
     fn tenant_path_kind(
         &self,
-        _name: &TenantUserName,
-        _path: &std::path::Path,
+        name: &TenantUserName,
+        path: &std::path::Path,
     ) -> Result<PathKind, ProbeError> {
-        Ok(PathKind::Absent)
+        let declared = self
+            .read_profile(name)
+            .ok()
+            .and_then(|toml| crate::profile::parse(&toml).ok())
+            .and_then(|profile| {
+                profile.shares.into_iter().find(|share| {
+                    crate::profile::expand_tenant_path(name.as_str(), &share.tenant_path) == path
+                })
+            });
+        Ok(match declared {
+            Some(share) => PathKind::Symlink(share.host_path),
+            None => PathKind::Absent,
+        })
     }
 
     fn tenant_dir_present(
@@ -150,12 +170,7 @@ impl HostMachine for DryRunHostMachine {
     /// Cowork-pattern paths synthesize `Dir` (matching `read_host_acl`); other paths
     /// delegate, since create's home-symlink checks need real verdicts.
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
-        if path
-            .strip_prefix(crate::domain::tenants::COWORK_DIR_PARENT)
-            .ok()
-            .and_then(|p| p.to_str())
-            .is_some_and(|s| !s.is_empty() && !s.contains('/'))
-        {
+        if cowork_tenant(path).is_some() {
             return Ok(PathKind::Dir);
         }
         MacosHostMachine.host_path_kind(path)
@@ -163,22 +178,20 @@ impl HostMachine for DryRunHostMachine {
 
     /// Real ACL drift is invisible under `--dry-run`; the tenant is inferred from a
     /// cowork path's last segment.
-    fn read_host_acl_tree(&self, _path: &std::path::Path) -> Result<String, ProbeError> {
-        Ok(String::new())
+    fn read_host_acl_tree(&self, path: &std::path::Path) -> Result<String, ProbeError> {
+        if cowork_tenant(path).is_some() {
+            return Ok(String::new());
+        }
+        self.inner.read_host_acl_tree(path)
     }
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
-        if let Some(name) = path
-            .strip_prefix(crate::domain::tenants::COWORK_DIR_PARENT)
-            .ok()
-            .and_then(|p| p.to_str())
-            .filter(|s| !s.is_empty() && !s.contains('/'))
-        {
+        if let Some(name) = cowork_tenant(path) {
             return Ok(format!(
                 " 0: group:{name}-tenant-share allow read,write,execute,delete,append,file_inherit,directory_inherit\n"
             ));
         }
-        Ok(String::new())
+        self.inner.read_host_acl(path)
     }
 
     fn current_host_user_name(&self) -> HostUserName {
@@ -235,12 +248,11 @@ impl HostMachine for DryRunHostMachine {
         Ok(true)
     }
 
-    // TODO(smell): NotFound makes every `tenant shell --dry-run` exit 64 via the StashAbsent refusal — return a placeholder
     fn find_stashed_password(
         &self,
         _name: &TenantUserName,
     ) -> Result<KeychainPassword, KeychainError> {
-        Err(KeychainError::NotFound)
+        Ok(KeychainPassword::for_plan_placeholder())
     }
 
     fn unlock_tenant_keychain(
@@ -250,4 +262,12 @@ impl HostMachine for DryRunHostMachine {
     ) -> Result<(), KeychainError> {
         Ok(())
     }
+}
+
+/// The cowork dir doesn't exist yet in a create preview, so its answers stay placeholders.
+fn cowork_tenant(path: &std::path::Path) -> Option<&str> {
+    path.strip_prefix(crate::domain::tenants::COWORK_DIR_PARENT)
+        .ok()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty() && !s.contains('/'))
 }

@@ -222,7 +222,6 @@ fn reload_profile_read_failure_surfaces_before_prompt() {
     );
 }
 
-// TODO(smell): DryRunHostMachine::read_profile ignores the profile; --dry-run never shows shares.
 #[test]
 fn reload_verbose_plan_block_includes_share_ops() {
     // A simulated TTY operator answering `y` stands in for --dry-run.
@@ -1465,4 +1464,21 @@ fn reload_fails_when_the_anchor_rules_never_reach_the_kernel() {
         !stdout.contains("Tenant 'dev' reloaded."),
         "stdout={stdout:?}"
     );
+}
+
+#[test]
+fn reload_dry_run_previews_the_real_profile() {
+    let toml = profile_with_shares(&["api.example.com"], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["reload", "dev", "--dry-run", "-v"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains("Grant 'dev-tenant-share' ACL access to /tmp"),
+        "stdout={stdout:?}"
+    );
+    assert!(exec.firewall_ops().is_empty() && exec.acl_ops().is_empty());
 }

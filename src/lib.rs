@@ -35,7 +35,10 @@ fn with_active_machine<R>(
     f: impl FnOnce(&dyn domain::HostMachine) -> R,
 ) -> R {
     if dry_run {
-        let wrapper = adapters::dry_run_host_machine::DryRunHostMachine { host: host.clone() };
+        let wrapper = adapters::dry_run_host_machine::DryRunHostMachine {
+            host: host.clone(),
+            inner: machine,
+        };
         f(&wrapper)
     } else {
         f(machine)

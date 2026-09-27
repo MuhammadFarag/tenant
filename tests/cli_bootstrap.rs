@@ -208,7 +208,6 @@ fn bootstrap_pre_exec_doctor_aggregates_warning_and_never_aborts() {
     );
 }
 
-// TODO(smell): DryRunHostMachine::read_profile returns the default profile, so `bootstrap --dry-run` previews nothing even when commands are declared.
 #[test]
 fn bootstrap_dry_run_bypasses_injected_host_machine() {
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
@@ -711,4 +710,17 @@ fn bootstrap_without_terminal_on_cold_sudo_refuses_before_widening() {
         "sudo -v would block on the prompt"
     );
     assert!(exec.firewall_ops().is_empty() && exec.exec_calls().is_empty());
+}
+
+#[test]
+fn bootstrap_dry_run_previews_the_real_profiles_commands() {
+    let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo previewed"]);
+    let exec = StubHostMachine::new().with_existing_profile("alice", &profile);
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("alice"),
+        &exec,
+        &["bootstrap", "alice", "--dry-run"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(stdout.contains("echo previewed"), "stdout={stdout:?}");
 }

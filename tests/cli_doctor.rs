@@ -1625,8 +1625,7 @@ fn doctor_share_acl_drift_with_strict_exits_1() {
 }
 
 #[test]
-fn doctor_share_drift_dry_run_emits_no_finding() {
-    // DryRunHostMachine's profile has no `[[shares]]`, so this holds regardless of the stub.
+fn doctor_dry_run_reports_real_share_acl_drift_without_guessing_symlinks() {
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let stub_exec = StubHostMachine::new()
@@ -1639,8 +1638,12 @@ fn doctor_share_drift_dry_run_emits_no_finding() {
         run_with_exec(stub_reader, &stub_exec, &["doctor", "dev", "--dry-run"]);
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        !stdout.contains("share ACL drift"),
-        "dry-run must not fire AclDrift; stdout={stdout:?}"
+        stdout.contains("share ACL drift"),
+        "the ACL listing is an auth-free read, so the preview shows it; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("share symlink drift"),
+        "the tenant-side link needs sudo, so the preview doesn't guess; stdout={stdout:?}"
     );
     assert!(
         stdout.starts_with("Would run doctor on tenant 'dev'"),
@@ -1887,7 +1890,7 @@ fn doctor_share_symlink_drift_with_strict_exits_1() {
 
 #[test]
 fn doctor_share_symlink_drift_dry_run_emits_no_finding() {
-    // DryRunHostMachine's profile has no `[[shares]]`, so this holds regardless of the stub.
+    // The tenant-side link needs sudo, so a preview answers from the profile, not the stub.
     let stub_reader = make_tenant_stub_reader("dev");
     let profile = profile_with_shares(&[], &[], &[("/Users/Shared/src", "rw", "$HOME/src")]);
     let stub_exec = StubHostMachine::new()

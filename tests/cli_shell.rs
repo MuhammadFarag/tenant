@@ -10,27 +10,22 @@ mod common;
 use adapters::*;
 use common::*;
 
-// TODO(smell): DryRunHostMachine::find_stashed_password returns NotFound, so every `shell --dry-run` ends in the StashAbsent refusal (exit 64).
 #[test]
 fn shell_dry_run_default_shows_intent() {
     let (code, stdout, stderr) = run_with(stub_with_tenant("dev"), &["shell", "dev", "--dry-run"]);
-    assert_eq!(code, 64, "exit code = {code}; stderr={stderr:?}");
+    assert_eq!(code, 0, "exit code = {code}; stderr={stderr:?}");
     let want = format!("{}Would shell into 'dev'.\n", shell_summary_block("dev"));
     assert_eq!(stdout, want);
-    assert!(
-        stderr.contains("stashed password absent"),
-        "expected stash-absent refusal frame; stderr={stderr:?}"
-    );
+    assert!(stderr.is_empty(), "stderr={stderr:?}");
 }
 
 #[test]
 fn shell_dry_run_verbose_shows_mechanism() {
-    // Exit 64 is the dry-run stash refusal (see the TODO(smell) at the top of this file).
     let (code, stdout, _stderr) = run_with(
         stub_with_tenant("dev"),
         &["shell", "dev", "--dry-run", "-v"],
     );
-    assert_eq!(code, 64);
+    assert_eq!(code, 0);
     let want = format!(
         "{}Would shell into 'dev'.\n\
          {}",
@@ -340,14 +335,13 @@ fn shell_propagates_child_exit_code() {
 
 #[test]
 fn shell_dry_run_bypasses_injected_host_machine() {
-    // Exit 64 is the dry-run stash refusal (see the TODO(smell) at the top of this file).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "--dry-run"],
     );
-    assert_eq!(code, 64, "stderr={stderr:?}");
+    assert_eq!(code, 0, "stderr={stderr:?}");
     let want = format!("{}Would shell into 'dev'.\n", shell_summary_block("dev"));
     assert_eq!(stdout, want);
     assert!(
@@ -1494,14 +1488,13 @@ fn shell_command_form_share_substrate_reapplies_before_exec() {
 
 #[test]
 fn shell_command_dry_run_default_shows_intent() {
-    // Exit 64 is the dry-run stash refusal (see the TODO(smell) at the top of this file).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "--dry-run", "--", "ls", "/tmp"],
     );
-    assert_eq!(code, 64, "stderr={stderr:?}");
+    assert_eq!(code, 0, "stderr={stderr:?}");
     let want = format!(
         "{}Would run command as tenant 'dev' (runtime tier).\n",
         shell_command_summary_block("dev", "runtime", "ls /tmp"),
@@ -1511,7 +1504,6 @@ fn shell_command_dry_run_default_shows_intent() {
 
 #[test]
 fn shell_command_dry_run_install_mode_includes_widen_and_narrow_bullets() {
-    // Exit 64 is the dry-run stash refusal (see the TODO(smell) at the top of this file).
     let exec = StubHostMachine::new();
     let (code, stdout, stderr) = run_with_exec(
         stub_with_tenant("dev"),
@@ -1528,7 +1520,7 @@ fn shell_command_dry_run_install_mode_includes_widen_and_narrow_bullets() {
             "echo hi",
         ],
     );
-    assert_eq!(code, 64, "stderr={stderr:?}");
+    assert_eq!(code, 0, "stderr={stderr:?}");
     let want = format!(
         "{}Would run command as tenant 'dev' (install tier).\n",
         shell_command_summary_block("dev", "install", "bash -c echo hi"),
@@ -2716,7 +2708,7 @@ fn shell_interactive_plan_line_renders_the_cd() {
         stub_with_tenant("dev"),
         &["shell", "dev", "-d", "projects/foo", "--dry-run", "-v"],
     );
-    assert_eq!(code, 64, "dry-run shell ends at the stash-absent refusal");
+    assert_eq!(code, 0, "a healthy preview exits 0");
     assert!(
         stdout.contains("Log in as 'dev' in /Users/dev/projects/foo"),
         "plan must name the resolved dir: {stdout}"
@@ -2746,7 +2738,7 @@ fn shell_command_summary_names_the_directory() {
             "ls",
         ],
     );
-    assert_eq!(code, 64);
+    assert_eq!(code, 0);
     assert!(
         stdout.contains("run as 'dev' in 'projects/foo': ls"),
         "command-form summary must name the directory: {stdout}"

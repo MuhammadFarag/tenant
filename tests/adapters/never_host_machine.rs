@@ -41,8 +41,9 @@ impl HostMachine for NeverHostMachine {
     fn read_profile(&self, name: &TenantUserName) -> Result<String, tenant::profile::ProfileError> {
         panic!("host machine unexpectedly invoked (read_profile) with name: {name:?}");
     }
-    fn profile_exists(&self, name: &TenantUserName) -> bool {
-        panic!("host machine unexpectedly invoked (profile_exists): {name:?}");
+    /// Exempt: dry-run asks it, and "no profile" previews the default like a fresh host.
+    fn profile_exists(&self, _name: &TenantUserName) -> bool {
+        false
     }
     fn read_profile_fragment(
         &self,

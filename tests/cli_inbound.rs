@@ -9,7 +9,7 @@ use common::*;
 
 #[test]
 fn inbound_restricted_dry_run_default_shows_intent() {
-    // DryRunHostMachine::read_profile returns the default profile (no inbound ports).
+    // `run_with` has no profile on disk, so the preview renders the default (no inbound ports).
     let (code, stdout, stderr) = run_with(
         stub_with_tenant("dev"),
         &["inbound", "dev", "restricted", "--dry-run"],

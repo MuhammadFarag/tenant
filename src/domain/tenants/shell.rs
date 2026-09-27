@@ -172,7 +172,6 @@ impl<'a> Tenants<'a> {
         }
     }
 
-    // TODO(smell): dry-run shell always refuses (DryRunHostMachine stash lookup ⇒ NotFound, exit 64); a preview shouldn't manufacture a refusal
     /// Unconditional by design, no locked-state pre-probe: `security show-keychain-info` via
     /// `sudo -iu` raises a SecurityAgent GUI prompt on Darwin 25.x and hangs headless runs.
     fn unlock_tenant_keychain(
