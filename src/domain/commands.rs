@@ -10,6 +10,20 @@ const EX_IOERR: u8 = 74;
 const EX_DOCTOR_WARNING: u8 = 1;
 const EX_DOCTOR_CRITICAL: u8 = 2;
 
+/// `Some(exit)` when the verb stops here instead of executing.
+fn consent(reporter: &mut Reporter, default_yes: bool) -> Option<u8> {
+    if reporter.refuse_sudo_without_terminal() {
+        return Some(EX_USAGE);
+    }
+    match reporter.confirm(default_yes) {
+        ConfirmOutcome::Proceed => None,
+        ConfirmOutcome::Abort => {
+            reporter.aborted();
+            Some(0)
+        }
+    }
+}
+
 fn doctor_exit_code(max_severity: Option<Severity>, strict: bool) -> u8 {
     if !strict {
         return 0;
@@ -66,9 +80,8 @@ pub(crate) fn dispatch(
                 reporter.create_summary(&name, host, uid, gid, Some(&create_plan));
                 tenants.pre_exec_doctor_summary(None, host, tenants::DoctorScope::Create, reporter);
             }
-            if reporter.confirm(true) == ConfirmOutcome::Abort {
-                reporter.aborted();
-                return 0;
+            if let Some(code) = consent(reporter, true) {
+                return code;
             }
             match tenants.create(&name, host, uid, gid, reporter) {
                 Ok(()) => 0,
@@ -172,6 +185,9 @@ pub(crate) fn dispatch(
                             reporter,
                         );
                     }
+                    if reporter.refuse_sudo_without_terminal() {
+                        return EX_USAGE;
+                    }
                     match tenants.shell(
                         &name,
                         host,
@@ -256,6 +272,9 @@ pub(crate) fn dispatch(
                 }
                 tenants::Eligibility::Destroyable => {
                     // Plan before summary, so pre-flight failures surface before the prompt.
+                    if reporter.refuse_sudo_without_terminal() {
+                        return EX_USAGE;
+                    }
                     let plan = match tenants.build_reapply_plan(
                         &name,
                         host,
@@ -279,9 +298,8 @@ pub(crate) fn dispatch(
                             reporter,
                         );
                     }
-                    if reporter.confirm(true) == ConfirmOutcome::Abort {
-                        reporter.aborted();
-                        return 0;
+                    if let Some(code) = consent(reporter, true) {
+                        return code;
                     }
                     match tenants.mode(&name, level, &plan, reporter) {
                         Ok(()) => 0,
@@ -319,6 +337,9 @@ pub(crate) fn dispatch(
                     EX_USAGE
                 }
                 tenants::Eligibility::Destroyable => {
+                    if reporter.refuse_sudo_without_terminal() {
+                        return EX_USAGE;
+                    }
                     let plan = match tenants.build_reapply_plan(
                         &name,
                         host,
@@ -342,9 +363,8 @@ pub(crate) fn dispatch(
                             reporter,
                         );
                     }
-                    if reporter.confirm(true) == ConfirmOutcome::Abort {
-                        reporter.aborted();
-                        return 0;
+                    if let Some(code) = consent(reporter, true) {
+                        return code;
                     }
                     match tenants.inbound(&name, level, &plan, reporter) {
                         Ok(()) => 0,
@@ -428,6 +448,9 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     tenants::Eligibility::Destroyable => {
+                        if reporter.refuse_sudo_without_terminal() {
+                            return EX_USAGE;
+                        }
                         let plan = match tenants.build_reapply_plan(
                             &n,
                             host,
@@ -451,9 +474,8 @@ pub(crate) fn dispatch(
                                 reporter,
                             );
                         }
-                        if reporter.confirm(true) == ConfirmOutcome::Abort {
-                            reporter.aborted();
-                            return 0;
+                        if let Some(code) = consent(reporter, true) {
+                            return code;
                         }
                         match tenants.reload(&n, &plan, reporter) {
                             Ok(()) => 0,
@@ -486,9 +508,8 @@ pub(crate) fn dispatch(
                 if show_summary {
                     reporter.reload_all_summary(host, &names);
                 }
-                if reporter.confirm(true) == ConfirmOutcome::Abort {
-                    reporter.aborted();
-                    return 0;
+                if let Some(code) = consent(reporter, true) {
+                    return code;
                 }
                 match tenants.reload_all(directory, host, reporter) {
                     Ok(outcome) if outcome.failed == 0 => 0,
@@ -527,6 +548,9 @@ pub(crate) fn dispatch(
                         EX_USAGE
                     }
                     tenants::Eligibility::Destroyable => {
+                        if reporter.refuse_sudo_without_terminal() {
+                            return EX_USAGE;
+                        }
                         let plan = match tenants.build_bootstrap_plan(&n, host) {
                             Ok(p) => p,
                             Err(e) => {
@@ -555,9 +579,8 @@ pub(crate) fn dispatch(
                                 reporter,
                             );
                         }
-                        if reporter.confirm(true) == ConfirmOutcome::Abort {
-                            reporter.aborted();
-                            return 0;
+                        if let Some(code) = consent(reporter, true) {
+                            return code;
                         }
                         match tenants.bootstrap(&n, host, &plan, reporter) {
                             Ok(()) => 0,
@@ -593,9 +616,8 @@ pub(crate) fn dispatch(
                 if show_summary {
                     reporter.bootstrap_all_summary(host, &names);
                 }
-                if reporter.confirm(true) == ConfirmOutcome::Abort {
-                    reporter.aborted();
-                    return 0;
+                if let Some(code) = consent(reporter, true) {
+                    return code;
                 }
                 match tenants.bootstrap_all(directory, host, reporter) {
                     Ok(outcome) if outcome.failed == 0 => 0,
@@ -645,9 +667,8 @@ pub(crate) fn dispatch(
                     if show_summary {
                         reporter.destroy_orphan_summary(&name, host, Some(&orphan_plan));
                     }
-                    if reporter.confirm(false) == ConfirmOutcome::Abort {
-                        reporter.aborted();
-                        return 0;
+                    if let Some(code) = consent(reporter, false) {
+                        return code;
                     }
                     if let Err(e) = tenants.destroy_orphan_group(&name, host, reporter) {
                         surface_destroy_error(reporter, &name, &e);
@@ -676,9 +697,8 @@ pub(crate) fn dispatch(
                         };
                         reporter.destroy_summary(&name, host, uid, Some(&destroy_plan));
                     }
-                    if reporter.confirm(false) == ConfirmOutcome::Abort {
-                        reporter.aborted();
-                        return 0;
+                    if let Some(code) = consent(reporter, false) {
+                        return code;
                     }
                     if let Err(e) = tenants.destroy(&name, host, reporter) {
                         surface_destroy_error(reporter, &name, &e);

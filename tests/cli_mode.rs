@@ -980,8 +980,12 @@ fn mode_on_cold_sudo_still_refuses_occupied_tenant_path() {
         .with_existing_profile("dev", &toml)
         .with_sudo_session_cached(false)
         .with_tenant_path_kind("dev", &PathBuf::from("/Users/dev/src"), PathKind::Other);
-    let (code, _stdout, stderr) =
-        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime"],
+        b"",
+    );
     assert_eq!(code, 74, "stderr={stderr:?}");
     assert!(
         stderr.contains("cannot apply mode for 'dev'") && stderr.contains("/Users/dev/src"),
@@ -1006,8 +1010,12 @@ fn mode_on_cold_sudo_still_refuses_occupied_tenant_path() {
 fn mode_with_cached_sudo_does_not_authenticate() {
     let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
     let exec = StubHostMachine::new().with_existing_profile("dev", &toml);
-    let (code, _stdout, stderr) =
-        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime"],
+        b"y\n",
+    );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(exec.authenticate_sudo_calls(), 0);
 }
@@ -1017,8 +1025,12 @@ fn mode_without_shares_does_not_authenticate_on_cold_sudo() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_sudo_session_cached(false);
-    let (code, _stdout, stderr) =
-        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime"],
+        b"y\n",
+    );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(exec.authenticate_sudo_calls(), 0);
 }
@@ -1055,8 +1067,12 @@ fn mode_on_cold_sudo_authentication_failure_exits_74_without_mutation() {
             code: 1,
             stderr: String::new(),
         });
-    let (code, _stdout, stderr) =
-        run_with_exec(stub_with_tenant("dev"), &exec, &["mode", "dev", "runtime"]);
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["mode", "dev", "runtime"],
+        b"",
+    );
     assert_eq!(code, 74, "stderr={stderr:?}");
     assert_eq!(
         stderr,

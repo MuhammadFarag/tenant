@@ -384,8 +384,12 @@ fn bootstrap_on_cold_sudo_refuses_occupied_tenant_path_before_widening() {
             &std::path::PathBuf::from("/Users/alice/src"),
             tenant::domain::PathKind::Other,
         );
-    let (code, _stdout, stderr) =
-        run_with_exec(stub_with_tenant("alice"), &exec, &["bootstrap", "alice"]);
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("alice"),
+        &exec,
+        &["bootstrap", "alice"],
+        b"",
+    );
     assert_eq!(code, 74, "stderr={stderr:?}");
     assert!(
         stderr.contains("cannot bootstrap 'alice'") && stderr.contains("/Users/alice/src"),
@@ -418,8 +422,12 @@ fn bootstrap_on_cold_sudo_authentication_failure_exits_74_without_mutation() {
             code: 1,
             stderr: String::new(),
         });
-    let (code, _stdout, stderr) =
-        run_with_exec(stub_with_tenant("alice"), &exec, &["bootstrap", "alice"]);
+    let (code, _stdout, stderr) = run_with_stdin(
+        stub_with_tenant("alice"),
+        &exec,
+        &["bootstrap", "alice"],
+        b"",
+    );
     assert_eq!(code, 74);
     assert_eq!(
         stderr,
@@ -674,4 +682,33 @@ fn bootstrap_no_arg_no_tenants_is_quiet_noop() {
     let (code, stdout, _stderr) = run_with(StubUserDirectory::default(), &["bootstrap"]);
     assert_eq!(code, 0);
     assert_eq!(stdout, "No tenants on this host to bootstrap.\n");
+}
+
+#[test]
+fn bootstrap_without_terminal_on_cold_sudo_refuses_before_widening() {
+    let profile = "schema_version = 1\n\
+                   [allowlist.runtime]\n\
+                   hosts = []\n\
+                   [allowlist.install]\n\
+                   hosts = []\n\
+                   [bootstrap]\n\
+                   commands = [\"true\"]\n\
+                   [[shares]]\n\
+                   host_path = \"/tmp\"\n\
+                   mode = \"rw\"\n\
+                   tenant_path = \"$HOME/src\"\n";
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", profile)
+        .with_default_stash("dev")
+        .with_sudo_session_cached(false);
+    let (code, _stdout, stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["bootstrap", "dev"]);
+    assert_eq!(code, 64, "stderr={stderr:?}");
+    assert_eq!(stderr, SUDO_NEEDS_TERMINAL_REFUSAL);
+    assert_eq!(
+        exec.authenticate_sudo_calls(),
+        0,
+        "sudo -v would block on the prompt"
+    );
+    assert!(exec.firewall_ops().is_empty() && exec.exec_calls().is_empty());
 }

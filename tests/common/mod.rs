@@ -800,3 +800,6 @@ pub fn make_two_tenant_stub_reader() -> StubUserDirectory {
         ..Default::default()
     }
 }
+
+pub const SUDO_NEEDS_TERMINAL_REFUSAL: &str = "tenant: this verb needs sudo and no terminal is \
+     attached \u{2014} run it in your terminal, or run 'sudo -v' in this session first\n";

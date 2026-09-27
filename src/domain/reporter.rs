@@ -140,6 +140,21 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
     }
 
+    /// sudo prompts on the controlling tty even when stdin is piped, so a cold
+    /// timestamp in a non-interactive run blocks forever with no output. Call it
+    /// before any plan build: share probes `sudo -v` there.
+    pub(crate) fn refuse_sudo_without_terminal(&mut self) -> bool {
+        if self.dry_run || self.terminal.stdin_is_tty || self.machine.sudo_session_cached() {
+            return false;
+        }
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: this verb needs sudo and no terminal is attached \u{2014} run it in your \
+             terminal, or run 'sudo -v' in this session first"
+        );
+        true
+    }
+
     pub fn aborted(&mut self) {
         let _ = writeln!(
             self.terminal.stdout,

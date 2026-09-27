@@ -645,7 +645,8 @@ fn shell_on_cold_sudo_authenticates_then_probes_tenant_path() {
         .with_existing_profile("dev", &toml)
         .with_default_stash("dev")
         .with_sudo_session_cached(false);
-    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    let (code, _stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
     assert_eq!(code, 0, "stderr={stderr:?}");
     // The stub's tenant_path_kind fails while sudo is uncached (like `sudo -n`),
     // so a recorded probe plus exit 0 proves authenticate ran first.
@@ -666,10 +667,11 @@ fn shell_install_command_on_cold_sudo_refuses_occupied_tenant_path_before_wideni
         .with_default_stash("dev")
         .with_sudo_session_cached(false)
         .with_tenant_path_kind("dev", &PathBuf::from("/Users/dev/src"), PathKind::Other);
-    let (code, _stdout, stderr) = run_with_exec(
+    let (code, _stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "--mode", "install", "--", "true"],
+        b"",
     );
     assert_eq!(code, 74, "stderr={stderr:?}");
     assert!(
@@ -700,10 +702,11 @@ fn shell_command_on_cold_sudo_authentication_failure_exits_74_without_mutation()
             code: 1,
             stderr: String::new(),
         });
-    let (code, _stdout, stderr) = run_with_exec(
+    let (code, _stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "--mode", "install", "--", "true"],
+        b"",
     );
     assert_eq!(code, 74);
     assert_eq!(
@@ -2602,10 +2605,11 @@ fn shell_directory_pre_flight_skipped_when_sudo_uncached() {
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
         .with_sudo_session_cached(false); // and NO with_tenant_dir_present
-    let (code, _stdout, stderr) = run_with_exec(
+    let (code, _stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "-d", "projects/foo", "--", "ls"],
+        b"",
     );
     assert_eq!(
         code, 0,
@@ -2786,4 +2790,20 @@ fn shell_directory_composes_with_install_mode() {
         "install-mode widen + narrow = two InstallAnchor/Reload rounds: {:?}",
         exec.firewall_ops()
     );
+}
+
+#[test]
+fn shell_command_without_terminal_on_cold_sudo_refuses_before_entry() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_sudo_session_cached(false);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "true"],
+    );
+    assert_eq!(code, 64);
+    assert_eq!(stderr, SUDO_NEEDS_TERMINAL_REFUSAL);
+    assert!(exec.firewall_ops().is_empty() && exec.exec_calls().is_empty());
 }

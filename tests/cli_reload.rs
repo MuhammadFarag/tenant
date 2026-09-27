@@ -1378,3 +1378,21 @@ fn reload_pre_exec_doctor_counts_missing_anchor_ref_as_one_critical_and_proceeds
         exec.firewall_ops()
     );
 }
+
+#[test]
+fn reload_without_terminal_on_cold_sudo_refuses_before_mutation() {
+    let toml = profile_with_shares(&[], &[], &[("/tmp", "rw", "$HOME/src")]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &toml)
+        .with_sudo_session_cached(false);
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout={stdout:?}");
+    assert_eq!(stderr, SUDO_NEEDS_TERMINAL_REFUSAL);
+    assert_eq!(
+        exec.authenticate_sudo_calls(),
+        0,
+        "sudo -v would block on the prompt"
+    );
+    assert!(exec.firewall_ops().is_empty() && exec.account_ops().is_empty());
+}
