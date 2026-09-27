@@ -1943,6 +1943,13 @@ fn create_fails_when_the_new_anchor_never_reaches_the_kernel() {
         stderr.contains("the kernel has no pass/block rules for anchor tenant-dev"),
         "stderr={stderr:?}"
     );
+    assert!(
+        stderr.ends_with(
+            "; 'dev' was created but its firewall isn't enforced \u{2014} fix pf, then run \
+             `tenant reload dev` (or `tenant destroy dev` to start over)\n"
+        ),
+        "stderr={stderr:?}"
+    );
 }
 
 #[test]

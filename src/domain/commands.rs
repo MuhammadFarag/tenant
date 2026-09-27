@@ -133,6 +133,12 @@ pub(crate) fn dispatch(
                     reporter.create_profile_failed(&name, &e);
                     EX_IOERR
                 }
+                Err(tenants::CreateError::Firewall(
+                    e @ super::FirewallError::AnchorRulesMissing { .. },
+                )) => {
+                    reporter.create_anchor_not_loaded(&name, &e);
+                    EX_IOERR
+                }
                 Err(tenants::CreateError::Firewall(e)) => {
                     reporter.create_firewall_failed(&name, &e);
                     EX_IOERR

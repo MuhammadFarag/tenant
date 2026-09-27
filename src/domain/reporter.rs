@@ -1558,6 +1558,16 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    /// Everything but the kernel load succeeded, so the tenant exists and needs a way forward.
+    pub fn create_anchor_not_loaded(&mut self, name: &TenantUserName, err: &FirewallError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to install firewall for '{name}': {err}; '{name}' was created but its \
+             firewall isn't enforced \u{2014} fix pf, then run `tenant reload {name}` (or \
+             `tenant destroy {name}` to start over)"
+        );
+    }
+
     pub fn create_firewall_failed(&mut self, name: &TenantUserName, err: &FirewallError) {
         let _ = writeln!(
             self.terminal.stderr,
