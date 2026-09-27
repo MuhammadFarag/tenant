@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclMode, AclOp, FirewallError,
     FirewallOp, GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError,
-    KeychainOp, KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, SudoersOp,
-    TENANT_KEYCHAIN_FILE, TenantUserName, tenant_keychain_path,
+    KeychainOp, KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TENANT_KEYCHAIN_FILE,
+    TenantUserName, tenant_keychain_path,
 };
 use crate::firewall::{
     PF_CONF, PF_CONF_BACKUP, is_anchor_referenced, tenant_anchor_name, tenant_anchor_path,
@@ -27,12 +27,6 @@ const PAM_SUDO_LOCAL_BACKUP: &str = "/etc/pam.d/sudo_local.tenant-backup";
 
 /// `sufficient`: a Touch ID hit short-circuits the auth stack; a miss falls through to password.
 const PAM_TID_DIRECTIVE: &str = "auth sufficient pam_tid.so";
-
-/// A drop-in: macOS updates replace /etc/sudoers itself.
-const SUDOERS_DROP_IN: &str = "/etc/sudoers.d/tenant";
-
-/// Unqualified on purpose: a `Defaults>user` form doesn't cover `sudo -u <tenant>`.
-const SSH_AUTH_SOCK_ENV_DELETE: &str = "Defaults env_delete += \"SSH_AUTH_SOCK\"";
 
 pub struct MacosHostMachine;
 
@@ -706,45 +700,6 @@ impl HostMachine for MacosHostMachine {
         }
     }
 
-    fn describe_sudoers(&self, op: &SudoersOp) -> String {
-        match op {
-            SudoersOp::DeleteSshAuthSockEnv => format!(
-                "echo '{SSH_AUTH_SOCK_ENV_DELETE}' >> <tmp copy of {SUDOERS_DROP_IN}>\n\
-                 sudo visudo -cf <tmp>\n\
-                 sudo install -o root -g wheel -m 0440 <tmp> {SUDOERS_DROP_IN}"
-            ),
-        }
-    }
-
-    fn execute_sudoers(&self, op: &SudoersOp) -> Result<(), HostFileError> {
-        match op {
-            SudoersOp::DeleteSshAuthSockEnv => {
-                if crate::doctor::has_env_delete_for(&self.read_env_policy()?, "SSH_AUTH_SOCK") {
-                    return Ok(());
-                }
-                let existing = if Path::new(SUDOERS_DROP_IN).exists() {
-                    read_privileged_text(SUDOERS_DROP_IN)?
-                } else {
-                    String::new()
-                };
-                let Some(content) = sudoers_drop_in_content(&existing) else {
-                    return Ok(());
-                };
-                let tmp_path = tempfile_path();
-                fs::write(&tmp_path, content).map_err(|e| HostFileError::Fs {
-                    path: tmp_path.display().to_string(),
-                    message: e.to_string(),
-                })?;
-                // A drop-in sudo can't parse breaks sudo host-wide: validate before install.
-                let result = sudoers_install_argv(&tmp_path.display().to_string())
-                    .iter()
-                    .try_for_each(|argv| spawn_host_file(argv));
-                let _ = fs::remove_file(&tmp_path);
-                result
-            }
-        }
-    }
-
     fn host_in_group(&self, host: &HostUserName, group: &GroupName) -> Result<bool, AccountError> {
         // dseditgroup conflates non-member, absent host, and absent group; all read false.
         let output = Command::new("dseditgroup")
@@ -986,40 +941,6 @@ pub fn authenticate_sudo_argv() -> Vec<String> {
 /// `-n` is load-bearing: asks whether sudo would prompt, without prompting.
 pub fn sudo_session_cached_argv() -> Vec<String> {
     vec!["sudo".into(), "-n".into(), "-v".into()]
-}
-
-/// `None` when the drop-in already carries the directive.
-pub fn sudoers_drop_in_content(existing: &str) -> Option<String> {
-    if crate::doctor::has_env_delete_for(existing, "SSH_AUTH_SOCK") {
-        return None;
-    }
-    let mut content = existing.to_string();
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str(SSH_AUTH_SOCK_ENV_DELETE);
-    content.push('\n');
-    Some(content)
-}
-
-pub fn sudoers_install_argv(tmp: &str) -> [Vec<String>; 2] {
-    [
-        vec!["sudo".into(), "visudo".into(), "-cf".into(), tmp.into()],
-        [
-            "sudo",
-            "install",
-            "-o",
-            "root",
-            "-g",
-            "wheel",
-            "-m",
-            "0440",
-            tmp,
-            SUDOERS_DROP_IN,
-        ]
-        .map(String::from)
-        .into(),
-    ]
 }
 
 fn read_privileged_text(path: &str) -> Result<String, HostFileError> {

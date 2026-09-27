@@ -1,4 +1,4 @@
-use tenant::domain::{PamOp, SudoersOp};
+use tenant::domain::PamOp;
 
 mod adapters;
 mod common;
@@ -153,69 +153,5 @@ fn setup_pam_failure_surfaces_io_error() {
     assert!(
         stderr.contains("failed to enable Touch ID for sudo"),
         "stderr should carry the setup failure frame; got: {stderr:?}"
-    );
-}
-
-// ----- SSH agent strip (sudoers drop-in) -----
-
-const SSH_AGENT_OFFER: &str = "Keep your ssh-agent out of tenant sessions
-  `tenant shell` runs through sudo, which forwards SSH_AUTH_SOCK, so code in a
-  tenant can use (not read) your SSH keys while a session is open. Writes
-  `Defaults env_delete += \"SSH_AUTH_SOCK\"` to /etc/sudoers.d/tenant, checked
-  with `visudo` first. Host-wide: no sudo command gets your agent any more
-  (`sudo git ...` included). Inside tenants, git over ssh needs the tenant's own key.
-";
-
-#[test]
-fn setup_offers_the_ssh_agent_strip_with_its_host_wide_effect_and_applies_on_yes() {
-    let exec = StubHostMachine::new();
-    let (code, stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"n\ny\n");
-    assert_eq!(code, 0, "stderr={stderr:?}");
-    assert!(stdout.contains(SSH_AGENT_OFFER), "stdout={stdout:?}");
-    assert!(exec.pam_ops().is_empty());
-    assert_eq!(exec.sudoers_ops(), vec![SudoersOp::DeleteSshAuthSockEnv]);
-    assert!(
-        stdout.contains("SSH_AUTH_SOCK removed from sudo sessions in /etc/sudoers.d/tenant"),
-        "stdout={stdout:?}"
-    );
-}
-
-#[test]
-fn setup_ssh_agent_strip_declined_writes_nothing() {
-    let exec = StubHostMachine::new();
-    let (code, stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"y\nn\n");
-    assert_eq!(code, 0, "stderr={stderr:?}");
-    assert!(exec.sudoers_ops().is_empty());
-    assert!(
-        stdout.contains("Skipped ssh-agent strip."),
-        "stdout={stdout:?}"
-    );
-}
-
-#[test]
-fn setup_yes_applies_both_items_and_non_tty_applies_neither() {
-    let exec = StubHostMachine::new();
-    let (code, _stdout, _stderr) = run_with_exec(no_tenants(), &exec, &["-y", "setup"]);
-    assert_eq!(code, 0);
-    assert_eq!(exec.sudoers_ops(), vec![SudoersOp::DeleteSshAuthSockEnv]);
-
-    let exec = StubHostMachine::new();
-    let (code, _stdout, _stderr) = run_with_exec(no_tenants(), &exec, &["setup"]);
-    assert_eq!(code, 0);
-    assert!(exec.sudoers_ops().is_empty());
-}
-
-#[test]
-fn setup_sudoers_failure_names_the_drop_in_and_exits_74() {
-    let exec = StubHostMachine::new().fail_next_sudoers(tenant::domain::HostFileError::NonZero {
-        code: 1,
-        stderr: "visudo: syntax error".to_string(),
-    });
-    let (code, _stdout, stderr) = run_with_exec(no_tenants(), &exec, &["-y", "setup"]);
-    assert_eq!(code, 74);
-    assert_eq!(
-        stderr,
-        "tenant: failed to update /etc/sudoers.d/tenant: sudo read exited with code 1: visudo: syntax \
-         error \u{2014} nothing was installed unless visudo accepted it\n"
     );
 }

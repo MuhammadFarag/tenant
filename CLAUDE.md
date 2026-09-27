@@ -16,7 +16,7 @@ Verbs (full semantics live in `src/cli.rs` doc comments / `tenant --help`):
 - `reload [<name>]` — canonical "apply everything" (Full reapply); heals Light drift
 - `bootstrap [<name>]` — run the merged profile's `[bootstrap]` commands as the tenant
 - `doctor [<name>] [--strict]` — read-only audit
-- `setup` — host-wide opt-in prep (Touch ID for sudo, SSH_AUTH_SOCK sudoers drop-in)
+- `setup` — host-wide opt-in prep (Touch ID for sudo)
 - `help [profile]` — long-form topic help
 
 ## Scope

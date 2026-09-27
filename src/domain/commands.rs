@@ -774,7 +774,6 @@ fn surface_destroy_error(
 fn surface_setup_error(reporter: &mut Reporter, error: &tenants::SetupError) {
     match error {
         tenants::SetupError::Pam(e) => reporter.setup_pam_failed(e),
-        tenants::SetupError::Sudoers(e) => reporter.setup_sudoers_failed(e),
     }
 }
 

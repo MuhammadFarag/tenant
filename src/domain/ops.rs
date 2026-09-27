@@ -226,12 +226,6 @@ pub enum PamOp {
     EnableTouchIdForSudo,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SudoersOp {
-    /// Appends the directive to `/etc/sudoers.d/tenant`; no-ops if any sudoers file has it.
-    DeleteSshAuthSockEnv,
-}
-
 /// Display-only umbrella; execution stays on the per-domain ADTs to keep their error types.
 pub enum Op<'a> {
     Account(&'a AccountOp),
@@ -240,7 +234,6 @@ pub enum Op<'a> {
     Acl(&'a AclOp),
     Keychain(&'a KeychainOp),
     Pam(&'a PamOp),
-    Sudoers(&'a SudoersOp),
 }
 
 impl<'a> Op<'a> {
@@ -252,7 +245,6 @@ impl<'a> Op<'a> {
             Op::Acl(op) => machine.describe_acl(op),
             Op::Keychain(op) => machine.describe_keychain(op),
             Op::Pam(op) => machine.describe_pam(op),
-            Op::Sudoers(op) => machine.describe_sudoers(op),
         }
     }
 
@@ -266,7 +258,6 @@ impl<'a> Op<'a> {
             Op::Acl(op) => acl_business_label(op),
             Op::Keychain(op) => keychain_business_label(op),
             Op::Pam(op) => pam_business_label(op),
-            Op::Sudoers(op) => sudoers_business_label(op),
         }
     }
 
@@ -279,7 +270,6 @@ impl<'a> Op<'a> {
             Op::Acl(op) => acl_intent_label(op),
             Op::Keychain(op) => keychain_intent_label(op),
             Op::Pam(op) => pam_intent_label(op),
-            Op::Sudoers(op) => sudoers_intent_label(op),
         }
     }
 }
@@ -559,22 +549,6 @@ fn pam_business_label(op: &PamOp) -> String {
     }
 }
 
-fn sudoers_business_label(op: &SudoersOp) -> String {
-    match op {
-        SudoersOp::DeleteSshAuthSockEnv => {
-            "SSH_AUTH_SOCK removed from sudo sessions in /etc/sudoers.d/tenant".to_string()
-        }
-    }
-}
-
-fn sudoers_intent_label(op: &SudoersOp) -> String {
-    match op {
-        SudoersOp::DeleteSshAuthSockEnv => {
-            "Remove SSH_AUTH_SOCK from sudo sessions in /etc/sudoers.d/tenant".to_string()
-        }
-    }
-}
-
 fn pam_intent_label(op: &PamOp) -> String {
     match op {
         PamOp::EnableTouchIdForSudo => {
@@ -630,16 +604,6 @@ impl WritableOp for KeychainOp {
     }
     fn op_ref(&self) -> Op<'_> {
         Op::Keychain(self)
-    }
-}
-
-impl WritableOp for SudoersOp {
-    type Error = HostFileError;
-    fn execute_via(&self, machine: &dyn HostMachine) -> Result<(), HostFileError> {
-        machine.execute_sudoers(self)
-    }
-    fn op_ref(&self) -> Op<'_> {
-        Op::Sudoers(self)
     }
 }
 

@@ -2,7 +2,7 @@ use crate::adapters::macos::MacosHostMachine;
 use crate::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
     GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, SudoersOp, TenantUserName,
+    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
 };
 use crate::profile::{ProfileError, default_profile_toml};
 
@@ -230,14 +230,6 @@ impl HostMachine for DryRunHostMachine<'_> {
 
     fn describe_pam(&self, op: &PamOp) -> String {
         MacosHostMachine.describe_pam(op)
-    }
-
-    fn describe_sudoers(&self, op: &SudoersOp) -> String {
-        MacosHostMachine.describe_sudoers(op)
-    }
-
-    fn execute_sudoers(&self, _op: &SudoersOp) -> Result<(), HostFileError> {
-        Ok(())
     }
 
     fn execute_pam(&self, _op: &PamOp) -> Result<(), HostFileError> {

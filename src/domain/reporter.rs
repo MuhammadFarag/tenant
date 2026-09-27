@@ -927,36 +927,6 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    pub fn setup_ssh_agent_offer(&mut self) -> ConfirmOutcome {
-        let _ = write!(
-            self.terminal.stdout,
-            "Keep your ssh-agent out of tenant sessions
-  `tenant shell` runs through sudo, which forwards SSH_AUTH_SOCK, so code in a
-  tenant can use (not read) your SSH keys while a session is open. Writes
-  `Defaults env_delete += \"SSH_AUTH_SOCK\"` to /etc/sudoers.d/tenant, checked
-  with `visudo` first. Host-wide: no sudo command gets your agent any more
-  (`sudo git ...` included). Inside tenants, git over ssh needs the tenant's own key.
-
-"
-        );
-        self.setup_offer("Remove SSH_AUTH_SOCK from sudo sessions?")
-    }
-
-    pub fn setup_ssh_agent_skipped(&mut self) {
-        if self.dry_run {
-            return;
-        }
-        let _ = writeln!(self.terminal.stdout, "Skipped ssh-agent strip.");
-    }
-
-    pub fn setup_sudoers_failed(&mut self, err: &HostFileError) {
-        let _ = writeln!(
-            self.terminal.stderr,
-            "tenant: failed to update /etc/sudoers.d/tenant: {err} \u{2014} nothing was \
-             installed unless visudo accepted it"
-        );
-    }
-
     pub fn setup_touch_id_skipped(&mut self) {
         if self.dry_run {
             return;
