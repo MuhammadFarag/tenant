@@ -5,7 +5,8 @@ Location
   ~/.config/tenant/profiles/<name>.toml
   (Fragments resolve from ~/.config/tenant/profiles/includes/<name>.toml)
 
-  Read on every `tenant create` (scaffolded), `tenant mode`,
+  Read on every `tenant create` (scaffolded unless one is already
+  there, which create keeps and uses), `tenant mode`,
   `tenant reload`, and `tenant shell`. Edits take effect on the
   next `tenant reload <name>` (or `tenant shell <name>` entry).
 

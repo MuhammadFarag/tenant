@@ -44,6 +44,9 @@ impl HostMachine for DryRunHostMachine {
     fn read_profile(&self, _name: &TenantUserName) -> Result<String, ProfileError> {
         Ok(default_profile_toml())
     }
+    fn profile_exists(&self, _name: &TenantUserName) -> bool {
+        false
+    }
     fn read_profile_fragment(&self, _fragment: &str) -> Result<String, ProfileError> {
         Ok(String::new())
     }

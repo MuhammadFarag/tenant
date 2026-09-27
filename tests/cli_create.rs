@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use tenant::domain::{
-    AccountError, AccountOp, AclMode, AclOp, FirewallError, GroupId, KeychainError, KeychainOp,
-    PathKind, ProfileOp, UserId,
+    AccountError, AccountOp, AclMode, AclOp, FirewallError, FirewallOp, GroupId, KeychainError,
+    KeychainOp, PathKind, ProfileOp, UserId,
 };
 
 mod adapters;
@@ -1872,4 +1872,54 @@ fn create_merges_included_fragment_hosts_into_anchor_body() {
         frag_pos < prof_pos,
         "fragment host must render before profile host (fragments first):\n{body}"
     );
+}
+
+#[test]
+fn create_keeps_and_uses_an_existing_hand_written_profile() {
+    let authored = profile_with_hosts(&["api.example.com"], &[]);
+    let exec = StubHostMachine::new().with_existing_profile("dev", &authored);
+    let (code, stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        exec.profile_ops().is_empty(),
+        "the profile must not be rewritten"
+    );
+    assert_eq!(exec.profile_state().get("dev"), Some(&authored));
+    assert!(
+        stdout.contains("Kept existing profile at ~/.config/tenant/profiles/dev.toml"),
+        "stdout={stdout:?}"
+    );
+    let expected = tenant::firewall::render_anchor(
+        "dev",
+        &common::egress(&["api.example.com"]),
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
+    assert!(
+        exec.firewall_ops().contains(&FirewallOp::InstallAnchor {
+            name: "dev".into(),
+            body: expected,
+        }),
+        "anchor renders from the kept profile"
+    );
+}
+
+#[test]
+fn create_refuses_an_existing_profile_that_does_not_parse_before_creating_anything() {
+    let exec = StubHostMachine::new().with_existing_profile("dev", "schema_version = 2\n");
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 64);
+    assert!(
+        stderr.starts_with(
+            "tenant: refusing to create 'dev': the existing profile \
+             ~/.config/tenant/profiles/dev.toml does not load \u{2014} "
+        ),
+        "stderr={stderr:?}"
+    );
+    assert!(
+        stderr.ends_with("; fix it, or move it aside to start from the default\n"),
+        "stderr={stderr:?}"
+    );
+    assert!(exec.account_ops().is_empty() && exec.profile_ops().is_empty());
 }

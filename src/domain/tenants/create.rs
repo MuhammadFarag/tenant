@@ -31,12 +31,24 @@ pub(crate) enum CreateError {
 }
 
 impl<'a> Tenants<'a> {
+    /// `Ok(true)` when a hand-written profile is already in place and loads; create keeps it.
+    pub(crate) fn existing_profile_loads(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<bool, ProfileError> {
+        if !self.machine.profile_exists(name) {
+            return Ok(false);
+        }
+        self.load_profile(name).map(|_| true)
+    }
+
     pub(crate) fn create(
         &self,
         name: &TenantUserName,
         host: &HostUserName,
         uid: UserId,
         gid: GroupId,
+        keep_profile: bool,
         reporter: &mut Reporter,
     ) -> Result<(), CreateError> {
         let group = tenant_share_group_name(name.as_str());
@@ -105,8 +117,12 @@ impl<'a> Tenants<'a> {
                     .map_err(CreateError::KeychainProvision)?;
                 self.run(&stash, reporter)
                     .map_err(CreateError::KeychainStash)?;
-                self.run(&create_profile, reporter)
-                    .map_err(CreateError::Profile)?;
+                if keep_profile {
+                    reporter.create_profile_kept(name);
+                } else {
+                    self.run(&create_profile, reporter)
+                        .map_err(CreateError::Profile)?;
+                }
                 let parsed_profile = self.load_profile(name).map_err(|e| {
                     CreateError::Firewall(FirewallError::Fs {
                         path: display_path_for(name.as_str()),

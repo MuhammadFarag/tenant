@@ -65,6 +65,13 @@ pub(crate) fn dispatch(
                     return EX_IOERR;
                 }
             }
+            let keep_profile = match tenants.existing_profile_loads(&name) {
+                Ok(keep) => keep,
+                Err(e) => {
+                    reporter.refuse_create_profile_invalid(&name, &e);
+                    return EX_USAGE;
+                }
+            };
             let uid = match allocation::UidAllocator::new(directory).lowest_free_uid() {
                 Ok(uid) => uid,
                 Err(e) => {
@@ -79,7 +86,7 @@ pub(crate) fn dispatch(
                     return EX_IOERR;
                 }
             };
-            let create_plan_ops = build_create_plan_ops(&name, host, uid, gid);
+            let create_plan_ops = build_create_plan_ops(&name, host, uid, gid, keep_profile);
             let create_plan = create_plan_entries(&create_plan_ops);
             if show_summary {
                 reporter.create_summary(&name, host, uid, gid, Some(&create_plan));
@@ -88,7 +95,7 @@ pub(crate) fn dispatch(
             if let Some(code) = consent(reporter, true) {
                 return code;
             }
-            match tenants.create(&name, host, uid, gid, reporter) {
+            match tenants.create(&name, host, uid, gid, keep_profile, reporter) {
                 Ok(()) => 0,
                 Err(tenants::CreateError::Group(e)) => {
                     reporter.create_group_failed(&name, &e);
@@ -844,7 +851,7 @@ pub(crate) struct CreatePlanOps {
     pub(crate) add_to_search_list: KeychainOp,
     pub(crate) disable_auto_lock: KeychainOp,
     pub(crate) stash_password: KeychainOp,
-    pub(crate) create_profile: ProfileOp,
+    pub(crate) create_profile: Option<ProfileOp>,
     pub(crate) backup: FirewallOp,
     pub(crate) install_anchor: FirewallOp,
     pub(crate) update_conf: FirewallOp,
@@ -860,6 +867,7 @@ fn build_create_plan_ops(
     host: &super::HostUserName,
     uid: super::UserId,
     gid: super::GroupId,
+    keep_profile: bool,
 ) -> CreatePlanOps {
     let group = tenants::tenant_share_group_name(name.as_str());
     // describe_keychain renders `<password>` regardless; the real one is generated in `Tenants::create`.
@@ -898,7 +906,7 @@ fn build_create_plan_ops(
             name: name.into(),
             password: plan_placeholder,
         },
-        create_profile: ProfileOp::Create { name: name.into() },
+        create_profile: (!keep_profile).then(|| ProfileOp::Create { name: name.into() }),
         backup: FirewallOp::BackupConfig,
         install_anchor: FirewallOp::InstallAnchor {
             name: name.into(),
@@ -916,28 +924,31 @@ fn build_create_plan_ops(
 }
 
 fn create_plan_entries(ops: &CreatePlanOps) -> Vec<(Op<'_>, Option<&'static str>)> {
-    vec![
-        (Op::Account(&ops.create_group), None),
-        (Op::Account(&ops.add_host), None),
-        (Op::Account(&ops.add_user), None),
-        (Op::Account(&ops.rollback_group), Some("on rollback")),
-        (Op::Account(&ops.ensure_cowork_dir), None),
-        (Op::Keychain(&ops.create_keychain), None),
-        (Op::Keychain(&ops.set_default_keychain), None),
-        (Op::Keychain(&ops.add_to_search_list), None),
-        (Op::Keychain(&ops.disable_auto_lock), None),
-        (Op::Keychain(&ops.stash_password), None),
-        (Op::Profile(&ops.create_profile), None),
-        (Op::Firewall(&ops.backup), None),
-        (Op::Firewall(&ops.install_anchor), None),
-        (Op::Firewall(&ops.update_conf), None),
-        (Op::Firewall(&ops.reload), None),
-        (Op::Firewall(&ops.restore), Some("on reload failure")),
-        (Op::Firewall(&ops.remove_anchor), Some("on reload failure")),
-        (Op::Firewall(&ops.reload), Some("on reload failure")),
-        (Op::Firewall(&ops.flush_anchor), Some("on reload failure")),
-        (Op::Firewall(&ops.enable), None),
-    ]
+    let entries = vec![
+        Some((Op::Account(&ops.create_group), None)),
+        Some((Op::Account(&ops.add_host), None)),
+        Some((Op::Account(&ops.add_user), None)),
+        Some((Op::Account(&ops.rollback_group), Some("on rollback"))),
+        Some((Op::Account(&ops.ensure_cowork_dir), None)),
+        Some((Op::Keychain(&ops.create_keychain), None)),
+        Some((Op::Keychain(&ops.set_default_keychain), None)),
+        Some((Op::Keychain(&ops.add_to_search_list), None)),
+        Some((Op::Keychain(&ops.disable_auto_lock), None)),
+        Some((Op::Keychain(&ops.stash_password), None)),
+        ops.create_profile
+            .as_ref()
+            .map(|op| (Op::Profile(op), None)),
+        Some((Op::Firewall(&ops.backup), None)),
+        Some((Op::Firewall(&ops.install_anchor), None)),
+        Some((Op::Firewall(&ops.update_conf), None)),
+        Some((Op::Firewall(&ops.reload), None)),
+        Some((Op::Firewall(&ops.restore), Some("on reload failure"))),
+        Some((Op::Firewall(&ops.remove_anchor), Some("on reload failure"))),
+        Some((Op::Firewall(&ops.reload), Some("on reload failure"))),
+        Some((Op::Firewall(&ops.flush_anchor), Some("on reload failure"))),
+        Some((Op::Firewall(&ops.enable), None)),
+    ];
+    entries.into_iter().flatten().collect()
 }
 
 pub(crate) struct DestroyPlanOps {

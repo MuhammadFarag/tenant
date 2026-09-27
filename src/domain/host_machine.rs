@@ -29,6 +29,8 @@ pub trait HostMachine {
 
     fn read_profile(&self, name: &TenantUserName) -> Result<String, ProfileError>;
 
+    fn profile_exists(&self, name: &TenantUserName) -> bool;
+
     /// `fragment` is safe as a path segment: `validate_fragment_name` already ran at parse.
     fn read_profile_fragment(&self, fragment: &str) -> Result<String, ProfileError>;
 

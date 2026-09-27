@@ -1461,6 +1461,25 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    pub fn create_profile_kept(&mut self, name: &TenantUserName) {
+        if self.dry_run {
+            return;
+        }
+        self.ok(&format!(
+            "Kept existing profile at {}",
+            display_path_for(name.as_str())
+        ));
+    }
+
+    pub fn refuse_create_profile_invalid(&mut self, name: &TenantUserName, err: &ProfileError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to create '{name}': the existing profile {} does not load \
+             \u{2014} {err}; fix it, or move it aside to start from the default",
+            display_path_for(name.as_str())
+        );
+    }
+
     pub fn create_profile_failed(&mut self, name: &TenantUserName, err: &ProfileError) {
         let path = display_path_for(name.as_str());
         let _ = writeln!(

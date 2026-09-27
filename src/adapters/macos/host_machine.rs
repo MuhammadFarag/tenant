@@ -208,6 +208,10 @@ impl HostMachine for MacosHostMachine {
         })
     }
 
+    fn profile_exists(&self, name: &TenantUserName) -> bool {
+        profile_path(name).is_ok_and(|path| path.exists())
+    }
+
     fn read_profile_fragment(&self, fragment: &str) -> Result<String, ProfileError> {
         let path = profile_fragment_path(fragment)?;
         fs::read_to_string(&path).map_err(|e| ProfileError {

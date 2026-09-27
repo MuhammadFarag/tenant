@@ -834,6 +834,10 @@ impl HostMachine for StubHostMachine {
         }
     }
 
+    fn profile_exists(&self, name: &TenantUserName) -> bool {
+        self.profile_state.borrow().contains_key(name.as_str())
+    }
+
     fn read_profile_fragment(&self, fragment: &str) -> Result<String, ProfileError> {
         self.fragment_reads.borrow_mut().push(fragment.to_string());
         match self.profile_fragments.borrow().get(fragment) {
