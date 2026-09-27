@@ -1932,3 +1932,15 @@ fn create_confirm_prompt_goes_to_stderr_so_piped_stdout_still_prompts() {
     );
     assert!(!stdout.contains("Proceed?"), "stdout={stdout:?}");
 }
+
+#[test]
+fn create_fails_when_the_new_anchor_never_reaches_the_kernel() {
+    let exec = StubHostMachine::new().with_kernel_pf_rules_after_reload("dev", "");
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 74, "stderr={stderr:?}");
+    assert!(
+        stderr.contains("the kernel has no pass/block rules for anchor tenant-dev"),
+        "stderr={stderr:?}"
+    );
+}

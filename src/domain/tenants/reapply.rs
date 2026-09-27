@@ -280,7 +280,7 @@ impl<'a> Tenants<'a> {
         self.execute_share_ops(&plan.name, &plan.share_ops, reporter)
     }
 
-    fn verify_anchor_loaded(&self, name: &TenantUserName) -> Result<(), FirewallError> {
+    pub(super) fn verify_anchor_loaded(&self, name: &TenantUserName) -> Result<(), FirewallError> {
         let rules = self.machine.read_kernel_pf_rules(name)?;
         if crate::doctor::pf_rule_presence_check(&rules, name.as_str()).is_empty() {
             return Ok(());

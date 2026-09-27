@@ -99,6 +99,8 @@ pub struct StubHostMachine {
     /// Absent ⇒ a reload loads the default healthy rules.
     kernel_pf_rules_after_reload: RefCell<HashMap<String, String>>,
 
+    kernel_pf_rules_failure_after_reload: RefCell<Option<FirewallError>>,
+
     /// Keyed `(tenant, table)`; absent ⇒ empty table.
     kernel_pf_tables: RefCell<HashMap<(String, String), String>>,
 
@@ -432,6 +434,11 @@ impl StubHostMachine {
         self.kernel_pf_rules_after_reload
             .borrow_mut()
             .insert(name.to_string(), content.to_string());
+        self
+    }
+
+    pub fn fail_kernel_pf_rules_after_reload(self, err: FirewallError) -> Self {
+        *self.kernel_pf_rules_failure_after_reload.borrow_mut() = Some(err);
         self
     }
 
@@ -906,7 +913,10 @@ impl HostMachine for StubHostMachine {
         if *op == FirewallOp::Reload {
             // A reload re-reads every anchor, so pre-reload kernel state is gone.
             *self.kernel_pf_rules.borrow_mut() = self.kernel_pf_rules_after_reload.borrow().clone();
-            self.kernel_pf_rules_failure.borrow_mut().take();
+            *self.kernel_pf_rules_failure.borrow_mut() = self
+                .kernel_pf_rules_failure_after_reload
+                .borrow_mut()
+                .take();
         }
         Ok(())
     }

@@ -1482,3 +1482,16 @@ fn reload_dry_run_previews_the_real_profile() {
     );
     assert!(exec.firewall_ops().is_empty() && exec.acl_ops().is_empty());
 }
+
+#[test]
+fn reload_fails_when_the_post_reload_kernel_read_fails() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .fail_kernel_pf_rules_after_reload(FirewallError::NonZero {
+            code: 1,
+            stderr: "pfctl: DIOCGETRULES: Permission denied".into(),
+        });
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 74);
+    assert!(stderr.contains("DIOCGETRULES"), "stderr={stderr:?}");
+}

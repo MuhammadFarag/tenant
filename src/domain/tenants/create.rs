@@ -160,6 +160,8 @@ impl<'a> Tenants<'a> {
                     return Err(CreateError::Firewall(reload_err));
                 }
                 self.run(&enable, reporter).map_err(CreateError::Firewall)?;
+                self.verify_anchor_loaded(name)
+                    .map_err(CreateError::Firewall)?;
                 self.reapply_shares_post_provision(name, &parsed_profile, reporter)
                     .map_err(CreateError::PostProvision)?;
                 reporter.create_done(name, uid, gid);
