@@ -89,3 +89,20 @@ fn other_vars_substrings_and_prose_do_not_match() {
         assert!(!sudo_strips_env_var(policy, VAR), "{policy:?}");
     }
 }
+
+// sudo applies Defaults in file order, so a later `+=` re-adds what an earlier `-=` removed.
+#[test]
+fn a_later_add_back_wins() {
+    let policy = "Defaults env_keep -= \"SSH_AUTH_SOCK\"\n\
+                  Defaults env_keep += \"SSH_AUTH_SOCK\"\n";
+    assert!(!sudo_strips_env_var(policy, VAR));
+    let policy = "Defaults env_keep += \"SSH_AUTH_SOCK\"\n\
+                  Defaults env_keep -= \"SSH_AUTH_SOCK\"\n";
+    assert!(sudo_strips_env_var(policy, VAR));
+}
+
+#[test]
+fn comma_joined_defaults_are_read_per_entry() {
+    let policy = "Defaults env_reset, env_keep -= \"SSH_AUTH_SOCK\"\n";
+    assert!(sudo_strips_env_var(policy, VAR));
+}

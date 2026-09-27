@@ -385,7 +385,7 @@ fn validate_host_entry(entry: &HostEntry) -> Result<(), ProfileError> {
 }
 
 fn is_address_range_or_hostname(host: &str) -> bool {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv6Addr};
     if let Some((addr, prefix)) = host.split_once('/') {
         let max = match addr.parse::<IpAddr>() {
             Ok(IpAddr::V4(_)) => 32,
@@ -397,8 +397,19 @@ fn is_address_range_or_hostname(host: &str) -> bool {
     if host.parse::<IpAddr>().is_ok() {
         return true;
     }
-    host.contains('.')
-        && host.split('.').all(|label| {
+    if let Some((addr, zone)) = host.split_once('%') {
+        return addr.parse::<Ipv6Addr>().is_ok()
+            && !zone.is_empty()
+            && zone.chars().all(|c| c.is_ascii_alphanumeric());
+    }
+    let name = host.strip_suffix('.').unwrap_or(host);
+    let labels: Vec<&str> = name.split('.').collect();
+    // A letter-led top label keeps out `127.1`-style shorthand the resolver expands to an IP.
+    labels.len() >= 2
+        && labels
+            .last()
+            .is_some_and(|tld| tld.starts_with(|c: char| c.is_ascii_alphabetic()))
+        && labels.iter().all(|label| {
             !label.is_empty()
                 && label.len() <= 63
                 && !label.starts_with('-')

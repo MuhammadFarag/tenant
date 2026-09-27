@@ -1197,3 +1197,17 @@ fn host_entry_accepts_hostnames_addresses_and_ranges() {
         parse(&profile_with_runtime_host(good)).expect(good);
     }
 }
+
+#[test]
+fn host_entry_accepts_a_trailing_dot_and_an_ipv6_zone() {
+    for good in [r#""example.com.""#, r#""fe80::1%en0""#] {
+        parse(&profile_with_runtime_host(good)).expect(good);
+    }
+}
+
+#[test]
+fn host_entry_refuses_numeric_shorthand_the_resolver_would_expand() {
+    for bad in [r#""127.1""#, r#""0x7f.1""#, r#""10.0""#] {
+        parse(&profile_with_runtime_host(bad)).expect_err(bad);
+    }
+}

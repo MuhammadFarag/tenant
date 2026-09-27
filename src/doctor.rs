@@ -1074,29 +1074,46 @@ pub fn anchor_body_matches(actual: &str, expected: &str) -> bool {
     actual == expected
 }
 
-/// Unqualified `Defaults env_keep -=` only: under env_reset (the macOS default) that's the
-/// form that removes a var; `env_delete` is ignored. Qualified forms (`Defaults:user`,
-/// `>runas`, `@host`, `!cmd`) may not cover `sudo -u <tenant>`, so they read as missing.
+/// Replays unqualified `Defaults` entries in order, as sudo does: `env_keep -=` removes the
+/// var, `+=` adds it back, `=` replaces the whole list. Under env_reset (the macOS default)
+/// that list is what forwards; `env_delete` is ignored. Qualified forms (`Defaults:user`,
+/// `>runas`, `@host`, `!cmd`) may not cover `sudo -u <tenant>`, so they don't count.
 pub fn sudo_strips_env_var(policy: &str, var: &str) -> bool {
-    policy.lines().any(|raw_line| {
-        let Some(rest) = raw_line.trim().strip_prefix("Defaults") else {
-            return false;
+    let mut stripped = false;
+    for line in policy.lines() {
+        let Some(rest) = line.trim().strip_prefix("Defaults") else {
+            continue;
         };
         if !rest.starts_with(char::is_whitespace) {
-            return false;
+            continue;
         }
-        let Some(rest) = rest.trim().strip_prefix("env_keep") else {
-            return false;
-        };
-        let Some(value) = rest.trim_start().strip_prefix("-=") else {
-            return false;
-        };
-        value
-            .trim()
-            .trim_matches('"')
-            .split_whitespace()
-            .any(|token| token == var)
-    })
+        for entry in rest.split(',') {
+            let Some(rest) = entry.trim().strip_prefix("env_keep") else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            let (op, list) = if let Some(list) = rest.strip_prefix("-=") {
+                ('-', list)
+            } else if let Some(list) = rest.strip_prefix("+=") {
+                ('+', list)
+            } else if let Some(list) = rest.strip_prefix('=') {
+                ('=', list)
+            } else {
+                continue;
+            };
+            let listed = list
+                .trim()
+                .trim_matches('"')
+                .split_whitespace()
+                .any(|token| token == var);
+            stripped = match op {
+                '-' => stripped || listed,
+                '+' => stripped && !listed,
+                _ => !listed,
+            };
+        }
+    }
+    stripped
 }
 
 fn render_port_list(ports: &[u16]) -> String {
