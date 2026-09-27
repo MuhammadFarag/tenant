@@ -437,9 +437,10 @@ Alternative
   filesystem, and the UID/GID are all correct.
 
 Recommended fix
-  echo 'Defaults env_delete += \"{var}\"' | sudo tee -a /etc/sudoers.d/tenant >/dev/null
-  Appends to a drop-in file so the main /etc/sudoers stays pristine.
-  The directive must be unqualified (no `Defaults:user`, no
+  tenant setup
+  Offers to add the directive to the /etc/sudoers.d/tenant drop-in,
+  validated with visudo before install; macOS updates replace the main
+  /etc/sudoers, not drop-ins. The directive must be unqualified (no `Defaults:user`, no
   `Defaults>runas`); qualified forms restrict scope and don't protect
   `sudo -u <tenant>` invocations.
 
@@ -452,9 +453,6 @@ Side-effects to know about
     lose {var} from their inherited env, regardless of which user sudo
     is running as. Usually fine; flag if a host-side workflow depended
     on the leak.
-  \u{2022} Validate the edit with `sudo visudo -c -f /etc/sudoers.d/tenant`
-    before relying on it \u{2014} a syntax error in a drop-in can break sudo
-    across the host.
 
 Alternative
   Defaults>tenant env_delete += \"{var}\"
@@ -902,8 +900,8 @@ impl fmt::Display for Finding {
             Finding::EnvLeak { var } => write!(
                 f,
                 "warning: {var} not in env_delete \u{2014} host's session env leaks into 'tenant shell' sessions; \
-                 add `Defaults env_delete += \"{var}\"` to /etc/sudoers.d/tenant \
-                 (/etc/sudoers is replaced by macOS updates)"
+                 run `tenant setup` to add `Defaults env_delete += \"{var}\"` to \
+                 /etc/sudoers.d/tenant"
             ),
             Finding::PfRuleDrift { tenant, detail } => write!(
                 f,

@@ -9,7 +9,7 @@ use tenant::adapters::macos::MacosHostMachine;
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
     GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
+    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, SudoersOp, TenantUserName,
 };
 use tenant::profile::{ProfileError, default_profile_toml};
 
@@ -177,6 +177,10 @@ pub struct StubHostMachine {
     authenticate_sudo_failure: RefCell<Option<ProbeError>>,
 
     pam_ops: RefCell<Vec<PamOp>>,
+
+    sudoers_ops: RefCell<Vec<SudoersOp>>,
+
+    sudoers_failure: RefCell<Option<HostFileError>>,
 
     pam_failure: RefCell<Option<HostFileError>>,
 
@@ -623,6 +627,15 @@ impl StubHostMachine {
 
     pub fn pam_ops(&self) -> Vec<PamOp> {
         self.pam_ops.borrow().clone()
+    }
+
+    pub fn sudoers_ops(&self) -> Vec<SudoersOp> {
+        self.sudoers_ops.borrow().clone()
+    }
+
+    pub fn fail_next_sudoers(self, err: HostFileError) -> Self {
+        *self.sudoers_failure.borrow_mut() = Some(err);
+        self
     }
 
     pub fn fail_next_pam(self, err: HostFileError) -> Self {
@@ -1171,6 +1184,18 @@ impl HostMachine for StubHostMachine {
 
     fn describe_pam(&self, op: &PamOp) -> String {
         MacosHostMachine.describe_pam(op)
+    }
+
+    fn describe_sudoers(&self, op: &SudoersOp) -> String {
+        MacosHostMachine.describe_sudoers(op)
+    }
+
+    fn execute_sudoers(&self, op: &SudoersOp) -> Result<(), HostFileError> {
+        self.sudoers_ops.borrow_mut().push(op.clone());
+        match self.sudoers_failure.borrow_mut().take() {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     fn execute_pam(&self, op: &PamOp) -> Result<(), HostFileError> {

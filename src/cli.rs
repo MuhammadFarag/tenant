@@ -44,9 +44,13 @@ pub struct Cli {
 pub enum Verb {
     /// Prepare this host to run tenants (opt-in, host-wide).
     ///
-    /// Offers a menu of host-preparation items, today one: enabling
-    /// Touch ID for sudo (appends `auth sufficient pam_tid.so` to
-    /// `/etc/pam.d/sudo_local`, the OS-update-safe customization file).
+    /// Offers a menu of host-preparation items: enabling Touch ID for
+    /// sudo (appends `auth sufficient pam_tid.so` to
+    /// `/etc/pam.d/sudo_local`, the OS-update-safe customization file),
+    /// and keeping your ssh-agent out of tenant sessions (adds
+    /// `Defaults env_delete += "SSH_AUTH_SOCK"` to `/etc/sudoers.d/tenant`,
+    /// validated with visudo; host-wide, so no sudo command inherits the
+    /// agent).
     /// Each item is OPT-IN: the prompt defaults to no, and a non-TTY
     /// invocation without `--yes` declines rather than auto-applying an
     /// auth-stack change. `--yes` accepts every item (scripted host
@@ -54,8 +58,8 @@ pub enum Verb {
     ///
     /// Distinct from the per-tenant verbs: no name argument, no
     /// eligibility checks, no pre-exec doctor pass — `setup` prepares the
-    /// HOST, not a tenant. `tenant doctor` surfaces a Touch-ID-missing
-    /// note that points here. Listed first because it's the natural
+    /// HOST, not a tenant. `tenant doctor`'s Touch-ID-missing note and
+    /// SSH_AUTH_SOCK warning point here. Listed first because it's the natural
     /// first step: prepare the host, then `create` a tenant.
     Setup,
     /// Provision a new tenant: user account, share group, profile, PF anchor, co-working dir.

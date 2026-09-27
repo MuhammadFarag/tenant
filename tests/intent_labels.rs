@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use tenant::domain::{
-    AccountOp, AclMode, AclOp, FirewallOp, GroupId, Op, PamOp, ProfileOp, UserId,
+    AccountOp, AclMode, AclOp, FirewallOp, GroupId, Op, PamOp, ProfileOp, SudoersOp, UserId,
 };
 
 #[test]
@@ -13,6 +13,15 @@ fn intent_enable_touch_id_for_sudo() {
     assert_eq!(
         Op::Pam(&op).intent_label(),
         "Enable Touch ID for sudo in /etc/pam.d/sudo_local"
+    );
+}
+
+#[test]
+fn intent_delete_ssh_auth_sock_env() {
+    let op = SudoersOp::DeleteSshAuthSockEnv;
+    assert_eq!(
+        Op::Sudoers(&op).intent_label(),
+        "Remove SSH_AUTH_SOCK from sudo sessions in /etc/sudoers.d/tenant"
     );
 }
 

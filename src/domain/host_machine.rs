@@ -1,7 +1,7 @@
 use super::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
     GroupId, GroupName, HostFileError, HostUserName, KeychainError, KeychainOp, KeychainPassword,
-    Op, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
+    Op, PamOp, PathKind, ProbeError, ProfileOp, SudoersOp, TenantUserName,
 };
 use crate::profile::ProfileError;
 
@@ -70,6 +70,9 @@ pub trait HostMachine {
 
     fn describe_pam(&self, op: &PamOp) -> String;
     fn execute_pam(&self, op: &PamOp) -> Result<(), HostFileError>;
+
+    fn describe_sudoers(&self, op: &SudoersOp) -> String;
+    fn execute_sudoers(&self, op: &SudoersOp) -> Result<(), HostFileError>;
 
     fn probe_access_as_tenant(
         &self,

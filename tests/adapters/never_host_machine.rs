@@ -3,7 +3,7 @@
 use tenant::domain::{
     AccessMode, AccessOutcome, AccountError, AccountOp, AclError, AclOp, FirewallError, FirewallOp,
     GroupId, GroupName, HostFileError, HostMachine, HostUserName, KeychainError, KeychainOp,
-    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, TenantUserName,
+    KeychainPassword, PamOp, PathKind, ProbeError, ProfileOp, SudoersOp, TenantUserName,
 };
 
 /// Panics on any substrate call: for paths that must not reach exec.
@@ -157,6 +157,12 @@ impl HostMachine for NeverHostMachine {
     }
     fn describe_pam(&self, op: &PamOp) -> String {
         panic!("host machine unexpectedly invoked (describe_pam) with op: {op:?}");
+    }
+    fn describe_sudoers(&self, op: &SudoersOp) -> String {
+        panic!("host machine unexpectedly invoked (describe_sudoers) with op: {op:?}");
+    }
+    fn execute_sudoers(&self, op: &SudoersOp) -> Result<(), HostFileError> {
+        panic!("host machine unexpectedly invoked (execute_sudoers) with op: {op:?}");
     }
     fn execute_pam(&self, op: &PamOp) -> Result<(), HostFileError> {
         panic!("host machine unexpectedly invoked (execute_pam) with op: {op:?}");
