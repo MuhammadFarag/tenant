@@ -193,7 +193,9 @@ Examples:
     /// HONEST SCOPE: `restricted` is SURFACE-REDUCTION, not host-vs-peer
     /// isolation. A declared port is reachable by the host AND by peer
     /// tenants — pf cannot see the initiator on shared loopback
-    /// (127.0.0.1). A tenant also cannot reach its OWN undeclared loopback
+    /// (127.0.0.1). `[inbound]` governs only listeners the TENANT opens:
+    /// the tenant's connections to host-owned loopback services always
+    /// pass. A tenant also cannot reach its OWN undeclared loopback
     /// port (declare it to restore intra-tenant use). UDP loopback is
     /// unfiltered (TCP only). The inbound and egress (`tenant mode`)
     /// widenings do NOT compose across separate commands: each verb renders

@@ -101,6 +101,10 @@ Inbound loopback ports
     (127.0.0.1), so it is open to everyone on the box, not just the
     host.
 
+    [inbound] governs only listeners the TENANT opens. The tenant's
+    own connections to host-owned loopback services (databases, adb,
+    dev servers) always pass — declare nothing for those.
+
     A tenant cannot reach its OWN undeclared loopback port. The
     block is indiscriminate: declare a port to restore the tenant's
     own intra-process loopback use of it.

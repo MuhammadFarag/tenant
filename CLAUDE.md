@@ -115,6 +115,8 @@ only — code comments don't restate or cite them.
   to steady state. Widenings never compose across commands
   (implicit-current-mode doctrine). `restricted` is surface-reduction, NOT
   host-vs-peer isolation — pf can't see the initiator on shared loopback.
+  `[inbound]` gates only tenant-opened listeners; tenant→host loopback
+  always passes.
 - **`ReapplyScope::{Light, Full}` splits reapply by cost.** Light
   (mode/shell) skips the recursive ACL + cowork passes — inheritable ACE
   bits make that sound in steady state; Full (reload,
