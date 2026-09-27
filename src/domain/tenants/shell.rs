@@ -15,25 +15,12 @@ use super::{ModeError, Tenants};
 pub(crate) enum ShellError {
     Account(AccountError),
     Mode(ModeError),
-    NarrowFailed {
-        child_exit: i32,
-        narrow_err: ModeError,
-    },
-    StashAbsent {
-        name: TenantUserName,
-    },
+    NarrowFailed { child_exit: i32 },
+    StashAbsent { name: TenantUserName },
     UnlockFailed(KeychainError),
-    DirectoryInvalid {
-        raw: String,
-        reason: &'static str,
-    },
-    DirectoryUnavailable {
-        path: PathBuf,
-    },
-    DirectoryProbe {
-        path: PathBuf,
-        err: ProbeError,
-    },
+    DirectoryInvalid { raw: String, reason: &'static str },
+    DirectoryUnavailable { path: PathBuf },
+    DirectoryProbe { path: PathBuf, err: ProbeError },
 }
 
 /// Relative paths resolve against the tenant home, the primary UX: an unquoted `$HOME`
@@ -180,10 +167,7 @@ impl<'a> Tenants<'a> {
 
         match (child_result, narrow_result) {
             (Ok(code), Ok(())) => Ok(code),
-            (Ok(code), Err(narrow_err)) => Err(ShellError::NarrowFailed {
-                child_exit: code,
-                narrow_err,
-            }),
+            (Ok(code), Err(_)) => Err(ShellError::NarrowFailed { child_exit: code }),
             (Err(child_err), _) => Err(child_err),
         }
     }

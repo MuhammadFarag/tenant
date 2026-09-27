@@ -81,6 +81,14 @@ pub(crate) struct ReloadAllOutcome {
 }
 
 /// The inbound axis for verbs that don't control it; empty ports stays locked.
+impl Tenants<'_> {
+    /// Display only: an unreadable profile reads as restricted and surfaces at plan build.
+    pub(crate) fn inbound_posture_is_permissive(&self, name: &TenantUserName) -> bool {
+        self.load_profile(name)
+            .is_ok_and(|p| p.inbound.posture == InboundPosture::Permissive)
+    }
+}
+
 pub(crate) fn steady_inbound_rules(profile: &Profile) -> InboundRules {
     match profile.inbound.posture {
         InboundPosture::Permissive => InboundRules::Permissive,

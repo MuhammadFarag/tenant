@@ -2945,3 +2945,83 @@ fn shell_pre_exec_skips_root_only_anchor_reads_on_cold_sudo() {
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(exec.anchor_body_reads(), 0);
 }
+
+#[test]
+fn shell_command_summary_names_a_permissive_inbound_widen() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile_with_hosts(&["api.example.com"], &[]))
+        .with_default_stash("dev");
+    let (code, stdout, stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "permissive", "--", "ls"],
+        b"",
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "  \u{2022} open ALL inbound loopback ports for the command \u{2014} reachable by \
+             host + peer tenants\n"
+        ),
+        "stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains(
+            "  \u{2022} narrow inbound loopback back to the profile's posture (always \u{2014} \
+             even if the command fails)\n"
+        ),
+        "stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_summary_names_a_permissive_profile_posture() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile(
+            "dev",
+            &profile_with_permissive_posture(&["api.example.com"], &[]),
+        )
+        .with_default_stash("dev");
+    let (code, stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "  \u{2022} keep inbound loopback PERMISSIVE (profile posture) \u{2014} every port the \
+             tenant opens is reachable by host + peer tenants\n"
+        ),
+        "stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn shell_inbound_only_narrow_failure_names_the_inbound_leftover() {
+    let restricted = tenant::firewall::render_anchor(
+        "dev",
+        &common::egress(&["api.example.com"]),
+        tenant::firewall::InboundRules::Restricted(vec![]),
+    );
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile_with_hosts(&["api.example.com"], &[]))
+        .with_default_stash("dev")
+        .fail_firewall_op(
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: restricted,
+            },
+            FirewallError::NonZero {
+                code: 1,
+                stderr: String::new(),
+            },
+        );
+    let (_code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "permissive", "--", "ls"],
+    );
+    assert_eq!(
+        stderr,
+        "\u{26a0} tenant 'dev': firewall not narrowed after command \u{2014} all-ports inbound \
+         loopback still in effect; run `tenant mode dev runtime` to recover\n"
+    );
+}

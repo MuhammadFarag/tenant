@@ -17,6 +17,14 @@ pub(crate) enum ConfirmOutcome {
     Abort,
 }
 
+/// Which inbound line, if any, a shell summary owes the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellInbound {
+    Restricted,
+    PermissiveByProfile,
+    WidenedForCommand,
+}
+
 pub(crate) struct Reporter<'t, 'm> {
     terminal: Terminal<'t>,
     verbose: bool,
@@ -427,6 +435,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         name: &TenantUserName,
         host: &HostUserName,
         directory: Option<&str>,
+        posture_permissive: bool,
     ) {
         let group = tenant_share_group_name(name.as_str());
         let _ = writeln!(self.terminal.stdout, "About to enter tenant '{name}'.");
@@ -436,6 +445,9 @@ impl<'t, 'm> Reporter<'t, 'm> {
             self.terminal.stdout,
             "  \u{2022} narrow the firewall to runtime tier (auto-narrow)"
         );
+        if posture_permissive {
+            self.permissive_posture_bullet();
+        }
         let _ = writeln!(
             self.terminal.stdout,
             "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
@@ -601,11 +613,13 @@ impl<'t, 'm> Reporter<'t, 'm> {
         name: &TenantUserName,
         host: &HostUserName,
         mode: ModeLevel,
+        inbound: ShellInbound,
         argv: &[String],
         directory: Option<&str>,
     ) {
         let group = tenant_share_group_name(name.as_str());
         let joined = argv.join(" ");
+        let inbound_widened = inbound == ShellInbound::WidenedForCommand;
         if mode == ModeLevel::Runtime {
             let _ = writeln!(
                 self.terminal.stdout,
@@ -631,6 +645,15 @@ impl<'t, 'm> Reporter<'t, 'm> {
                 "  \u{2022} widen the firewall to install tier (narrows back to runtime on completion)"
             );
         }
+        if inbound_widened {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "  \u{2022} open ALL inbound loopback ports for the command \u{2014} reachable by \
+                 host + peer tenants"
+            );
+        } else if inbound == ShellInbound::PermissiveByProfile {
+            self.permissive_posture_bullet();
+        }
         let _ = writeln!(
             self.terminal.stdout,
             "  \u{2022} ensure host '{host}' is a member of '{group}' (idempotent catch-up)"
@@ -650,6 +673,13 @@ impl<'t, 'm> Reporter<'t, 'm> {
             let _ = writeln!(
                 self.terminal.stdout,
                 "  \u{2022} narrow the firewall to runtime tier (always — even if the command fails)"
+            );
+        }
+        if inbound_widened {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "  \u{2022} narrow inbound loopback back to the profile's posture (always \u{2014} \
+                 even if the command fails)"
             );
         }
         let _ = writeln!(self.terminal.stdout);
@@ -699,11 +729,30 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
-    pub fn shell_narrow_failed(&mut self, name: &TenantUserName, _err: &super::tenants::ModeError) {
+    fn permissive_posture_bullet(&mut self) {
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} keep inbound loopback PERMISSIVE (profile posture) \u{2014} every port the \
+             tenant opens is reachable by host + peer tenants"
+        );
+    }
+
+    pub fn shell_narrow_failed(
+        &mut self,
+        name: &TenantUserName,
+        egress_widened: bool,
+        inbound_widened: bool,
+    ) {
         let prefix = self.stderr_warn_prefix();
+        let leftover = match (egress_widened, inbound_widened) {
+            (true, true) => "install-tier widening and all-ports inbound loopback",
+            (false, true) => "all-ports inbound loopback",
+            _ => "install-tier widening",
+        };
         let _ = writeln!(
             self.terminal.stderr,
-            "{prefix} tenant '{name}': firewall not narrowed after command — install-tier widening still in effect; run `tenant mode {name} runtime` to recover"
+            "{prefix} tenant '{name}': firewall not narrowed after command \u{2014} {leftover} \
+             still in effect; run `tenant mode {name} runtime` to recover"
         );
     }
 

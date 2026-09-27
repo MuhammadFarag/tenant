@@ -1,7 +1,9 @@
-use super::reporter::{ConfirmOutcome, Reporter};
+use super::reporter::{ConfirmOutcome, Reporter, ShellInbound};
 use super::{AccountOp, FirewallOp, KeychainOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
-use crate::{Cli, HelpTopic, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR};
+use crate::{
+    Cli, HelpTopic, InboundLevel, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR,
+};
 
 const EX_USAGE: u8 = 64;
 const EX_IOERR: u8 = 74;
@@ -178,13 +180,27 @@ pub(crate) fn dispatch(
                 tenants::Eligibility::Destroyable => {
                     let resolved_mode = mode.unwrap_or(ModeLevel::Runtime);
                     if show_summary {
+                        let posture_permissive = tenants.inbound_posture_is_permissive(&name);
                         if argv.is_empty() {
-                            reporter.shell_summary(&name, host, shell_directory.as_deref());
+                            reporter.shell_summary(
+                                &name,
+                                host,
+                                shell_directory.as_deref(),
+                                posture_permissive,
+                            );
                         } else {
+                            let shell_inbound = if inbound == Some(InboundLevel::Permissive) {
+                                ShellInbound::WidenedForCommand
+                            } else if posture_permissive {
+                                ShellInbound::PermissiveByProfile
+                            } else {
+                                ShellInbound::Restricted
+                            };
                             reporter.shell_command_summary(
                                 &name,
                                 host,
                                 resolved_mode,
+                                shell_inbound,
                                 &argv,
                                 shell_directory.as_deref(),
                             );
@@ -229,12 +245,13 @@ pub(crate) fn dispatch(
                             surface_shell_mode_error(reporter, &name, &e);
                             EX_IOERR
                         }
-                        Err(tenants::ShellError::NarrowFailed {
-                            child_exit,
-                            narrow_err,
-                        }) => {
+                        Err(tenants::ShellError::NarrowFailed { child_exit }) => {
                             // TODO(smell): Runtime is passed only to suppress the "narrowed back" suffix — give shell_command_done an explicit flag
-                            reporter.shell_narrow_failed(&name, &narrow_err);
+                            reporter.shell_narrow_failed(
+                                &name,
+                                resolved_mode == ModeLevel::Install,
+                                inbound == Some(InboundLevel::Permissive),
+                            );
                             reporter.shell_command_done(child_exit, ModeLevel::Runtime);
                             child_exit.clamp(0, 255) as u8
                         }
