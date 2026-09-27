@@ -981,7 +981,9 @@ fn shell_pre_exec_doctor_silent_in_scripted_mode_no_summary() {
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
         .with_pf_status_content("Status: Disabled\n");
-    let (code, stdout, _stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    // `-y` gets past the no-terminal critical refusal; stdout stays free of the audit.
+    let (code, stdout, _stderr) =
+        run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev", "-y"]);
     assert_eq!(code, 0);
     assert!(
         !stdout.contains("\u{26a0} Doctor:"),
@@ -3149,4 +3151,54 @@ fn shell_pre_exec_does_not_count_the_ssh_auth_sock_note_as_a_warning() {
         run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"");
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(!stdout.contains("\u{26a0} Doctor:"), "stdout={stdout:?}");
+}
+
+#[test]
+fn shell_without_terminal_refuses_on_criticals_entry_wont_repair() {
+    let exec = pf_disabled_host();
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+    );
+    assert_eq!(code, 64, "stdout={stdout:?}");
+    assert_eq!(
+        stderr,
+        "critical: pf is globally disabled \u{2014} no tenant firewall is enforcing; \
+         run `sudo pfctl -e` to enable\n\
+         tenant: refusing to enter 'dev' with no terminal to confirm: 1 critical doctor \
+         finding above \u{2014} run `tenant doctor dev`, or pass -y to enter anyway\n"
+    );
+    assert!(exec.exec_calls().is_empty() && exec.firewall_ops().is_empty());
+}
+
+#[test]
+fn shell_without_terminal_enters_past_criticals_with_yes_and_says_so() {
+    let exec = pf_disabled_host();
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "-y", "--", "ls"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stderr.contains("\u{26a0} entering 'dev' despite 1 critical doctor finding (-y)"),
+        "stderr={stderr:?}"
+    );
+    assert_eq!(exec.exec_calls().len(), 1);
+}
+
+#[test]
+fn shell_without_terminal_refuses_on_primary_group_drift() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_user_primary_gid("dev", 20);
+    let (code, _stdout, _stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+    );
+    assert_eq!(code, 64);
+    assert!(exec.exec_calls().is_empty());
 }

@@ -220,6 +220,14 @@ pub(crate) fn dispatch(
                     if reporter.refuse_sudo_without_terminal() {
                         return EX_USAGE;
                     }
+                    if !show_summary {
+                        let criticals = tenants.shell_entry_criticals(&name);
+                        if !criticals.is_empty()
+                            && !reporter.allow_entry_without_terminal(&name, &criticals)
+                        {
+                            return EX_USAGE;
+                        }
+                    }
                     match tenants.shell(
                         &name,
                         host,

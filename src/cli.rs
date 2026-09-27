@@ -243,8 +243,10 @@ Examples:
     ///
     /// When the pre-entry audit finds a critical problem (pf disabled, the
     /// anchor not loaded, a reset primary group), shell shows a warning
-    /// and asks `Enter '<name>' anyway? [y/N]`, defaulting to no; `-y`
-    /// is the explicit allow.
+    /// and asks `Enter '<name>' anyway? [y/N]`, defaulting to no. With
+    /// no terminal it refuses (exit 64) instead. `-y` is the explicit
+    /// allow. A missing pf.conf anchor reference doesn't count: entry
+    /// restores it.
     ///
     /// `-d/--directory` is valid on BOTH forms and takes a path resolved
     /// on the TENANT's filesystem: relative (`projects/foo`) resolves

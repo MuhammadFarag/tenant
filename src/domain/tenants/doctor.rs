@@ -529,6 +529,23 @@ impl<'a> Tenants<'a> {
         }))
     }
 
+    /// For a run with no terminal: the criticals shell entry won't repair, found silently.
+    /// Probe failures read as clean; the caller has already warmed sudo.
+    pub(crate) fn shell_entry_criticals(&self, name: &TenantUserName) -> Vec<Finding> {
+        let mut criticals = Vec::new();
+        if self
+            .machine
+            .read_pf_status()
+            .is_ok_and(|status| !pf_status_enabled(&status))
+        {
+            criticals.push(Finding::PfDisabled);
+        }
+        if let Ok(Some(drift)) = self.check_primary_group_drift(name) {
+            criticals.push(drift);
+        }
+        criticals
+    }
+
     /// Returns the criticals the verb's own reapply won't repair.
     pub(crate) fn pre_exec_doctor_summary(
         &self,

@@ -130,7 +130,8 @@ only — code comments don't restate or cite them.
   *descriptions of state* (inherently safe); `[bootstrap]` commands are
   *actions* — re-running them is operator-chosen.
 - **Pre-exec doctor summary is a courtesy, never an abort gate** — except
-  `shell` on a critical finding: a default-no `[y/N]` (`-y` allows).
+  `shell` on a critical entry won't repair: a default-no `[y/N]` on a
+  terminal, a 64 refusal without one; `-y` allows.
 - **Exit codes.** `0` success (incl. convergent noops, default doctor);
   `64` (`EX_USAGE`) user-input refusal; `74` (`EX_IOERR`) substrate
   failure on every verb except shell — shell propagates the child's exit

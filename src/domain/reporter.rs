@@ -181,6 +181,36 @@ impl<'t, 'm> Reporter<'t, 'm> {
         self.ask(&question, false)
     }
 
+    /// No terminal to ask on, so `-y` is the only way past: refuse otherwise.
+    pub(crate) fn allow_entry_without_terminal(
+        &mut self,
+        name: &TenantUserName,
+        criticals: &[Finding],
+    ) -> bool {
+        for finding in criticals {
+            let _ = writeln!(self.terminal.stderr, "{finding}");
+        }
+        let findings = if criticals.len() == 1 {
+            "1 critical doctor finding".to_string()
+        } else {
+            format!("{} critical doctor findings", criticals.len())
+        };
+        if self.yes_flag {
+            let prefix = self.stderr_warn_prefix();
+            let _ = writeln!(
+                self.terminal.stderr,
+                "{prefix} entering '{name}' despite {findings} (-y)"
+            );
+            return true;
+        }
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to enter '{name}' with no terminal to confirm: {findings} above \
+             \u{2014} run `tenant doctor {name}`, or pass -y to enter anyway"
+        );
+        false
+    }
+
     pub fn shell_entry_declined(&mut self, name: &TenantUserName) {
         let _ = writeln!(self.terminal.stdout, "Not entering '{name}'.");
     }
