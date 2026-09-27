@@ -2408,3 +2408,18 @@ fn doctor_single_tenant_probes_its_peers_too() {
         stub_exec.probes()
     );
 }
+
+#[test]
+fn doctor_dry_run_on_a_real_profile_reports_no_anchor_drift() {
+    let stub_exec = StubHostMachine::new().with_existing_profile(
+        "dev",
+        &profile_with_permissive_posture(&["api.example.com"], &[]),
+    );
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev", "--dry-run", "--strict"],
+    );
+    assert_eq!(code, 0, "stdout={stdout:?} stderr={stderr:?}");
+    assert!(!stdout.contains("anchor file drift"), "stdout={stdout:?}");
+}

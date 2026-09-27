@@ -81,7 +81,7 @@ impl<'a> Tenants<'a> {
     /// The one profile-load path: fragments merge first, tenant profile last. Doctor's
     /// anchor-body check renders from this merge, so an unreloaded fragment edit surfaces
     /// as `AnchorBodyDrift` on every includer.
-    pub(super) fn load_profile(&self, name: &TenantUserName) -> Result<Profile, ProfileError> {
+    pub(crate) fn load_profile(&self, name: &TenantUserName) -> Result<Profile, ProfileError> {
         let content = self.machine.read_profile(name)?;
         let base = parse_partial(&content, ProfileRole::Tenant)?;
         let includes = base.include.clone();

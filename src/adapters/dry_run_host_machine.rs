@@ -120,13 +120,21 @@ impl HostMachine for DryRunHostMachine<'_> {
         Ok("Status: Enabled for 0 days 00:00:00\n".to_string())
     }
 
-    /// Must equal the render for `read_profile`'s default, or `AnchorBodyDrift` fires.
+    /// The steady render of the profile a real run would read, so `AnchorBodyDrift` can't fire.
     fn read_anchor_body(&self, name: &TenantUserName) -> Result<String, HostFileError> {
-        Ok(crate::firewall::render_anchor(
-            name.as_str(),
-            &[] as &[crate::firewall::EgressHost],
-            crate::firewall::InboundRules::Restricted(vec![]),
-        ))
+        use crate::domain::tenants::reapply::{hosts_for_level, steady_inbound_rules};
+        Ok(match self.merged_profile(name) {
+            Some(profile) => crate::firewall::render_anchor(
+                name.as_str(),
+                &hosts_for_level(&profile, crate::ModeLevel::Runtime),
+                steady_inbound_rules(&profile),
+            ),
+            None => crate::firewall::render_anchor(
+                name.as_str(),
+                &[],
+                crate::firewall::InboundRules::Restricted(vec![]),
+            ),
+        })
     }
 
     fn describe_acl(&self, op: &AclOp) -> String {
@@ -144,15 +152,11 @@ impl HostMachine for DryRunHostMachine<'_> {
         name: &TenantUserName,
         path: &std::path::Path,
     ) -> Result<PathKind, ProbeError> {
-        let declared = self
-            .read_profile(name)
-            .ok()
-            .and_then(|toml| crate::profile::parse(&toml).ok())
-            .and_then(|profile| {
-                profile.shares.into_iter().find(|share| {
-                    crate::profile::expand_tenant_path(name.as_str(), &share.tenant_path) == path
-                })
-            });
+        let declared = self.merged_profile(name).and_then(|profile| {
+            profile.shares.into_iter().find(|share| {
+                crate::profile::expand_tenant_path(name.as_str(), &share.tenant_path) == path
+            })
+        });
         Ok(match declared {
             Some(share) => PathKind::Symlink(share.host_path),
             None => PathKind::Absent,
@@ -261,6 +265,12 @@ impl HostMachine for DryRunHostMachine<'_> {
         _password: &KeychainPassword,
     ) -> Result<(), KeychainError> {
         Ok(())
+    }
+}
+
+impl DryRunHostMachine<'_> {
+    fn merged_profile(&self, name: &TenantUserName) -> Option<crate::profile::Profile> {
+        crate::domain::Tenants::new(self).load_profile(name).ok()
     }
 }
 
