@@ -360,14 +360,14 @@ fn validate_fragment_name(name: &str) -> Result<(), ProfileError> {
     Ok(())
 }
 
-/// Hosts are interpolated into a root-installed pf anchor, so pf syntax must never pass.
+/// Hosts are interpolated into a root-installed pf anchor, where a bare word can be a pf
+/// keyword (`self`) or an interface name (`lo0`), so only addresses, ranges and dotted names pass.
 fn validate_host_entry(entry: &HostEntry) -> Result<(), ProfileError> {
-    let is_host_char = |c: char| c.is_ascii_alphanumeric() || ".-:/_".contains(c);
-    if entry.host.is_empty() || !entry.host.chars().all(is_host_char) {
+    if !is_address_range_or_hostname(&entry.host) {
         return Err(ProfileError {
             message: format!(
-                "allowlist host {:?} is not a hostname, IP address or CIDR range \u{2014} \
-                 allowed characters are letters, digits and . - : / _",
+                "allowlist host {:?} is not a dotted hostname, an IP address or a CIDR range \
+                 (e.g. api.example.com, 142.250.0.0/15)",
                 entry.host
             ),
         });
@@ -382,6 +382,31 @@ fn validate_host_entry(entry: &HostEntry) -> Result<(), ProfileError> {
         });
     }
     Ok(())
+}
+
+fn is_address_range_or_hostname(host: &str) -> bool {
+    use std::net::IpAddr;
+    if let Some((addr, prefix)) = host.split_once('/') {
+        let max = match addr.parse::<IpAddr>() {
+            Ok(IpAddr::V4(_)) => 32,
+            Ok(IpAddr::V6(_)) => 128,
+            Err(_) => return false,
+        };
+        return prefix.parse::<u8>().is_ok_and(|p| p <= max);
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    host.contains('.')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
 }
 
 fn validate_bootstrap_command(command: &str) -> Result<(), ProfileError> {

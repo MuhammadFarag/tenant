@@ -838,7 +838,7 @@ fn merge_unions_shares_fragments_first() {
 #[test]
 fn merge_refuses_when_a_tier_is_never_declared() {
     let frag = parse_partial(
-        "[allowlist.runtime]\nhosts = [\"x\"]\n",
+        "[allowlist.runtime]\nhosts = [\"x.example\"]\n",
         ProfileRole::Fragment,
     )
     .unwrap();
@@ -944,7 +944,7 @@ fn merge_include_only_profile_is_legal_when_fragment_complete() {
     let frag = parse_partial(
         "schema_version = 1\n\
          [allowlist.runtime]\n\
-         hosts = [\"a\"]\n\
+         hosts = [\"a.example\"]\n\
          [allowlist.install]\n\
          hosts = []\n",
         ProfileRole::Fragment,
@@ -953,16 +953,16 @@ fn merge_include_only_profile_is_legal_when_fragment_complete() {
     let prof = parse_partial("include = [\"base\"]\n", ProfileRole::Tenant).unwrap();
     let merged = merge(vec![frag, prof]).expect("include-only profile must merge");
     assert_eq!(merged.schema_version, 1);
-    assert_eq!(merged.allowlist.runtime.hosts, vec![bare("a")]);
+    assert_eq!(merged.allowlist.runtime.hosts, vec![bare("a.example")]);
 }
 
 #[test]
 fn parse_equals_single_part_merge_for_include_free_profiles() {
     let toml = "schema_version = 1\n\
                 [allowlist.runtime]\n\
-                hosts = [\"a\"]\n\
+                hosts = [\"a.example\"]\n\
                 [allowlist.install]\n\
-                hosts = [\"b\"]\n";
+                hosts = [\"b.example\"]\n";
     let via_parse = parse(toml).unwrap();
     let via_merge = merge(vec![parse_partial(toml, ProfileRole::Tenant).unwrap()]).unwrap();
     assert_eq!(via_parse, via_merge);
@@ -1164,12 +1164,21 @@ fn host_entry_with_pf_syntax_is_refused_before_it_reaches_the_anchor() {
         r#""1.2.3.4 } pass""#,
         r#""""#,
         r#""!10.0.0.0/8""#,
+        r#""self""#,
+        r#""lo0""#,
+        r#""en0:network""#,
+        r#""-""#,
+        r#""/""#,
+        r#""0/0""#,
+        r#""10.0.0.0/33""#,
+        r#""-bad.example""#,
+        r#""a..example""#,
     ] {
         let err = parse(&profile_with_runtime_host(bad)).expect_err(bad);
         assert!(
             err.message.ends_with(
-                "is not a hostname, IP address or CIDR range \u{2014} allowed characters are \
-                 letters, digits and . - : / _"
+                "is not a dotted hostname, an IP address or a CIDR range (e.g. \
+                 api.example.com, 142.250.0.0/15)"
             ),
             "{bad}: {}",
             err.message
