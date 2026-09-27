@@ -361,7 +361,7 @@ fn inbound_dry_run_verbose_shows_plan_no_echo() {
 fn inbound_confirm_y_default_proceeds_on_enter() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml());
-    let (code, stdout, _stderr) = run_with_stdin(
+    let (code, stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
         &["inbound", "dev", "restricted"],
@@ -369,8 +369,8 @@ fn inbound_confirm_y_default_proceeds_on_enter() {
     );
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("Proceed? [Y/n]"),
-        "inbound prompt should be Y-default; stdout={stdout:?}"
+        stderr.contains("Proceed? [Y/n]"),
+        "inbound prompt should be Y-default; stdout={stderr:?}"
     );
     assert!(
         stdout.contains("Tenant 'dev' inbound loopback is restricted."),

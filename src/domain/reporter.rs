@@ -122,8 +122,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         }
         let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
         loop {
-            let _ = write!(self.terminal.stdout, "Proceed? {hint} ");
-            let _ = self.terminal.stdout.flush();
+            self.prompt(&format!("Proceed? {hint} "));
             let mut line = String::new();
             match self.terminal.stdin.read_line(&mut line) {
                 Ok(0) => return ConfirmOutcome::Abort, // EOF
@@ -142,7 +141,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
                 "y" | "yes" => return ConfirmOutcome::Proceed,
                 "n" | "no" => return ConfirmOutcome::Abort,
                 _ => {
-                    let _ = writeln!(self.terminal.stdout, "Please answer y or n.");
+                    let _ = writeln!(self.terminal.stderr, "Please answer y or n.");
                 }
             }
         }
@@ -705,6 +704,14 @@ impl<'t, 'm> Reporter<'t, 'm> {
         self.ok(&format!("Tenant '{name}' keychain unlocked"));
     }
 
+    /// On stderr so a piped stdout still leaves the question on the operator's terminal; stdout
+    /// is flushed first so the summary lands above it.
+    fn prompt(&mut self, question: &str) {
+        let _ = self.terminal.stdout.flush();
+        let _ = write!(self.terminal.stderr, "{question}");
+        let _ = self.terminal.stderr.flush();
+    }
+
     fn stderr_warn_prefix(&self) -> &'static str {
         if self.terminal.colors.stderr {
             "\x1b[33m\u{26a0}\x1b[0m"
@@ -871,8 +878,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
             "  You'll be asked for your password once to apply this."
         );
         loop {
-            let _ = write!(self.terminal.stdout, "{question} [y/N] ");
-            let _ = self.terminal.stdout.flush();
+            self.prompt(&format!("{question} [y/N] "));
             let mut line = String::new();
             match self.terminal.stdin.read_line(&mut line) {
                 Ok(0) => return ConfirmOutcome::Abort, // EOF
@@ -887,7 +893,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
                 "y" | "yes" => return ConfirmOutcome::Proceed,
                 "n" | "no" => return ConfirmOutcome::Abort,
                 _ => {
-                    let _ = writeln!(self.terminal.stdout, "Please answer y or n.");
+                    let _ = writeln!(self.terminal.stderr, "Please answer y or n.");
                 }
             }
         }

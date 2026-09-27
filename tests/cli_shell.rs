@@ -1571,7 +1571,7 @@ fn shell_command_no_confirm_prompt() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev");
-    let (code, stdout, stderr) = run_with_stdin(
+    let (code, _stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
         &["shell", "dev", "--", "true"],
@@ -1579,8 +1579,8 @@ fn shell_command_no_confirm_prompt() {
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        !stdout.contains("Proceed?"),
-        "command form must not emit a confirm prompt on TTY: {stdout:?}"
+        !stderr.contains("Proceed?"),
+        "command form must not emit a confirm prompt on TTY: {stderr:?}"
     );
     assert_eq!(exec.exec_calls().len(), 1, "child runs without prompt gate");
 }

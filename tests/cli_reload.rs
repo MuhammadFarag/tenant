@@ -217,8 +217,8 @@ fn reload_profile_read_failure_surfaces_before_prompt() {
         "stderr should frame the failure; got {stderr:?}"
     );
     assert!(
-        !stdout.contains("Proceed?"),
-        "no confirm prompt should be emitted; got {stdout:?}"
+        !stderr.contains("Proceed?"),
+        "no confirm prompt should be emitted; got {stderr:?}"
     );
 }
 
@@ -1211,8 +1211,8 @@ fn reload_missing_fragment_fails_before_prompt() {
         "stderr must name the missing fragment file; got {stderr:?}"
     );
     assert!(
-        !stdout.contains("Proceed?"),
-        "no confirm prompt should be emitted; got {stdout:?}"
+        !stderr.contains("Proceed?"),
+        "no confirm prompt should be emitted; got {stderr:?}"
     );
     assert!(
         exec.firewall_ops().is_empty(),

@@ -957,8 +957,8 @@ fn destroy_with_tty_default_n_aborts_on_empty_input() {
         run_with_stdin(stub_with_tenant("dev"), &exec, &["destroy", "dev"], b"\n");
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        stdout.contains("Proceed? [y/N] "),
-        "default-N hint should appear: {stdout:?}",
+        stderr.contains("Proceed? [y/N] "),
+        "default-N hint should appear: {stderr:?}",
     );
     assert!(
         stdout.contains("Aborted by operator. No changes made."),
@@ -988,7 +988,7 @@ fn destroy_with_tty_proceeds_on_explicit_y() {
 #[test]
 fn destroy_with_yes_flag_skips_prompt() {
     let exec = StubHostMachine::new();
-    let (code, stdout, stderr) = run_with_stdin(
+    let (code, _stdout, stderr) = run_with_stdin(
         stub_with_tenant("dev"),
         &exec,
         &["destroy", "dev", "--yes"],
@@ -996,8 +996,8 @@ fn destroy_with_yes_flag_skips_prompt() {
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        !stdout.contains("Proceed?"),
-        "prompt must NOT emit with --yes: {stdout:?}",
+        !stderr.contains("Proceed?"),
+        "prompt must NOT emit with --yes: {stderr:?}",
     );
     assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }

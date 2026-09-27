@@ -661,8 +661,8 @@ fn mode_profile_read_failure_surfaces_before_prompt() {
         "stderr should frame the failure; got {stderr:?}"
     );
     assert!(
-        !stdout.contains("Proceed?"),
-        "no confirm prompt should be emitted; got {stdout:?}"
+        !stderr.contains("Proceed?"),
+        "no confirm prompt should be emitted; got {stderr:?}"
     );
 }
 

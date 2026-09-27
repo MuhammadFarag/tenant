@@ -1230,7 +1230,7 @@ fn create_post_provision_refusal_carries_recovery_hint() {
 fn create_real_verbose_interactive_emits_plan_before_prompt() {
     // The section divider only appears after the answer, so `n` leaves no verb-section output.
     let exec = StubHostMachine::new();
-    let (code, stdout, _stderr) = run_with_stdin(
+    let (code, stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
         &exec,
         &["create", "dev", "-v"],
@@ -1243,9 +1243,6 @@ fn create_real_verbose_interactive_emits_plan_before_prompt() {
     let plan_idx = stdout
         .find("Plan (commands to execute):")
         .expect("verbose plan section should emit");
-    let prompt_idx = stdout
-        .find("Proceed? [Y/n]")
-        .expect("confirm prompt should emit on TTY");
     let section_idx = stdout
         .find(&section_line("Creating tenant 'dev'"))
         .expect("section divider should emit after the operator answers");
@@ -1255,16 +1252,11 @@ fn create_real_verbose_interactive_emits_plan_before_prompt() {
          plan={plan_idx} sudo={sudo_idx} in {stdout:?}"
     );
     assert!(
-        sudo_idx < prompt_idx,
-        "Proceed? prompt should follow the Sudo line; \
-         sudo={sudo_idx} prompt={prompt_idx} in {stdout:?}"
+        sudo_idx < section_idx,
+        "the verb's section starts only after the summary; \
+         sudo={sudo_idx} section={section_idx} in {stdout:?}"
     );
-    assert!(
-        section_idx > prompt_idx,
-        "Section divider should land AFTER the confirm prompt — operator \
-         commits to the verb after seeing the plan + prompt, not before; \
-         prompt={prompt_idx} section={section_idx} in {stdout:?}"
-    );
+    assert!(stderr.contains("Proceed? [Y/n]"), "stderr={stderr:?}");
     assert!(
         stdout.contains("  \u{2022} Create share group 'dev-tenant-share' (GID 600)"),
         "plan should carry the intent bullet for CreateShareGroup: {stdout:?}"
@@ -1290,8 +1282,8 @@ fn create_with_tty_proceeds_on_y() {
         "summary should emit: {stdout:?}",
     );
     assert!(
-        stdout.contains("Proceed? [Y/n] "),
-        "prompt should emit: {stdout:?}",
+        stderr.contains("Proceed? [Y/n] "),
+        "prompt should emit: {stderr:?}",
     );
     assert!(
         stdout.contains(&section_line("Creating tenant 'dev'")),
@@ -1331,7 +1323,7 @@ fn create_with_tty_aborts_on_n() {
 #[test]
 fn create_with_tty_empty_input_uses_default_yes() {
     let exec = StubHostMachine::new();
-    let (code, stdout, stderr) = run_with_stdin(
+    let (code, _stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
         &exec,
         &["create", "dev"],
@@ -1339,8 +1331,8 @@ fn create_with_tty_empty_input_uses_default_yes() {
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        stdout.contains("Proceed? [Y/n] "),
-        "default-Y hint should appear in prompt: {stdout:?}",
+        stderr.contains("Proceed? [Y/n] "),
+        "default-Y hint should appear in prompt: {stderr:?}",
     );
     assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }
@@ -1348,7 +1340,7 @@ fn create_with_tty_empty_input_uses_default_yes() {
 #[test]
 fn create_with_yes_flag_skips_prompt_proceeds() {
     let exec = StubHostMachine::new();
-    let (code, stdout, stderr) = run_with_stdin(
+    let (code, _stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
         &exec,
         &["create", "dev", "--yes"],
@@ -1356,8 +1348,8 @@ fn create_with_yes_flag_skips_prompt_proceeds() {
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        !stdout.contains("Proceed?"),
-        "prompt must NOT emit with --yes: {stdout:?}",
+        !stderr.contains("Proceed?"),
+        "prompt must NOT emit with --yes: {stderr:?}",
     );
     assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }
@@ -1365,7 +1357,7 @@ fn create_with_yes_flag_skips_prompt_proceeds() {
 #[test]
 fn create_with_invalid_input_reprompts_then_accepts() {
     let exec = StubHostMachine::new();
-    let (code, stdout, stderr) = run_with_stdin(
+    let (code, _stdout, stderr) = run_with_stdin(
         StubUserDirectory::default(),
         &exec,
         &["create", "dev"],
@@ -1373,8 +1365,8 @@ fn create_with_invalid_input_reprompts_then_accepts() {
     );
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert!(
-        stdout.contains("Please answer y or n."),
-        "reprompt hint should appear: {stdout:?}",
+        stderr.contains("Please answer y or n."),
+        "reprompt hint should appear: {stderr:?}",
     );
     assert!(!exec.account_ops().is_empty(), "substrate should fire");
 }
@@ -1922,4 +1914,21 @@ fn create_refuses_an_existing_profile_that_does_not_parse_before_creating_anythi
         "stderr={stderr:?}"
     );
     assert!(exec.account_ops().is_empty() && exec.profile_ops().is_empty());
+}
+
+#[test]
+fn create_confirm_prompt_goes_to_stderr_so_piped_stdout_still_prompts() {
+    let exec = StubHostMachine::new();
+    let (code, stdout, stderr) = run_with_stdin(
+        StubUserDirectory::default(),
+        &exec,
+        &["create", "dev"],
+        b"maybe\ny\n",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        stderr,
+        "Proceed? [Y/n] Please answer y or n.\nProceed? [Y/n] "
+    );
+    assert!(!stdout.contains("Proceed?"), "stdout={stdout:?}");
 }

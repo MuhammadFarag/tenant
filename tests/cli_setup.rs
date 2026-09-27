@@ -65,7 +65,7 @@ fn setup_eof_on_prompt_declines() {
 #[test]
 fn setup_reprompts_on_unrecognized_then_accepts() {
     let exec = StubHostMachine::new();
-    let (code, stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"maybe\ny\n");
+    let (code, _stdout, stderr) = run_with_stdin(no_tenants(), &exec, &["setup"], b"maybe\ny\n");
     assert_eq!(code, 0, "stderr={stderr:?}");
     assert_eq!(
         exec.pam_ops(),
@@ -73,8 +73,8 @@ fn setup_reprompts_on_unrecognized_then_accepts() {
         "reprompt then 'y' must enable"
     );
     assert!(
-        stdout.contains("Please answer y or n."),
-        "unrecognized input should reprompt; stdout={stdout:?}"
+        stderr.contains("Please answer y or n."),
+        "unrecognized input should reprompt; stdout={stderr:?}"
     );
 }
 
