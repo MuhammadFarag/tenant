@@ -159,7 +159,7 @@ fn macos_describes_exec_as_user() {
             argv: vec!["ls".into(), "/tmp".into()],
             dir: None,
         }),
-        "sudo -iu dev -- ls /tmp",
+        r#"sudo -H -u dev -- /bin/zsh -lc 'cd "$HOME" && exec "$@"' zsh ls /tmp"#,
     );
 }
 
@@ -172,7 +172,7 @@ fn macos_describes_exec_as_user_preserves_quoted_argv_element() {
             argv: vec!["bash".into(), "-c".into(), "curl https://x | bash".into(),],
             dir: None,
         }),
-        "sudo -iu dev -- bash -c curl https://x | bash",
+        r#"sudo -H -u dev -- /bin/zsh -lc 'cd "$HOME" && exec "$@"' zsh bash -c 'curl https://x | bash'"#,
     );
 }
 
@@ -667,7 +667,7 @@ fn macos_describes_login_as_user_with_directory() {
 
 #[test]
 fn macos_describes_exec_as_user_with_directory() {
-    // `"$@"` + the `sh` placeholder keep the operator's argv boundaries intact.
+    // `"$@"` + the `zsh` placeholder keep the operator's argv boundaries intact.
     let s = MacosHostMachine;
     assert_eq!(
         s.describe_account(&AccountOp::ExecAsUser {
@@ -675,7 +675,7 @@ fn macos_describes_exec_as_user_with_directory() {
             argv: vec!["ls".into(), "/tmp".into()],
             dir: Some(PathBuf::from("/Users/dev/projects/foo")),
         }),
-        "sudo -iu dev -- /bin/sh -c 'cd /Users/dev/projects/foo && exec \"$@\"' sh ls /tmp",
+        r#"sudo -H -u dev -- /bin/zsh -lc 'cd /Users/dev/projects/foo && exec "$@"' zsh ls /tmp"#,
     );
 }
 
@@ -693,7 +693,7 @@ fn macos_describes_directory_needing_quotes() {
 }
 
 // TODO(smell): derive `describe_account`'s dir-less display from `account_argv` so the two can't diverge.
-// Until then this is the only executed-argv coverage of the dir-less arms.
+// Until then this is the only executed-argv coverage of the dir-less `LoginAsUser` arm.
 #[test]
 fn macos_account_argv_wraps_only_when_directory_present() {
     use tenant::adapters::macos::host_machine::account_argv;
@@ -703,34 +703,6 @@ fn macos_account_argv_wraps_only_when_directory_present() {
             dir: None,
         }),
         vec!["sudo", "-iu", "dev"],
-    );
-    assert_eq!(
-        account_argv(&AccountOp::ExecAsUser {
-            name: "dev".into(),
-            argv: vec!["ls".into(), "/tmp".into()],
-            dir: None,
-        }),
-        vec!["sudo", "-iu", "dev", "--", "ls", "/tmp"],
-    );
-    assert_eq!(
-        account_argv(&AccountOp::ExecAsUser {
-            name: "dev".into(),
-            argv: vec!["bash".into(), "-c".into(), "echo a b".into()],
-            dir: Some(PathBuf::from("/w")),
-        }),
-        vec![
-            "sudo",
-            "-iu",
-            "dev",
-            "--",
-            "/bin/sh",
-            "-c",
-            "cd /w && exec \"$@\"",
-            "sh",
-            "bash",
-            "-c",
-            "echo a b",
-        ],
     );
     assert_eq!(
         account_argv(&AccountOp::LoginAsUser {
@@ -747,4 +719,53 @@ fn macos_account_argv_wraps_only_when_directory_present() {
             "cd '/Users/dev/my work' && exec \"$SHELL\"",
         ],
     );
+}
+
+// Runs the argv minus the sudo prefix as the current user: the sandbox has no sudo, but
+// everything after `--` is what the tenant's side evaluates.
+fn run_exec_as_user_locally(argv: Vec<String>, dir: Option<PathBuf>) -> std::process::ExitStatus {
+    use tenant::adapters::macos::host_machine::account_argv;
+    let full = account_argv(&AccountOp::ExecAsUser {
+        name: "dev".into(),
+        argv,
+        dir,
+    });
+    assert_eq!(full[..5], ["sudo", "-H", "-u", "dev", "--"]);
+    std::process::Command::new(&full[5])
+        .args(&full[6..])
+        .status()
+        .unwrap()
+}
+
+fn scratch_dir(test: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tenant-{test}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn macos_exec_as_user_evaluates_the_command_once() {
+    let out = scratch_dir("exec-once").join("out");
+    let command = format!("printf '%s\\n' '$X' > {}", out.display());
+    let status = run_exec_as_user_locally(vec!["/bin/sh".into(), "-c".into(), command], None);
+    assert!(status.success());
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "$X\n");
+    std::fs::remove_dir_all(out.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn macos_exec_as_user_runs_argv_in_directory() {
+    let dir = scratch_dir("exec-dir").canonicalize().unwrap();
+    let out = dir.join("out");
+    let command = format!("pwd > {}", out.display());
+    let status = run_exec_as_user_locally(
+        vec!["/bin/sh".into(), "-c".into(), command],
+        Some(dir.clone()),
+    );
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        format!("{}\n", dir.display())
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }

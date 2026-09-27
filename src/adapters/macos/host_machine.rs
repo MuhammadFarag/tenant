@@ -51,10 +51,7 @@ impl HostMachine for MacosHostMachine {
                 Some(_) => render_argv(&account_argv(op)),
                 None => format!("sudo -iu {name}"),
             },
-            AccountOp::ExecAsUser { name, argv, dir } => match dir {
-                Some(_) => render_argv(&account_argv(op)),
-                None => format!("sudo -iu {name} -- {}", argv.join(" ")),
-            },
+            AccountOp::ExecAsUser { .. } => render_argv(&account_argv(op)),
             AccountOp::EnsureDirAsUser { name, path } => {
                 format!("sudo -n -u {name} /bin/mkdir -p {}", path.display())
             }
@@ -1155,21 +1152,21 @@ pub fn account_argv(op: &AccountOp) -> Vec<String> {
             Some(dir) => sudo_sh_argv(name, &[cd_wrapper(dir, "exec \"$SHELL\"")]),
             None => vec!["sudo".into(), "-iu".into(), name.0.clone()],
         },
-        AccountOp::ExecAsUser { name, argv, dir } => match dir {
-            // `"$@"` + the `sh` argv[0] placeholder hand the operator's
-            // command to the inner shell as positional parameters — argv
-            // boundaries survive with zero re-quoting.
-            Some(dir) => {
-                let mut tail = vec![cd_wrapper(dir, "exec \"$@\""), "sh".to_string()];
-                tail.extend(argv.iter().cloned());
-                sudo_sh_argv(name, &tail)
-            }
-            None => {
-                let mut full = vec!["sudo".into(), "-iu".into(), name.0.clone(), "--".into()];
-                full.extend(argv.iter().cloned());
-                full
-            }
-        },
+        AccountOp::ExecAsUser { name, argv, dir } => {
+            // Not `sudo -i`: it joins the argv into one string for the login shell,
+            // which re-expands every `$` in the command before it runs.
+            let cd = dir.as_deref().map_or("cd \"$HOME\"".to_string(), |d| {
+                format!("cd {}", sh_quote(&d.display().to_string()))
+            });
+            let mut full: Vec<String> =
+                ["sudo", "-H", "-u", name.0.as_str(), "--", "/bin/zsh", "-lc"]
+                    .map(String::from)
+                    .into();
+            full.push(format!("{cd} && exec \"$@\""));
+            full.push("zsh".into());
+            full.extend(argv.iter().cloned());
+            full
+        }
         AccountOp::EnsureDirAsUser { name, path } => vec![
             "sudo".into(),
             "-n".into(),

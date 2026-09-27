@@ -222,10 +222,10 @@ Examples:
     ///
     /// `tenant shell <name> [--mode install|runtime] -- <cmd...>`
     /// (command form): same reapply at the requested tier (runtime by
-    /// default), runs `<cmd...>` as the tenant via `sudo -iu <name>`,
-    /// then always reapplies at runtime tier on completion —
-    /// guarantees on-disk state returns to runtime even if `--mode
-    /// install` widened it. The child's exit code propagates to the
+    /// default), runs `<cmd...>` verbatim as the tenant in a zsh login
+    /// shell (no second `$` expansion), then always reapplies at
+    /// runtime tier on completion — guarantees on-disk state returns
+    /// to runtime even if `--mode install` widened it. The child's exit code propagates to the
     /// verb's exit. A narrow-on-completion failure emits a warning to
     /// stderr naming `tenant mode <name> runtime` for recovery, but
     /// does NOT override the child's exit code.
