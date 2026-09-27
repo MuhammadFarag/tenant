@@ -1396,3 +1396,25 @@ fn reload_without_terminal_on_cold_sudo_refuses_before_mutation() {
     );
     assert!(exec.firewall_ops().is_empty() && exec.account_ops().is_empty());
 }
+
+#[test]
+fn reload_renders_permissive_inbound_when_profile_declares_posture() {
+    let exec = StubHostMachine::new().with_existing_profile(
+        "dev",
+        &profile_with_permissive_posture(&["api.example.com"], &[]),
+    );
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let expected = tenant::firewall::render_anchor(
+        "dev",
+        &common::egress(&["api.example.com"]),
+        tenant::firewall::InboundRules::Permissive,
+    );
+    assert_eq!(
+        exec.firewall_ops()[0],
+        FirewallOp::InstallAnchor {
+            name: "dev".into(),
+            body: expected,
+        }
+    );
+}

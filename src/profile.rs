@@ -95,6 +95,17 @@ impl From<RawHostEntry> for HostEntry {
 pub struct Inbound {
     #[serde(default)]
     pub ports: Vec<u16>,
+    #[serde(default)]
+    pub posture: InboundPosture,
+}
+
+/// The steady state every reapply renders; `tenant inbound` widens on top of it.
+#[derive(Debug, Deserialize, PartialEq, Eq, Default, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum InboundPosture {
+    #[default]
+    Restricted,
+    Permissive,
 }
 
 /// Each runs as the tenant via `/bin/sh -c`; the operator owns idempotency
@@ -267,6 +278,14 @@ pub fn merge(parts: Vec<PartialProfile>) -> Result<Profile, ProfileError> {
         .iter()
         .flat_map(|p| p.inbound.ports.iter().copied())
         .collect();
+    let posture = if parts
+        .iter()
+        .any(|p| p.inbound.posture == InboundPosture::Permissive)
+    {
+        InboundPosture::Permissive
+    } else {
+        InboundPosture::Restricted
+    };
     let commands: Vec<String> = parts
         .iter()
         .flat_map(|p| p.bootstrap.commands.iter().cloned())
@@ -291,7 +310,7 @@ pub fn merge(parts: Vec<PartialProfile>) -> Result<Profile, ProfileError> {
         schema_version,
         allowlist: Allowlist { runtime, install },
         shares,
-        inbound: Inbound { ports },
+        inbound: Inbound { ports, posture },
         bootstrap: Bootstrap { commands },
     })
 }

@@ -2807,3 +2807,59 @@ fn shell_command_without_terminal_on_cold_sudo_refuses_before_entry() {
     assert_eq!(stderr, SUDO_NEEDS_TERMINAL_REFUSAL);
     assert!(exec.firewall_ops().is_empty() && exec.exec_calls().is_empty());
 }
+
+#[test]
+fn shell_command_install_on_permissive_profile_keeps_inbound_permissive_both_ways() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile(
+            "dev",
+            &profile_with_permissive_posture(&["api.example.com"], &["pypi.org"]),
+        )
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--mode", "install", "--", "ls"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let body = |hosts: &[&str]| {
+        tenant::firewall::render_anchor(
+            "dev",
+            &common::egress(hosts),
+            tenant::firewall::InboundRules::Permissive,
+        )
+    };
+    assert_eq!(
+        exec.firewall_ops(),
+        vec![
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: body(&["api.example.com", "pypi.org"]),
+            },
+            FirewallOp::Reload,
+            FirewallOp::InstallAnchor {
+                name: "dev".into(),
+                body: body(&["api.example.com"]),
+            },
+            FirewallOp::Reload,
+        ],
+    );
+}
+
+#[test]
+fn shell_inbound_restricted_refuses_on_permissive_profile() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile(
+            "dev",
+            &profile_with_permissive_posture(&["api.example.com"], &[]),
+        )
+        .with_default_stash("dev");
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--inbound", "restricted", "--", "ls"],
+    );
+    assert_eq!(code, 64);
+    assert_eq!(stderr, refuse_restricted_on_permissive_profile("dev"));
+    assert!(exec.firewall_ops().is_empty() && exec.exec_calls().is_empty());
+}

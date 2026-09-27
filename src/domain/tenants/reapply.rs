@@ -6,7 +6,7 @@ use crate::domain::{
 use crate::firewall::{
     EgressHost, InboundRules, ensure_anchor_ref, is_anchor_referenced, render_anchor,
 };
-use crate::profile::{Profile, ProfileError};
+use crate::profile::{InboundPosture, Profile, ProfileError};
 use crate::{InboundLevel, ModeLevel};
 
 use super::shares::ShareOps;
@@ -21,6 +21,7 @@ pub(crate) enum ModeError {
     Account(AccountError),
     Probe(ProbeError),
     Share(ShareError),
+    RestrictedOnPermissiveProfile,
 }
 
 /// `Light` (mode, shell) skips the recursive ACL, cowork-dir and primary-group passes;
@@ -80,14 +81,25 @@ pub(crate) struct ReloadAllOutcome {
 
 /// The inbound axis for verbs that don't control it; empty ports stays locked.
 pub(crate) fn steady_inbound_rules(profile: &Profile) -> InboundRules {
-    InboundRules::Restricted(profile.inbound.ports.clone())
+    match profile.inbound.posture {
+        InboundPosture::Permissive => InboundRules::Permissive,
+        InboundPosture::Restricted => InboundRules::Restricted(profile.inbound.ports.clone()),
+    }
 }
 
 /// Lives in the domain, not `firewall.rs`, so the renderer stays free of `cli` types.
-pub(crate) fn inbound_rules_for_level(profile: &Profile, level: InboundLevel) -> InboundRules {
-    match level {
-        InboundLevel::Permissive => InboundRules::Permissive,
-        InboundLevel::Restricted => InboundRules::Restricted(profile.inbound.ports.clone()),
+pub(crate) fn inbound_rules_for_level(
+    profile: &Profile,
+    level: InboundLevel,
+) -> Result<InboundRules, ModeError> {
+    match (level, profile.inbound.posture) {
+        (InboundLevel::Permissive, _) => Ok(InboundRules::Permissive),
+        (InboundLevel::Restricted, InboundPosture::Permissive) => {
+            Err(ModeError::RestrictedOnPermissiveProfile)
+        }
+        (InboundLevel::Restricted, InboundPosture::Restricted) => {
+            Ok(InboundRules::Restricted(profile.inbound.ports.clone()))
+        }
     }
 }
 
@@ -169,7 +181,7 @@ impl<'a> Tenants<'a> {
     ) -> Result<ReapplyPlan, ModeError> {
         let hosts = hosts_for_level(parsed_profile, level);
         let inbound = match inbound_override {
-            Some(inbound_level) => inbound_rules_for_level(parsed_profile, inbound_level),
+            Some(inbound_level) => inbound_rules_for_level(parsed_profile, inbound_level)?,
             None => steady_inbound_rules(parsed_profile),
         };
         let install_anchor = FirewallOp::InstallAnchor {
@@ -301,6 +313,9 @@ impl<'a> Tenants<'a> {
                     ModeError::Account(e) => reporter.mode_account_failed(name, e),
                     ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
                     ModeError::Share(e) => reporter.refuse_reload_share(name, e),
+                    ModeError::RestrictedOnPermissiveProfile => {
+                        reporter.refuse_restricted_on_permissive_profile(name)
+                    }
                 }
             }
         }

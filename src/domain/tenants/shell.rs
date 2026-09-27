@@ -80,7 +80,7 @@ impl<'a> Tenants<'a> {
         host: &HostUserName,
         argv: &[String],
         mode: ModeLevel,
-        inbound: InboundLevel,
+        inbound: Option<InboundLevel>,
         directory: Option<&str>,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
@@ -146,26 +146,20 @@ impl<'a> Tenants<'a> {
         host: &HostUserName,
         argv: &[String],
         mode: ModeLevel,
-        inbound: InboundLevel,
+        inbound: Option<InboundLevel>,
         dir: Option<&Path>,
         reporter: &mut Reporter,
     ) -> Result<i32, ShellError> {
         reporter.shell_command_intent(name, mode);
 
         let entry_plan: ReapplyPlan = self
-            .build_reapply_plan(name, host, mode, Some(inbound), ReapplyScope::Light)
+            .build_reapply_plan(name, host, mode, inbound, ReapplyScope::Light)
             .map_err(ShellError::Mode)?;
 
         if let Err(entry_err) = self.execute_reapply_plan(&entry_plan, reporter) {
             // Best-effort: the entry failure is the operator's signal, so a narrow error is dropped.
             let _ = self
-                .build_reapply_plan(
-                    name,
-                    host,
-                    ModeLevel::Runtime,
-                    Some(InboundLevel::Restricted),
-                    ReapplyScope::Light,
-                )
+                .build_reapply_plan(name, host, ModeLevel::Runtime, None, ReapplyScope::Light)
                 .and_then(|p| self.execute_reapply_plan(&p, reporter));
             return Err(ShellError::Mode(entry_err));
         }
@@ -174,18 +168,12 @@ impl<'a> Tenants<'a> {
 
         let child_result = self.machine.exec_as_tenant(name, argv, dir);
 
-        let widened = mode == ModeLevel::Install || inbound == InboundLevel::Permissive;
+        let widened = mode == ModeLevel::Install || inbound == Some(InboundLevel::Permissive);
         let narrow_result = if !widened {
             Ok(())
         } else {
-            self.build_reapply_plan(
-                name,
-                host,
-                ModeLevel::Runtime,
-                Some(InboundLevel::Restricted),
-                ReapplyScope::Light,
-            )
-            .and_then(|p| self.execute_reapply_plan(&p, reporter))
+            self.build_reapply_plan(name, host, ModeLevel::Runtime, None, ReapplyScope::Light)
+                .and_then(|p| self.execute_reapply_plan(&p, reporter))
         };
 
         match (child_result, narrow_result) {

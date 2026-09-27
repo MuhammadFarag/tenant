@@ -1,9 +1,7 @@
 use super::reporter::{ConfirmOutcome, Reporter};
 use super::{AccountOp, FirewallOp, KeychainOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
-use crate::{
-    Cli, HelpTopic, InboundLevel, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR,
-};
+use crate::{Cli, HelpTopic, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR};
 
 const EX_USAGE: u8 = 64;
 const EX_IOERR: u8 = 74;
@@ -165,7 +163,6 @@ pub(crate) fn dispatch(
                 }
                 tenants::Eligibility::Destroyable => {
                     let resolved_mode = mode.unwrap_or(ModeLevel::Runtime);
-                    let resolved_inbound = inbound.unwrap_or(InboundLevel::Restricted);
                     if show_summary {
                         if argv.is_empty() {
                             reporter.shell_summary(&name, host, shell_directory.as_deref());
@@ -193,7 +190,7 @@ pub(crate) fn dispatch(
                         host,
                         &argv,
                         resolved_mode,
-                        resolved_inbound,
+                        inbound,
                         shell_directory.as_deref(),
                         reporter,
                     ) {
@@ -207,6 +204,12 @@ pub(crate) fn dispatch(
                         Err(tenants::ShellError::Account(e)) => {
                             reporter.shell_failed(&name, &e);
                             EX_IOERR
+                        }
+                        Err(tenants::ShellError::Mode(
+                            tenants::ModeError::RestrictedOnPermissiveProfile,
+                        )) => {
+                            reporter.refuse_restricted_on_permissive_profile(&name);
+                            EX_USAGE
                         }
                         Err(tenants::ShellError::Mode(e)) => {
                             surface_shell_mode_error(reporter, &name, &e);
@@ -348,6 +351,10 @@ pub(crate) fn dispatch(
                         tenants::ReapplyScope::Light,
                     ) {
                         Ok(p) => p,
+                        Err(tenants::ModeError::RestrictedOnPermissiveProfile) => {
+                            reporter.refuse_restricted_on_permissive_profile(&name);
+                            return EX_USAGE;
+                        }
                         Err(e) => {
                             surface_inbound_error(reporter, &name, &e);
                             return EX_IOERR;
@@ -750,6 +757,9 @@ fn surface_mode_error(
         tenants::ModeError::Account(e) => reporter.mode_account_failed(name, e),
         tenants::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
         tenants::ModeError::Share(e) => reporter.refuse_mode_share(name, e),
+        tenants::ModeError::RestrictedOnPermissiveProfile => {
+            reporter.refuse_restricted_on_permissive_profile(name)
+        }
     }
 }
 
@@ -766,6 +776,9 @@ fn surface_shell_mode_error(
         tenants::ModeError::Account(e) => reporter.shell_narrow_account_failed(name, e),
         tenants::ModeError::Probe(e) => reporter.shell_narrow_probe_failed(name, e),
         tenants::ModeError::Share(e) => reporter.refuse_shell_share(name, e),
+        tenants::ModeError::RestrictedOnPermissiveProfile => {
+            reporter.refuse_restricted_on_permissive_profile(name)
+        }
     }
 }
 
@@ -781,6 +794,9 @@ fn surface_inbound_error(
         tenants::ModeError::Account(e) => reporter.mode_account_failed(name, e),
         tenants::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
         tenants::ModeError::Share(e) => reporter.refuse_inbound_share(name, e),
+        tenants::ModeError::RestrictedOnPermissiveProfile => {
+            reporter.refuse_restricted_on_permissive_profile(name)
+        }
     }
 }
 
@@ -796,6 +812,9 @@ fn surface_reload_error(
         tenants::ModeError::Account(e) => reporter.mode_account_failed(name, e),
         tenants::ModeError::Probe(e) => reporter.mode_probe_failed(name, e),
         tenants::ModeError::Share(e) => reporter.refuse_reload_share(name, e),
+        tenants::ModeError::RestrictedOnPermissiveProfile => {
+            reporter.refuse_restricted_on_permissive_profile(name)
+        }
     }
 }
 
@@ -1050,6 +1069,9 @@ fn surface_create_post_provision_error(
         tenants::ModeError::Account(e) => reporter.create_post_provision_account_failed(name, e),
         tenants::ModeError::Probe(e) => reporter.create_post_provision_probe_failed(name, e),
         tenants::ModeError::Share(e) => reporter.refuse_create_post_provision_share(name, e),
+        tenants::ModeError::RestrictedOnPermissiveProfile => {
+            reporter.refuse_restricted_on_permissive_profile(name)
+        }
     }
 }
 

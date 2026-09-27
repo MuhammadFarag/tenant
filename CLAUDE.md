@@ -117,6 +117,8 @@ only — code comments don't restate or cite them.
   host-vs-peer isolation — pf can't see the initiator on shared loopback.
   `[inbound]` gates only tenant-opened listeners; tenant→host loopback
   always passes.
+  Inbound steady state is the profile's `posture`; an explicit
+  `restricted` on a permissive profile refuses (64) — edit the profile.
 - **`ReapplyScope::{Light, Full}` splits reapply by cost.** Light
   (mode/shell) skips the recursive ACL + cowork passes — inheritable ACE
   bits make that sound in steady state; Full (reload,

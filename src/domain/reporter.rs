@@ -999,6 +999,16 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    pub fn refuse_restricted_on_permissive_profile(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: cannot narrow '{name}' to restricted inbound: its profile declares \
+             [inbound] posture = \"permissive\" \u{2014} set it to \"restricted\" (or remove it) in \
+             {} or the include that sets it, then run `tenant reload {name}`",
+            display_path_for(name.as_str())
+        );
+    }
+
     pub fn refuse_inbound_absent(&mut self, name: &TenantUserName) {
         let _ = writeln!(
             self.terminal.stderr,
@@ -1333,6 +1343,12 @@ impl<'t, 'm> Reporter<'t, 'm> {
                     "inbound: restricted \u{2014} {ports_spec} open to host + peer tenants"
                 );
                 let painted = self.paint_stdout(&line, ansi::dim);
+                let _ = writeln!(self.terminal.stdout, "{painted}");
+            }
+            Finding::InboundPermissiveByProfile { .. } => {
+                let line =
+                    "inbound: permissive (profile) \u{2014} all ports open to host + peer tenants";
+                let painted = self.paint_stdout(line, ansi::dim);
                 let _ = writeln!(self.terminal.stdout, "{painted}");
             }
             Finding::InboundPermissive { .. } => {

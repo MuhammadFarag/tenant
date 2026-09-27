@@ -186,9 +186,11 @@ Examples:
     /// (a service that binds a random port the operator can't predeclare).
     ///
     /// Permissive widening is intentionally non-persistent at the session
-    /// boundary — `tenant shell <name>` auto-narrows inbound back to
-    /// restricted on entry, so a forgotten `inbound permissive` doesn't
-    /// leak into a future shell session.
+    /// boundary — `tenant shell <name>` auto-narrows inbound back to the
+    /// profile's posture on entry, so a forgotten `inbound permissive`
+    /// doesn't leak into a future shell session. For a persistent
+    /// all-ports posture (JVM build tools), declare `[inbound] posture =
+    /// "permissive"` in the profile; `restricted` then refuses.
     ///
     /// HONEST SCOPE: `restricted` is SURFACE-REDUCTION, not host-vs-peer
     /// isolation. A declared port is reachable by the host AND by peer

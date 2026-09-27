@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use tenant::profile::{
-    Allowlist, Bootstrap, HostEntry, Inbound, PartialProfile, Profile, ProfileRole, Share,
-    ShareMode, Tier, default_profile_toml, expand_tenant_path, merge, parse, parse_partial,
+    Allowlist, Bootstrap, HostEntry, Inbound, InboundPosture, PartialProfile, Profile, ProfileRole,
+    Share, ShareMode, Tier, default_profile_toml, expand_tenant_path, merge, parse, parse_partial,
 };
 
 fn bare(host: &str) -> HostEntry {
@@ -26,7 +26,7 @@ fn parse_default_toml_yields_schema_1_with_empty_allowlists() {
                 install: Tier { hosts: vec![] },
             },
             shares: vec![],
-            inbound: Inbound { ports: vec![] },
+            inbound: Inbound::default(),
             bootstrap: Bootstrap { commands: vec![] },
         }
     );
@@ -1126,4 +1126,27 @@ fn merge_does_not_dedupe_repeated_bootstrap_command() {
         merged.bootstrap.commands,
         vec!["echo same".to_string(), "echo same".to_string()]
     );
+}
+
+#[test]
+fn merge_posture_is_permissive_when_any_part_declares_it() {
+    let fragment = parse_partial(
+        "[inbound]\nposture = \"permissive\"\n",
+        ProfileRole::Fragment,
+    )
+    .unwrap();
+    let profile = parse_partial(
+        "schema_version = 1\n[allowlist.runtime]\nhosts = []\n[allowlist.install]\nhosts = []\n",
+        ProfileRole::Tenant,
+    )
+    .unwrap();
+    let merged = merge(vec![fragment, profile]).unwrap();
+    assert_eq!(merged.inbound.posture, InboundPosture::Permissive);
+}
+
+#[test]
+fn unknown_posture_value_rejected() {
+    let toml = "schema_version = 1\n[allowlist.runtime]\nhosts = []\n[allowlist.install]\n\
+                hosts = []\n[inbound]\nposture = \"open\"\n";
+    assert!(parse(toml).is_err());
 }

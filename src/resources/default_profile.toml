@@ -46,6 +46,9 @@ hosts = [
 ports = [
 #   3000,
 ]
+# JVM build tools (Gradle, Maven, sbt, Bazel) fork workers on random
+# loopback ports and need every port open, persistently. Uncomment:
+# posture = "permissive"
 
 [bootstrap]
 # Idempotent shell commands `tenant bootstrap <name>` runs AS the tenant

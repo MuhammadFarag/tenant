@@ -85,13 +85,22 @@ Inbound loopback ports
 
   [inbound]
   ports = [3000, 8080]
+  posture = "restricted"  # default; or "permissive"
 
   A bare TCP port list gating inbound loopback (127.0.0.1) in the
   default `restricted` posture. An absent section or empty list
   (`ports = []`) locks inbound loopback entirely. `tenant inbound
   <name> permissive` is the temporary all-ports widen (the
   localhost-redirect OAuth window); `tenant shell <name>` and
-  `tenant reload` narrow inbound back to restricted.
+  `tenant reload` narrow inbound back to the profile's posture.
+
+  `posture = "permissive"` makes all-ports the steady state: every
+  reapply renders it and `tenant inbound <name> restricted` refuses
+  until the profile changes. Any tenant that runs a JVM build tool
+  (Gradle, Maven, sbt, Bazel) needs it — they fork workers that
+  report back over random loopback ports, and daemon-off settings do
+  not avoid it. A fragment declaring it makes the merged profile
+  permissive.
 
   HONEST SCOPE — read before relying on this:
 

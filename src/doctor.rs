@@ -3,6 +3,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::profile::{Inbound, InboundPosture};
+
 use crate::domain::tenants::tenant_share_group_name;
 use crate::domain::{
     AccessMode, AccessOutcome, GroupId, GroupName, HostUserName, TENANT_KEYCHAIN_FILE,
@@ -77,6 +79,9 @@ pub enum Finding {
     InboundPermissive {
         tenant: TenantUserName,
     },
+    InboundPermissiveByProfile {
+        tenant: TenantUserName,
+    },
     AclDrift {
         tenant: TenantUserName,
         host_path: PathBuf,
@@ -135,6 +140,7 @@ impl Finding {
             Finding::AnchorBodyDrift { .. } => Severity::Warning,
             Finding::InboundExposure { .. } => Severity::Info,
             Finding::InboundPermissive { .. } => Severity::Warning,
+            Finding::InboundPermissiveByProfile { .. } => Severity::Info,
             Finding::AclDrift { .. } => Severity::Warning,
             Finding::CoworkAclDrift { .. } => Severity::Warning,
             Finding::CoworkDirAbsent { .. } => Severity::Warning,
@@ -215,6 +221,20 @@ Alternative
   blanket widen when the port is known."
                 ))
             }
+            Finding::InboundPermissiveByProfile { tenant } => Some(format!(
+                "Why this matters
+  Tenant '{tenant}'s profile declares `[inbound] posture = \"permissive\"`, so
+  every reapply renders all loopback TCP ports open. JVM build tools
+  (Gradle, Maven, sbt, Bazel) need this: they fork workers that report
+  back over random loopback ports. But every listener the tenant opens
+  is reachable by the host AND by every peer tenant (pf can't see the
+  initiator across shared 127.0.0.1).
+
+Recommended fix
+  Nothing to fix \u{2014} this is informational. If the tenant no longer
+  needs it, set `posture = \"restricted\"` (or remove it) in the profile
+  and run `tenant reload {tenant}`."
+            )),
             Finding::InboundPermissive { tenant } => Some(format!(
                 "Why this matters
   Tenant '{tenant}'s anchor is in the PERMISSIVE inbound posture: every
@@ -859,6 +879,11 @@ impl fmt::Display for Finding {
                      reachable by host + peer tenants"
                 )
             }
+            Finding::InboundPermissiveByProfile { tenant } => write!(
+                f,
+                "info: tenant '{tenant}' inbound posture is permissive (profile) \u{2014} \
+                 every loopback port the tenant opens is reachable by host + peer tenants"
+            ),
             Finding::InboundPermissive { tenant } => write!(
                 f,
                 "warning: tenant '{tenant}' inbound loopback is PERMISSIVE \u{2014} \
@@ -1014,9 +1039,15 @@ fn render_port_list(ports: &[u16]) -> String {
 /// than intent.
 pub fn classify_inbound_exposure(
     tenant: &TenantUserName,
-    ports: &[u16],
+    inbound: &Inbound,
     permissive: bool,
 ) -> Option<Finding> {
+    let ports = &inbound.ports;
+    if permissive && inbound.posture == InboundPosture::Permissive {
+        return Some(Finding::InboundPermissiveByProfile {
+            tenant: tenant.clone(),
+        });
+    }
     if permissive {
         return Some(Finding::InboundPermissive {
             tenant: tenant.clone(),

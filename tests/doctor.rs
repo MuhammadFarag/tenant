@@ -7,6 +7,7 @@ use tenant::doctor::{
     classify_inbound_exposure, curated_paths,
 };
 use tenant::domain::{AccessMode, AccessOutcome, GroupId, HostUserName, TenantUserName};
+use tenant::profile::{Inbound, InboundPosture};
 
 // --- Finding display ---
 
@@ -319,7 +320,14 @@ fn finding_inbound_permissive_severity_is_warning() {
 
 #[test]
 fn classify_inbound_permissive_wins_over_declared_ports() {
-    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[3000], true);
+    let f = classify_inbound_exposure(
+        &TenantUserName::from("dev"),
+        &Inbound {
+            ports: vec![3000],
+            ..Inbound::default()
+        },
+        true,
+    );
     assert_eq!(
         f,
         Some(Finding::InboundPermissive {
@@ -330,7 +338,14 @@ fn classify_inbound_permissive_wins_over_declared_ports() {
 
 #[test]
 fn classify_inbound_permissive_with_no_declared_ports() {
-    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[], true);
+    let f = classify_inbound_exposure(
+        &TenantUserName::from("dev"),
+        &Inbound {
+            ports: vec![],
+            ..Inbound::default()
+        },
+        true,
+    );
     assert_eq!(
         f,
         Some(Finding::InboundPermissive {
@@ -341,7 +356,14 @@ fn classify_inbound_permissive_with_no_declared_ports() {
 
 #[test]
 fn classify_inbound_restricted_with_ports_is_info() {
-    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[3000, 8080], false);
+    let f = classify_inbound_exposure(
+        &TenantUserName::from("dev"),
+        &Inbound {
+            ports: vec![3000, 8080],
+            ..Inbound::default()
+        },
+        false,
+    );
     assert_eq!(
         f,
         Some(Finding::InboundExposure {
@@ -353,7 +375,14 @@ fn classify_inbound_restricted_with_ports_is_info() {
 
 #[test]
 fn classify_inbound_locked_is_no_finding() {
-    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &[], false);
+    let f = classify_inbound_exposure(
+        &TenantUserName::from("dev"),
+        &Inbound {
+            ports: vec![],
+            ..Inbound::default()
+        },
+        false,
+    );
     assert_eq!(f, None);
 }
 
@@ -1372,4 +1401,25 @@ Alternative
   sudo dscl . -create /Users/dev PrimaryGroupID 612
   The single write reload performs; skips the share reapply.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
+#[test]
+fn classify_permissive_anchor_on_permissive_profile_is_info() {
+    let inbound = Inbound {
+        ports: vec![],
+        posture: InboundPosture::Permissive,
+    };
+    let f = classify_inbound_exposure(&TenantUserName::from("dev"), &inbound, true).unwrap();
+    assert_eq!(
+        f,
+        Finding::InboundPermissiveByProfile {
+            tenant: TenantUserName::from("dev"),
+        }
+    );
+    assert_eq!(f.severity(), Severity::Info);
+    assert_eq!(
+        format!("{f}"),
+        "info: tenant 'dev' inbound posture is permissive (profile) \u{2014} \
+         every loopback port the tenant opens is reachable by host + peer tenants"
+    );
 }

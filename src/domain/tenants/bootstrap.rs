@@ -193,6 +193,9 @@ pub(crate) fn surface_bootstrap_error(
         BootstrapError::Mode(ModeError::Account(e)) => reporter.mode_account_failed(name, e),
         BootstrapError::Mode(ModeError::Probe(e)) => reporter.mode_probe_failed(name, e),
         BootstrapError::Mode(ModeError::Share(e)) => reporter.refuse_bootstrap_share(name, e),
+        BootstrapError::Mode(ModeError::RestrictedOnPermissiveProfile) => {
+            reporter.refuse_restricted_on_permissive_profile(name);
+        }
         BootstrapError::StashAbsent { name: refused } => {
             reporter.bootstrap_refuse_stash_absent(refused);
         }

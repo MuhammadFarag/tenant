@@ -375,6 +375,9 @@ fn create_writes_profile_with_correct_toml_shape() {
                 ports = [\n\
                 #   3000,\n\
                 ]\n\
+                # JVM build tools (Gradle, Maven, sbt, Bazel) fork workers on random\n\
+                # loopback ports and need every port open, persistently. Uncomment:\n\
+                # posture = \"permissive\"\n\
                 \n\
                 [bootstrap]\n\
                 # Idempotent shell commands `tenant bootstrap <name>` runs AS the tenant\n\

@@ -2264,3 +2264,23 @@ fn doctor_cowork_dir_absent_emits_warning() {
         "absence must short-circuit the ACL probe; stdout={stdout:?}"
     );
 }
+
+#[test]
+fn doctor_permissive_anchor_on_permissive_profile_is_info_not_strict_failure() {
+    let permissive_body =
+        tenant::firewall::render_anchor("dev", &[], tenant::firewall::InboundRules::Permissive);
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &profile_with_permissive_posture(&[], &[]))
+        .with_anchor_body("dev", &permissive_body);
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev", "--strict"],
+    );
+    assert_eq!(code, 0, "stdout={stdout:?} stderr={stderr:?}");
+    assert!(
+        stdout.contains("info: tenant 'dev' inbound posture is permissive (profile)"),
+        "stdout={stdout:?}"
+    );
+    assert!(!stdout.contains("PERMISSIVE"), "stdout={stdout:?}");
+}

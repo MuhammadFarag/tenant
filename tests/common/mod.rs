@@ -803,3 +803,19 @@ pub fn make_two_tenant_stub_reader() -> StubUserDirectory {
 
 pub const SUDO_NEEDS_TERMINAL_REFUSAL: &str = "tenant: this verb needs sudo and no terminal is \
      attached \u{2014} run it in your terminal, or run 'sudo -v' in this session first\n";
+
+pub fn profile_with_permissive_posture(runtime: &[&str], install: &[&str]) -> String {
+    format!(
+        "{}\n[inbound]\nposture = \"permissive\"\n",
+        profile_with_hosts(runtime, install)
+    )
+}
+
+pub fn refuse_restricted_on_permissive_profile(name: &str) -> String {
+    format!(
+        "tenant: cannot narrow '{name}' to restricted inbound: its profile declares \
+         [inbound] posture = \"permissive\" \u{2014} set it to \"restricted\" (or remove it) in \
+         ~/.config/tenant/profiles/{name}.toml or the include that sets it, then run \
+         `tenant reload {name}`\n"
+    )
+}

@@ -510,3 +510,20 @@ fn inbound_reload_failure_surfaces_without_recovery() {
         );
     }
 }
+
+#[test]
+fn inbound_restricted_refuses_when_profile_declares_permissive_posture() {
+    let exec = StubHostMachine::new().with_existing_profile(
+        "dev",
+        &profile_with_permissive_posture(&["api.example.com"], &[]),
+    );
+    let (code, stdout, stderr) = run_with_exec(
+        stub_with_tenant("dev"),
+        &exec,
+        &["inbound", "dev", "restricted"],
+    );
+    assert_eq!(code, 64);
+    assert!(stdout.is_empty(), "stdout={stdout:?}");
+    assert_eq!(stderr, refuse_restricted_on_permissive_profile("dev"));
+    assert!(exec.firewall_ops().is_empty());
+}

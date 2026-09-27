@@ -400,11 +400,7 @@ impl<'a> Tenants<'a> {
             Err(_) => return Ok(None),
         };
         let permissive = anchor_is_permissive(&self.machine.read_anchor_body(name)?);
-        Ok(classify_inbound_exposure(
-            name,
-            &parsed.inbound.ports,
-            permissive,
-        ))
+        Ok(classify_inbound_exposure(name, &parsed.inbound, permissive))
     }
 
     /// Runtime tier only: install-tier widening outside a shell session IS drift, since
