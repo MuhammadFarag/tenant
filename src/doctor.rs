@@ -103,6 +103,13 @@ pub enum Finding {
         tenant: TenantUserName,
         path: PathBuf,
     },
+    /// Inheritable ACEs land only on creation in place; a rename keeps the ACL it was born with.
+    TreeAclDrift {
+        tenant: TenantUserName,
+        root: PathBuf,
+        group: GroupName,
+        paths: Vec<PathBuf>,
+    },
     SymlinkDrift {
         tenant: TenantUserName,
         tenant_path: PathBuf,
@@ -152,6 +159,7 @@ impl Finding {
             Finding::AclDrift { .. } => Severity::Warning,
             Finding::CoworkAclDrift { .. } => Severity::Warning,
             Finding::CoworkDirAbsent { .. } => Severity::Warning,
+            Finding::TreeAclDrift { .. } => Severity::Warning,
             Finding::SymlinkDrift { .. } => Severity::Warning,
             Finding::HostNotInShareGroup { .. } => Severity::Warning,
             Finding::PrimaryGroupDrift { .. } => Severity::Critical,
@@ -227,6 +235,38 @@ Alternative
   a random port). Narrows back on `tenant inbound {tenant} restricted` or on
   `tenant shell {tenant}` entry. Prefer declaring the specific port over a
   blanket widen when the port is known."
+                ))
+            }
+            Finding::TreeAclDrift {
+                tenant,
+                root,
+                paths,
+                ..
+            } => {
+                let shown: Vec<String> = paths
+                    .iter()
+                    .take(20)
+                    .map(|p| format!("  {}", p.display()))
+                    .collect();
+                let more = match paths.len().saturating_sub(20) {
+                    0 => String::new(),
+                    n => format!("\n  \u{2026} and {n} more"),
+                };
+                Some(format!(
+                    "Why this matters
+  Entries under {} carry the share-group ACE only when created in
+  place. Tools that write via temp file + rename (Gradle, Maven, cargo,
+  npm, Android Studio) move in objects with no ACE and an owner-only
+  mode, so the other side gets EACCES on them:
+{}{more}
+
+Recommended fix
+  tenant reload {tenant}
+  Re-walks the tree and re-applies the ACE. Or keep build output
+  outside the shared tree (e.g. a Gradle init script redirecting
+  `buildDir`).",
+                    root.display(),
+                    shown.join("\n"),
                 ))
             }
             Finding::EgressResolveDrift { tenant, host, .. } => Some(format!(
@@ -905,6 +945,24 @@ impl fmt::Display for Finding {
                      reachable by host + peer tenants"
                 )
             }
+            Finding::TreeAclDrift {
+                tenant,
+                root,
+                group,
+                paths,
+            } => {
+                let (count, verb) = match paths.len() {
+                    1 => ("1 entry".to_string(), "lacks"),
+                    n => (format!("{n} entries"), "lack"),
+                };
+                write!(
+                    f,
+                    "warning: tenant '{tenant}' {count} under {} {verb} the '{group}' ACE \
+                     (moved in, not created in place) \u{2014} run `tenant reload {tenant}` \
+                     to re-walk",
+                    root.display()
+                )
+            }
             Finding::EgressResolveDrift {
                 tenant,
                 host,
@@ -1325,6 +1383,62 @@ pub fn pf_rule_presence_check(rules: &str, tenant: &str) -> Vec<Finding> {
 /// Ignores the bit list: macOS canonicalizes bit names on storage
 /// (`read,write` → `list,add_file`, …), so comparing bits false-negatives.
 /// `:` and ` allow` bound the name so `dev` can't match `dev-tenant-share`.
+/// Parses `ls -leRA <root>`: the root's entries come first, headerless; each subdirectory
+/// follows as a blank line + `<path>:` header. Names start after 8 fields (mode, links,
+/// owner, group, size, 3-token date).
+pub fn entries_missing_group_ace(listing: &str, root: &Path, group: &str) -> Vec<PathBuf> {
+    let direct = format!("group:{group} allow");
+    let inherited = format!("group:{group} inherited allow");
+    let mut dir = root.to_path_buf();
+    let mut pending: Option<(PathBuf, bool)> = None;
+    let mut missing = Vec::new();
+    let mut flush = |pending: &mut Option<(PathBuf, bool)>| {
+        if let Some((path, false)) = pending.take() {
+            missing.push(path);
+        }
+    };
+    let mut after_blank = false;
+    for line in listing.lines() {
+        if line.is_empty() {
+            flush(&mut pending);
+            after_blank = true;
+            continue;
+        }
+        if after_blank && line.ends_with(':') {
+            dir = PathBuf::from(line.trim_end_matches(':'));
+            after_blank = false;
+            continue;
+        }
+        after_blank = false;
+        if line.starts_with(' ') {
+            if let Some((_, has_ace)) = pending.as_mut() {
+                *has_ace |= line.contains(&direct) || line.contains(&inherited);
+            }
+            continue;
+        }
+        flush(&mut pending);
+        if line.starts_with("total ") || line.starts_with('l') {
+            continue;
+        }
+        if let Some(name) = after_fields(line, 8) {
+            pending = Some((dir.join(name), false));
+        }
+    }
+    flush(&mut pending);
+    missing
+}
+
+/// The rest of `line` after `n` whitespace-separated fields, byte-exact.
+fn after_fields(line: &str, n: usize) -> Option<&str> {
+    let mut rest = line;
+    for _ in 0..n {
+        rest = rest.trim_start();
+        rest = &rest[rest.find(char::is_whitespace)?..];
+    }
+    let name = rest.trim_start();
+    (!name.is_empty()).then_some(name)
+}
+
 pub fn has_group_acl_entry(listing: &str, group: &str) -> bool {
     let needle = format!("group:{group} allow");
     for raw_line in listing.lines() {

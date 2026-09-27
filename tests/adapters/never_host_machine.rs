@@ -130,6 +130,9 @@ impl HostMachine for NeverHostMachine {
     fn host_path_kind(&self, path: &std::path::Path) -> Result<PathKind, ProbeError> {
         panic!("host machine unexpectedly invoked (host_path_kind): path={path:?}");
     }
+    fn read_host_acl_tree(&self, path: &std::path::Path) -> Result<String, ProbeError> {
+        panic!("host machine unexpectedly invoked (read_host_acl_tree): path={path:?}");
+    }
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
         panic!("host machine unexpectedly invoked (read_host_acl): path={path:?}");
     }

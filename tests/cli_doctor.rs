@@ -2314,3 +2314,27 @@ fn doctor_warns_when_egress_host_resolves_outside_loaded_table() {
         "CIDR entries are not hostnames"
     );
 }
+
+#[test]
+fn doctor_warns_on_cowork_entries_moved_in_without_the_share_ace() {
+    let cowork = "/Users/Shared/tenants/dev";
+    let listing = "total 0\n\
+                   -rw-r--r--  1 dev  staff  0 Sep 26 10:01 classes.jar\n";
+    let stub_exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_host_acl_tree(std::path::Path::new(cowork), listing);
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "warning: tenant 'dev' 1 entry under /Users/Shared/tenants/dev lacks the \
+             'dev-tenant-share' ACE (moved in, not created in place) \u{2014} \
+             run `tenant reload dev` to re-walk"
+        ),
+        "stdout={stdout:?}"
+    );
+}

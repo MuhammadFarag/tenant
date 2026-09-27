@@ -104,6 +104,9 @@ pub trait HostMachine {
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError>;
 
+    /// `ls -leRA` of everything under `path` (not `path` itself).
+    fn read_host_acl_tree(&self, path: &std::path::Path) -> Result<String, ProbeError>;
+
     /// Infallible: adapters fall back to a placeholder rather than failing the verb.
     fn current_host_user_name(&self) -> HostUserName;
 

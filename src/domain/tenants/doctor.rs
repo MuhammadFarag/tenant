@@ -1,8 +1,8 @@
 use crate::ModeLevel;
 use crate::doctor::{
     Finding, SymlinkActual, anchor_body_matches, classify_egress_resolve_drift,
-    classify_inbound_exposure, curated_paths, has_env_delete_for, has_group_acl_entry, has_pam_tid,
-    pf_rule_presence_check, pf_status_enabled,
+    classify_inbound_exposure, curated_paths, entries_missing_group_ace, has_env_delete_for,
+    has_group_acl_entry, has_pam_tid, pf_rule_presence_check, pf_status_enabled,
 };
 use crate::domain::reporter::Reporter;
 use crate::domain::{
@@ -338,6 +338,11 @@ impl<'a> Tenants<'a> {
                 };
                 reporter.doctor_finding(&finding);
                 findings.push(finding);
+            } else if let Some(finding) =
+                self.check_tree_acl_drift(name, &share.host_path, &group)?
+            {
+                reporter.doctor_finding(&finding);
+                findings.push(finding);
             }
             // String-exact comparison — the profile names the operator's
             // declared intent, not a canonicalized path.
@@ -394,8 +399,27 @@ impl<'a> Tenants<'a> {
             };
             reporter.doctor_finding(&finding);
             findings.push(finding);
+        } else if let Some(finding) = self.check_tree_acl_drift(name, &cowork_path, &group)? {
+            reporter.doctor_finding(&finding);
+            findings.push(finding);
         }
         Ok(findings)
+    }
+
+    fn check_tree_acl_drift(
+        &self,
+        name: &TenantUserName,
+        root: &std::path::Path,
+        group: &crate::domain::GroupName,
+    ) -> Result<Option<Finding>, ProbeError> {
+        let listing = self.machine.read_host_acl_tree(root)?;
+        let paths = entries_missing_group_ace(&listing, root, group.as_str());
+        Ok((!paths.is_empty()).then(|| Finding::TreeAclDrift {
+            tenant: name.clone(),
+            root: root.to_path_buf(),
+            group: group.clone(),
+            paths,
+        }))
     }
 
     /// Runtime tier, against the kernel's live tables. Address and CIDR entries can't drift.

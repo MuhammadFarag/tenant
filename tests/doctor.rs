@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tenant::doctor::{
     Category, Finding, Severity, SymlinkActual, anchor_body_matches, classify,
     classify_egress_resolve_drift, classify_inbound_exposure, curated_paths,
+    entries_missing_group_ace,
 };
 use tenant::domain::{AccessMode, AccessOutcome, GroupId, HostUserName, TenantUserName};
 use tenant::profile::{Inbound, InboundPosture};
@@ -1480,4 +1481,42 @@ fn egress_resolve_drift_none_when_nothing_resolved() {
         LOADED_TABLE,
     );
     assert_eq!(f, None);
+}
+
+// --- entries_missing_group_ace: `ls -leRA <root>` → descendants without the share-group ACE ---
+
+const ACL_TREE: &str = "total 0
+drwxrwx---+ 3 alice  dev-tenant-share  96 Sep 26 10:00 app
+ 0: group:dev-tenant-share inherited allow list,add_file,search,file_inherit,directory_inherit
+-rw-r--r--  1 dev    staff             0 Sep 26 10:01 moved  in.txt
+-rw-rw----+ 1 dev    staff             0 Sep 26 10:01 direct.txt
+ 0: group:dev-tenant-share allow read,write
+lrwxr-xr-x  1 dev    staff             4 Sep 26 10:01 link -> app
+
+/Users/Shared/tenants/dev/app:
+total 0
+drwxr-xr-x+ 2 dev  staff  64 Sep 26  2025 build
+ 0: group:other-tenant-share inherited allow list
+";
+
+#[test]
+fn acl_tree_lists_entries_without_the_group_ace_skipping_symlinks() {
+    assert_eq!(
+        entries_missing_group_ace(
+            ACL_TREE,
+            std::path::Path::new("/Users/Shared/tenants/dev"),
+            "dev-tenant-share"
+        ),
+        vec![
+            PathBuf::from("/Users/Shared/tenants/dev/moved  in.txt"),
+            PathBuf::from("/Users/Shared/tenants/dev/app/build"),
+        ]
+    );
+}
+
+#[test]
+fn acl_tree_empty_listing_has_no_drift() {
+    assert!(
+        entries_missing_group_ace("", std::path::Path::new("/x"), "dev-tenant-share").is_empty()
+    );
 }

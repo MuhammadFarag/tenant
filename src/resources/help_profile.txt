@@ -153,6 +153,13 @@ Co-working directory (auto-provisioned, not configurable)
   read/writable by the other via the inheritable ACL (no umask
   fiddling required inside the tenant).
 
+  "Creates" is literal: the inherited ACE lands only on objects
+  created in place. Tools that write via temp file + rename (Gradle,
+  Maven, cargo, npm, IDEs) move in objects without it, and the other
+  side gets EACCES. `tenant doctor <name>` lists them (the same holds
+  under [[shares]]); `tenant reload <name>` re-walks and repairs. Or
+  keep build output outside the shared tree.
+
   Unlike [[shares]] (which grant access to pre-existing host
   paths), the co-working directory is a fresh tenant-managed
   workspace. `tenant destroy <name>` does NOT remove it — the dir

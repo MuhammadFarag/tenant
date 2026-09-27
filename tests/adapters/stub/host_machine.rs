@@ -157,6 +157,9 @@ pub struct StubHostMachine {
     /// Unmatched lookups synthesize a matching share-group ACE (no spurious AclDrift).
     host_acl_state: RefCell<HashMap<PathBuf, String>>,
 
+    /// Absent ⇒ an empty tree, so no tree-drift finding by default.
+    host_acl_trees: RefCell<HashMap<PathBuf, String>>,
+
     host_acl_failures: RefCell<HashMap<PathBuf, ProbeError>>,
 
     /// Unmatched lookups default to `true` (no spurious `HostNotInShareGroup`).
@@ -438,6 +441,13 @@ impl StubHostMachine {
 
     pub fn resolved_hosts(&self) -> Vec<String> {
         self.resolve_calls.borrow().clone()
+    }
+
+    pub fn with_host_acl_tree(self, path: &std::path::Path, listing: &str) -> Self {
+        self.host_acl_trees
+            .borrow_mut()
+            .insert(path.to_path_buf(), listing.to_string());
+        self
     }
 
     pub fn kernel_pf_rules_calls(&self) -> Vec<String> {
@@ -1078,6 +1088,15 @@ impl HostMachine for StubHostMachine {
             return Ok(PathKind::Dir);
         }
         Ok(PathKind::Absent)
+    }
+
+    fn read_host_acl_tree(&self, path: &std::path::Path) -> Result<String, ProbeError> {
+        Ok(self
+            .host_acl_trees
+            .borrow()
+            .get(path)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {

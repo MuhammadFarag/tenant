@@ -160,6 +160,10 @@ impl HostMachine for DryRunHostMachine {
 
     /// Real ACL drift is invisible under `--dry-run`; the tenant is inferred from a
     /// cowork path's last segment.
+    fn read_host_acl_tree(&self, _path: &std::path::Path) -> Result<String, ProbeError> {
+        Ok(String::new())
+    }
+
     fn read_host_acl(&self, path: &std::path::Path) -> Result<String, ProbeError> {
         if let Some(name) = path
             .strip_prefix(crate::domain::tenants::COWORK_DIR_PARENT)

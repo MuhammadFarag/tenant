@@ -524,6 +524,22 @@ impl HostMachine for MacosHostMachine {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    fn read_host_acl_tree(&self, path: &std::path::Path) -> Result<String, ProbeError> {
+        let output = Command::new("ls")
+            .arg("-leRA")
+            .arg(path)
+            .output()
+            .map_err(ProbeError::Spawn)?;
+        // Exit 1 is ls's "minor problem" (an unreadable subdirectory); the rest still audits.
+        match output.status.code() {
+            Some(0 | 1) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+            code => Err(ProbeError::NonZero {
+                code: code.unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }),
+        }
+    }
+
     fn describe_acl(&self, op: &AclOp) -> String {
         let entry_str = |group: &GroupName, mode: AclMode| acl_entry(group.as_str(), mode);
         match op {
