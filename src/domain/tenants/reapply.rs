@@ -258,6 +258,8 @@ impl<'a> Tenants<'a> {
         }
         self.run(&plan.reload, reporter)
             .map_err(ModeError::Firewall)?;
+        self.verify_anchor_loaded(&plan.name)
+            .map_err(ModeError::Firewall)?;
         self.run(&plan.add_host, reporter)
             .map_err(ModeError::Account)?;
         if let Some(ensure_primary_group) = &plan.ensure_primary_group {
@@ -268,6 +270,16 @@ impl<'a> Tenants<'a> {
             self.run(cowork, reporter).map_err(ModeError::Account)?;
         }
         self.execute_share_ops(&plan.name, &plan.share_ops, reporter)
+    }
+
+    fn verify_anchor_loaded(&self, name: &TenantUserName) -> Result<(), FirewallError> {
+        let rules = self.machine.read_kernel_pf_rules(name)?;
+        if crate::doctor::pf_rule_presence_check(&rules, name.as_str()).is_empty() {
+            return Ok(());
+        }
+        Err(FirewallError::AnchorRulesMissing {
+            anchor: crate::firewall::tenant_anchor_name(name.as_str()),
+        })
     }
 
     pub(crate) fn reload(

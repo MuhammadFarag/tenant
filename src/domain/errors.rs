@@ -121,9 +121,21 @@ impl fmt::Display for ProbeError {
 #[derive(Debug)]
 pub enum FirewallError {
     Spawn(io::Error),
-    NonZero { code: i32, stderr: String },
-    Fs { path: String, message: String },
-    RestoreFailed { path: String },
+    NonZero {
+        code: i32,
+        stderr: String,
+    },
+    Fs {
+        path: String,
+        message: String,
+    },
+    RestoreFailed {
+        path: String,
+    },
+    /// `pfctl -f` exits 0 even when pf.conf never loads the anchor.
+    AnchorRulesMissing {
+        anchor: String,
+    },
 }
 
 impl fmt::Display for FirewallError {
@@ -145,6 +157,11 @@ impl fmt::Display for FirewallError {
                 f,
                 "pf.conf restore from {path} failed \u{2014} \
                  sudo cp {path} /etc/pf.conf to recover"
+            ),
+            FirewallError::AnchorRulesMissing { anchor } => write!(
+                f,
+                "pf reloaded, but the kernel has no pass/block rules for anchor {anchor} \
+                 \u{2014} its egress allowlist is not enforced"
             ),
         }
     }

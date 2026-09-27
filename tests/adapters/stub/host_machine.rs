@@ -96,6 +96,9 @@ pub struct StubHostMachine {
 
     kernel_pf_rules_calls: RefCell<Vec<String>>,
 
+    /// Absent ⇒ a reload loads the default healthy rules.
+    kernel_pf_rules_after_reload: RefCell<HashMap<String, String>>,
+
     /// Keyed `(tenant, table)`; absent ⇒ empty table.
     kernel_pf_tables: RefCell<HashMap<(String, String), String>>,
 
@@ -420,6 +423,13 @@ impl StubHostMachine {
 
     pub fn with_kernel_pf_rules(self, name: &str, content: &str) -> Self {
         self.kernel_pf_rules
+            .borrow_mut()
+            .insert(name.to_string(), content.to_string());
+        self
+    }
+
+    pub fn with_kernel_pf_rules_after_reload(self, name: &str, content: &str) -> Self {
+        self.kernel_pf_rules_after_reload
             .borrow_mut()
             .insert(name.to_string(), content.to_string());
         self
@@ -888,6 +898,11 @@ impl HostMachine for StubHostMachine {
         }
         if let FirewallOp::UpdateConfig { content } = op {
             *self.pf_conf_state.borrow_mut() = content.clone();
+        }
+        if *op == FirewallOp::Reload {
+            // A reload re-reads every anchor, so pre-reload kernel state is gone.
+            *self.kernel_pf_rules.borrow_mut() = self.kernel_pf_rules_after_reload.borrow().clone();
+            self.kernel_pf_rules_failure.borrow_mut().take();
         }
         Ok(())
     }

@@ -1089,7 +1089,11 @@ fn shell_pre_exec_doctor_pf_conf_read_failure_surfaces_and_proceeds() {
         stderr,
         "tenant: failed to read pf state: filesystem error at /etc/pf.conf: Permission denied\n"
     );
-    assert_eq!(exec.kernel_pf_rules_calls(), vec!["dev".to_string()]);
+    assert_eq!(
+        exec.kernel_pf_rules_calls(),
+        vec!["dev".to_string(), "dev".to_string()],
+        "pre-pass probe, then the post-reload verify"
+    );
     assert_eq!(exec.logins(), vec!["dev".to_string()]);
 }
 

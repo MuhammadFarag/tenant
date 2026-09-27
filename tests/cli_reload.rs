@@ -1395,10 +1395,10 @@ fn reload_pre_exec_doctor_counts_missing_anchor_ref_as_one_critical_and_proceeds
         "stdout={stdout:?}"
     );
     assert!(!stdout.contains("\u{26a0} Doctor:"), "stdout={stdout:?}");
-    assert!(
-        exec.kernel_pf_rules_calls().is_empty(),
-        "calls={:?}",
-        exec.kernel_pf_rules_calls()
+    assert_eq!(
+        exec.kernel_pf_rules_calls(),
+        vec!["dev".to_string()],
+        "the pre-pass skips the kernel check; only the post-reload verify reads it"
     );
     assert!(
         exec.firewall_ops()
@@ -1446,5 +1446,23 @@ fn reload_renders_permissive_inbound_when_profile_declares_posture() {
             name: "dev".into(),
             body: expected,
         }
+    );
+}
+
+#[test]
+fn reload_fails_when_the_anchor_rules_never_reach_the_kernel() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_kernel_pf_rules_after_reload("dev", "");
+    let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["reload", "dev"]);
+    assert_eq!(code, 74, "stdout={stdout:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to reload firewall for 'dev': pf reloaded, but the kernel has no \
+         pass/block rules for anchor tenant-dev \u{2014} its egress allowlist is not enforced\n"
+    );
+    assert!(
+        !stdout.contains("Tenant 'dev' reloaded."),
+        "stdout={stdout:?}"
     );
 }
