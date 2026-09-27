@@ -205,12 +205,19 @@ pub(crate) fn dispatch(
                                 shell_directory.as_deref(),
                             );
                         }
-                        tenants.pre_exec_doctor_summary(
+                        let criticals = tenants.pre_exec_doctor_summary(
                             Some(&name),
                             host,
                             tenants::DoctorScope::Shell,
                             reporter,
                         );
+                        if criticals > 0
+                            && reporter.confirm_entry_despite_criticals(&name, criticals)
+                                == ConfirmOutcome::Abort
+                        {
+                            reporter.shell_entry_declined(&name);
+                            return 0;
+                        }
                     }
                     if reporter.refuse_sudo_without_terminal() {
                         return EX_USAGE;

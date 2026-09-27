@@ -535,7 +535,7 @@ impl<'a> Tenants<'a> {
         host: &HostUserName,
         scope: DoctorScope,
         reporter: &mut Reporter,
-    ) {
+    ) -> usize {
         let mut criticals: Vec<Finding> = Vec::new();
         let mut warning_count: usize = 0;
         let mut record = |finding: Finding| {
@@ -652,6 +652,7 @@ impl<'a> Tenants<'a> {
             reporter.doctor_finding_one_liner(finding);
         }
         reporter.doctor_summary_pending(warning_count, name);
+        criticals.len()
     }
 
     fn collect_share_drift<F: FnMut(Finding)>(

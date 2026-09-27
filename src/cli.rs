@@ -244,6 +244,11 @@ Examples:
     /// (`--inbound`) widenings are orthogonal: each leaves the axis it
     /// doesn't name at steady state, and both narrow back on completion.
     ///
+    /// When the pre-entry audit finds a critical problem (pf disabled, the
+    /// anchor not loaded, a reset primary group), shell shows a warning
+    /// and asks `Enter '<name>' anyway? [y/N]`, defaulting to no; `-y`
+    /// is the explicit allow.
+    ///
     /// `-d/--directory` is valid on BOTH forms and takes a path resolved
     /// on the TENANT's filesystem: relative (`projects/foo`) resolves
     /// under the tenant's home, absolute is literal, and a QUOTED

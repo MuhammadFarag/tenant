@@ -120,24 +120,22 @@ impl<'t, 'm> Reporter<'t, 'm> {
         if !self.terminal.stdin_is_tty {
             return ConfirmOutcome::Proceed;
         }
+        self.ask("Proceed?", default_yes)
+    }
+
+    /// EOF or a read error declines; an empty answer takes the default.
+    fn ask(&mut self, question: &str, default_yes: bool) -> ConfirmOutcome {
         let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
         loop {
-            self.prompt(&format!("Proceed? {hint} "));
+            self.prompt(&format!("{question} {hint} "));
             let mut line = String::new();
             match self.terminal.stdin.read_line(&mut line) {
-                Ok(0) => return ConfirmOutcome::Abort, // EOF
+                Ok(0) | Err(_) => return ConfirmOutcome::Abort,
                 Ok(_) => {}
-                Err(_) => return ConfirmOutcome::Abort,
             }
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return if default_yes {
-                    ConfirmOutcome::Proceed
-                } else {
-                    ConfirmOutcome::Abort
-                };
-            }
-            match trimmed.to_ascii_lowercase().as_str() {
+            match line.trim().to_ascii_lowercase().as_str() {
+                "" if default_yes => return ConfirmOutcome::Proceed,
+                "" => return ConfirmOutcome::Abort,
                 "y" | "yes" => return ConfirmOutcome::Proceed,
                 "n" | "no" => return ConfirmOutcome::Abort,
                 _ => {
@@ -145,6 +143,46 @@ impl<'t, 'm> Reporter<'t, 'm> {
                 }
             }
         }
+    }
+
+    /// Default no, and unlike `confirm` a non-TTY declines: entering a tenant whose
+    /// guarantees are broken must be an explicit choice (`-y` is that choice).
+    pub fn confirm_entry_despite_criticals(
+        &mut self,
+        name: &TenantUserName,
+        criticals: usize,
+    ) -> ConfirmOutcome {
+        let findings = if criticals == 1 {
+            "1 critical doctor finding".to_string()
+        } else {
+            format!("{criticals} critical doctor findings")
+        };
+        let warning = format!(
+            "\u{26a0}  '{name}' has {findings} (above). Its sandbox guarantees may not hold:\n\
+             \u{26a0}  entering now can run code without the isolation you expect.\n\
+             \u{26a0}  Run `tenant doctor {name}` for details and fixes."
+        );
+        let painted = self.paint_stdout(&warning, ansi::red);
+        let _ = writeln!(self.terminal.stdout, "\n{painted}\n");
+        let question = format!("Enter '{name}' anyway?");
+        if self.dry_run {
+            let _ = writeln!(
+                self.terminal.stdout,
+                "(Real run would prompt: {question} [y/N])"
+            );
+            return ConfirmOutcome::Proceed;
+        }
+        if self.yes_flag {
+            return ConfirmOutcome::Proceed;
+        }
+        if !self.terminal.stdin_is_tty {
+            return ConfirmOutcome::Abort;
+        }
+        self.ask(&question, false)
+    }
+
+    pub fn shell_entry_declined(&mut self, name: &TenantUserName) {
+        let _ = writeln!(self.terminal.stdout, "Not entering '{name}'.");
     }
 
     /// sudo prompts on the controlling tty even when stdin is piped, so a cold
@@ -877,26 +915,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
             self.terminal.stdout,
             "  You'll be asked for your password once to apply this."
         );
-        loop {
-            self.prompt(&format!("{question} [y/N] "));
-            let mut line = String::new();
-            match self.terminal.stdin.read_line(&mut line) {
-                Ok(0) => return ConfirmOutcome::Abort, // EOF
-                Ok(_) => {}
-                Err(_) => return ConfirmOutcome::Abort,
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return ConfirmOutcome::Abort; // default NO
-            }
-            match trimmed.to_ascii_lowercase().as_str() {
-                "y" | "yes" => return ConfirmOutcome::Proceed,
-                "n" | "no" => return ConfirmOutcome::Abort,
-                _ => {
-                    let _ = writeln!(self.terminal.stderr, "Please answer y or n.");
-                }
-            }
-        }
+        self.ask(question, false)
     }
 
     pub fn setup_touch_id_done(&mut self) {

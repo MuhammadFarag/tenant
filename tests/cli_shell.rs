@@ -3017,3 +3017,74 @@ fn shell_inbound_only_narrow_failure_names_the_inbound_leftover() {
          loopback still in effect; run `tenant mode dev runtime` to recover\n"
     );
 }
+
+fn pf_disabled_host() -> StubHostMachine {
+    StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .with_pf_status_content("Status: Disabled\n")
+}
+
+const CRITICAL_ENTRY_WARNING: &str = "
+\u{26a0}  'dev' has 1 critical doctor finding (above). Its sandbox guarantees may not hold:
+\u{26a0}  entering now can run code without the isolation you expect.
+\u{26a0}  Run `tenant doctor dev` for details and fixes.
+
+";
+
+#[test]
+fn shell_on_critical_findings_warns_and_declining_enters_nothing() {
+    let exec = pf_disabled_host();
+    let (code, stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"n\n");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(stdout.contains(CRITICAL_ENTRY_WARNING), "stdout={stdout:?}");
+    assert_eq!(stderr, "Enter 'dev' anyway? [y/N] ");
+    assert!(
+        stdout.ends_with("Not entering 'dev'.\n"),
+        "stdout={stdout:?}"
+    );
+    assert!(exec.logins().is_empty() && exec.firewall_ops().is_empty());
+}
+
+#[test]
+fn shell_critical_prompt_defaults_to_no() {
+    let exec = pf_disabled_host();
+    let (code, _stdout, _stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"\n");
+    assert_eq!(code, 0);
+    assert!(exec.logins().is_empty());
+}
+
+#[test]
+fn shell_critical_prompt_answered_yes_enters() {
+    let exec = pf_disabled_host();
+    let (code, _stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev"], b"y\n");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert_eq!(exec.logins(), vec!["dev".to_string()]);
+}
+
+#[test]
+fn shell_yes_flag_is_the_explicit_allow_past_criticals() {
+    let exec = pf_disabled_host();
+    let (code, stdout, stderr) =
+        run_with_stdin(stub_with_tenant("dev"), &exec, &["shell", "dev", "-y"], b"");
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(stdout.contains(CRITICAL_ENTRY_WARNING), "stdout={stdout:?}");
+    assert!(!stderr.contains("anyway?"), "stderr={stderr:?}");
+    assert_eq!(exec.logins(), vec!["dev".to_string()]);
+}
+
+#[test]
+fn shell_command_form_gates_on_criticals_too() {
+    let exec = pf_disabled_host();
+    let (code, _stdout, _stderr) = run_with_stdin(
+        stub_with_tenant("dev"),
+        &exec,
+        &["shell", "dev", "--", "ls"],
+        b"n\n",
+    );
+    assert_eq!(code, 0);
+    assert!(exec.exec_calls().is_empty() && exec.firewall_ops().is_empty());
+}
