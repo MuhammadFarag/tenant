@@ -153,7 +153,7 @@ Pre-commit hooks run `cargo fmt --check` and `cargo clippy -- -D warnings` on Ru
 
 ## Troubleshooting
 
-[`docs/troubleshooting.md`](./docs/troubleshooting.md) has manual diagnostics for problems `tenant doctor` doesn't explain yet, starting with a tenant keychain that won't unlock (`security exited with code 51`).
+[`docs/troubleshooting.md`](./docs/troubleshooting.md) collects diagnostics by symptom: egress hangs, the firewall after macOS updates, loopback access, share permissions, the tenant keychain, sudo and shell entry. Each section says what `tenant doctor` already reports and how far the manual steps go beyond it.
 
 ## Scope and status
 
