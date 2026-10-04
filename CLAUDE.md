@@ -55,6 +55,7 @@ tests/cli_<verb>.rs    — E2E per verb through tenant::run (bulk of coverage); 
                          cross-cutting; common/ builders+runners; adapters/ stubs
 tests/macos_host_machine.rs, intent_labels.rs — per-variant argv + label pins
 tests/doctor.rs, *_parse.rs — combinatorial pure-fn coverage
+docs/troubleshooting.md — manual diagnostics doctor doesn't cover yet
 ```
 
 ## Doctrine

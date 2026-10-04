@@ -151,6 +151,10 @@ just run create dev --dry-run -v
 
 Pre-commit hooks run `cargo fmt --check` and `cargo clippy -- -D warnings` on Rust files. Run `pre-commit install` once after a fresh clone to wire them up.
 
+## Troubleshooting
+
+[`docs/troubleshooting.md`](./docs/troubleshooting.md) has manual diagnostics for problems `tenant doctor` doesn't explain yet, starting with a tenant keychain that won't unlock (`security exited with code 51`).
+
 ## Scope and status
 
 This is a solo-developer tool. It runs on the author's Mac. It is not designed for CI, multi-user provisioning, or automated cron use. The substrate calls are sudo-prompting by design; there is no NOPASSWD sudoers entry and no daemon. If you fork it for other use, expect to revisit those assumptions.
