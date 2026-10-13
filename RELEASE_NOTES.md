@@ -1,6 +1,6 @@
-# tenant 0.1.0-alpha.12
+# tenant 0.1.0-alpha.13
 
-Twelfth alpha. Still alpha quality: the verbs work end-to-end on the
+Thirteenth alpha. Still alpha quality: the verbs work end-to-end on the
 author's machine, but rough edges remain. Use this release to evaluate
 the shape of the tool, not as a foundation for production tenants.
 
@@ -21,6 +21,49 @@ The primary use case is running tools — coding agents, build chains,
 third-party CLIs — under an account that cannot reach your shell,
 your SSH keys, or arbitrary internet hosts unless you explicitly
 grant access.
+
+## New since 0.1.0-alpha.12
+
+Detection and repair for a tenant keychain that its stashed password no
+longer opens. On one host, two tenants' `tenant.keychain-db` files were
+replaced by an unknown process; `tenant shell` then failed with a bare
+`security exited with code 51` and macOS asked for the tenant's password.
+No migration steps.
+
+- **`tenant keychain <name> reset`.** Moves the keychain aside to
+  `tenant.keychain-db.replaced-<UTC timestamp>` (a rename, so its birth
+  time survives as evidence), creates an empty keychain keyed to the
+  stash, and restores the default, search-list and no-auto-lock
+  settings. With no stash it generates a fresh password and stashes it,
+  so it also repairs a missing keychain or a missing stash without
+  `destroy && create`. Destructive: apps inside the tenant sign in
+  again once. Asks `Proceed? [y/N]`, defaulting to no; `-y` skips the
+  prompt and `--dry-run -v` previews the commands.
+
+- **Doctor checks that the stash opens the keychain.** When both exist,
+  `tenant doctor <name>` unlocks the keychain with the stash (as
+  `tenant shell` does). A wrong password is a new `critical:` finding
+  (`--strict` exits 2). Its guidance prints the two commands that date
+  the stash and the keychain; capture them before resetting if you want
+  to know what replaced it.
+
+- **Shell and bootstrap explain the failure.** Exit 51 from the unlock
+  now reads *the stashed password doesn't open tenant.keychain-db — the
+  keychain was replaced or re-keyed; run `tenant keychain <name>
+  reset`*. A missing stash points at reset too.
+
+- **`create` no longer reuses an existing keychain.** A retried
+  `create`, or one reusing a home that `destroy` left behind, kept the
+  old keychain and stashed a new password, guaranteeing exit 51 at the
+  next shell. It now moves the old file aside and creates a fresh one.
+
+- **Safer manual recipe.** Doctor's by-hand keychain steps read the
+  stash into a variable and stop when it comes back empty. An empty
+  `-p` made `create-keychain` prompt and key the keychain to whatever
+  was typed.
+
+- **docs/troubleshooting.md.** New operator guide to diagnostics by
+  symptom, with a Keychain section covering the above.
 
 ## New since 0.1.0-alpha.11
 
