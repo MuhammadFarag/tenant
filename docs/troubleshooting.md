@@ -27,7 +27,8 @@ Conventions:
 | `ACL grant on PATH incomplete — chmod: Failed to set ACL …` | [Incomplete ACL grant](#incomplete-acl-grant) |
 | `critical: … primary group …`, or the tenant can suddenly read your home | [Primary group reset](#primary-group-reset) |
 | `SSH_AUTH_SOCK` note, or sudoers changes vanished after an update | [sudoers and SSH_AUTH_SOCK](#sudoers-and-ssh_auth_sock) |
-| `security exited with code 51` at shell entry, or a dialog asks for the tenant's password | [Keychain won't unlock](#keychain-wont-unlock-security-exited-with-code-51) |
+| `the stashed password doesn't open tenant.keychain-db` (or `security exited with code 51`), or a dialog asks for the tenant's password | [Keychain won't unlock](#keychain-wont-unlock) |
+| `keychain absent` or `stashed password absent` | [Keychain or stash missing](#keychain-or-stash-missing) |
 | `this verb needs sudo and no terminal is attached` | [No terminal for sudo](#no-terminal-for-sudo) |
 | `refusing to enter 'NAME' with no terminal to confirm` | [Shell refuses without a terminal](#shell-refuses-without-a-terminal) |
 | Host git: `detected dubious ownership in repository` | [Host git and dubious ownership](#host-git-and-dubious-ownership) |
@@ -395,29 +396,42 @@ on, which is the macOS default.
 
 ## Keychain
 
-### Keychain won't unlock (`security exited with code 51`)
+`tenant` unlocks the tenant's `~/Library/Keychains/tenant.keychain-db` with a
+password it stashed in **your** login keychain (service `tenant-NAME`). Every
+problem below is the two falling out of step. `tenant keychain NAME reset`
+brings them back together.
+
+### Keychain won't unlock
 
 #### Symptoms
 
-- `tenant shell NAME` or `tenant bootstrap NAME` fails with:
+- `tenant shell NAME` or `tenant bootstrap NAME` fails (exit 74) with:
 
   ```
-  tenant: failed to unlock keychain for 'NAME': security exited with code 51:
-  security: SecKeychainUnlock tenant.keychain-db: The user name or passphrase you entered is not correct.
+  tenant: failed to unlock keychain for 'NAME': the stashed password doesn't open tenant.keychain-db — the keychain was replaced or re-keyed; run `tenant keychain NAME reset` (see docs/troubleshooting.md, "Keychain")
   ```
+
+  Versions before 0.1.0-alpha.13 print `security exited with code 51` instead.
 
 - A macOS dialog asks for the tenant's password, because the keychain stayed
   locked and something inside the tenant (git, gh, Claude Code) needs it.
 
+**Doctor:** reports `critical: tenant 'NAME' stashed password doesn't open
+tenant.keychain-db` (`--strict` exits 2). It checks by unlocking the keychain
+with the stash, which leaves it unlocked, as `tenant shell` does.
+
 #### What it means
 
-`tenant` unlocks the tenant's `~/Library/Keychains/tenant.keychain-db` with a
-password it stashed in **your** login keychain (service `tenant-NAME`). Exit 51
-means the file exists but the stashed password doesn't open it. (A missing file
-gives "could not be found" instead.) Either the keychain was replaced or
-re-keyed, or the stash was overwritten.
+The keychain file exists, but the stashed password doesn't open it. Either
+something replaced or re-keyed the keychain, or the stash was overwritten.
+Before 0.1.0-alpha.13, a `tenant create` that found an existing keychain kept
+the keychain and overwrote the stash. `create` now moves the old keychain aside
+instead.
 
-#### Diagnose
+#### Diagnose first (optional, but the evidence fades)
+
+Reset keeps the old file, and its birth time, beside the new one. Logs rotate
+within days, though, so look now if you want to know what did it.
 
 1. When was the stash written?
 
@@ -433,8 +447,9 @@ re-keyed, or the stash was overwritten.
 
    - **Keychain born after the stash** → the keychain was replaced after
      `tenant` stashed its password. Something deleted and recreated it.
-   - **Stash modified after the keychain was born** → the stash was overwritten
-     (e.g. a `tenant create` that found an existing keychain).
+   - **Stash modified after the keychain was born** → the stash was overwritten.
+   - **Several tenants' keychains born at the same time** → a host-level cause
+     (an OS update, a shared process) rather than something inside one tenant.
 
 3. Was it you? Look for keychain commands in your shell history:
 
@@ -453,7 +468,7 @@ re-keyed, or the stash was overwritten.
    ```
 
 5. Was it macOS? Check for an update or a login session around the birth time,
-   and the security logs for that window (logs rotate within days, so check soon):
+   and the security logs for that window:
 
    ```
    system_profiler SPInstallHistoryDataType | grep -A5 -i macos
@@ -462,14 +477,14 @@ re-keyed, or the stash was overwritten.
      --predicate 'process == "securityd" OR process == "SecurityAgent" OR eventMessage CONTAINS[c] "keychain"'
    ```
 
-6. Is the old keychain still around?
+6. Is an older keychain still around?
 
    ```
    sudo find /Users/NAME -name '*keychain*' 2>/dev/null
    ```
 
-   If a keychain from before the replacement still exists, it should open with
-   the stash. Moving it back restores everything it held.
+   A keychain from before the replacement should open with the stash. Moving
+   it back restores everything it held.
 
 #### Recover
 
@@ -481,49 +496,88 @@ security find-generic-password -a NAME -s tenant-NAME -w | pbcopy
 sudo -iu NAME security set-keychain-password tenant.keychain-db
 ```
 
-Otherwise move it aside and create a fresh keychain keyed to the stash. Apps in
-the tenant sign in again once:
+Otherwise, reset it:
 
 ```
-sudo -iu NAME mv Library/Keychains/tenant.keychain-db Library/Keychains/tenant.keychain-db.replaced
-sudo -iu NAME security create-keychain -p "$(security find-generic-password -a NAME -s tenant-NAME -w)" tenant.keychain-db
+tenant keychain NAME reset
+```
+
+Reset:
+
+1. Moves the keychain to `tenant.keychain-db.replaced-<UTC timestamp>` in the
+   same directory. It renames the file rather than copying it, so the birth
+   time from step 2 survives.
+2. Creates an empty `tenant.keychain-db` keyed to the stash.
+3. Makes it the tenant's default and only keychain, with auto-lock off.
+
+It asks `Proceed? [y/N]`, defaulting to no (`-y` skips the prompt), and
+`--dry-run -v` previews the commands. Apps inside the tenant sign in again
+once. The moved-aside file still opens with the stashed password, so a reset
+by mistake can be undone by moving it back.
+
+<details>
+<summary>The same steps by hand</summary>
+
+Run these from **your** terminal, not inside `tenant shell`: the stash read
+must reach your keychain.
+
+```
+sudo -iu NAME mv -n Library/Keychains/tenant.keychain-db Library/Keychains/tenant.keychain-db.replaced
+pw=$(security find-generic-password -a NAME -s tenant-NAME -w) && [ -n "$pw" ] && sudo -iu NAME security create-keychain -p "$pw" tenant.keychain-db; unset pw
 sudo -iu NAME security default-keychain -s tenant.keychain-db
 sudo -iu NAME security list-keychains -s tenant.keychain-db
 sudo -iu NAME security set-keychain-settings tenant.keychain-db
 ```
 
-Run these from **your** shell, not inside `tenant shell`: the `$(…)` must read
-your keychain, where the stash lives. If it comes back empty, `security`
-silently prompts for a password instead.
+Keep the `[ -n "$pw" ]` guard: given an empty `-p`, `create-keychain` prompts
+and keys the keychain to whatever you type.
+
+</details>
 
 #### Verify
 
 ```
-sudo -iu NAME security unlock-keychain -p "$(security find-generic-password -a NAME -s tenant-NAME -w)" tenant.keychain-db && echo "stash opens it"
-sudo -iu NAME security default-keychain
+tenant doctor NAME
 tenant shell NAME -- true
+```
+
+Doctor should report no keychain finding, and the shell command should exit 0.
+
+### Keychain or stash missing
+
+**Doctor:** reports `keychain absent` or `stashed password absent` (warnings).
+`tenant shell` and `tenant bootstrap` refuse (exit 64) while the stash is
+missing.
+
+**Fix.** `tenant keychain NAME reset`. It creates a missing keychain keyed to
+the stash. With no stash, it generates a fresh password, stashes it and keys
+the new keychain to it. The old keychain can't be opened without its old
+password anyway, so it is moved aside, not deleted. If you saved that password
+somewhere (a password manager), re-stash it instead and keep the keychain's
+contents:
+
+```
+security add-generic-password -a NAME -s tenant-NAME -w <recovered-password>
 ```
 
 ### Tenant still on `login.keychain-db`
 
-**Symptom.** Exit 51 on unlock although the stash is fine, on a tenant created
-before `tenant` switched to `tenant.keychain-db`.
-
-**Doctor:** reports `keychain absent` and prints a four-command recipe.
+**Symptom.** Doctor reports `keychain absent` on a tenant created before
+`tenant` switched to `tenant.keychain-db`.
 
 **Diagnose.** **(sudo)** `sudo ls -l /Users/NAME/Library/Keychains/`. Only
 `login.keychain-db` and no `tenant.keychain-db` means it predates the switch.
 macOS 26.6 and later refuse to unlock a keychain with that name from outside
 the tenant's own login session.
 
-**Fix.** Run doctor's recipe from your own terminal (see the warning under
-[Recover](#recover) above about where the `$(…)` runs).
+**Fix.** `tenant keychain NAME reset`. The old `login.keychain-db` stays in
+place, unused.
 
 ### Don't probe with `show-keychain-info`
 
 `sudo -iu NAME security show-keychain-info …` pops a macOS dialog even without
-a terminal. To check a tenant keychain, unlock it with the stash as in
-[Verify](#verify) above.
+a terminal. To check a tenant keychain, run `tenant doctor NAME`. It unlocks
+the keychain with the stash instead.
 
 ## sudo, terminals and shell entry
 

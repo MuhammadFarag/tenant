@@ -31,7 +31,7 @@ pub struct Cli {
     pub dry_run: bool,
 
     /// Skip the interactive confirmation prompt that mutating verbs
-    /// (create / destroy / mode / inbound / reload / bootstrap) emit
+    /// (create / destroy / mode / inbound / reload / bootstrap / keychain) emit
     /// before executing.
     #[arg(short = 'y', long, global = true)]
     pub yes: bool,
@@ -316,8 +316,8 @@ Examples:
     /// stash it generates a fresh password and stashes it.
     ///
     /// DESTRUCTIVE: the new keychain is empty, so apps inside the tenant
-    /// sign in again once. The old file stays beside it; it still opens
-    /// with the stashed password if the reset was a mistake. Prompts
+    /// sign in again once. The old file stays beside it: if the stash
+    /// opened it, moving it back undoes a mistaken reset. Prompts
     /// `[y/N]`, defaulting to no; `-y` skips the prompt. See
     /// docs/troubleshooting.md, "Keychain".
     #[command(after_help = "\

@@ -15,6 +15,7 @@ Verbs (full semantics live in `src/cli.rs` doc comments / `tenant --help`):
 - `shell <name> [--mode] [--inbound] [-d <dir>] [-- <cmd>]` — enter the tenant (Light reapply + auto-narrow)
 - `reload [<name>]` — canonical "apply everything" (Full reapply); heals Light drift
 - `bootstrap [<name>]` — run the merged profile's `[bootstrap]` commands as the tenant
+- `keychain <name> reset` — move the tenant keychain aside, recreate it keyed to the stash (destructive, `[y/N]`)
 - `list` (`ls`) — tenant names, one per line (read-only, no sudo)
 - `doctor [<name>] [--strict]` — read-only audit
 - `setup` — host-wide opt-in prep (Touch ID for sudo)
