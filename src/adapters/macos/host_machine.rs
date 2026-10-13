@@ -774,7 +774,7 @@ impl HostMachine for MacosHostMachine {
     ) -> Result<(), KeychainError> {
         let args = unlock_keychain_argv(password);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_security_as_tenant(name.as_str(), &refs)
+        run_security_as_tenant(name.as_str(), &refs).map_err(classify_unlock_failure)
     }
 
     fn stash_present(&self, name: &TenantUserName) -> Result<bool, KeychainError> {
@@ -1052,6 +1052,14 @@ fn spawn_host_file(argv: &[String]) -> Result<(), HostFileError> {
         });
     }
     Ok(())
+}
+
+/// `security unlock-keychain` exits 51 on a wrong password.
+pub fn classify_unlock_failure(err: KeychainError) -> KeychainError {
+    match err {
+        KeychainError::NonZero { code: 51, .. } => KeychainError::StashMismatch,
+        other => other,
+    }
 }
 
 // TODO(smell): pub only for tests/macos_host_machine.rs pins — narrow visibility or move the pin

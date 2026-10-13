@@ -1078,9 +1078,16 @@ impl<'t, 'm> Reporter<'t, 'm> {
     }
 
     pub fn keychain_unlock_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
+        let remedy = match err {
+            KeychainError::StashMismatch => format!(
+                "; run `tenant keychain {name} reset` \
+                 (see docs/troubleshooting.md, \"Keychain\")"
+            ),
+            _ => String::new(),
+        };
         let _ = writeln!(
             self.terminal.stderr,
-            "tenant: failed to unlock keychain for '{name}': {err}"
+            "tenant: failed to unlock keychain for '{name}': {err}{remedy}"
         );
     }
 

@@ -447,6 +447,31 @@ fn bootstrap_on_cold_sudo_authentication_failure_exits_74_without_mutation() {
 }
 
 #[test]
+fn bootstrap_explains_a_stash_that_no_longer_opens_the_keychain() {
+    let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);
+    let exec = StubHostMachine::new()
+        .with_existing_profile("alice", &profile)
+        .with_default_stash("alice")
+        .fail_next_unlock_tenant_keychain(tenant::domain::KeychainError::StashMismatch);
+    let (code, _stdout, stderr) = run_with_exec(
+        stub_with_tenant("alice"),
+        &exec,
+        &["-y", "bootstrap", "alice"],
+    );
+    assert_eq!(code, 74, "stderr={stderr:?}");
+    assert!(
+        stderr.contains(
+            "tenant: failed to unlock keychain for 'alice': \
+             the stashed password doesn't open tenant.keychain-db \u{2014} \
+             the keychain was replaced or re-keyed; \
+             run `tenant keychain alice reset` (see docs/troubleshooting.md, \"Keychain\")\n"
+        ),
+        "stderr={stderr:?}"
+    );
+    assert!(exec.exec_calls().is_empty());
+}
+
+#[test]
 fn bootstrap_unlock_failure_exits_74() {
     // Stash present (find succeeds); the in-tenant unlock itself fails.
     let profile = profile_with_bootstrap(&["r.example"], &["i.example"], &["echo hi"]);

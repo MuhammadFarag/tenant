@@ -5,11 +5,12 @@ use std::path::PathBuf;
 
 use tenant::adapters::macos::MacosHostMachine;
 use tenant::domain::{
-    AccountOp, AclMode, AclOp, FirewallOp, GroupId, HostMachine, PamOp, ProfileOp, UserId,
+    AccountOp, AclMode, AclOp, FirewallOp, GroupId, HostMachine, KeychainError, PamOp, ProfileOp,
+    UserId,
 };
 
 // Only coverage of the no-duplicate + newline guards: `execute_pam` is unreachable from stubs.
-use tenant::adapters::macos::host_machine::pam_tid_append_payload;
+use tenant::adapters::macos::host_machine::{classify_unlock_failure, pam_tid_append_payload};
 
 #[test]
 fn pam_payload_none_when_already_in_sudo() {
@@ -803,4 +804,25 @@ fn macos_absent_anchor_file_reads_as_empty_body() {
         .read_anchor_body(&"never-created-tenant-xyz".into())
         .unwrap();
     assert_eq!(body, "");
+}
+
+// `security unlock-keychain` exits 51 on a wrong password; that's the stash-drift signal.
+#[test]
+fn unlock_exit_51_classifies_as_stash_mismatch() {
+    let wrong = KeychainError::NonZero {
+        code: 51,
+        stderr: "The user name or passphrase you entered is not correct.".to_string(),
+    };
+    assert!(matches!(
+        classify_unlock_failure(wrong),
+        KeychainError::StashMismatch
+    ));
+    let other = KeychainError::NonZero {
+        code: 36,
+        stderr: "x".to_string(),
+    };
+    assert!(matches!(
+        classify_unlock_failure(other),
+        KeychainError::NonZero { code: 36, .. }
+    ));
 }

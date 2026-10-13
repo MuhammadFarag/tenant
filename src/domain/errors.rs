@@ -2,7 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use super::ops::PathKind;
+use super::ops::{PathKind, TENANT_KEYCHAIN_FILE};
 
 #[derive(Debug)]
 pub enum AccountError {
@@ -199,6 +199,8 @@ pub enum KeychainError {
     /// Stash absent in the operator keychain: destroy converges, `shell` /
     /// `bootstrap` refuse.
     NotFound,
+    /// The stash exists but `unlock-keychain` rejects it.
+    StashMismatch,
 }
 
 impl fmt::Display for KeychainError {
@@ -216,6 +218,11 @@ impl fmt::Display for KeychainError {
             KeychainError::NotFound => {
                 write!(f, "stashed password not found in operator keychain")
             }
+            KeychainError::StashMismatch => write!(
+                f,
+                "the stashed password doesn't open {TENANT_KEYCHAIN_FILE} \u{2014} \
+                 the keychain was replaced or re-keyed"
+            ),
         }
     }
 }

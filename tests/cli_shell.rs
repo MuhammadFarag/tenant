@@ -116,13 +116,31 @@ fn shell_refuses_when_stash_absent() {
 }
 
 #[test]
+fn shell_explains_a_stash_that_no_longer_opens_the_keychain() {
+    let exec = StubHostMachine::new()
+        .with_existing_profile("dev", &tenant::profile::default_profile_toml())
+        .with_default_stash("dev")
+        .fail_next_unlock_tenant_keychain(KeychainError::StashMismatch);
+    let (code, _stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
+    assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
+    assert_eq!(
+        stderr,
+        "tenant: failed to unlock keychain for 'dev': \
+         the stashed password doesn't open tenant.keychain-db \u{2014} \
+         the keychain was replaced or re-keyed; \
+         run `tenant keychain dev reset` (see docs/troubleshooting.md, \"Keychain\")\n"
+    );
+    assert!(exec.logins().is_empty());
+}
+
+#[test]
 fn shell_surfaces_substrate_failure_on_unlock_call() {
     let exec = StubHostMachine::new()
         .with_existing_profile("dev", &tenant::profile::default_profile_toml())
         .with_default_stash("dev")
         .fail_next_unlock_tenant_keychain(KeychainError::NonZero {
-            code: 51,
-            stderr: "The user name or passphrase you entered is not correct.".to_string(),
+            code: 1,
+            stderr: "synthetic".to_string(),
         });
     let (code, stdout, stderr) = run_with_exec(stub_with_tenant("dev"), &exec, &["shell", "dev"]);
     assert_eq!(code, 74, "EX_IOERR expected; stderr={stderr:?}");
@@ -137,8 +155,7 @@ fn shell_surfaces_substrate_failure_on_unlock_call() {
     assert_eq!(
         stderr,
         "tenant: failed to unlock keychain for 'dev': \
-         security exited with code 51: \
-         The user name or passphrase you entered is not correct.\n"
+         security exited with code 1: synthetic\n"
     );
     assert!(
         exec.logins().is_empty(),
