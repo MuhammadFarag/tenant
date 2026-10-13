@@ -101,7 +101,7 @@ fn shell_refuses_when_stash_absent() {
     assert_eq!(
         stderr,
         "tenant: refusing to enter 'dev': stashed password absent \
-         \u{2014} run `tenant destroy dev && tenant create dev` to re-bootstrap\n"
+         \u{2014} run `tenant keychain dev reset` to re-key\n"
     );
     assert!(
         exec.logins().is_empty(),

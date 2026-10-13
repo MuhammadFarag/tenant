@@ -622,7 +622,7 @@ fn doctor_pf_conf_ref_dry_run_strict_exits_0() {
 
 const DEV_STASH_ABSENT: &str = "warning: stashed password absent for tenant 'dev' \u{2014} \
      `tenant shell` and `tenant bootstrap` can't unlock the keychain without it; \
-     run `tenant destroy dev && tenant create dev` to re-bootstrap\n";
+     run `tenant keychain dev reset` to re-key\n";
 
 #[test]
 fn doctor_primary_group_drift_emits_critical_finding() {
@@ -2100,7 +2100,7 @@ fn doctor_stash_absent_emits_warning() {
         "expected StashAbsent warning; stdout={stdout:?}"
     );
     assert!(
-        stdout.contains("tenant destroy dev && tenant create dev"),
+        stdout.contains("tenant keychain dev reset"),
         "warning should name the recovery; stdout={stdout:?}"
     );
 }
@@ -2222,16 +2222,14 @@ fn doctor_keychain_findings_carry_guidance_in_verbose() {
     );
     assert!(
         stdout.contains(
-            "sudo -iu dev security create-keychain -p \"$(security find-generic-password -a dev -s tenant-dev -w)\" tenant.keychain-db"
+            "pw=$(security find-generic-password -a dev -s tenant-dev -w) && [ -n \"$pw\" ] &&"
         ),
-        "keychain-absent guidance should name the recreate recipe; stdout={stdout:?}"
+        "keychain-absent guidance should carry the guarded manual recipe; stdout={stdout:?}"
     );
-    let recovery_count = stdout
-        .matches("tenant destroy dev && tenant create dev")
-        .count();
+    let recovery_count = stdout.matches("tenant keychain dev reset").count();
     assert_eq!(
         recovery_count, 3,
-        "stash one-liner + stash guidance + keychain-absent alternative; stdout={stdout:?}"
+        "stash one-liner + stash guidance + keychain-absent guidance; stdout={stdout:?}"
     );
 }
 

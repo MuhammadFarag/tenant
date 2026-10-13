@@ -243,7 +243,7 @@ fn bootstrap_refuses_when_stash_absent_and_narrows_back() {
     assert_eq!(
         stderr,
         "tenant: refusing to bootstrap 'alice': stashed password absent \
-         \u{2014} run `tenant destroy alice && tenant create alice` to re-bootstrap\n"
+         \u{2014} run `tenant keychain alice reset` to re-key\n"
     );
     assert!(
         exec.exec_calls().is_empty(),

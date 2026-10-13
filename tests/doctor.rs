@@ -1124,29 +1124,28 @@ fn guidance_tenant_keychain_absent_byte_form() {
   directory, or a partial-create that left the file off disk.
 
 Recommended fix
-  sudo -iu dev security create-keychain -p \"$(security find-generic-password -a dev -s tenant-dev -w)\" tenant.keychain-db
-  sudo -iu dev security default-keychain -s tenant.keychain-db
-  sudo -iu dev security list-keychains -s tenant.keychain-db
-  sudo -iu dev security set-keychain-settings tenant.keychain-db
-  Creates the keychain keyed to the password already stashed in the
-  operator's keychain, makes it the tenant's default and sole
-  search-list entry, and clears auto-lock \u{2014} the same four steps
-  `tenant create` runs, without touching the tenant's home. Step one
-  fails if the stash is absent; doctor reports that separately and
-  the alternative below covers it.
+  tenant keychain dev reset
+  Creates the keychain keyed to the password stashed in the operator's
+  keychain (a fresh, stashed one if the stash is gone too), makes it
+  the tenant's default and sole search-list entry, and clears
+  auto-lock \u{2014} the keychain steps of `tenant create`, without
+  touching the tenant's home.
 
 Side-effects to know about
   \u{2022} The new keychain starts empty: apps inside the tenant
     re-authenticate once. Anything stored in a pre-26.6
     `login.keychain-db` stays in that file, unused.
-  \u{2022} The password is on the command line for the duration of step
-    one \u{2014} the same exposure `tenant create` has today.
+  \u{2022} The password is on the command line while the keychain is
+    created \u{2014} the same exposure `tenant create` has.
 
 Alternative
-  tenant destroy dev && tenant create dev
-  Re-bootstraps the tenant from scratch with a fresh password and
-  stash. Moves the tenant's home to /Users/Deleted Users/dev/;
-  use it when the stash is gone too.";
+  pw=$(security find-generic-password -a dev -s tenant-dev -w) && [ -n \"$pw\" ] && sudo -iu dev security create-keychain -p \"$pw\" tenant.keychain-db; unset pw
+  sudo -iu dev security default-keychain -s tenant.keychain-db
+  sudo -iu dev security list-keychains -s tenant.keychain-db
+  sudo -iu dev security set-keychain-settings tenant.keychain-db
+  The same steps by hand, from your own terminal (not inside `tenant
+  shell`). The `[ -n \"$pw\" ]` guard matters: given an empty `-p`,
+  create-keychain prompts and keys the keychain to whatever you type.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
@@ -1161,7 +1160,7 @@ fn finding_display_stash_absent() {
         format!("{f}"),
         "warning: stashed password absent for tenant 'dev' \u{2014} \
          `tenant shell` and `tenant bootstrap` can't unlock the keychain without it; \
-         run `tenant destroy dev && tenant create dev` to re-bootstrap"
+         run `tenant keychain dev reset` to re-key"
     );
 }
 
@@ -1190,29 +1189,19 @@ fn guidance_stash_absent_byte_form() {
   the keychain but missed the stash.
 
 Recommended fix
-  tenant destroy dev && tenant create dev
-  Re-bootstraps both the tenant keychain AND the operator-side stash
-  with a fresh shared password. The destroy converges on the
-  pre-existing tenant; the create generates a new password, writes it
-  to the tenant keychain, and stashes the same bytes in the operator's
-  keychain.
+  tenant keychain dev reset
+  Generates a fresh password, recreates the tenant's keychain keyed to
+  it, and stashes the same bytes in the operator's keychain. The old
+  keychain is moved aside, not deleted.
 
 Side-effects to know about
-  \u{2022} Any tenant-side state in /Users/dev/ moves to
-    /Users/Deleted Users/dev/ (recoverable until the host empties
-    /Users/Deleted Users or the host is rebuilt).
-  \u{2022} The new keychain password is unrelated to any previously-used
-    password \u{2014} apps that cached the old one will need re-auth.
+  \u{2022} The new keychain starts empty: apps inside the tenant sign in
+    again once. The old one can't be opened without its password.
 
 Alternative
-  In practice, none. The password was never written outside the
-  operator's keychain by design, so it can't be recovered after the
-  stash is gone. If the tenant's keychain happens to still be unlocked
-  and the operator can somehow reproduce the password (e.g. it was
-  captured to a password manager out-of-band), they could
-  `security add-generic-password -a dev -s tenant-dev -w
-  <recovered-password>` to re-stash. Without that, `destroy && create`
-  is the only path.";
+  security add-generic-password -a dev -s tenant-dev -w <recovered-password>
+  Only if the old password was captured out-of-band (e.g. a password
+  manager): re-stashing it keeps the keychain's contents.";
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 

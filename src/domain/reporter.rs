@@ -1146,7 +1146,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(
             self.terminal.stderr,
             "tenant: refusing to enter '{name}': stashed password absent \
-             \u{2014} run `tenant destroy {name} && tenant create {name}` to re-bootstrap"
+             \u{2014} run `tenant keychain {name} reset` to re-key"
         );
     }
 
@@ -2148,7 +2148,7 @@ impl<'t, 'm> Reporter<'t, 'm> {
         let _ = writeln!(
             self.terminal.stderr,
             "tenant: refusing to bootstrap '{name}': stashed password absent \
-             \u{2014} run `tenant destroy {name} && tenant create {name}` to re-bootstrap"
+             \u{2014} run `tenant keychain {name} reset` to re-key"
         );
     }
 
