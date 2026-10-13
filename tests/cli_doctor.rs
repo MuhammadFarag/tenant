@@ -2119,6 +2119,84 @@ fn doctor_stash_present_emits_no_warning() {
 }
 
 #[test]
+fn doctor_stash_that_does_not_open_the_keychain_is_critical() {
+    let stub_exec = StubHostMachine::new()
+        .with_default_stash("dev")
+        .fail_next_unlock_tenant_keychain(tenant::domain::KeychainError::StashMismatch);
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev", "--strict"],
+    );
+    assert_eq!(code, 2, "critical under --strict; stderr={stderr:?}");
+    assert!(
+        stdout.contains(
+            "critical: tenant 'dev' stashed password doesn't open tenant.keychain-db \u{2014} \
+             `tenant shell` and `tenant bootstrap` will fail to unlock; \
+             run `tenant keychain dev reset`"
+        ),
+        "stdout={stdout:?}"
+    );
+    assert_eq!(stub_exec.unlock_calls(), vec!["dev".to_string()]);
+}
+
+#[test]
+fn doctor_stash_that_opens_the_keychain_emits_no_finding() {
+    let stub_exec = StubHostMachine::new().with_default_stash("dev");
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    assert!(!stdout.contains("doesn't open"), "stdout={stdout:?}");
+    assert_eq!(stub_exec.unlock_calls(), vec!["dev".to_string()]);
+}
+
+#[test]
+fn doctor_skips_the_trial_unlock_when_keychain_or_stash_is_absent() {
+    for stub_exec in [
+        StubHostMachine::new()
+            .with_default_stash("dev")
+            .with_tenant_keychain_present("dev", false),
+        StubHostMachine::new()
+            .with_default_stash("dev")
+            .with_stash_present("dev", false),
+    ] {
+        let (_code, _stdout, stderr) = run_with_exec(
+            make_tenant_stub_reader("dev"),
+            &stub_exec,
+            &["doctor", "dev"],
+        );
+        assert!(stub_exec.unlock_calls().is_empty(), "stderr={stderr:?}");
+    }
+}
+
+#[test]
+fn doctor_trial_unlock_failure_surfaces_and_walk_continues() {
+    let stub_exec = StubHostMachine::new()
+        .with_default_stash("dev")
+        .fail_next_unlock_tenant_keychain(tenant::domain::KeychainError::NonZero {
+            code: 1,
+            stderr: "synthetic".to_string(),
+        });
+    let (code, stdout, stderr) = run_with_exec(
+        make_tenant_stub_reader("dev"),
+        &stub_exec,
+        &["doctor", "dev"],
+    );
+    assert_eq!(code, 74, "the walk completes, then exits EX_IOERR");
+    assert!(!stdout.contains("doesn't open"), "stdout={stdout:?}");
+    assert!(
+        stderr.contains(
+            "tenant: failed to trial-unlock tenant 'dev' keychain with the stash: \
+             security exited with code 1: synthetic\n"
+        ),
+        "stderr={stderr:?}"
+    );
+}
+
+#[test]
 fn doctor_strict_keychain_warning_exits_1() {
     let stub_reader = make_tenant_stub_reader("dev");
     let stub_exec = StubHostMachine::new().with_tenant_keychain_present("dev", false);

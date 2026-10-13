@@ -6,8 +6,8 @@ use crate::doctor::{
 };
 use crate::domain::reporter::Reporter;
 use crate::domain::{
-    FirewallError, HostFileError, HostUserDirectory, HostUserName, PathKind, ProbeError,
-    TenantUserName, UserDirectoryError,
+    FirewallError, HostFileError, HostUserDirectory, HostUserName, KeychainError, PathKind,
+    ProbeError, TenantUserName, UserDirectoryError,
 };
 use crate::firewall::{anchor_is_permissive, egress_table_name, render_anchor};
 use crate::profile::expand_tenant_path;
@@ -266,33 +266,70 @@ impl<'a> Tenants<'a> {
                 outcome.probe_failed = true;
             }
         }
-        match self.machine.tenant_keychain_present(name) {
-            Ok(true) => {}
-            Ok(false) => outcome.emit(
-                Finding::TenantKeychainAbsent {
-                    tenant: name.clone(),
-                },
-                reporter,
-            ),
+        let keychain_present = match self.machine.tenant_keychain_present(name) {
+            Ok(true) => true,
+            Ok(false) => {
+                outcome.emit(
+                    Finding::TenantKeychainAbsent {
+                        tenant: name.clone(),
+                    },
+                    reporter,
+                );
+                false
+            }
             Err(e) => {
                 reporter.doctor_keychain_probe_failed(name, &e);
                 outcome.probe_failed = true;
+                false
             }
-        }
-        match self.machine.stash_present(name) {
-            Ok(true) => {}
-            Ok(false) => outcome.emit(
-                Finding::StashAbsent {
-                    tenant: name.clone(),
-                },
-                reporter,
-            ),
+        };
+        let stash_present = match self.machine.stash_present(name) {
+            Ok(true) => true,
+            Ok(false) => {
+                outcome.emit(
+                    Finding::StashAbsent {
+                        tenant: name.clone(),
+                    },
+                    reporter,
+                );
+                false
+            }
             Err(e) => {
                 reporter.doctor_stash_probe_failed(name, &e);
                 outcome.probe_failed = true;
+                false
+            }
+        };
+        if keychain_present && stash_present {
+            match self.check_stash_opens_keychain(name) {
+                Ok(None) => {}
+                Ok(Some(mismatch)) => outcome.emit(mismatch, reporter),
+                Err(e) => {
+                    reporter.doctor_keychain_trial_unlock_failed(name, &e);
+                    outcome.probe_failed = true;
+                }
             }
         }
         reporter.doctor_done_summary(name, outcome.findings.len() - before);
+    }
+
+    /// Leaves the keychain unlocked, as shell entry does.
+    fn check_stash_opens_keychain(
+        &self,
+        name: &TenantUserName,
+    ) -> Result<Option<Finding>, KeychainError> {
+        let password = match self.machine.find_stashed_password(name) {
+            Ok(pw) => pw,
+            Err(KeychainError::NotFound) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        match self.machine.unlock_tenant_keychain(name, &password) {
+            Ok(()) => Ok(None),
+            Err(KeychainError::StashMismatch) => Ok(Some(Finding::StashMismatch {
+                tenant: name.clone(),
+            })),
+            Err(e) => Err(e),
+        }
     }
 
     fn check_pf_conf_anchor_ref(

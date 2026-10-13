@@ -1216,6 +1216,56 @@ Alternative
     assert_eq!(f.guidance().as_deref(), Some(expected));
 }
 
+// --- Finding::StashMismatch ---
+
+#[test]
+fn finding_display_stash_mismatch() {
+    let f = Finding::StashMismatch {
+        tenant: TenantUserName::from("dev"),
+    };
+    assert_eq!(
+        format!("{f}"),
+        "critical: tenant 'dev' stashed password doesn't open tenant.keychain-db \u{2014} \
+         `tenant shell` and `tenant bootstrap` will fail to unlock; \
+         run `tenant keychain dev reset`"
+    );
+    assert_eq!(f.severity(), Severity::Critical);
+}
+
+#[test]
+fn guidance_stash_mismatch_byte_form() {
+    let f = Finding::StashMismatch {
+        tenant: TenantUserName::from("dev"),
+    };
+    let expected = "Why this matters
+  The password stashed in the operator's keychain (service
+  tenant-dev) no longer unlocks /Users/dev/Library/Keychains/tenant.keychain-db.
+  Something replaced or re-keyed the keychain after `tenant create`;
+  `tenant shell` and `tenant bootstrap` fail with exit 74 and apps
+  inside the tenant raise password dialogs.
+
+Before you fix it
+  The dates are the evidence for what replaced it; reset keeps the old
+  file (and its birth time) beside the new one, but capture them now:
+  security find-generic-password -a dev -s tenant-dev | grep -E 'cdat|mdat'
+  sudo -iu dev stat -f 'born %SB  modified %Sm' Library/Keychains/tenant.keychain-db
+  A keychain born after the stash's mdat was replaced, not re-keyed by
+  `tenant`. See docs/troubleshooting.md, \"Keychain\".
+
+Recommended fix
+  tenant keychain dev reset
+  Moves the keychain aside as tenant.keychain-db.replaced-<UTC timestamp>,
+  recreates it keyed to the stash, and restores the default, search
+  list and no-auto-lock settings.
+
+Side-effects to know about
+  \u{2022} The new keychain starts empty: apps inside the tenant sign in
+    again once.
+  \u{2022} If you know the current keychain's password, keep its contents
+    instead: sudo -iu dev security set-keychain-password tenant.keychain-db";
+    assert_eq!(f.guidance().as_deref(), Some(expected));
+}
+
 #[test]
 fn guidance_host_not_in_share_group_byte_form() {
     let f = Finding::HostNotInShareGroup {

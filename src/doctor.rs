@@ -132,6 +132,9 @@ pub enum Finding {
     StashAbsent {
         tenant: TenantUserName,
     },
+    StashMismatch {
+        tenant: TenantUserName,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +167,7 @@ impl Finding {
             Finding::PrimaryGroupDrift { .. } => Severity::Critical,
             Finding::TenantKeychainAbsent { .. } => Severity::Warning,
             Finding::StashAbsent { .. } => Severity::Warning,
+            Finding::StashMismatch { .. } => Severity::Critical,
         }
     }
 
@@ -851,6 +855,34 @@ Alternative
   <recovered-password>` to re-stash. Without that, `destroy && create`
   is the only path."
             )),
+            Finding::StashMismatch { tenant } => Some(format!(
+                "Why this matters
+  The password stashed in the operator's keychain (service
+  tenant-{tenant}) no longer unlocks /Users/{tenant}/Library/Keychains/{TENANT_KEYCHAIN_FILE}.
+  Something replaced or re-keyed the keychain after `tenant create`;
+  `tenant shell` and `tenant bootstrap` fail with exit 74 and apps
+  inside the tenant raise password dialogs.
+
+Before you fix it
+  The dates are the evidence for what replaced it; reset keeps the old
+  file (and its birth time) beside the new one, but capture them now:
+  security find-generic-password -a {tenant} -s tenant-{tenant} | grep -E 'cdat|mdat'
+  sudo -iu {tenant} stat -f 'born %SB  modified %Sm' Library/Keychains/{TENANT_KEYCHAIN_FILE}
+  A keychain born after the stash's mdat was replaced, not re-keyed by
+  `tenant`. See docs/troubleshooting.md, \"Keychain\".
+
+Recommended fix
+  tenant keychain {tenant} reset
+  Moves the keychain aside as {TENANT_KEYCHAIN_FILE}.replaced-<UTC timestamp>,
+  recreates it keyed to the stash, and restores the default, search
+  list and no-auto-lock settings.
+
+Side-effects to know about
+  \u{2022} The new keychain starts empty: apps inside the tenant sign in
+    again once.
+  \u{2022} If you know the current keychain's password, keep its contents
+    instead: sudo -iu {tenant} security set-keychain-password {TENANT_KEYCHAIN_FILE}"
+            )),
         }
     }
 }
@@ -1059,6 +1091,12 @@ impl fmt::Display for Finding {
                 "warning: stashed password absent for tenant '{tenant}' \u{2014} \
                  `tenant shell` and `tenant bootstrap` can't unlock the keychain without it; \
                  run `tenant destroy {tenant} && tenant create {tenant}` to re-bootstrap"
+            ),
+            Finding::StashMismatch { tenant } => write!(
+                f,
+                "critical: tenant '{tenant}' stashed password doesn't open {TENANT_KEYCHAIN_FILE} \u{2014} \
+                 `tenant shell` and `tenant bootstrap` will fail to unlock; \
+                 run `tenant keychain {tenant} reset`"
             ),
         }
     }

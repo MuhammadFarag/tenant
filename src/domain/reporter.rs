@@ -1324,6 +1324,17 @@ impl<'t, 'm> Reporter<'t, 'm> {
         );
     }
 
+    pub fn doctor_keychain_trial_unlock_failed(
+        &mut self,
+        name: &TenantUserName,
+        err: &KeychainError,
+    ) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to trial-unlock tenant '{name}' keychain with the stash: {err}"
+        );
+    }
+
     pub fn doctor_stash_probe_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
         let _ = writeln!(
             self.terminal.stderr,
