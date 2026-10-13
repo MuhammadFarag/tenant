@@ -201,6 +201,7 @@ pub enum KeychainError {
     NotFound,
     /// The stash exists but `unlock-keychain` rejects it.
     StashMismatch,
+    AlreadyExists,
     MoveAsideFailed {
         code: i32,
         stderr: String,
@@ -222,6 +223,7 @@ impl fmt::Display for KeychainError {
             KeychainError::NotFound => {
                 write!(f, "stashed password not found in operator keychain")
             }
+            KeychainError::AlreadyExists => write!(f, "{TENANT_KEYCHAIN_FILE} already exists"),
             KeychainError::MoveAsideFailed { code, stderr } => {
                 write!(f, "mv exited with code {code}: {}", stderr.trim())
             }

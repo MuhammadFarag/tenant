@@ -11,7 +11,8 @@ use tenant::domain::{
 
 // Only coverage of the no-duplicate + newline guards: `execute_pam` is unreachable from stubs.
 use tenant::adapters::macos::host_machine::{
-    classify_unlock_failure, move_keychain_aside_argv, pam_tid_append_payload,
+    classify_create_keychain_failure, classify_unlock_failure, move_keychain_aside_argv,
+    pam_tid_append_payload,
 };
 
 #[test]
@@ -848,4 +849,25 @@ fn macos_describes_move_tenant_keychain_aside() {
             "/k/tenant.keychain-db.replaced-20261013T104000Z"
         ]
     );
+}
+
+// macOS varies the casing, and the exit code (historically 25299) isn't stable.
+#[test]
+fn create_keychain_already_exists_classifies_by_stderr() {
+    let dup = KeychainError::NonZero {
+        code: 48,
+        stderr: "security: SecKeychainCreate tenant.keychain-db: A keychain with the same name ALREADY EXISTS.".to_string(),
+    };
+    assert!(matches!(
+        classify_create_keychain_failure(dup),
+        KeychainError::AlreadyExists
+    ));
+    let other = KeychainError::NonZero {
+        code: 1,
+        stderr: "x".to_string(),
+    };
+    assert!(matches!(
+        classify_create_keychain_failure(other),
+        KeychainError::NonZero { code: 1, .. }
+    ));
 }

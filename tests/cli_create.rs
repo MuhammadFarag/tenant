@@ -1513,6 +1513,28 @@ fn create_uses_fresh_keychain_password_each_invocation() {
     );
 }
 
+// A reused home can carry a keychain keyed to a password the new stash won't hold.
+#[test]
+fn create_moves_an_existing_keychain_aside_and_retries() {
+    let exec = StubHostMachine::new().fail_next_keychain_create(KeychainError::AlreadyExists);
+    let (code, _stdout, stderr) =
+        run_with_exec(StubUserDirectory::default(), &exec, &["create", "dev"]);
+    assert_eq!(code, 0, "stderr={stderr:?}");
+    let ops = exec.keychain_ops();
+    assert!(
+        matches!(
+            &ops[..3],
+            [
+                KeychainOp::CreateTenantKeychain { .. },
+                KeychainOp::MoveTenantKeychainAside { .. },
+                KeychainOp::CreateTenantKeychain { .. },
+            ]
+        ),
+        "ops={ops:?}"
+    );
+    assert_eq!(ops.len(), 7, "ops={ops:?}");
+}
+
 /// Stash must carry the same bytes as CreateTenantKeychain so the shell/bootstrap unlock works.
 #[test]
 fn create_provision_and_stash_share_the_same_password() {

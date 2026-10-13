@@ -191,6 +191,14 @@ pub fn create_verbose_plan_entries(
             None,
         ),
         (
+            format!("Move tenant '{name}' keychain aside"),
+            format!(
+                "sudo -u {name} /bin/mv -n /Users/{name}/Library/Keychains/tenant.keychain-db \
+                 /Users/{name}/Library/Keychains/tenant.keychain-db.replaced-<UTC timestamp>"
+            ),
+            Some("if tenant.keychain-db already exists, then create again"),
+        ),
+        (
             format!("Set tenant '{name}' default keychain to tenant.keychain-db"),
             format!("sudo -iu {name} security default-keychain -s tenant.keychain-db"),
             None,

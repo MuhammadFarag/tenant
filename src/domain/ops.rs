@@ -194,7 +194,8 @@ pub enum KeychainOp {
     /// Renames, never copies, so the file keeps its birth time: the evidence for what replaced it.
     MoveTenantKeychainAside { name: TenantUserName },
 
-    /// "Already exists" maps to `Ok(())` in the adapter.
+    /// An existing file is `KeychainError::AlreadyExists`, never reused: its password may
+    /// not be the one about to be stashed.
     CreateTenantKeychain {
         name: TenantUserName,
         password: KeychainPassword,

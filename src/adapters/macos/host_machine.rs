@@ -637,23 +637,19 @@ impl HostMachine for MacosHostMachine {
         // No per-variant rollback: `tenant destroy` moves the home — and a half-built
         // keychain with it — to /Users/Deleted Users/.
         //
-        // `CreateTenantKeychain` on an existing keychain (retry after a partial create)
-        // converges. Match "already exists" case-insensitively: macOS varies the casing,
-        // and the exit code (historically 25299) isn't stable. The other three calls
-        // overwrite, so they're natively idempotent.
+        // The other three tenant-side calls overwrite, so they're natively idempotent.
         match op {
             KeychainOp::MoveTenantKeychainAside { name } => move_tenant_keychain_aside(name),
-            KeychainOp::CreateTenantKeychain { name, password } => {
-                run_security_as_tenant_allowing_duplicate(
-                    name.as_str(),
-                    &[
-                        "create-keychain",
-                        "-p",
-                        password.expose_secret(),
-                        TENANT_KEYCHAIN_FILE,
-                    ],
-                )
-            }
+            KeychainOp::CreateTenantKeychain { name, password } => run_security_as_tenant(
+                name.as_str(),
+                &[
+                    "create-keychain",
+                    "-p",
+                    password.expose_secret(),
+                    TENANT_KEYCHAIN_FILE,
+                ],
+            )
+            .map_err(classify_create_keychain_failure),
             KeychainOp::SetDefaultKeychain { name } => run_security_as_tenant(
                 name.as_str(),
                 &["default-keychain", "-s", TENANT_KEYCHAIN_FILE],
@@ -1348,18 +1344,16 @@ fn acl_entry(group: &str, mode: AclMode) -> String {
     format!("group:{group} allow {}", mode.acl_bits())
 }
 
-fn run_security_as_tenant_allowing_duplicate(
-    tenant: &str,
-    args: &[&str],
-) -> Result<(), KeychainError> {
-    match run_security_as_tenant(tenant, args) {
-        Ok(()) => Ok(()),
-        Err(KeychainError::NonZero { stderr, .. })
+/// Matched on stderr, case-insensitively: macOS varies the casing, and the exit code
+/// (historically 25299) isn't stable.
+pub fn classify_create_keychain_failure(err: KeychainError) -> KeychainError {
+    match err {
+        KeychainError::NonZero { ref stderr, .. }
             if stderr.to_lowercase().contains("already exists") =>
         {
-            Ok(())
+            KeychainError::AlreadyExists
         }
-        Err(e) => Err(e),
+        other => other,
     }
 }
 

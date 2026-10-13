@@ -7,6 +7,7 @@ use crate::domain::{
 use crate::firewall::{ensure_anchor_ref, render_anchor};
 use crate::profile::{ProfileError, display_path_for};
 
+use super::keychain::tenant_keychain_provision_ops;
 use super::reapply::{hosts_for_level, steady_inbound_rules};
 use super::{ModeError, Tenants, cowork_dir_path, guard_cowork_dir_kind, tenant_share_group_name};
 
@@ -105,26 +106,22 @@ impl<'a> Tenants<'a> {
                 };
                 self.run(&ensure_cowork, reporter)
                     .map_err(CreateError::CoworkDir)?;
-                let keychain_password = KeychainPassword::generate();
-                let create_kc = KeychainOp::CreateTenantKeychain {
-                    name: name.into(),
-                    password: keychain_password.clone(),
-                };
-                let set_default = KeychainOp::SetDefaultKeychain { name: name.into() };
-                let add_to_search = KeychainOp::AddKeychainToSearchList { name: name.into() };
-                let disable_lock = KeychainOp::DisableKeychainAutoLock { name: name.into() };
-                let stash = KeychainOp::StashPassword {
-                    name: name.into(),
-                    password: keychain_password,
-                };
-                self.run(&create_kc, reporter)
-                    .map_err(CreateError::KeychainProvision)?;
-                self.run(&set_default, reporter)
-                    .map_err(CreateError::KeychainProvision)?;
-                self.run(&add_to_search, reporter)
-                    .map_err(CreateError::KeychainProvision)?;
-                self.run(&disable_lock, reporter)
-                    .map_err(CreateError::KeychainProvision)?;
+                let [create_kc, tenant_side @ .., stash] =
+                    tenant_keychain_provision_ops(name, &KeychainPassword::generate());
+                match self.run(&create_kc, reporter) {
+                    Err(KeychainError::AlreadyExists) => {
+                        let move_aside = KeychainOp::MoveTenantKeychainAside { name: name.into() };
+                        self.run(&move_aside, reporter)
+                            .map_err(CreateError::KeychainProvision)?;
+                        self.run(&create_kc, reporter)
+                            .map_err(CreateError::KeychainProvision)?;
+                    }
+                    other => other.map_err(CreateError::KeychainProvision)?,
+                }
+                for op in &tenant_side {
+                    self.run(op, reporter)
+                        .map_err(CreateError::KeychainProvision)?;
+                }
                 self.run(&stash, reporter)
                     .map_err(CreateError::KeychainStash)?;
                 if keep_profile {
