@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use super::tenants::{ConflictError, NameError, ShareError, tenant_share_group_name};
 use super::{
     AccessMode, AccountError, AclError, FirewallError, GroupId, HostFileError, HostMachine,
-    HostUserName, KeychainError, Op, ProbeError, TenantUserName, UserDirectoryError, UserId,
+    HostUserName, KeychainError, Op, ProbeError, TENANT_KEYCHAIN_FILE, TenantUserName,
+    UserDirectoryError, UserId, tenant_keychain_path,
 };
 use crate::ansi::{self};
 use crate::doctor::{Category, Finding, Severity};
@@ -597,6 +598,108 @@ impl<'t, 'm> Reporter<'t, 'm> {
             "Next: edit {} and run `tenant reload {name}` to apply changes.",
             display_path_for(name.as_str())
         ));
+    }
+
+    pub fn keychain_reset_summary(
+        &mut self,
+        name: &TenantUserName,
+        plan: &[(Op<'_>, Option<&'static str>)],
+    ) {
+        let path = tenant_keychain_path(name.as_str());
+        let _ = writeln!(
+            self.terminal.stdout,
+            "About to reset tenant '{name}' keychain."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(self.terminal.stdout, "This will:");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} move {path} aside to \
+             {TENANT_KEYCHAIN_FILE}.replaced-<UTC timestamp> (if present)"
+        );
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} create an empty {TENANT_KEYCHAIN_FILE} keyed to the stashed password \
+             (a fresh one if the stash is missing)"
+        );
+        let _ = writeln!(
+            self.terminal.stdout,
+            "  \u{2022} make it the tenant's default and only keychain, with auto-lock off"
+        );
+        let _ = writeln!(self.terminal.stdout);
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Apps inside the tenant sign in again once."
+        );
+        let _ = writeln!(self.terminal.stdout);
+        self.emit_plan_section(Some(plan));
+        let _ = writeln!(self.terminal.stdout, "Sudo needed for: keychain reset.");
+        let _ = writeln!(self.terminal.stdout);
+    }
+
+    pub fn keychain_reset_intent(&mut self, name: &TenantUserName) {
+        if !self.dry_run {
+            self.section(&format!("Resetting tenant '{name}' keychain"));
+        }
+    }
+
+    pub fn keychain_reset_done(&mut self, name: &TenantUserName) {
+        if self.dry_run {
+            return;
+        }
+        self.section("Done");
+        let _ = writeln!(
+            self.terminal.stdout,
+            "Tenant '{name}' keychain reset; apps inside it sign in again once."
+        );
+        self.next_step(&format!("Next: verify with `tenant doctor {name}`."));
+    }
+
+    pub fn refuse_keychain_absent(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: cannot reset keychain for '{name}': does not exist"
+        );
+    }
+
+    pub fn refuse_keychain_not_a_tenant(&mut self, name: &TenantUserName, uid: UserId, floor: u32) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to reset keychain for '{name}': UID {uid} is below tenant floor {floor}"
+        );
+    }
+
+    pub fn refuse_keychain_system_account(&mut self, name: &TenantUserName) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: refusing to reset keychain for '{name}': system account (no tenant-range UID)"
+        );
+    }
+
+    pub fn keychain_eligibility_probe_failed(
+        &mut self,
+        name: &TenantUserName,
+        err: &UserDirectoryError,
+    ) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to check keychain-reset eligibility for '{name}': {err}"
+        );
+    }
+
+    pub fn keychain_reset_stash_read_failed(&mut self, name: &TenantUserName, err: &KeychainError) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to read the stashed password for '{name}': {err}"
+        );
+    }
+
+    pub fn keychain_reset_failed(&mut self, name: &TenantUserName, err: &dyn std::fmt::Display) {
+        let _ = writeln!(
+            self.terminal.stderr,
+            "tenant: failed to reset keychain for '{name}': {err} \
+             \u{2014} re-run `tenant keychain {name} reset` once the cause is fixed"
+        );
     }
 
     pub fn destroy_starting(&mut self, name: &TenantUserName) {

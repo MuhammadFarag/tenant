@@ -517,3 +517,16 @@ fn intent_exec_as_user_with_directory() {
         "Run as 'dev': ls /tmp in /Users/dev/projects/foo"
     );
 }
+
+#[test]
+fn intent_and_business_move_tenant_keychain_aside() {
+    let op = tenant::domain::KeychainOp::MoveTenantKeychainAside { name: "dev".into() };
+    assert_eq!(
+        Op::Keychain(&op).intent_label(),
+        "Move tenant 'dev' keychain aside"
+    );
+    assert_eq!(
+        Op::Keychain(&op).business_label(),
+        "Tenant 'dev' old keychain moved aside"
+    );
+}

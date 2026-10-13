@@ -2,7 +2,8 @@ use super::reporter::{ConfirmOutcome, EntryGate, Reporter, ShellInbound};
 use super::{AccountOp, FirewallOp, KeychainOp, Op, ProfileOp, tenants};
 use crate::doctor::Severity;
 use crate::{
-    Cli, HelpTopic, InboundLevel, ModeLevel, Verb, allocation, allocation::TENANT_UID_FLOOR,
+    Cli, HelpTopic, InboundLevel, KeychainAction, ModeLevel, Verb, allocation,
+    allocation::TENANT_UID_FLOOR,
 };
 
 const EX_USAGE: u8 = 64;
@@ -716,6 +717,64 @@ pub(crate) fn dispatch(
             reporter.help_topic(body);
             0
         }
+        Verb::Keychain {
+            name,
+            action: KeychainAction::Reset,
+        } => {
+            if let Err(e) = tenants::validate_name(&name) {
+                reporter.refuse_invalid_name(&name, &e);
+                return EX_USAGE;
+            }
+            let eligibility = match tenants::destroy_eligibility(directory, &name) {
+                Ok(e) => e,
+                Err(e) => {
+                    reporter.keychain_eligibility_probe_failed(&name, &e);
+                    return EX_IOERR;
+                }
+            };
+            match eligibility {
+                tenants::Eligibility::NotPresent | tenants::Eligibility::OrphanGroup => {
+                    reporter.refuse_keychain_absent(&name);
+                    EX_USAGE
+                }
+                tenants::Eligibility::NotATenant { uid } => {
+                    reporter.refuse_keychain_not_a_tenant(&name, uid, TENANT_UID_FLOOR);
+                    EX_USAGE
+                }
+                tenants::Eligibility::SystemAccount => {
+                    reporter.refuse_keychain_system_account(&name);
+                    EX_USAGE
+                }
+                tenants::Eligibility::Destroyable => {
+                    if reporter.refuse_sudo_without_terminal() {
+                        return EX_USAGE;
+                    }
+                    let plan = match tenants.build_keychain_reset_plan(&name) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            surface_keychain_reset_error(reporter, &name, &e);
+                            return EX_IOERR;
+                        }
+                    };
+                    if show_summary {
+                        let mut entries =
+                            vec![(Op::Keychain(&plan.move_aside), Some("if present"))];
+                        entries.extend(plan.provision.iter().map(|op| (Op::Keychain(op), None)));
+                        reporter.keychain_reset_summary(&name, &entries);
+                    }
+                    if let Some(code) = consent(reporter, false) {
+                        return code;
+                    }
+                    match tenants.keychain_reset(&name, &plan, reporter) {
+                        Ok(()) => 0,
+                        Err(e) => {
+                            surface_keychain_reset_error(reporter, &name, &e);
+                            EX_IOERR
+                        }
+                    }
+                }
+            }
+        }
         Verb::Destroy { name } => {
             if let Err(e) = tenants::validate_name(&name) {
                 reporter.refuse_invalid_name(&name, &e);
@@ -780,6 +839,20 @@ pub(crate) fn dispatch(
                 }
             }
         }
+    }
+}
+
+fn surface_keychain_reset_error(
+    reporter: &mut Reporter,
+    name: &super::TenantUserName,
+    error: &tenants::KeychainResetError,
+) {
+    match error {
+        tenants::KeychainResetError::StashRead(e) => {
+            reporter.keychain_reset_stash_read_failed(name, e)
+        }
+        tenants::KeychainResetError::Probe(e) => reporter.keychain_reset_failed(name, e),
+        tenants::KeychainResetError::Step(e) => reporter.keychain_reset_failed(name, e),
     }
 }
 

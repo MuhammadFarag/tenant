@@ -304,6 +304,33 @@ Examples:
         #[arg(last = true)]
         argv: Vec<String>,
     },
+    /// Repair the tenant's keychain (today one action: `reset`).
+    ///
+    /// `reset` is for a keychain the stash no longer opens (`tenant shell`
+    /// fails to unlock it; `tenant doctor` reports it as critical), or one
+    /// that is missing. It moves `~/Library/Keychains/tenant.keychain-db`
+    /// aside to `tenant.keychain-db.replaced-<UTC timestamp>` (renamed, so
+    /// its birth time survives for diagnosis), creates an empty keychain
+    /// keyed to the password stashed in your login keychain, and makes it
+    /// the tenant's default and only keychain with auto-lock off. With no
+    /// stash it generates a fresh password and stashes it.
+    ///
+    /// DESTRUCTIVE: the new keychain is empty, so apps inside the tenant
+    /// sign in again once. The old file stays beside it; it still opens
+    /// with the stashed password if the reset was a mistake. Prompts
+    /// `[y/N]`, defaulting to no; `-y` skips the prompt. See
+    /// docs/troubleshooting.md, "Keychain".
+    #[command(after_help = "\
+Examples:
+  tenant keychain alice reset            recreate alice's keychain from the stash
+  tenant keychain alice reset --dry-run -v
+                                         preview the commands without running them")]
+    Keychain {
+        /// Tenant short username.
+        name: TenantUserName,
+        #[arg(value_enum)]
+        action: KeychainAction,
+    },
     /// List the tenants on this host, one name per line.
     ///
     /// Read-only and sudo-free: enumerates local users at or above the
@@ -381,6 +408,12 @@ impl InboundLevel {
             InboundLevel::Permissive => "permissive",
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum KeychainAction {
+    /// Move the keychain aside and recreate it keyed to the stash.
+    Reset,
 }
 
 /// Topics renderable by `tenant help <topic>`.

@@ -10,7 +10,9 @@ use tenant::domain::{
 };
 
 // Only coverage of the no-duplicate + newline guards: `execute_pam` is unreachable from stubs.
-use tenant::adapters::macos::host_machine::{classify_unlock_failure, pam_tid_append_payload};
+use tenant::adapters::macos::host_machine::{
+    classify_unlock_failure, move_keychain_aside_argv, pam_tid_append_payload,
+};
 
 #[test]
 fn pam_payload_none_when_already_in_sudo() {
@@ -825,4 +827,25 @@ fn unlock_exit_51_classifies_as_stash_mismatch() {
         classify_unlock_failure(other),
         KeychainError::NonZero { code: 36, .. }
     ));
+}
+
+#[test]
+fn macos_describes_move_tenant_keychain_aside() {
+    let op = tenant::domain::KeychainOp::MoveTenantKeychainAside { name: "dev".into() };
+    assert_eq!(
+        MacosHostMachine.describe_keychain(&op),
+        "sudo -u dev /bin/mv -n /Users/dev/Library/Keychains/tenant.keychain-db \
+         /Users/dev/Library/Keychains/tenant.keychain-db.replaced-<UTC timestamp>"
+    );
+    assert_eq!(
+        move_keychain_aside_argv("dev", "/k/tenant.keychain-db", "20261013T104000Z"),
+        [
+            "-u",
+            "dev",
+            "/bin/mv",
+            "-n",
+            "/k/tenant.keychain-db",
+            "/k/tenant.keychain-db.replaced-20261013T104000Z"
+        ]
+    );
 }

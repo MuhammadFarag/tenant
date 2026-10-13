@@ -191,6 +191,9 @@ pub fn tenant_keychain_path(name: &str) -> String {
 /// `bootstrap` can unlock it non-interactively.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeychainOp {
+    /// Renames, never copies, so the file keeps its birth time: the evidence for what replaced it.
+    MoveTenantKeychainAside { name: TenantUserName },
+
     /// "Already exists" maps to `Ok(())` in the adapter.
     CreateTenantKeychain {
         name: TenantUserName,
@@ -387,6 +390,9 @@ fn acl_business_label(op: &AclOp) -> String {
 
 fn keychain_business_label(op: &KeychainOp) -> String {
     match op {
+        KeychainOp::MoveTenantKeychainAside { name } => {
+            format!("Tenant '{name}' old keychain moved aside")
+        }
         KeychainOp::CreateTenantKeychain { name, .. } => {
             format!("Tenant '{name}' keychain created")
         }
@@ -520,6 +526,9 @@ fn acl_intent_label(op: &AclOp) -> String {
 
 fn keychain_intent_label(op: &KeychainOp) -> String {
     match op {
+        KeychainOp::MoveTenantKeychainAside { name } => {
+            format!("Move tenant '{name}' keychain aside")
+        }
         KeychainOp::CreateTenantKeychain { name, .. } => {
             format!("Create keychain for tenant '{name}'")
         }

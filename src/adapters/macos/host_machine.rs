@@ -602,6 +602,10 @@ impl HostMachine for MacosHostMachine {
 
     fn describe_keychain(&self, op: &KeychainOp) -> String {
         match op {
+            KeychainOp::MoveTenantKeychainAside { name } => {
+                let path = tenant_keychain_path(name.as_str());
+                format!("sudo -u {name} /bin/mv -n {path} {path}.replaced-<UTC timestamp>")
+            }
             KeychainOp::CreateTenantKeychain { name, .. } => {
                 format!(
                     "sudo -iu {name} security create-keychain -p <password> {TENANT_KEYCHAIN_FILE}"
@@ -638,6 +642,7 @@ impl HostMachine for MacosHostMachine {
         // and the exit code (historically 25299) isn't stable. The other three calls
         // overwrite, so they're natively idempotent.
         match op {
+            KeychainOp::MoveTenantKeychainAside { name } => move_tenant_keychain_aside(name),
             KeychainOp::CreateTenantKeychain { name, password } => {
                 run_security_as_tenant_allowing_duplicate(
                     name.as_str(),
@@ -1356,6 +1361,38 @@ fn run_security_as_tenant_allowing_duplicate(
         }
         Err(e) => Err(e),
     }
+}
+
+fn move_tenant_keychain_aside(name: &TenantUserName) -> Result<(), KeychainError> {
+    let stamp = Command::new("/bin/date")
+        .args(["-u", "+%Y%m%dT%H%M%SZ"])
+        .output()
+        .map_err(KeychainError::Spawn)?;
+    let stamp = String::from_utf8_lossy(&stamp.stdout).trim().to_string();
+    let path = tenant_keychain_path(name.as_str());
+    let output = Command::new("sudo")
+        .args(move_keychain_aside_argv(name.as_str(), &path, &stamp))
+        .output()
+        .map_err(KeychainError::Spawn)?;
+    if !output.status.success() {
+        return Err(KeychainError::MoveAsideFailed {
+            code: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Tail after `sudo`; `-n` so a same-second rerun can't clobber an earlier move.
+pub fn move_keychain_aside_argv(tenant: &str, path: &str, stamp: &str) -> Vec<String> {
+    vec![
+        "-u".to_string(),
+        tenant.to_string(),
+        "/bin/mv".to_string(),
+        "-n".to_string(),
+        path.to_string(),
+        format!("{path}.replaced-{stamp}"),
+    ]
 }
 
 fn stash_password_in_operator_keychain(
